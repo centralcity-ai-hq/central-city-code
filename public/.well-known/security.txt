@@ -1,6 +1,6 @@
 Contact: mailto:security@centralcity.ai
-Contact: https://github.com/centralcity-ai/protocol/security/advisories/new
+Contact: https://github.com/centralcity-ai-hq/protocol/security/advisories/new
 Expires: 2027-09-28T00:00:00.000Z
 Preferred-Languages: en
 Canonical: https://centralcity.ai/.well-known/security.txt
-Policy: https://github.com/centralcity-ai/protocol/blob/main/SECURITY.md
+Policy: https://github.com/centralcity-ai-hq/protocol/blob/main/SECURITY.md

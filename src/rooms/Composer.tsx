@@ -1,7 +1,8 @@
 import { lazy, Suspense, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
-import { AtSign, CodeXml, Send, SquareCheckBig } from 'lucide-react';
+import { ArrowUp, AtSign, Check, ChevronDown, CodeXml } from 'lucide-react';
+import { Avatar, type AvatarKind } from './Avatar';
 import type { Member } from './api';
-import { mentionNamesFor, ownerNames, ownHost, possessive } from './people';
+import { agentLabel, agentOwners, mentionNamesFor, ownHost } from './people';
 import { NEW_POST_FORMAT } from './markdown/format';
 import { MessageBoundary } from './markdown/Boundary';
 import './markdown/composer.css';
@@ -22,10 +23,15 @@ function mentionAt(text: string, caret: number) {
   return match ? { start: caret - match[2]!.length - 1, query: match[2]!.toLowerCase() } : null;
 }
 
+const kindOf = (member: Member): AvatarKind =>
+  member.auto_reply?.provider === 'elric' ? 'elric' : member.kind === 'person' ? 'person' : 'agent';
+
 /**
- * Room composer: auto-growing textarea, Enter sends, Shift+Enter adds a
- * line (on touch Enter adds a line), @ opens the member picker, "Post as" only when the viewer
- * has several agents here. The draft lives in the parent, so it survives polls and re-sorts.
+ * Room composer (Workspace v3 §4.4): a floating card with the auto-growing 16 px textarea on top
+ * and one tool row under it: the "Post as" picker on the left (only when the viewer has several
+ * identities here; with one, Members already shows who you are), then mention, code block, add task, Preview and the
+ * Send square. Enter sends, Shift+Enter adds a line (on touch Enter adds a line), @ opens the
+ * member picker. The draft lives in the parent, so it survives polls and re-sorts.
  */
 export function Composer({
   roomName,
@@ -50,23 +56,41 @@ export function Composer({
   onTask?: () => void;
 }) {
   const box = useRef<HTMLTextAreaElement>(null);
+  // The caret to restore once an insert (code block, @mention) is rendered: set right after React
+  // commits the new draft, never on a frame that may still show the old text.
+  const pendingCaret = useRef<{ caret: number; track: boolean } | null>(null);
+  useLayoutEffect(() => {
+    const element = box.current;
+    const pending = pendingCaret.current;
+    if (!element || !pending || element.value !== draft) return;
+    pendingCaret.current = null;
+    element.focus();
+    element.setSelectionRange(pending.caret, pending.caret);
+    if (pending.track) track(draft, pending.caret);
+  }, [draft]);
   const [agentId, setAgentId] = useState('');
   const [picker, setPicker] = useState<{ start: number; query: string } | null>(null);
   const [active, setActive] = useState(0);
   // Markdown is typed as text; Preview shows it rendered. No editor.
   const markdown = NEW_POST_FORMAT === 'markdown';
   const [preview, setPreview] = useState(false);
-  // Your own room-host agent is never offered: writing to it is not a mention (people.ts).
+  const agentOwner = agentOwners(members);
+  const postable = own.filter((member) => member.auto_reply?.provider !== 'elric');
+  // You write as yourself by default (your person member, when you are in the room); your agents
+  // are a choice under "Post as".
+  const self = postable.find((member) => member.kind === 'person');
+  const sender = postable.find((member) => member.id === agentId) ?? self ?? postable[0];
+  const asPerson = sender?.kind === 'person';
+  // Never the sender itself. Your own room-host agent only when you write as yourself: then the
+  // @mention wakes it (people.ts ownHost); from one of your agents it is no mention.
   const mine = ownHost(members);
   const options = picker
     ? members
-        .filter((member) => member.id !== mine?.id)
+        .filter((member) => member.id !== sender?.id)
+        .filter((member) => asPerson || member.id !== mine?.id)
         .filter((member) => member.name.toLowerCase().includes(picker.query))
         .slice(0, 8)
     : [];
-  const owner = ownerNames(members);
-  const postable = own.filter((member) => member.auto_reply?.provider !== 'elric');
-  const sender = postable.find((member) => member.id === agentId) ?? postable[0];
 
   // Auto-grow between 1 and 8 lines.
   useLayoutEffect(() => {
@@ -88,13 +112,9 @@ export function Composer({
     if (!element || !picker) return;
     const caret = element.selectionStart;
     const next = `${draft.slice(0, picker.start)}@${member.name} ${draft.slice(caret)}`;
+    pendingCaret.current = { caret: picker.start + member.name.length + 2, track: false };
     onDraft(next);
     setPicker(null);
-    const position = picker.start + member.name.length + 2;
-    requestAnimationFrame(() => {
-      element.focus();
-      element.setSelectionRange(position, position);
-    });
   }
   /** Inserts text at the caret (around the selection), then puts the caret after it. */
   function insert(before: string, after = '') {
@@ -104,14 +124,9 @@ export function Composer({
     const end = element.selectionEnd ?? start;
     const selected = draft.slice(start, end);
     const next = draft.slice(0, start) + before + selected + after + draft.slice(end);
-    const caret = start + before.length + selected.length;
+    pendingCaret.current = { caret: start + before.length + selected.length, track: true };
     onDraft(next);
     setPreview(false);
-    requestAnimationFrame(() => {
-      element.focus();
-      element.setSelectionRange(caret, caret);
-      track(next, caret);
-    });
   }
   function atCaret() {
     const start = box.current?.selectionStart ?? draft.length;
@@ -152,7 +167,7 @@ export function Composer({
   }
   return (
     <form
-      className="rm-composer"
+      className="rm-composer rm3-composer"
       aria-label="Message composer"
       onSubmit={(event) => {
         event.preventDefault();
@@ -160,18 +175,6 @@ export function Composer({
       }}
     >
       <div className="rm-compose-card">
-        {postable.length > 1 ? (
-          <label className="rm-post-as">
-            <span>Post as</span>
-            <select value={sender?.id ?? ''} onChange={(event) => setAgentId(event.target.value)}>
-              {postable.map((member) => (
-                <option key={member.id} value={member.id}>
-                  {member.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
         <div className="rm-compose-row">
           {picker && options.length ? (
             <ul className="rm-picker" role="listbox" aria-label="Mention a member">
@@ -185,6 +188,7 @@ export function Composer({
                     choose(member);
                   }}
                 >
+                  <Avatar id={member.id} name={member.name} kind={kindOf(member)} size="xs" />
                   <strong>{member.name}</strong>
                   <span title={member.own ? undefined : member.owner_label}>
                     {member.kind === 'person'
@@ -193,7 +197,7 @@ export function Composer({
                         : 'person'
                       : member.own
                         ? 'your agent'
-                        : `${possessive(owner(member.owner_label))} agent`}
+                        : agentLabel(agentOwner(member.owner_label))}
                   </span>
                 </li>
               ))}
@@ -204,7 +208,10 @@ export function Composer({
               {draft.trim() ? (
                 <MessageBoundary fallback={<p className="rm-text">{draft}</p>}>
                   <Suspense fallback={<p className="rm-text">{draft}</p>}>
-                    <Markdown text={draft} names={mentionNamesFor(members, { own: true })} />
+                    <Markdown
+                      text={draft}
+                      names={mentionNamesFor(members, { own: true, sender_kind: sender?.kind })}
+                    />
                   </Suspense>
                 </MessageBoundary>
               ) : (
@@ -224,7 +231,8 @@ export function Composer({
                 ? 'Message…'
                 : `Message ${roomName}…`
             }
-            aria-expanded={Boolean(picker && options.length)}
+            // aria-expanded is not allowed on a textarea (axe aria-allowed-attr); the @-mention
+            // list announces itself as a listbox.
             aria-autocomplete="list"
             onChange={(event) => {
               onDraft(event.target.value);
@@ -238,6 +246,28 @@ export function Composer({
           />
         </div>
         <div className="rm-compose-tools">
+          {postable.length > 1 ? (
+            <label className="rm-post-as rm3-postas">
+              <Avatar
+                id={sender?.id}
+                name={sender?.name ?? ''}
+                kind={sender ? kindOf(sender) : 'agent'}
+                size="xs"
+              />
+              <span className="rm3-postas-label">Post as</span>
+              <select value={sender?.id ?? ''} onChange={(event) => setAgentId(event.target.value)}>
+                {(self ? [self, ...postable.filter((member) => member !== self)] : postable).map(
+                  (member) => (
+                    <option key={member.id} value={member.id}>
+                      {member.kind === 'person' ? `${member.name} (you)` : member.name}
+                    </option>
+                  ),
+                )}
+              </select>
+              <ChevronDown className="rm3-postas-chevron" size={14} aria-hidden="true" />
+            </label>
+          ) : null}
+          <span className="rm-tools-spacer" />
           <button
             type="button"
             className="rm-tool"
@@ -248,7 +278,7 @@ export function Composer({
               insert(previous && !/\s/.test(previous) ? ' @' : '@');
             }}
           >
-            <AtSign size={16} aria-hidden="true" />
+            <AtSign size={18} aria-hidden="true" />
           </button>
           <button
             type="button"
@@ -260,7 +290,7 @@ export function Composer({
               insert(`${start && previous !== '\n' ? '\n' : ''}${FENCE}\n`, `\n${FENCE}`);
             }}
           >
-            <CodeXml size={16} aria-hidden="true" />
+            <CodeXml size={18} aria-hidden="true" />
           </button>
           {onTask ? (
             <button
@@ -270,10 +300,9 @@ export function Composer({
               title="Add a task"
               onClick={onTask}
             >
-              <SquareCheckBig size={16} aria-hidden="true" />
+              <Check size={18} aria-hidden="true" />
             </button>
           ) : null}
-          <span className="rm-tools-spacer" />
           {markdown ? (
             <button
               type="button"
@@ -294,7 +323,7 @@ export function Composer({
             title={disabled || 'Send'}
             disabled={Boolean(disabled) || !draft.trim()}
           >
-            <Send size={18} aria-hidden="true" />
+            <ArrowUp size={20} strokeWidth={2.4} aria-hidden="true" />
           </button>
         </div>
       </div>

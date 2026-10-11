@@ -130,11 +130,18 @@ export function toAnthropicWire(request: ModelRequest, model: string, maxTokens:
 }
 
 /** HTTP status → fixed code, and whether the model may have run (charged). */
-function failure(status: number): AdapterError {
+function failure(status: number, retryAfter?: string | null): AdapterError {
   if (status === 401 || status === 403) return new AdapterError('unauthorized');
   if (status === 404) return new AdapterError('model_unavailable');
   if (status === 413) return new AdapterError('too_large');
-  if (status === 429) return new AdapterError('rate_limited');
+  if (status === 429) {
+    const seconds = Number(retryAfter ?? NaN);
+    return new AdapterError(
+      'rate_limited',
+      false,
+      Number.isFinite(seconds) && seconds >= 0 ? { retryAfterMs: Math.ceil(seconds * 1000) } : {},
+    );
+  }
   // 529 overloaded: refused before any work.
   if (status === 529) return new AdapterError('server_error');
   if (status >= 500) return new AdapterError('server_error', true);
@@ -343,7 +350,7 @@ export class AnthropicAdapter implements ModelAdapter {
       });
       if (response.status !== 200) {
         await response.body?.cancel().catch(() => {});
-        const error = failure(response.status);
+        const error = failure(response.status, response.headers?.get('retry-after'));
         if (error.code === 'unauthorized') this.options.onUnauthorized?.();
         throw error;
       }
@@ -450,6 +457,10 @@ const FALLBACK_ON = new Set<AdapterErrorCode>([
 ]);
 /** Below this much time left, the fallback is not tried (it could not answer in time). */
 const FALLBACK_MIN_MS = 3_000;
+/** After the fallback was unreachable or timed out, it is skipped for this long (per process). */
+export const FALLBACK_BREAKER_MS = 60_000;
+/** The share of the time left that the fallback may use, so a hanging one never eats the run. */
+const FALLBACK_TIME_SHARE = 0.5;
 
 /**
  * The primary adapter, and once on failure the fallback (the self-hosted endpoint). The
@@ -471,26 +482,39 @@ export class FallbackAdapter implements ModelAdapter {
   }
   /** A step may be answered by the GPU-priced fallback: reservations cover both worst cases. */
   readonly fallbackPricing = 'gpu' as const;
+  /** When the fallback last failed as unreachable or timed out (the circuit breaker). */
+  private fallbackDownAt = -Infinity;
   async complete(request: ModelRequest): Promise<ModelResponse> {
     const started = this.clock();
     try {
       return await this.primary.complete(request);
     } catch (error) {
       if (!(error instanceof AdapterError) || !FALLBACK_ON.has(error.code)) throw error;
+      // The fallback was down a moment ago: do not spend this run's time on it again.
+      if (this.clock() - this.fallbackDownAt < FALLBACK_BREAKER_MS) throw error;
       const left =
         request.timeoutMs === undefined ? undefined : request.timeoutMs - (this.clock() - started);
       if (left !== undefined && left < FALLBACK_MIN_MS) throw error;
+      const timeoutMs =
+        left === undefined ? undefined : Math.max(FALLBACK_MIN_MS, left * FALLBACK_TIME_SHARE);
       try {
         const answer = await this.fallback.complete({
           ...request,
-          ...(left === undefined ? {} : { timeoutMs: left }),
+          ...(timeoutMs === undefined ? {} : { timeoutMs }),
         });
         // A fallback answer is priced by GPU-seconds (self-hosted), never at the primary's rates.
         return { ...answer, model: this.primary.model, pricing: 'gpu' };
       } catch (second) {
-        const code =
+        const fallbackCode: AdapterErrorCode =
           second instanceof AdapterError && second.code !== 'waking' ? second.code : 'unreachable';
-        throw new AdapterError(code, error.sent || (second instanceof AdapterError && second.sent));
+        if (fallbackCode === 'unreachable' || fallbackCode === 'timeout')
+          this.fallbackDownAt = this.clock();
+        // The primary's code stays the cause (e.g. overloaded); the fallback's travels with it.
+        throw new AdapterError(
+          error.code,
+          error.sent || (second instanceof AdapterError && second.sent),
+          { ...error.detail, fallbackCode },
+        );
       }
     }
   }

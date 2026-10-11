@@ -29,9 +29,10 @@ import {
   type StoredAgent,
   type Workspace,
 } from '../model.js';
-import { descendants, revokeStoredAgent } from '../agent-lifecycle.js';
-import { elricAgentIds } from '../elric/access.js';
+import { descendants, revokeStoredAgent, setAgentPaused } from '../agent-lifecycle.js';
+import { ELRIC_MANAGED, elricAgentIds } from '../elric/access.js';
 import { ELRIC_RESERVED_NAME_MESSAGE, reservedName } from '../elric/names.js';
+import { baseRegistrationStarted } from '../base/identity/short-links.js';
 
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
 
@@ -55,6 +56,7 @@ export class AutonomyError extends Error {
     public statusCode: number,
     message: string,
     public issues?: ManifestIssue[],
+    public errorCode?: string,
   ) {
     super(message);
   }
@@ -469,7 +471,28 @@ export function createAutonomyService(caps: CityLimits) {
       const agent = workspace.agents.find((candidate) => candidate.id === item.agentId)!;
       ids.set(item.name, agent.id);
       if (item.action === 'update') {
+        // A Base agent's on-chain URI (/a/<id>) is read from its public card, so it stays public
+        // (the same rule as My agents' Make private).
+        if (manifest.spec.visibility !== 'public' && (await baseRegistrationStarted(tx, agent.id)))
+          throw new AutonomyError(
+            409,
+            "A Base agent's profile stays public.",
+            [
+              manifestIssue(
+                'BASE_AGENT_PUBLIC',
+                'spec.visibility',
+                `${agent.name} is registered on Base, so its visibility must stay public.`,
+                'Set spec.visibility to "public" in the manifest.',
+              ),
+            ],
+            'base_stays_public',
+          );
+        const previousName = agent.name;
         Object.assign(agent, fields);
+        // The stored copy mirrors the manifest (the owner's pages read it).
+        const visibility = manifest.spec.visibility;
+        if (visibility === 'private' || visibility === 'public') agent.visibility = visibility;
+        else delete agent.visibility;
         agent.manifestHash = item.manifestHash;
         agent.revision = (agent.revision ?? 1) + 1;
         await tx.query(
@@ -490,6 +513,15 @@ export function createAutonomyService(caps: CityLimits) {
           `${agent.name} updated to manifest revision ${agent.revision} by ${actor.label}.`,
           agent.id,
         );
+        // A manifest can change the display name: the owner sees it in Activity like a rename (#116).
+        if (agent.name !== previousName)
+          event(
+            workspace,
+            time,
+            'agent.renamed',
+            `Renamed ${previousName} to ${agent.name}.`,
+            agent.id,
+          );
       }
       agents.push({ name: item.name, id: agent.id, action: item.action });
     }
@@ -881,10 +913,8 @@ export function createAutonomyService(caps: CityLimits) {
         refuse(404, 'Agent not found.');
       const targets =
         values.cascade === false ? [target] : [target, ...descendants(workspace, target.id)];
-      // Elric (docs/ELRIC.md) answers only to its owner's console: a grant or key may pause it
-      // (the safe direction) but never resume or revoke it.
+      // Elric (docs/ELRIC.md) is managed by Central City: no grant or key controls it.
       if (
-        values.action !== 'pause' &&
         (
           await elricAgentIds(
             tx,
@@ -892,7 +922,7 @@ export function createAutonomyService(caps: CityLimits) {
           )
         ).size
       )
-        refuse(403, 'Only its owner can control Elric, from the Central City console.');
+        throw new AutonomyError(409, ELRIC_MANAGED.message, undefined, ELRIC_MANAGED.code);
       const affected = [];
       for (const agent of targets) {
         let changed = false;
@@ -907,30 +937,8 @@ export function createAutonomyService(caps: CityLimits) {
               ? `${agent.name} revoked by ${actor.label}.`
               : `${agent.name} revoked by ${actor.label} because its parent agent ${target.name} was revoked.`,
           );
-        else if (values.action === 'pause' && !agent.revokedAt && !agent.pausedAt) {
-          agent.pausedAt = iso(time);
-          for (const job of workspace.jobs)
-            if (active(job) && (job.requesterId === agent.id || job.providerId === agent.id))
-              stopJob(workspace, job, time, 'Work stopped because an agent was paused.');
-          event(
-            workspace,
-            time,
-            'agent.paused',
-            `${agent.name} paused by ${actor.label}.`,
-            agent.id,
-          );
-          changed = true;
-        } else if (values.action === 'resume' && !agent.revokedAt && agent.pausedAt) {
-          agent.pausedAt = null;
-          event(
-            workspace,
-            time,
-            'agent.resumed',
-            `${agent.name} resumed by ${actor.label}.`,
-            agent.id,
-          );
-          changed = true;
-        }
+        else
+          changed = setAgentPaused(workspace, agent, time, values.action === 'pause', actor.label);
         affected.push({
           agent_id: agent.id,
           name: agent.name,

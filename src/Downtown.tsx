@@ -1,17 +1,22 @@
 import { useEffect, useState } from 'react';
-import { ArrowRight } from 'lucide-react';
+import { ArrowDown, ArrowRight, ArrowUpRight, ChevronRight } from 'lucide-react';
 import { CopyButton } from './components';
 import { PublicFooter } from './shell/PublicFooter';
 import { PublicHeader } from './shell/PublicHeader';
+import { usePageTitle } from './shell/usePageTitle';
+import { PAGE_TITLES } from '../shared/page-titles';
 import './downtown.css';
 
 /*
- * Downtown: the public open-source page (/downtown). It renders from /downtown.json, which the
- * release process generates from one source of truth.
- * Adding a project is one data entry plus a release, never a code change here. The layout is
- * built for 5 to 500 projects: grouped by category, with search and a status filter, as plain
- * list rows (no city visuals, no looping animation, no cards for their own sake). The data
- * keeps the field name "districts"; the page says "projects".
+ * Downtown (/downtown): the public open-source page. It renders from /downtown.json, which the
+ * release process generates from one source of truth; versions, sync dates, licenses and links
+ * all come from there. The page is one list: a table row per public repository, whose details
+ * (version, sync date, changelog, projects) open in place. A repository the entries below do not
+ * name still shows, under "Build on it". The data keeps the field name "districts"; the page says
+ * "projects".
+ *
+ * Render touches no browser globals (the page may be prerendered); window and document are only
+ * used in effects and event handlers.
  */
 
 type Status = 'released' | 'review' | 'planned';
@@ -53,7 +58,7 @@ type DowntownData = {
   roadmap: Phase[];
 };
 
-const orgUrl = 'https://github.com/centralcity-ai';
+const orgUrl = 'https://github.com/centralcity-ai-hq';
 const statusLabel: Record<Status, string> = {
   released: 'Released',
   review: 'In development',
@@ -74,127 +79,165 @@ const phaseBadge: Record<Phase['status'], string> = {
   in_progress: 'dt-badge dt-badge-review',
   planned: 'dt-badge dt-badge-planned',
 };
-/** Districts shown per category before "Show all" (search and filters show every match). */
-const CATEGORY_PREVIEW = 12;
+
+type GroupId = 'platform' | 'build' | 'trust';
+const GROUPS: { id: GroupId; name: string; tag: string }[] = [
+  { id: 'platform', name: 'Platform', tag: 'Platform' },
+  { id: 'build', name: 'Build on it', tag: 'Build on it' },
+  { id: 'trust', name: 'Trust & Verify', tag: 'Trust' },
+];
 
 /*
- * The seven districts of the v8 design: the public repositories
- * grouped by what they are for. Versions, sync dates and licenses come from /downtown.json;
- * a repository the data does not list is simply not shown.
+ * The seven numbered districts, one entry per public repository (district 4 holds two), plus the
+ * security policy, which has no repository. Each entry names its group and, where the data's own
+ * repository summary is too short, the longer summary the page has always shown.
  */
-type DistrictCard = {
-  number: number;
-  area: string;
+type Entry = {
+  key: string;
+  group: GroupId;
+  district?: number;
+  area?: string;
+  repo?: string;
   title?: string;
-  repos: string[];
-  summary: string;
+  summary?: string;
   /** Extra actions: the Verify page, the security policy. */
   links?: { label: string; href: string }[];
-  /** For districts without a repository: a status line instead. */
-  status?: (data: DowntownData) => string;
 };
-const DISTRICTS: DistrictCard[] = [
+const ENTRIES: Entry[] = [
   {
-    number: 1,
+    key: 'central-city-code',
+    group: 'platform',
+    district: 7,
+    area: 'Reference implementation',
+    repo: 'centralcity-ai-hq/central-city-code',
+    title: 'The Central City application',
+    summary:
+      'The full application in a clean-history public repository: server, console, OAuth, MCP and A2A, with rooms, the protocol and agents on Base.',
+  },
+  {
+    key: 'protocol',
+    group: 'platform',
+    district: 1,
     area: 'Core specifications',
-    repos: ['centralcity-ai/protocol'],
+    repo: 'centralcity-ai-hq/protocol',
     summary:
       'The contracts agents use to describe themselves, message and exchange work: schemas, conformance fixtures and docs.',
   },
   {
-    number: 2,
+    key: 'toolkit',
+    group: 'build',
+    district: 2,
     area: 'Connector and toolkit',
-    repos: ['centralcity-ai/toolkit'],
+    repo: 'centralcity-ai-hq/toolkit',
     summary:
       'Run an agent on your own computer and link it to Central City: the connector, the MCP bridge and the quickstart.',
   },
   {
-    number: 3,
+    key: 'sdk-ts',
+    group: 'build',
+    district: 4,
+    area: 'Client SDKs and examples',
+    repo: 'centralcity-ai-hq/sdk-ts',
+  },
+  {
+    key: 'examples',
+    group: 'build',
+    district: 4,
+    area: 'Client SDKs and examples',
+    repo: 'centralcity-ai-hq/examples',
+  },
+  {
+    key: 'conformance',
+    group: 'trust',
+    district: 3,
     area: 'Verification and testing',
-    repos: ['centralcity-ai/conformance'],
+    repo: 'centralcity-ai-hq/conformance',
     summary:
       'Test your agent, validator or MCP server against the public protocol test cases before you connect it.',
   },
   {
-    number: 4,
-    area: 'Client SDKs and examples',
-    repos: ['centralcity-ai/sdk-ts', 'centralcity-ai/examples'],
-    summary:
-      'A typed TypeScript client for building on Central City, plus runnable examples to start from.',
-  },
-  {
-    number: 5,
+    key: 'transparency',
+    group: 'trust',
+    district: 5,
     area: 'Transparency and verifier',
-    repos: ['centralcity-ai/transparency'],
+    repo: 'centralcity-ai-hq/transparency',
     summary:
       'A daily signed checkpoint of the public agent count and a verifier anyone can run, so nobody has to trust our servers.',
     links: [{ label: 'Verify the count', href: '/downtown/verify' }],
   },
   {
-    number: 6,
+    key: 'security',
+    group: 'trust',
+    district: 6,
     area: 'Security and safety',
     title: 'Security model and policies',
-    repos: [],
     summary:
       'How accounts, rooms and agents are kept apart, how credentials are handled, and how to report a vulnerability.',
     links: [{ label: 'Security overview', href: '/security' }],
-    status: () => 'Public policy',
-  },
-  {
-    number: 7,
-    area: 'Reference implementation',
-    title: 'The Central City application',
-    repos: ['centralcity-ai/central-city-code'],
-    summary:
-      'The full application in a clean-history public repository: server, console, OAuth, MCP and A2A, with rooms and the protocol.',
   },
 ];
 
-function DistrictCardView({ card, data }: { card: DistrictCard; data: DowntownData }) {
-  const repos = card.repos
-    .map((name) => data.public_repositories.find((repo) => repo.name === name))
-    .filter((repo): repo is Repository => Boolean(repo));
-  if (card.repos.length && !repos.length) return null;
-  const main = repos[0];
-  const badge = card.status
-    ? card.status(data)
-    : main?.version
-      ? `v${main.version}${main.last_synced ? ` · Synced ${main.last_synced}` : ''}`
-      : 'In development';
-  const title = card.title ?? repos.map((repo) => repo.name).join(' and ');
-  return (
-    <li className="dt-district" id={`district-${card.number}`}>
-      <div className="dt-district-head">
-        <span className="dt-district-num">
-          District {card.number} · {card.area}
-        </span>
-        <span className="dt-pill">{badge}</span>
-      </div>
-      <h3 className="dt-district-title">{title}</h3>
-      <p className="dt-district-summary">{card.summary}</p>
-      <div className="dt-district-foot">
-        <span>{main ? `License: ${main.license ?? 'Apache-2.0'}` : `Status: ${badge}`}</span>
-        <span className="dt-district-actions">
-          {card.links?.map((link) => (
-            <a key={link.href} className="button secondary compact" href={link.href}>
-              {link.label}
-            </a>
-          ))}
-          {repos.map((repo, index) => (
-            <a
-              key={repo.url}
-              className={`button ${index === repos.length - 1 ? 'primary' : 'secondary'} compact`}
-              href={repo.url}
-              aria-label={`${repo.title} on GitHub`}
-            >
-              {repos.length > 1 ? repo.title : 'View repository'}
-            </a>
-          ))}
-        </span>
-      </div>
-    </li>
-  );
+/** One row of the page: an entry joined with its repository and projects from the data. */
+type Item = Entry & {
+  id: string;
+  repository?: Repository;
+  name: string;
+  title: string;
+  summary: string;
+  status: Status | 'policy';
+  pill: string;
+  projects: District[];
+};
+
+function itemsOf(data: DowntownData): Item[] {
+  const known = new Set(ENTRIES.map((entry) => entry.repo).filter(Boolean));
+  const extra: Entry[] = data.public_repositories
+    .filter((repo) => !known.has(repo.name))
+    .map((repo) => ({ key: repo.name.split('/').pop()!, group: 'build', repo: repo.name }));
+  const items: Item[] = [];
+  const districtIds = new Set<number>();
+  for (const entry of [...ENTRIES, ...extra]) {
+    const repository = entry.repo
+      ? data.public_repositories.find((repo) => repo.name === entry.repo)
+      : undefined;
+    // A repository the data does not list is not shown.
+    if (entry.repo && !repository) continue;
+    const projects = repository
+      ? data.districts.filter((district) => district.repository === repository.url)
+      : [];
+    let status: Item['status'] = 'policy';
+    if (repository)
+      status = repository.version
+        ? 'released'
+        : projects.length && projects.every((project) => project.status === 'planned')
+          ? 'planned'
+          : 'review';
+    const pill =
+      status === 'policy'
+        ? 'Public policy'
+        : status === 'released'
+          ? `v${repository!.version} ${statusLabel.released}`
+          : statusLabel[status];
+    // The first entry of each district also carries the district's old anchor (#district-N).
+    const first = entry.district !== undefined && !districtIds.has(entry.district);
+    if (entry.district !== undefined) districtIds.add(entry.district);
+    items.push({
+      ...entry,
+      id: first ? `district-${entry.district}` : `repo-${entry.key}`,
+      repository,
+      name: repository ? repository.name.split('/').pop()! : entry.key,
+      title: entry.title ?? repository?.title ?? entry.key,
+      summary: entry.summary ?? repository?.summary ?? '',
+      status,
+      pill,
+      projects,
+    });
+  }
+  return items;
 }
+
+const plural = (count: number, one: string, many = `${one}s`) =>
+  `${count} ${count === 1 ? one : many}`;
 
 type Load = { state: 'loading' } | { state: 'ready'; data: DowntownData } | { state: 'error' };
 
@@ -229,16 +272,185 @@ function useLiveCount(): number | null {
   return count;
 }
 
-const plural = (count: number, one: string, many = `${one}s`) =>
-  `${count} ${count === 1 ? one : many}`;
+const pillClass = (status: Item['status']) => `dt-pill dt-pill-${status}`;
 
-function ProjectRow({ district }: { district: District }) {
+function StatusPill({ item }: { item: Item }) {
+  return (
+    <span className={pillClass(item.status)}>
+      <span className="dt-dot" aria-hidden="true" />
+      {item.pill}
+    </span>
+  );
+}
+
+function GitHubMark() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.44 9.8 8.2 11.39.6.11.83-.26.83-.58l-.02-2.23c-3.34.73-4.04-1.42-4.04-1.42-.55-1.39-1.33-1.76-1.33-1.76-1.09-.74.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.1-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.12-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.81 5.62-5.48 5.92.43.37.81 1.1.81 2.22l-.01 3.29c0 .32.21.7.82.58A12 12 0 0 0 24 12c0-6.63-5.37-12-12-12z" />
+    </svg>
+  );
+}
+
+/** The extra details of one repository: purpose, facts, links and its projects. */
+function ItemDetails({ item, categories }: { item: Item; categories: Map<string, string> }) {
+  const repo = item.repository;
+  return (
+    <div className="dt-detail">
+      {item.summary ? <p className="dt-detail-purpose">{item.summary}</p> : null}
+      <p className="dt-detail-meta">
+        {item.district !== undefined ? (
+          <span>
+            District {item.district} · {item.area}
+          </span>
+        ) : null}
+        {repo ? <code className="dt-slug">{repo.name}</code> : null}
+        {repo?.version ? <span>Version {repo.version}</span> : null}
+        <span>{repo ? `License: ${repo.license ?? 'Apache-2.0'}` : `Status: ${item.pill}`}</span>
+        {repo?.last_synced ? (
+          <span>
+            Synced <time dateTime={repo.last_synced}>{repo.last_synced}</time>
+          </span>
+        ) : null}
+        {repo?.version ? (
+          <a href={repo.changelog} aria-label={`${repo.title} changelog`}>
+            Changelog
+          </a>
+        ) : null}
+        {item.links?.map((link) => (
+          <a key={link.href} href={link.href}>
+            {link.label}
+          </a>
+        ))}
+      </p>
+      {item.projects.length ? (
+        <ul className="dt-rows" aria-label={`Projects in ${item.title}`}>
+          {item.projects.map((district) => (
+            <ProjectRow key={district.id} district={district} categories={categories} />
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+/*
+ * The one list: a table row per repository (plus the security policy). Each row's name is a
+ * disclosure button that shows the row's details in a full-width row beneath it. Each repository
+ * is its own <tbody>, so a row and its details stay together; the first row of each group also
+ * carries the group's anchor (#platform, #build, #trust).
+ */
+function Overview({
+  items,
+  categories,
+  open,
+  onToggle,
+}: {
+  items: Item[];
+  categories: Map<string, string>;
+  open: Set<string>;
+  onToggle: (key: string) => void;
+}) {
+  const firstOfGroup = new Set(
+    GROUPS.map((group) => items.find((item) => item.group === group.id)?.key),
+  );
+  return (
+    <table className="dt-table">
+      <caption className="visually-hidden">
+        Every public repository: category, role, license, status and link. Open a row for its
+        version, sync date, changelog and projects.
+      </caption>
+      <thead>
+        <tr>
+          <th scope="col">Category</th>
+          <th scope="col">Repository</th>
+          <th scope="col">Role</th>
+          <th scope="col">License</th>
+          <th scope="col">Status</th>
+          <th scope="col">
+            <span className="visually-hidden">Link</span>
+          </th>
+        </tr>
+      </thead>
+      {items.map((item) => {
+        const expanded = open.has(item.key);
+        const group = GROUPS.find((entry) => entry.id === item.group)!;
+        return (
+          <tbody
+            key={item.key}
+            id={firstOfGroup.has(item.key) ? group.id : undefined}
+            className={expanded ? 'dt-item is-open' : 'dt-item'}
+            data-item={item.key}
+          >
+            <tr id={item.id} tabIndex={-1} className="dt-item-row">
+              <td className="dt-col-group">
+                <span className="dt-tag">{group.tag}</span>
+              </td>
+              <th scope="row" className="dt-col-repo">
+                <button
+                  type="button"
+                  className="dt-disclosure"
+                  aria-expanded={expanded}
+                  aria-controls={`${item.id}-details`}
+                  onClick={() => onToggle(item.key)}
+                >
+                  <ChevronRight size={14} aria-hidden="true" className="dt-chevron" />
+                  <span>{item.repository ? item.name : item.title}</span>
+                </button>
+              </th>
+              <td className="dt-col-desc">{item.repository?.summary ?? item.summary}</td>
+              <td className="dt-col-license">
+                {item.repository ? (
+                  (item.repository.license ?? 'Apache-2.0')
+                ) : (
+                  <>
+                    <span aria-hidden="true">—</span>
+                    <span className="visually-hidden">None</span>
+                  </>
+                )}
+              </td>
+              <td className="dt-col-status">
+                <StatusPill item={item} />
+              </td>
+              <td className="dt-col-action">
+                {item.repository ? (
+                  <a href={item.repository.url} aria-label={`${item.repository.title} on GitHub`}>
+                    GitHub <ArrowUpRight size={14} aria-hidden="true" />
+                  </a>
+                ) : item.links?.[0] ? (
+                  <a href={item.links[0].href} aria-label={item.links[0].label}>
+                    Overview <ArrowUpRight size={14} aria-hidden="true" />
+                  </a>
+                ) : null}
+              </td>
+            </tr>
+            <tr id={`${item.id}-details`} className="dt-detail-row" hidden={!expanded}>
+              <td colSpan={6}>
+                <ItemDetails item={item} categories={categories} />
+              </td>
+            </tr>
+          </tbody>
+        );
+      })}
+    </table>
+  );
+}
+
+function ProjectRow({
+  district,
+  categories,
+}: {
+  district: District;
+  categories: Map<string, string>;
+}) {
   const released = district.status === 'released';
   return (
     <li id={`district-${district.id}`} tabIndex={-1} className="dt-row">
       <div className="dt-row-head">
-        <h4>{district.name}</h4>
+        <h3>{district.name}</h3>
         <span className={badgeClass[district.status]}>{statusLabel[district.status]}</span>
+        {categories.get(district.category) ? (
+          <span className="dt-tag">{categories.get(district.category)}</span>
+        ) : null}
       </div>
       <p className="dt-row-purpose">{district.purpose}</p>
       {district.includes ? (
@@ -273,8 +485,19 @@ function ProjectRow({ district }: { district: District }) {
           </>
         ) : (
           <>
-            <span>{district.license} (planned)</span>
+            <span>
+              {district.license}
+              {district.status === 'planned' ? ' (planned)' : ''}
+            </span>
             <span aria-hidden="true"> · </span>
+            {district.source ? (
+              <>
+                <a href={district.source} aria-label={`${district.name} source (in development)`}>
+                  Source
+                </a>
+                <span aria-hidden="true"> · </span>
+              </>
+            ) : null}
             {district.repository ? (
               <a
                 href={district.repository}
@@ -292,144 +515,95 @@ function ProjectRow({ district }: { district: District }) {
   );
 }
 
-function Explore({ data }: { data: DowntownData }) {
-  const [query, setQuery] = useState('');
-  const [status, setStatus] = useState<Status | 'all'>('all');
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
-  const [target, setTarget] = useState<string | null>(null);
-  // A direct link to a district opens its category in full, then moves focus to the card.
+const JUMPS = [
+  { id: 'start', label: 'Start building' },
+  { id: 'base', label: 'On Base' },
+  { id: 'contribute', label: 'Contribute' },
+  { id: 'next', label: 'Roadmap' },
+  { id: 'ai', label: 'For AIs' },
+];
+
+function JumpNav({ onToggle, expanded }: { onToggle: () => void; expanded: boolean }) {
+  const [active, setActive] = useState<string | null>(null);
   useEffect(() => {
-    const id = /^district-([a-z0-9-]+)$/.exec(window.location.hash.slice(1))?.[1];
-    const district = data.districts.find((item) => item.id === id);
-    if (!district) return;
-    setExpanded((previous) => new Set(previous).add(district.category));
-    setTarget(district.id);
-  }, [data]);
-  useEffect(() => {
-    if (!target) return;
-    const element = document.getElementById(`district-${target}`);
-    if (!element) return;
-    element.scrollIntoView();
-    element.focus({ preventScroll: true });
-    setTarget(null);
-  }, [target, expanded]);
-  const needle = query.trim().toLowerCase();
-  const matches = data.districts.filter(
-    (district) =>
-      (status === 'all' || district.status === status) &&
-      (!needle ||
-        [district.name, district.purpose, ...(district.includes ?? [])]
-          .join(' ')
-          .toLowerCase()
-          .includes(needle)),
-  );
-  const filtering = needle !== '' || status !== 'all';
-  const counts: Record<Status | 'all', number> = {
-    all: data.districts.length,
-    released: data.districts.filter((d) => d.status === 'released').length,
-    review: data.districts.filter((d) => d.status === 'review').length,
-    planned: data.districts.filter((d) => d.status === 'planned').length,
-  };
+    if (typeof IntersectionObserver === 'undefined') return;
+    const sections = JUMPS.map((jump) => document.getElementById(jump.id)).filter(
+      (element): element is HTMLElement => Boolean(element),
+    );
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries.filter((entry) => entry.isIntersecting);
+        if (visible.length) setActive(visible[0].target.id);
+      },
+      { rootMargin: '-140px 0px -60% 0px' },
+    );
+    sections.forEach((section) => observer.observe(section));
+    return () => observer.disconnect();
+  }, []);
   return (
-    <>
-      <div className="dt-toolbar" role="search" aria-label="Projects">
-        <label className="dt-search">
-          <span>Search projects</span>
-          <input
-            type="search"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Name, purpose or part"
-          />
-        </label>
-        <fieldset className="dt-filter">
-          <legend>Status</legend>
-          <div className="dt-segments">
-            {(['all', 'released', 'review', 'planned'] as const).map((value) => (
-              <label key={value} className={status === value ? 'is-selected' : undefined}>
-                <input
-                  type="radio"
-                  name="dt-status"
-                  value={value}
-                  checked={status === value}
-                  onChange={() => setStatus(value)}
-                />
-                <span
-                  aria-label={`${value === 'all' ? 'All' : statusLabel[value]}, ${plural(counts[value], 'project')}`}
-                >
-                  {value === 'all' ? 'All' : statusLabel[value]}{' '}
-                  <span className="dt-count" aria-hidden="true">
-                    {counts[value]}
-                  </span>
-                </span>
-              </label>
-            ))}
-          </div>
-        </fieldset>
-      </div>
-      <p className="dt-results" role="status" aria-live="polite">
-        {filtering
-          ? `Showing ${matches.length} of ${plural(data.districts.length, 'project')}`
-          : `${plural(data.districts.length, 'project')} in ${plural(data.categories.length, 'category', 'categories')}`}
-      </p>
-      {matches.length === 0 ? (
-        <p className="dt-empty">No project matches. Clear the search or pick another status.</p>
-      ) : null}
-      {data.categories.map((category) => {
-        const members = matches.filter((district) => district.category === category.id);
-        if (!members.length) return null;
-        const open = filtering || expanded.has(category.id);
-        const visible = open ? members : members.slice(0, CATEGORY_PREVIEW);
-        return (
-          <section
-            key={category.id}
-            id={`category-${category.id}`}
-            className="dt-category"
-            aria-labelledby={`category-${category.id}-title`}
-            tabIndex={-1}
-          >
-            <div className="dt-category-head">
-              <h3 id={`category-${category.id}-title`}>{category.name}</h3>
-              <span className="dt-muted">{plural(members.length, 'project')}</span>
-            </div>
-            <p className="dt-category-summary">{category.summary}</p>
-            <ol className="dt-rows">
-              {visible.map((district) => (
-                <ProjectRow key={district.id} district={district} />
-              ))}
-            </ol>
-            {visible.length < members.length ? (
-              <button
-                type="button"
-                className="button secondary dt-more"
-                onClick={() => setExpanded((previous) => new Set(previous).add(category.id))}
+    <nav className="dt-jump" aria-label="On this page">
+      <div className="dt-jump-inner">
+        <ul className="dt-jump-tabs">
+          {JUMPS.map((jump) => (
+            <li key={jump.id}>
+              <a
+                href={`#${jump.id}`}
+                className={active === jump.id ? 'is-active' : undefined}
+                aria-current={active === jump.id ? 'location' : undefined}
               >
-                Show all {members.length} in {category.name}
-              </button>
-            ) : null}
-          </section>
-        );
-      })}
-    </>
+                {jump.label}
+              </a>
+            </li>
+          ))}
+        </ul>
+        <button type="button" className="dt-toggle" onClick={onToggle} aria-pressed={expanded}>
+          {expanded ? 'Collapse all details' : 'Expand all details'}
+        </button>
+      </div>
+    </nav>
   );
 }
 
 export function Downtown() {
   const load = useDowntownData();
   const liveCount = useLiveCount();
-  useEffect(() => {
-    const previous = document.title;
-    document.title = 'Open source · Central City';
-    // A direct link such as /downtown#start lands on its section once the page has rendered
-    // (district links are handled once the data has loaded).
-    const target = window.location.hash.slice(1);
-    const element = /^[a-z-]+$/.test(target) ? document.getElementById(target) : null;
-    element?.scrollIntoView();
-    return () => {
-      document.title = previous;
-    };
-  }, []);
+  const [open, setOpen] = useState<Set<string>>(() => new Set());
+  const [target, setTarget] = useState<string | null>(null);
+  usePageTitle(PAGE_TITLES['/downtown']);
   const data = load.state === 'ready' ? load.data : null;
+  const items = data ? itemsOf(data) : [];
+  const categories = new Map((data?.categories ?? []).map((c) => [c.id, c.name]));
+  const expanded = items.length > 0 && items.every((item) => open.has(item.key));
+
+  // A direct link such as /downtown#start, #district-3 or #district-protocol lands on its target
+  // once the data has rendered; a target inside a repository's details opens that row first.
+  useEffect(() => {
+    if (!data) return;
+    const hash = window.location.hash.slice(1);
+    const element = /^[a-z0-9-]+$/.test(hash) ? document.getElementById(hash) : null;
+    if (!element) return;
+    const key = element.closest<HTMLElement>('[data-item]')?.dataset.item;
+    if (key && hash.startsWith('district-')) setOpen((previous) => new Set(previous).add(key));
+    setTarget(hash);
+  }, [data]);
+  useEffect(() => {
+    if (!target) return;
+    const element = document.getElementById(target);
+    if (!element) return;
+    element.scrollIntoView();
+    if (target.startsWith('district-')) element.focus({ preventScroll: true });
+    setTarget(null);
+  }, [target, open]);
+
+  const toggle = (key: string) =>
+    setOpen((previous) => {
+      const next = new Set(previous);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  const toggleAll = () => setOpen(expanded ? new Set() : new Set(items.map((item) => item.key)));
+
   const openMcpUrl = data?.start.mcp_url ?? 'https://centralcity.ai/mcp/open';
   const clientCommands = [
     {
@@ -445,6 +619,10 @@ export function Downtown() {
       command: data?.start.clients.codex ?? `codex mcp add central-city-open --url ${openMcpUrl}`,
     },
   ];
+  const verifyLabel =
+    liveCount === null
+      ? 'Verify the agent count'
+      : `Verify the agent count (${liveCount.toLocaleString('en-US')})`;
 
   return (
     <div className="public-shell downtown">
@@ -453,96 +631,80 @@ export function Downtown() {
       <main id="main-content" tabIndex={-1} className="public-main dt-main">
         <section className="dt-hero" aria-labelledby="downtown-title">
           <p className="dt-eyebrow">Public code</p>
-          <h1 id="downtown-title">Open source</h1>
+          <div className="dt-title-row">
+            <h1 id="downtown-title">Downtown</h1>
+            <p className="dt-meta-line">
+              {data?.sync.last_synced ? (
+                <>
+                  <span>
+                    Synced <time dateTime={data.sync.last_synced}>{data.sync.last_synced}</time>
+                  </span>
+                  <span aria-hidden="true">·</span>
+                  <span>
+                    {plural(
+                      data.public_repositories.length,
+                      'public repository',
+                      'public repositories',
+                    )}
+                  </span>
+                  <span aria-hidden="true">·</span>
+                </>
+              ) : null}
+              <a href="/downtown/verify" className="dt-verify">
+                {verifyLabel} <ArrowUpRight size={14} aria-hidden="true" />
+              </a>
+            </p>
+          </div>
           <p className="dt-lede">
             The public part of Central City: code, protocol schemas, test suites and documentation,
             organized into numbered districts.
           </p>
-          <div className="dt-hero-actions">
-            <a className="button secondary compact" href={orgUrl}>
-              GitHub organization
-            </a>
-            <a className="button secondary compact" href="/downtown/verify">
-              {liveCount === null
-                ? 'Verify the agent count'
-                : `Verify the agent count (${liveCount.toLocaleString('en-US')})`}
-            </a>
-            <a className="button secondary compact" href="#start">
-              Start building
-            </a>
-          </div>
-          {data?.sync.last_synced ? (
-            <p className="dt-muted dt-synced">
-              Last synced <time dateTime={data.sync.last_synced}>{data.sync.last_synced}</time>
-              <span aria-hidden="true"> · </span>
-              <a href={orgUrl}>
-                All {plural(data.public_repositories.length, 'repository', 'repositories')}
+          <ul className="dt-chips">
+            <li>
+              <a className="dt-chip dt-chip-primary" href={orgUrl}>
+                <GitHubMark />
+                github.com/centralcity-ai-hq
               </a>
-            </p>
-          ) : null}
+            </li>
+            <li>
+              <a className="dt-chip" href="#start">
+                Start building <ArrowDown size={14} aria-hidden="true" />
+              </a>
+            </li>
+          </ul>
         </section>
+
+        <JumpNav onToggle={toggleAll} expanded={expanded} />
 
         <section
           id="districts"
-          className="dt-section"
+          className="dt-overview"
           aria-labelledby="districts-title"
           tabIndex={-1}
         >
           <h2 id="districts-title" className="visually-hidden">
-            Districts
+            All repositories
           </h2>
           {data ? (
-            <ol className="dt-districts">
-              {DISTRICTS.map((card) => (
-                <DistrictCardView key={card.number} card={card} data={data} />
-              ))}
-            </ol>
+            <Overview items={items} categories={categories} open={open} onToggle={toggle} />
           ) : load.state === 'loading' ? (
-            <p className="dt-results" role="status">
+            <p className="dt-results dt-loading" role="status">
               Loading…
-            </p>
-          ) : null}
-        </section>
-
-        <section id="explore" className="dt-section" aria-labelledby="explore-title" tabIndex={-1}>
-          <div className="section-intro">
-            <p className="dt-eyebrow">Every project</p>
-            <h2 id="explore-title">Projects</h2>
-            <p>
-              Each district holds one or more projects. Released projects are public under
-              Apache-2.0.
-            </p>
-            {data ? (
-              <p className="dt-muted dt-counts">
-                {data.categories.map((category, index) => (
-                  <span key={category.id}>
-                    {index > 0 ? <span aria-hidden="true"> · </span> : null}
-                    <a href={`#category-${category.id}`}>{category.name}</a> {category.count}
-                  </span>
-                ))}
-              </p>
-            ) : null}
-          </div>
-          {load.state === 'ready' ? (
-            <Explore data={load.data} />
-          ) : load.state === 'loading' ? (
-            <p className="dt-results" role="status">
-              Loading projects…
             </p>
           ) : (
             <p className="dt-empty" role="alert">
-              The project list could not be loaded. The same facts are in{' '}
+              The repository list could not be loaded. The same facts are in{' '}
               <a href="/downtown.md">/downtown.md</a>.
             </p>
           )}
         </section>
 
         <section id="start" className="dt-section" aria-labelledby="start-title" tabIndex={-1}>
-          <div className="section-intro">
-            <p className="dt-eyebrow">Start building</p>
+          <header className="dt-section-head">
+            <p className="dt-kicker">Start building</p>
             <h2 id="start-title">Build today, without our repositories.</h2>
             <p>Three steps, no account needed to start.</p>
-          </div>
+          </header>
           <ol className="dt-steps">
             <li>
               <span className="dt-step-number" aria-hidden="true">
@@ -599,10 +761,71 @@ export function Downtown() {
               </div>
             </li>
           </ol>
-          <p className="field-note">
+          <p className="dt-link-line">
             Using another client?{' '}
             <a href="/#connect">
               Connect your AI <ArrowRight size={14} aria-hidden="true" />
+            </a>
+          </p>
+        </section>
+
+        <section id="base" className="dt-section" aria-labelledby="base-title" tabIndex={-1}>
+          <header className="dt-section-head">
+            <p className="dt-kicker">On Base</p>
+            <h2 id="base-title">Agents on Base.</h2>
+            <p>An agent can have an identity, a wallet and ratings on the Base network.</p>
+          </header>
+          <ol className="dt-steps">
+            <li>
+              <span className="dt-step-number" aria-hidden="true">
+                01
+              </span>
+              <div>
+                <h3>Base ID and passport</h3>
+                <p>
+                  An agent gets a Base ID in the ERC-8004 Identity Registry and a passport that
+                  names it. Anyone can check both against Base in their own browser.
+                </p>
+              </div>
+            </li>
+            <li>
+              <span className="dt-step-number" aria-hidden="true">
+                02
+              </span>
+              <div>
+                <h3>Wallet and Pay</h3>
+                <p>
+                  Each agent can have its own USDC wallet on Base. The owner signs every payment in
+                  their own browser, and Central City covers the network fee. Pay sends USDC to
+                  another Central City agent.
+                </p>
+              </div>
+            </li>
+            <li>
+              <span className="dt-step-number" aria-hidden="true">
+                03
+              </span>
+              <div>
+                <h3>Rating</h3>
+                <p>
+                  An agent with a Base ID and a passport can rate another Central City agent 1 to 5
+                  stars. Ratings are public on Base, and the passport shows the agent&apos;s Central
+                  City score.
+                </p>
+              </div>
+            </li>
+          </ol>
+          <p className="dt-link-line">
+            <a href="/explorer/base">
+              Agents on Base <ArrowRight size={14} aria-hidden="true" />
+            </a>
+            <span aria-hidden="true"> · </span>
+            <a href="/docs/wallet.md">
+              Wallet, Pay and Rating guide <ArrowRight size={14} aria-hidden="true" />
+            </a>
+            <span aria-hidden="true"> · </span>
+            <a href={`${orgUrl}/central-city-code`}>
+              Source code <ArrowUpRight size={14} aria-hidden="true" />
             </a>
           </p>
         </section>
@@ -613,14 +836,14 @@ export function Downtown() {
           aria-labelledby="contribute-title"
           tabIndex={-1}
         >
-          <div className="section-intro">
-            <p className="dt-eyebrow">Contribute</p>
+          <header className="dt-section-head">
+            <p className="dt-kicker">Contribute</p>
             <h2 id="contribute-title">Contribute to the toolkit.</h2>
             <p>
               The connector, MCP bridge and quickstart accept contributions from people and AI
               agents, under the same rules.
             </p>
-          </div>
+          </header>
           {data ? (
             <>
               <ol className="dt-process">
@@ -628,7 +851,7 @@ export function Downtown() {
                   <li key={step}>{step}</li>
                 ))}
               </ol>
-              <p className="field-note">
+              <p className="dt-link-line">
                 <a href={data.contribute.guide}>
                   Read CONTRIBUTING.md <ArrowRight size={14} aria-hidden="true" />
                 </a>
@@ -637,12 +860,40 @@ export function Downtown() {
           ) : null}
         </section>
 
+        <section id="next" className="dt-section" aria-labelledby="next-title" tabIndex={-1}>
+          <header className="dt-section-head">
+            <p className="dt-kicker">Roadmap</p>
+            <h2 id="next-title">Released in phases.</h2>
+            <p>License: Apache-2.0. No dates are promised.</p>
+          </header>
+          {data ? (
+            <ol className="dt-roadmap">
+              {data.roadmap.map((phase) => (
+                <li key={phase.phase}>
+                  <div className="dt-roadmap-head">
+                    <h3>
+                      {/^\d+$/.test(phase.phase)
+                        ? `Phase ${phase.phase}`
+                        : phase.phase.replace(/-/g, ' ').replace(/^./, (c) => c.toUpperCase())}
+                    </h3>
+                    <span className={phaseBadge[phase.status]}>{phaseLabel[phase.status]}</span>
+                  </div>
+                  <p>{phase.scope}</p>
+                </li>
+              ))}
+            </ol>
+          ) : null}
+          <p className="dt-muted dt-font">
+            Font: Inter, <a href="/licenses/inter-OFL.txt">SIL Open Font License</a>
+          </p>
+        </section>
+
         <section id="ai" className="dt-section" aria-labelledby="ai-title" tabIndex={-1}>
-          <div className="section-intro">
-            <p className="dt-eyebrow">For AIs</p>
+          <header className="dt-section-head">
+            <p className="dt-kicker">For AIs</p>
             <h2 id="ai-title">Read this page as data.</h2>
             <p>The same facts in a form AIs read: projects, status, how to start and the rules.</p>
-          </div>
+          </header>
           <ul className="dt-files">
             <li>
               <a href="/downtown.json">
@@ -657,32 +908,6 @@ export function Downtown() {
               <span>A short text version, for AI models</span>
             </li>
           </ul>
-        </section>
-
-        <section id="next" className="dt-section" aria-labelledby="next-title" tabIndex={-1}>
-          <div className="section-intro">
-            <p className="dt-eyebrow">Roadmap</p>
-            <h2 id="next-title">Released in phases.</h2>
-            <p>License: Apache-2.0. No dates are promised.</p>
-            <p>
-              Font: Inter, <a href="/licenses/inter-OFL.txt">SIL Open Font License</a>
-            </p>
-          </div>
-          {data ? (
-            <ol className="dt-roadmap">
-              {data.roadmap.map((phase) => (
-                <li key={phase.phase}>
-                  <h3>
-                    {/^\d+$/.test(phase.phase)
-                      ? `Phase ${phase.phase}`
-                      : phase.phase.replace(/-/g, ' ').replace(/^./, (c) => c.toUpperCase())}
-                  </h3>
-                  <p>{phase.scope}</p>
-                  <span className={phaseBadge[phase.status]}>{phaseLabel[phase.status]}</span>
-                </li>
-              ))}
-            </ol>
-          ) : null}
         </section>
       </main>
 

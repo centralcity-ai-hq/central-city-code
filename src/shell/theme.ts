@@ -2,10 +2,12 @@ import React, { useEffect, useState } from 'react';
 
 /**
  * Central City Theme Controller & Interactive Utilities (v8 Design System)
- * Light by default on every device, whatever the OS colour-scheme setting. Dark only when the
- * visitor picks it with the theme toggle (stored in localStorage) or via ?theme=dark|light.
- * A URL query parameter applies to that page view only and is never written to localStorage.
- * Applied before first render (applyStoredTheme in src/main.tsx), so there is no flash.
+ * With no stored choice (preference 'system') the theme follows the device's light/dark setting
+ * (prefers-color-scheme) and changes live when the device setting changes. An explicit choice
+ * from the theme toggle (stored in localStorage) or ?theme=dark|light always wins. A URL query
+ * parameter applies to that page view only and is never written to localStorage.
+ * Applied before the first paint by src/shell/theme-boot.js (the prerendered public pages paint
+ * before the app runs), then by applyStoredTheme in src/main.tsx, so there is no flash.
  */
 
 export type Theme = 'light' | 'dark';
@@ -37,16 +39,48 @@ export function getStoredThemePreference(): ThemePreference {
   return 'system';
 }
 
+const SYSTEM_DARK_QUERY = '(prefers-color-scheme: dark)';
+
 /**
- * The theme used when the visitor has not chosen one. Always light: the OS colour-scheme
- * setting is deliberately ignored.
+ * The theme used when the visitor has not chosen one: the device's light/dark setting.
+ * Light where the setting cannot be read (no window or no matchMedia).
  */
 export function getSystemTheme(): Theme {
+  try {
+    if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+      return window.matchMedia(SYSTEM_DARK_QUERY).matches ? 'dark' : 'light';
+    }
+  } catch {
+    // matchMedia unavailable: light.
+  }
   return 'light';
 }
 
+let systemThemeWatched = false;
+
+/**
+ * Re-applies the theme when the device's light/dark setting changes, but only while the
+ * preference is 'system' (no stored choice and no ?theme=). Registered once.
+ */
+export function watchSystemTheme(): void {
+  if (systemThemeWatched) return;
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+  let media: MediaQueryList;
+  try {
+    media = window.matchMedia(SYSTEM_DARK_QUERY);
+  } catch {
+    return;
+  }
+  const onChange = () => {
+    if (getStoredThemePreference() === 'system') applyTheme('system');
+  };
+  if (typeof media.addEventListener === 'function') media.addEventListener('change', onChange);
+  else media.addListener?.(onChange);
+  systemThemeWatched = true;
+}
+
 /** Browser chrome colour (meta theme-color) per theme. */
-const THEME_COLOR: Record<Theme, string> = { light: '#f4f6fa', dark: '#0c1426' };
+const THEME_COLOR: Record<Theme, string> = { light: '#ffffff', dark: '#0c1426' };
 
 /**
  * Computes the effective active theme ('light' | 'dark') based on user preference and system state.
@@ -82,11 +116,13 @@ export function applyTheme(preference: ThemePreference): void {
 }
 
 /**
- * Applies the stored theme immediately before first paint; call once at app startup.
+ * Applies the stored theme immediately before first paint and starts following the device's
+ * light/dark setting while no theme is chosen; call once at app startup.
  */
 export function applyStoredTheme(): void {
   const preference = getStoredThemePreference();
   applyTheme(preference);
+  watchSystemTheme();
 }
 
 /**
@@ -103,6 +139,12 @@ export function setThemePreference(preference: ThemePreference): void {
     // Storage might be unavailable
   }
   applyTheme(preference);
+}
+
+/** The workspace account menu's Theme item cycles System → Light → Dark. */
+export function nextThemePreference(current: ThemePreference): ThemePreference {
+  const order: ThemePreference[] = ['system', 'light', 'dark'];
+  return order[(order.indexOf(current) + 1) % order.length];
 }
 
 /**
@@ -169,10 +211,10 @@ export function ThemeToggle({ className }: { className?: string }): React.JSX.El
       )
     : React.createElement(
         'svg',
-        { viewBox: '0 0 24 24', 'aria-hidden': 'true', width: 16, height: 16 },
+        { viewBox: '0 0 20 20', 'aria-hidden': 'true', width: 16, height: 16 },
         React.createElement('path', {
           fill: 'currentColor',
-          d: 'M12.3 2a10 10 0 0 0-.19 20 10 10 0 0 0 8.7-5.2 1 1 0 0 0-1.07-1.48 8 8 0 1 1-7.92-12.25 1 1 0 0 0 .48-1.07z',
+          d: 'M17.293 13.293A8 8 0 0 1 6.707 2.707a8.001 8.001 0 1 0 10.586 10.586z',
         }),
       );
 

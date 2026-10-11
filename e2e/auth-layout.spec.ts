@@ -18,7 +18,7 @@ async function box(page: Page, selector: string) {
 
 for (const scheme of ['light', 'dark'] as const)
   for (const size of SIZES)
-    test(`${scheme} ${size.width}px: the statement does not move between sign in and sign up`, async ({
+    test(`${scheme} ${size.width}px: the form does not move between sign in and sign up`, async ({
       page,
     }) => {
       await page.emulateMedia({ colorScheme: scheme });
@@ -27,14 +27,14 @@ for (const scheme of ['light', 'dark'] as const)
       const tabs = page.getByRole('tablist', { name: 'Account' });
       await tabs.getByRole('tab', { name: 'Sign in' }).click();
       await expect(page.getByRole('heading', { level: 1, name: 'Welcome back.' })).toBeVisible();
-      const signIn = await box(page, '.auth-v8-intro');
+      const signIn = await box(page, '.auth-v8-card');
       const signInCard = await box(page, '.auth-v8-card');
 
       await tabs.getByRole('tab', { name: 'Sign up' }).click();
       await expect(
         page.getByRole('heading', { level: 1, name: 'Create your account.' }),
       ).toBeVisible();
-      const signUp = await box(page, '.auth-v8-intro');
+      const signUp = await box(page, '.auth-v8-card');
       expect(signUp.y).toBe(signIn.y);
       expect(signUp.x).toBe(signIn.x);
       expect((await box(page, '.auth-v8-card')).height).toBe(signInCard.height);
@@ -46,5 +46,5 @@ for (const scheme of ['light', 'dark'] as const)
       await expect(
         page.locator('.auth-v8-card').getByRole('link', { name: 'Terms of Service' }),
       ).toHaveCount(0);
-      expect((await box(page, '.auth-v8-intro')).y).toBe(signIn.y);
+      expect((await box(page, '.auth-v8-card')).y).toBe(signIn.y);
     });

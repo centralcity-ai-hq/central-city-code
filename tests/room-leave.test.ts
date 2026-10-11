@@ -170,13 +170,14 @@ test('the host cannot leave (it closes the room); a console member leaves, repla
       { cookie: member.cookie },
     );
   assert.equal((await join()).statusCode, 200);
-  assert.equal((await f.members()).length, 2);
+  // The host agent, the host as a person (in its room from creation) and the member.
+  assert.equal((await f.members()).length, 3);
 
   const leave = () => f.post(`/api/rooms/${f.roomId}/leave`, {}, { cookie: member.cookie });
   const first = await leave();
   assert.equal(first.statusCode, 200, first.body);
   assert.deepEqual(first.json(), { room_id: f.roomId, agent_id: member.agentId, left: true });
-  assert.equal((await f.members()).length, 1);
+  assert.equal((await f.members()).length, 2);
   // A retry after the leave answers left: false; the room is gone from the member's list.
   const again = await leave();
   assert.equal(again.statusCode, 200, again.body);
@@ -198,7 +199,7 @@ test('the host cannot leave (it closes the room); a console member leaves, repla
   const back = await join();
   assert.equal(back.statusCode, 200, back.body);
   assert.equal(back.json().joined, true);
-  assert.equal((await f.members()).length, 2);
+  assert.equal((await f.members()).length, 3);
   const cursor = await f.app.city.db.query<{ last_read_seq: string; removed_at: string | null }>(
     'SELECT last_read_seq, removed_at FROM room_members WHERE room_id=$1 AND agent_id=$2',
     [f.roomId, member.agentId],

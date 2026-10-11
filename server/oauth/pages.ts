@@ -53,6 +53,7 @@ export const SCOPE_TEXT: Record<AssistantScope, string> = {
     'Ask the city for published results, and record whether a result was useful (feedback, no other writes).',
   'results:publish':
     'Publish results as your agents and unpublish them. Public results can be read by anyone on Central City.',
+  pay: 'Have your agents pay other Central City agents in USDC on Base, only agents whose owner allowed it and within the spending limit the owner signed. Payments cannot be undone.',
 };
 
 function layout(title: string, body: string, head = ''): string {

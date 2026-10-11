@@ -5,6 +5,7 @@ import type { Claimed, TargetOutcome } from '../wake/webhooks.js';
 import type { ResponderKeyring } from './keys.js';
 import { findModel, type Provider } from './models.js';
 import { buildPrompt, type PromptMessage } from './prompt.js';
+import { isOwnerMessage } from './owner-message.js';
 import {
   callModel,
   fetchPostTransport,
@@ -337,12 +338,23 @@ export function createResponderDelivery(d: DeliveryDependencies) {
         [reply.trigger_owner_id],
       )
     ).rows[0];
+    const source = (
+      await d.db.query<{ sender_kind: string; sender_owner_id: string; auto_reply: unknown }>(
+        'SELECT sender_kind,sender_owner_id,auto_reply FROM room_messages WHERE room_id=$1 AND seq=$2',
+        [reply.room_id, reply.source_seq],
+      )
+    ).rows[0];
+    const ownerPerson = source !== undefined && isOwnerMessage(source, s.owner_id);
     const buckets: [string, number, number][] = [
       [`responder-room:${reply.room_id}`, L.perRoomPer10Min, 10 * 60_000],
       [`responder-agent-room:${reply.agent_id}:${reply.room_id}`, L.perAgentRoomPerHour, 3_600_000],
-      [`responder-pair:${reply.agent_id}:${reply.trigger_owner_id}`, L.perPairPerHour, 3_600_000],
-      [`responder-pair-day:${reply.agent_id}:${reply.trigger_owner_id}`, L.perPairPerDay, DAY],
     ];
+    if (!ownerPerson) {
+      buckets.push(
+        [`responder-pair:${reply.agent_id}:${reply.trigger_owner_id}`, L.perPairPerHour, 3_600_000],
+        [`responder-pair-day:${reply.agent_id}:${reply.trigger_owner_id}`, L.perPairPerDay, DAY],
+      );
+    }
     if (!trigger || trigger.kind === 'unclaimed' || trigger.unclaimed_ai)
       buckets.push([`responder-unclaimed-day:${reply.agent_id}`, L.unclaimedTriggersPerDay, DAY]);
     for (const [key, max, window] of buckets)
@@ -431,10 +443,12 @@ export function createResponderDelivery(d: DeliveryDependencies) {
         seq: string | number;
         sender_name: string;
         sender_owner_label: string;
+        sender_owner_id: string;
+        sender_kind: string;
         parts: unknown[];
         auto_reply: unknown;
       }>(
-        `SELECT seq,sender_name,sender_owner_label,parts,auto_reply FROM room_messages
+        `SELECT seq,sender_name,sender_owner_label,sender_owner_id,sender_kind,parts,auto_reply FROM room_messages
           WHERE room_id=$1 AND seq > $2 AND seq <= $3 ORDER BY seq DESC LIMIT 30`,
         [reply.room_id, visible, reply.source_seq],
       )
@@ -449,6 +463,7 @@ export function createResponderDelivery(d: DeliveryDependencies) {
       sender: row.sender_name,
       owner: row.sender_owner_label,
       autoReply: row.auto_reply !== null && row.auto_reply !== undefined,
+      ownerInstruction: isOwnerMessage(row, s.owner_id),
       parts: Array.isArray(row.parts) ? row.parts : [],
     }));
     return buildPrompt({

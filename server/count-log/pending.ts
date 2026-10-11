@@ -6,7 +6,7 @@ import type { Migration } from '../migrations.js';
  *
  * When a workspace write adds a counted agent (not a demo seed), a trigger on `workspaces` records
  * it in `count_log_pending` in the same transaction: a fresh secret salt and the agent's v1 leaf
- * (the same bytes as shared/count-log agentLeafHash), its creation day and minute (UTC). The 00:10
+ * (the same bytes as shared/count-log agentLeafHash), its creation day and minute (UTC). The 12:00 Europe/Berlin
  * checkpoint reuses that salt and leaf, so the fingerprint shown as pending is exactly the leaf
  * that gets confirmed; the checkpoint itself (body, hash, signature, proofs) is unchanged and
  * stays the only source of truth. Status is derived by joins, never updated: the table is
@@ -203,6 +203,22 @@ SELECT count_log_backfill_pending();
 
 type Q = Pick<Database, 'query'>;
 
+/**
+ * Migration 60: indexes for the live log feed, so its head page reads about one page of rows
+ * instead of every recorded agent: the feed's exact order (the page walks it backwards from its
+ * cursor) and the leaf hash it joins confirmed entries on (count_log_leaves had only idx and
+ * agent_id).
+ */
+export const countLogFeedIndexesMigration: Migration = {
+  version: 60,
+  name: 'count_log_feed_indexes',
+  sql: `
+CREATE INDEX IF NOT EXISTS count_log_pending_order
+  ON count_log_pending(created_minute, (COALESCE(created_ms, -1)), seq);
+CREATE INDEX IF NOT EXISTS count_log_leaves_leaf ON count_log_leaves(leaf_hash);
+`,
+};
+
 export const FEED_LIMITS = { default: 50, max: 100 } as const;
 
 export interface FeedEntry {
@@ -230,8 +246,13 @@ export interface Feed {
   /** Agents counted right now: the latest checkpoint's (minus withdrawn) plus the pending ones. */
   total_now: number;
   /**
+   * The head page only (no cursor): agents that joined in the last 24 h, exactly (see
+   * countNew24h). Absent on older pages.
+   */
+  new_24h?: number;
+  /**
    * How long the page may be cached: 'final' when every entry is removed (it never changes),
-   * 'checkpoint' when none is pending (it can change only at the next 00:10 checkpoint),
+   * 'checkpoint' when none is pending (it can change only at the next 12:00 Europe/Berlin checkpoint),
    * 'live' otherwise.
    */
   stability: 'final' | 'checkpoint' | 'live';
@@ -243,6 +264,58 @@ export interface Feed {
  */
 function parseCursor(raw: string | undefined): number | null {
   return raw !== undefined && /^\d{1,18}$/.test(raw) ? Number(raw) : null;
+}
+
+/**
+ * Each pending page row's rank: its place (0-based) in the creation order of all pending entries,
+ * as `row_number() OVER (ORDER BY created_minute, created_ms, seq) - 1` over the pending set.
+ * Computed as (number of pending entries) - (its place counting from the newest), so only the
+ * entries from the page's oldest row up to the newest are numbered, not every pending entry: for
+ * the head page that is about one page of rows.
+ */
+async function rankPending(
+  db: Q,
+  page: {
+    seq: string | number;
+    created_minute: string;
+    created_ms: string | number | null;
+    rank: string | number | null;
+  }[],
+  options: {
+    excluded: string[];
+    latest: { date: string; tree_size: number } | undefined;
+    pendingWhere: (size: string) => string;
+  },
+): Promise<void> {
+  const last = page.at(-1);
+  if (!last) return;
+  const { excluded, latest, pendingWhere } = options;
+  const ranks = (
+    await db.query<{ seq: string | number; rank: string | number }>(
+      `WITH newer AS (
+         SELECT p.seq, row_number() OVER (
+                  ORDER BY p.created_minute DESC, COALESCE(p.created_ms, -1) DESC, p.seq DESC) AS pos
+           FROM count_log_pending p
+          WHERE ${pendingWhere('$3::int')}
+            AND p.created_minute >= $4::text
+            AND (p.created_minute, COALESCE(p.created_ms, -1), p.seq) >= ($4::text, $5::bigint, $6::bigint))
+       SELECT n.seq,
+              (SELECT count(*) FROM count_log_pending p WHERE ${pendingWhere('$3::int')}) - n.pos AS rank
+         FROM newer n
+        WHERE n.seq = ANY($7::bigint[])`,
+      [
+        excluded,
+        latest?.date ?? null,
+        latest?.tree_size ?? 0,
+        last.created_minute,
+        last.created_ms === null ? -1 : Number(last.created_ms),
+        Number(last.seq),
+        page.map((row) => Number(row.seq)),
+      ],
+    )
+  ).rows;
+  const bySeq = new Map(ranks.map((row) => [Number(row.seq), row.rank]));
+  for (const row of page) row.rank = bySeq.get(Number(row.seq)) ?? null;
 }
 
 /** One page of the feed, newest created first. */
@@ -257,15 +330,20 @@ export async function pendingFeed(
     )
   ).rows[0];
   const excluded = [...options.excluded];
-  // Pending = not in the log yet and not left behind by a checkpoint dated after its day.
-  const pendingWhere = `NOT EXISTS (SELECT 1 FROM count_log_leaves l WHERE l.agent_id = p.agent_id)
+  // Pending = not in a checkpoint yet and not left behind by a checkpoint dated after its day. A
+  // leaf already appended by an unfinished (resumable) checkpoint run is still pending.
+  // `created_minute >= day` holds exactly when `created_day >= day` (the minute is the day
+  // followed by "T…", both checked formats), and lets count_log_pending_created bound the scan to
+  // the days since the latest checkpoint instead of every agent ever recorded.
+  const pendingWhere = (size: string) => `NOT EXISTS (SELECT 1 FROM count_log_leaves l
+        WHERE l.agent_id = p.agent_id AND l.idx < ${size})
       AND NOT (p.operator_id = ANY($1::text[]))
-      AND ($2::text IS NULL OR p.created_day >= $2)`;
+      AND ($2::text IS NULL OR (p.created_day >= $2 AND p.created_minute >= $2))`;
   const pendingCount = Number(
     (
       await db.query<{ n: string | number }>(
-        `SELECT count(*) AS n FROM count_log_pending p WHERE ${pendingWhere}`,
-        [excluded, latest?.date ?? null],
+        `SELECT count(*) AS n FROM count_log_pending p WHERE ${pendingWhere('$3::int')}`,
+        [excluded, latest?.date ?? null, latest?.tree_size ?? 0],
       )
     ).rows[0]?.n ?? 0,
   );
@@ -292,24 +370,19 @@ export async function pendingFeed(
       checkpoint_date: string | null;
       rank: string | number | null;
     }>(
-      `WITH pending AS (
-         SELECT p.seq, row_number() OVER (ORDER BY p.created_minute, COALESCE(p.created_ms, -1), p.seq) - 1 AS rank
-           FROM count_log_pending p WHERE ${pendingWhere})
-       SELECT p.seq, p.leaf_hash, p.created_day, p.created_minute, p.created_ms, l.idx,
+      `SELECT p.seq, p.leaf_hash, p.created_day, p.created_minute, p.created_ms, l.idx,
               (w.idx IS NOT NULL) AS withdrawn,
               (SELECT c.date FROM count_log_checkpoints c WHERE c.tree_size > l.idx
                 ORDER BY c.date LIMIT 1) AS checkpoint_date,
-              q.rank
+              NULL::bigint AS rank -- filled by rankPending
          FROM count_log_pending p
          LEFT JOIN count_log_leaves l ON l.leaf_hash = p.leaf_hash
          LEFT JOIN count_log_withdrawn w ON w.idx = l.idx
-         LEFT JOIN pending q ON q.seq = p.seq
-        WHERE ($3::text IS NULL OR (p.created_minute, COALESCE(p.created_ms, -1), p.seq) < ($3::text, $4::bigint, $5::bigint))
+        WHERE ($2::text IS NULL OR (p.created_minute, COALESCE(p.created_ms, -1), p.seq) < ($2::text, $3::bigint, $4::bigint))
           AND NOT (p.operator_id = ANY($1::text[]))
-        ORDER BY p.created_minute DESC, COALESCE(p.created_ms, -1) DESC, p.seq DESC LIMIT $6`,
+        ORDER BY p.created_minute DESC, COALESCE(p.created_ms, -1) DESC, p.seq DESC LIMIT $5`,
       [
         excluded,
-        latest?.date ?? null,
         // An unknown cursor matches nothing (an empty page), never the first page again.
         cursor?.minute ?? (cursorSeq === null ? null : ''),
         cursor === null ? null : Number(cursor.ms),
@@ -319,6 +392,7 @@ export async function pendingFeed(
     )
   ).rows;
   const page = rows.slice(0, limit);
+  await rankPending(db, page, { excluded, latest, pendingWhere });
   const entries = page.map((row): FeedEntry => {
     const confirmed = row.idx !== null && row.checkpoint_date !== null;
     // A checkpoint dated after the creation day ran without it: it will not be counted.
@@ -355,6 +429,55 @@ export async function pendingFeed(
           ? 'final'
           : 'checkpoint',
   };
+}
+
+export const DAY_MS = 86_400_000;
+
+const minuteOf = (time: number) => `${new Date(time).toISOString().slice(0, 16)}Z`;
+
+/**
+ * "New in the last 24 h": the feed entries created in [now - 24 h, now], with the same rule as
+ * total_now, so it counts agents that are counted right now. Pending and confirmed entries count;
+ * removed ones (withdrawn after confirmation, or left behind by a checkpoint) do not, and neither
+ * do excluded operators. The creation time is created_ms; rows from before migration 51 have only
+ * the minute and count from the start of that minute. Created exactly 24 h ago counts.
+ *
+ * One COUNT: an index range on count_log_pending_created (created_minute, ...) over the last day,
+ * then unique-key probes into count_log_leaves (agent_id) and count_log_withdrawn (idx).
+ * Aggregate only: no per-agent data leaves the query.
+ */
+export async function countNew24h(
+  db: Q,
+  options: { now: number; excluded: readonly string[] },
+): Promise<number> {
+  const since = options.now - DAY_MS;
+  const latest = (
+    await db.query<{ date: string }>(
+      'SELECT date FROM count_log_checkpoints ORDER BY date DESC LIMIT 1',
+    )
+  ).rows[0];
+  const row = (
+    await db.query<{ n: string | number }>(
+      `SELECT count(*) AS n
+         FROM count_log_pending p
+         LEFT JOIN count_log_leaves l ON l.agent_id = p.agent_id
+        WHERE p.created_minute >= $1
+          AND (p.created_ms >= $2 OR (p.created_ms IS NULL AND p.created_minute >= $3))
+          AND NOT (p.operator_id = ANY($4::text[]))
+          AND CASE WHEN l.idx IS NOT NULL
+                THEN NOT EXISTS (SELECT 1 FROM count_log_withdrawn w WHERE w.idx = l.idx)
+                ELSE ($5::text IS NULL OR p.created_day >= $5) END`,
+      [
+        minuteOf(since),
+        since,
+        // A minute-only row counts when its minute starts at or after `since`.
+        minuteOf(Math.ceil(since / 60_000) * 60_000),
+        [...options.excluded],
+        latest?.date ?? null,
+      ],
+    )
+  ).rows[0];
+  return Number(row?.n ?? 0);
 }
 
 /** The pending salts and leaves of agents not yet in the log, for the checkpoint. */

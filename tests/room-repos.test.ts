@@ -535,7 +535,7 @@ test('the tool module: names, schemas, descriptions, annotations, scopes and dis
   const expected = {
     city_room_repo: { read: true, dest: false, scope: 'rooms:join' },
     city_room_repo_read: { read: true, dest: false, scope: 'rooms:join' },
-    city_room_propose: { read: false, dest: false, scope: 'rooms:join' },
+    city_room_propose: { read: false, dest: true, scope: 'rooms:join' },
     city_room_proposals: { read: true, dest: false, scope: 'rooms:join' },
     city_room_proposal: { read: true, dest: false, scope: 'rooms:join' },
     city_room_review: { read: false, dest: false, scope: 'rooms:join' },

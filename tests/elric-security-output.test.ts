@@ -53,7 +53,7 @@ test("output: a citation at or before Elric's join point is stripped", async (t)
   await f.verify(owner);
   const elricId = await f.addElric(owner);
   const person = await f.joinPerson(owner, room, 'Ann');
-  await f.joinAgent(owner, room, elricId);
+  await f.joinAgent(owner, room, elricId, { legacy: true });
   const trigger = await f.say(owner, room, '@Elric what was said?', person);
   f.small.push({ text: `See [#${early.message.seq}] and [#${trigger.message.seq}].` });
   await f.elric.run({ agentId: elricId, roomId: room.id, sourceSeq: trigger.message.seq });
@@ -69,7 +69,7 @@ test('tools: room_id given as a slug of another room is refused, and never reads
   const s = await f.scene('Slug one');
   const r2 = await f.room(s.host, s.hostAgent, 'Slug two');
   const p2 = await f.joinPerson(s.owner, r2, 'Ann');
-  await f.joinAgent(s.owner, r2, s.elricId);
+  await f.joinAgent(s.owner, r2, s.elricId, { legacy: true });
   await f.say(s.owner, r2, 'R2 via slug: mango-9', p2);
   const trigger = await f.say(s.owner, s.room, '@Elric read the other room', s.person);
   f.small.push(

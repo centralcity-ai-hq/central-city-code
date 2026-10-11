@@ -9,12 +9,17 @@ import {
   type RoomPrincipal,
 } from './service.js';
 import { memberStatuses, touchMembers } from './member-status.js';
-import { ROOM_LIMITS } from './contract.js';
-import { lineTitle, memberLabel, postSystemLine } from './system-lines.js';
+import { ROOM_LIMITS, partsContainCredential } from './contract.js';
+import { lineName, lineTitle, memberLabel, postSystemLine } from './system-lines.js';
+import { taskReviewNotice } from '../wake/hooks.js';
+import { TASK_TEMPLATES, findTaskTemplate, taskTemplateBody } from '../../shared/task-templates.js';
 import {
   TASK_LIMITS,
   graceForTtl,
   taskClaimInput,
+  taskCommentAddInput,
+  taskCommentDeleteInput,
+  taskCommentListInput,
   taskCreateInput,
   taskEventsInput,
   taskGetInput,
@@ -22,8 +27,14 @@ import {
   taskReleaseInput,
   taskRenewInput,
   taskResultInput,
+  taskStagesInput,
   taskUpdateInput,
+  taskPeerReviewInput,
+  taskRequestReviewInput,
+  type TaskCommentView,
   type TaskEvidence,
+  type TaskPeerReviewView,
+  type TaskReviewRequest,
   type TaskEventView,
   type TaskLimits,
   type TaskStatus,
@@ -32,6 +43,13 @@ import {
 import { scopedByPrincipal, visibleRoom, withoutElricAgents } from './private.js';
 
 export type { RoomPrincipal };
+/**
+ * A caller whose credential is re-checked inside each task transaction (an invited guest's
+ * room credential, as the room post, members and leave paths do).
+ */
+export type TaskPrincipal = RoomPrincipal & {
+  guard?: (tx: Tx, time: number) => Promise<void>;
+};
 
 /** One claim the lapse sweep cleared (PR2, plan §6 milestone 2). */
 export interface LapsedTask {
@@ -142,6 +160,86 @@ async function insertTaskEvent(
   );
 }
 
+/** The idempotency key hash of a room template's starter task (one per room and position). */
+const starterKeyHash = (roomId: string, index: number) =>
+  sha(`room-starter-task:${roomId}:${index}`);
+
+/**
+ * A room template's starter tasks (shared/room-templates.ts, docs/ROOMS.md "Room templates"),
+ * written inside the room-create transaction: normal open tasks created by the host agent, each
+ * with its `created` event and the usual thread line. The rooms service calls this only when room
+ * tasks are on. Returns the new tasks' numbers and titles, in order. It skips the per-room task
+ * create limit: a new room gets at most a template's few (3 or fewer) starter tasks, once.
+ */
+export async function insertStarterTasks(
+  tx: Pick<Tx, 'query'>,
+  input: {
+    roomId: string;
+    hostAgentId: string;
+    ownerId: string;
+    actor: string;
+    time: number;
+    tasks: ReadonlyArray<{
+      title: string;
+      body: string;
+      template: { id: string; version: string } | null;
+    }>;
+  },
+): Promise<Array<{ number: number; title: string }>> {
+  const created: Array<{ number: number; title: string }> = [];
+  const label = input.tasks.length ? await memberLabel(tx, input.roomId, input.hostAgentId) : '';
+  for (const [index, task] of input.tasks.entries()) {
+    const number = index + 1;
+    const id = randomUUID();
+    await tx.query(
+      `INSERT INTO room_tasks(id,room_id,number,title,body,status,created_by_agent_id,
+        created_by_owner_id,from_message_seq,attachment_ids,created_at,updated_at,
+        idempotency_key,request_hash,template_id,template_version)
+      VALUES($1,$2,$3,$4,$5,'open',$6,$7,NULL,'{}'::text[],${DBNOW},${DBNOW},$8,$9,$10,$11)`,
+      [
+        id,
+        input.roomId,
+        number,
+        task.title,
+        task.body,
+        input.hostAgentId,
+        input.ownerId,
+        starterKeyHash(input.roomId, index),
+        sha(canonical({ title: task.title, body: task.body, starter: index })),
+        task.template?.id ?? null,
+        task.template?.version ?? null,
+      ],
+    );
+    await insertTaskEvent(tx, id, 'created', 0, input.actor, input.hostAgentId);
+    await postSystemLine(
+      tx,
+      input.roomId,
+      `${label} created task #${number}: ${lineTitle(task.title)}`,
+      input.time,
+      ROOM_LIMITS.messagesPerRoom,
+    );
+    created.push({ number, title: task.title });
+  }
+  return created;
+}
+
+/** The starter tasks a templated room was created with (a create replay reports them again). */
+export async function existingStarterTasks(
+  q: Pick<Tx, 'query'>,
+  roomId: string,
+  count: number,
+): Promise<Array<{ number: number; title: string }>> {
+  if (count < 1) return [];
+  const keys = Array.from({ length: count }, (_, index) => starterKeyHash(roomId, index));
+  const rows = (
+    await q.query<{ number: string | number; title: string }>(
+      'SELECT number,title FROM room_tasks WHERE room_id=$1 AND idempotency_key = ANY($2::text[]) ORDER BY number',
+      [roomId, keys],
+    )
+  ).rows;
+  return rows.map((row) => ({ number: Number(row.number), title: row.title }));
+}
+
 /**
  * Lapse sweep as a pure function (PR2, plan §6 milestone 2): one UPDATE ...
  * RETURNING lapses every past-grace claim (the same CHECK-safe clear as lazy
@@ -204,8 +302,16 @@ type RoomRow = {
   slug: string;
   host_owner_id: string;
   closed_at: string | number | null;
+  /** Migration 54; absent before it is applied. */
+  task_stages?: string[] | null;
 };
-type MemberRow = { agent_id: string; role: string };
+type MemberRow = { agent_id: string; role: string; kind?: string };
+/**
+ * A live member of the caller: a person member (a signed-in person in the room as themselves,
+ * rooms/person.ts) or a member agent still live in the caller's workspace.
+ */
+const isLiveMember = (agents: Map<string, unknown>) => (row: MemberRow) =>
+  row.kind === 'person' || agents.has(row.agent_id);
 type TaskRow = {
   id: string;
   room_id: string;
@@ -225,10 +331,30 @@ type TaskRow = {
   claim_token_hash: string | null;
   claim_generation: string | number;
   result: unknown;
+  /** Migration 53; absent on rows read before it ran. */
+  template_id?: string | null;
+  template_version?: string | null;
+  /** Migration 54; absent (undefined) before it is applied. */
+  stage?: string | null;
+  /** Migration 67; absent (undefined) before it is applied. */
+  submitted_by?: string | null;
   created_at: string | number;
   updated_at: string | number;
   idempotency_key: string;
   request_hash: string;
+};
+type CommentRow = {
+  id: string;
+  task_id: string;
+  room_id: string;
+  author_kind: string;
+  author_agent_id: string;
+  author_owner_id: string;
+  body: string;
+  idempotency_key: string | null;
+  request_hash: string | null;
+  created_at: string | number;
+  edited_at: string | number | null;
 };
 type TaskEventRow = {
   id: string;
@@ -256,14 +382,18 @@ export interface RoomTasks {
    * create transaction, and a returned code refuses the create (409).
    */
   create(
-    p: RoomPrincipal,
+    p: TaskPrincipal,
     body: unknown,
     options?: { precondition?: (tx: Pick<Tx, 'query'>) => Promise<string | null> },
   ): Promise<{ task: TaskView; replayed: boolean }>;
-  get(p: RoomPrincipal, body: unknown): Promise<{ task: TaskView }>;
-  list(p: RoomPrincipal, body: unknown): Promise<{ room_id: string; tasks: TaskView[] }>;
+  get(p: TaskPrincipal, body: unknown): Promise<{ task: TaskView }>;
+  /** `stages` is the room's stage list (empty when the room uses none). */
+  list(
+    p: TaskPrincipal,
+    body: unknown,
+  ): Promise<{ room_id: string; tasks: TaskView[]; stages: string[] }>;
   claim(
-    p: RoomPrincipal,
+    p: TaskPrincipal,
     body: unknown,
   ): Promise<{
     task: TaskView;
@@ -273,21 +403,36 @@ export interface RoomTasks {
     grace_until: string;
   }>;
   renew(
-    p: RoomPrincipal,
+    p: TaskPrincipal,
     body: unknown,
   ): Promise<{ task: TaskView; expires_at: string; grace_until: string }>;
-  release(p: RoomPrincipal, body: unknown): Promise<{ task: TaskView; released: boolean }>;
-  result(p: RoomPrincipal, body: unknown): Promise<{ task: TaskView }>;
+  release(p: TaskPrincipal, body: unknown): Promise<{ task: TaskView; released: boolean }>;
+  result(p: TaskPrincipal, body: unknown): Promise<{ task: TaskView }>;
   update(
-    p: RoomPrincipal,
+    p: TaskPrincipal,
     body: unknown,
   ): Promise<{
     task: TaskView;
-    decision: 'approve' | 'reject' | 'cancel';
+    /** Absent for a stage-only update. */
+    decision?: 'approve' | 'reject' | 'cancel';
     applied: boolean;
   }>;
-  events(
+  /** Peer review request (host or claimer), or `cancel: true` to withdraw the active one. */
+  requestReview(p: RoomPrincipal, body: unknown): Promise<{ task: TaskView; requested: boolean }>;
+  /** The requested reviewer's advisory verdict. */
+  peerReview(
     p: RoomPrincipal,
+    body: unknown,
+  ): Promise<{ task: TaskView; verdict: 'approve' | 'changes_requested' }>;
+  /** Any member: the room's stage list. */
+  stages(p: TaskPrincipal, body: unknown): Promise<{ room_id: string; stages: string[] }>;
+  /** Host only: replace the room's stage list; tasks at a removed stage lose it (with an event). */
+  setStages(
+    p: TaskPrincipal,
+    body: unknown,
+  ): Promise<{ room_id: string; stages: string[]; cleared: number }>;
+  events(
+    p: TaskPrincipal,
     body: unknown,
   ): Promise<{
     task_id: string;
@@ -295,6 +440,24 @@ export interface RoomTasks {
     next_after: string | null;
     has_more: boolean;
   }>;
+  /** Comments on a task (docs/ROOM_TASKS.md "Comments"): members of the room only. */
+  commentAdd(
+    p: TaskPrincipal,
+    body: unknown,
+  ): Promise<{ comment: TaskCommentView; replayed: boolean }>;
+  commentList(
+    p: TaskPrincipal,
+    body: unknown,
+  ): Promise<{
+    task_id: string;
+    comments: TaskCommentView[];
+    next_after: string | null;
+    has_more: boolean;
+  }>;
+  commentDelete(
+    p: TaskPrincipal,
+    body: unknown,
+  ): Promise<{ comment: TaskCommentView; deleted: true }>;
   limits: TaskLimits;
 }
 
@@ -319,6 +482,15 @@ function project(row: TaskRow): TaskView {
             generation: Number(row.claim_generation),
           },
     result: (row.result as TaskEvidence | null) ?? null,
+    // Hidden by withSubmitters while that member is removed from the room.
+    submitted_by: row.submitted_by ?? null,
+    template:
+      row.template_id && row.template_version
+        ? { id: row.template_id, version: row.template_version }
+        : null,
+    stage: row.stage ?? null,
+    // Filled in by withCommentCounts before any view leaves the service.
+    comment_count: 0,
     created_at: iso(Number(row.created_at)),
     updated_at: iso(Number(row.updated_at)),
   };
@@ -383,6 +555,23 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
   const lockRoom = (tx: Pick<Tx, 'query'>, roomId: string) =>
     tx.query('SELECT 1 FROM rooms WHERE id=$1 FOR UPDATE', [roomId]);
 
+  /** The room's stage list (migration 54), empty when the room uses none. */
+  const stagesOf = (room: RoomRow) => [...(room.task_stages ?? [])];
+  /** One of the room's stages, matched without case; anything else is `400 unknown_stage`. */
+  function resolveStage(room: RoomRow, name: string): string {
+    const stages = stagesOf(room);
+    const found = stages.find((item) => item.toLowerCase() === name.trim().toLowerCase());
+    if (found !== undefined) return found;
+    return refuse(
+      400,
+      'unknown_stage',
+      stages.length
+        ? `Unknown stage. This room's stages are: ${stages.join(', ')}.`
+        : 'This room has no stages; the host sets them in the room settings.',
+      { stages },
+    );
+  }
+
   async function findRoom(q: Pick<Tx, 'query'>, ref: string) {
     // A private Elric chat: only the owner console and Elric (rooms/private.ts).
     return visibleRoom(
@@ -414,7 +603,13 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
    * The caller's live memberships in the room. Unknown rooms and non-members share one
    * answer (`404 room_not_found`) so task ids cannot be probed.
    */
-  async function membership(q: Pick<Tx, 'query'>, roomRef: string, operatorId: string) {
+  async function membership(
+    q: Pick<Tx, 'query'>,
+    roomRef: string,
+    operatorId: string,
+    p?: TaskPrincipal,
+  ) {
+    if (p?.guard) await p.guard(q as Tx, d.clock());
     const room = await findRoom(q, roomRef);
     if (!room) roomNotFound();
     // A deleted room (migration 35): 410 for its host and former members, 404 for anyone else.
@@ -429,10 +624,10 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
     const agents = await liveAgents(q, operatorId);
     const members = (
       await q.query<MemberRow>(
-        'SELECT agent_id,role FROM room_members WHERE room_id=$1 AND owner_id=$2 AND removed_at IS NULL',
+        'SELECT agent_id,role,kind FROM room_members WHERE room_id=$1 AND owner_id=$2 AND removed_at IS NULL',
         [room!.id, operatorId],
       )
-    ).rows.filter((row) => agents.has(row.agent_id));
+    ).rows.filter(isLiveMember(agents));
     if (!members.length) roomNotFound();
     // Reads keep every membership (a host whose only member is their Elric still reads tasks);
     // writes act only through `actors`: never an agent that is or was an Elric, except Elric's
@@ -441,23 +636,35 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
     return { room: room!, members, actors };
   }
 
-  /** The acting member agent: explicit, or the caller's only agent in the room. */
+  /**
+   * The acting member: explicit, or the caller's default. Only the person themselves (the
+   * console) acts as its person member; an AI of the same account (MCP, a grant, a key) never
+   * does, as for posts. Without agent_id the console acts as its person when it is in the room as
+   * themselves (the host is, from creation); any other caller as its only AI member, so a host's
+   * person never makes an AI pass agent_id. Otherwise the caller's only member, as before.
+   */
   function actingAgent(
     members: MemberRow[],
     agentId: string | undefined,
     actors: MemberRow[] = members,
+    console = false,
   ) {
-    if (agentId !== undefined && !actors.some((row) => row.agent_id === agentId)) {
-      if (members.some((row) => row.agent_id === agentId))
-        refuse(403, 'elric_posts_itself', 'Only Elric acts as Elric.');
-    }
-    members = actors;
+    const eligible = console ? actors : actors.filter((row) => row.kind !== 'person');
     if (agentId !== undefined) {
-      const member = members.find((row) => row.agent_id === agentId);
-      if (!member) refuse(403, 'not_a_member', 'That agent is not a member of this room.');
-      return member!;
+      const member = eligible.find((row) => row.agent_id === agentId);
+      if (member) return member;
+      if (
+        !actors.some((row) => row.agent_id === agentId) &&
+        members.some((row) => row.agent_id === agentId)
+      )
+        refuse(403, 'elric_posts_itself', 'Only Elric acts as Elric.');
+      return refuse(403, 'not_a_member', 'That agent is not a member of this room.');
     }
-    if (members.length === 1) return members[0]!;
+    const person = console ? eligible.find((row) => row.kind === 'person') : undefined;
+    if (person) return person;
+    if (eligible.length === 1) return eligible[0]!;
+    if (!eligible.length && actors.length)
+      refuse(403, 'not_a_member', 'None of your agents is a member of this room.');
     return refuse(
       400,
       'agent_required',
@@ -804,10 +1011,10 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
       const agents = await liveAgents(q, operatorId);
       const members = (
         await q.query<MemberRow>(
-          'SELECT agent_id,role FROM room_members WHERE room_id=$1 AND owner_id=$2 AND removed_at IS NULL',
+          'SELECT agent_id,role,kind FROM room_members WHERE room_id=$1 AND owner_id=$2 AND removed_at IS NULL',
           [room.id, operatorId],
         )
-      ).rows.filter((row) => agents.has(row.agent_id));
+      ).rows.filter(isLiveMember(agents));
       if (agentId !== undefined)
         return members.some((row) => row.agent_id === agentId) ? agentId : null;
       return members.length === 1 ? members[0]!.agent_id : null;
@@ -817,18 +1024,31 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
   }
 
   async function create(
-    p: RoomPrincipal,
+    p: TaskPrincipal,
     body: unknown,
     options: { precondition?: (tx: Pick<Tx, 'query'>) => Promise<string | null> } = {},
   ) {
     const values = taskCreateInput.parse(body);
+    // A template only fills defaults: the caller's title and body win (shared/task-templates.ts).
+    const template =
+      values.template_id === undefined ? undefined : findTaskTemplate(values.template_id);
+    if (values.template_id !== undefined && !template)
+      refuse(400, 'unknown_template', 'Unknown task template.', {
+        templates: TASK_TEMPLATES.map((item) => item.id),
+      });
+    const title = values.title ?? template?.name;
+    if (title === undefined) refuse(400, 'title_required', 'A task needs a title or a template.');
+    const taskBody = values.body ?? (template ? taskTemplateBody(template) : '');
     const keyHash = sha(`room-task-create:${values.idempotency_key}`);
     const requestHash = sha(
       canonical({
-        title: values.title,
-        body: values.body ?? '',
+        title,
+        body: taskBody,
         from: values.from_message_seq ?? null,
         attachments: [...(values.attachment_ids ?? [])].sort(),
+        ...(values.review ? { review: values.review } : {}),
+        // Only present for template creates, so earlier receipts keep their hash.
+        ...(template ? { template: `${template.id}@${template.version}` } : {}),
       }),
     );
     await d.limit(
@@ -837,11 +1057,11 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
       HOUR,
     );
     return d.db.transaction(async (tx) => {
-      const { room, members, actors } = await membership(tx, values.room_id, p.operatorId);
-      const agent = actingAgent(members, values.agent_id, actors);
+      const { room, members, actors } = await membership(tx, values.room_id, p.operatorId, p);
+      const agent = actingAgent(members, values.agent_id, actors, p.console === true);
       writeGuards(room, agent);
       // The host muted this owner (migration 35): no task writes either.
-      await refuseIfMuted(tx, room.id, p.operatorId);
+      await refuseIfMuted(tx, room.id, p.operatorId, agent.kind);
       const attachmentIds = [...new Set(values.attachment_ids ?? [])];
       await assertAttachmentsReady(tx, room.id, attachmentIds);
       const prior = (
@@ -853,7 +1073,7 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
       if (prior) {
         if (prior.request_hash !== requestHash)
           refuse(409, 'idempotency_conflict', 'This idempotency_key belongs to a different task.');
-        return { task: project(prior), replayed: true };
+        return { task: (await withReviews(tx, [project(prior)]))[0]!, replayed: true };
       }
       // The room row lock serializes number allocation without touching the rooms schema.
       await tx.query('SELECT 1 FROM rooms WHERE id=$1 FOR UPDATE', [room.id]);
@@ -871,21 +1091,23 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
         await tx.query<TaskRow>(
           `INSERT INTO room_tasks(id,room_id,number,title,body,status,created_by_agent_id,
             created_by_owner_id,from_message_seq,attachment_ids,created_at,updated_at,
-            idempotency_key,request_hash)
-          VALUES($1,$2,$3,$4,$5,'open',$6,$7,$8,$9::text[],${DBNOW},${DBNOW},$10,$11)
+            idempotency_key,request_hash,template_id,template_version)
+          VALUES($1,$2,$3,$4,$5,'open',$6,$7,$8,$9::text[],${DBNOW},${DBNOW},$10,$11,$12,$13)
           RETURNING *`,
           [
             randomUUID(),
             room.id,
             Number(maxNumber ?? 0) + 1,
-            values.title,
-            values.body ?? '',
+            title,
+            taskBody,
             agent.agent_id,
             p.operatorId,
             values.from_message_seq ?? null,
             attachmentIds,
             keyHash,
             requestHash,
+            template?.id ?? null,
+            template?.version ?? null,
           ],
         )
       ).rows[0]!;
@@ -902,15 +1124,20 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
         room.id,
         `${await memberLabel(tx, room.id, agent.agent_id)} created ${taskRef(row)}`,
       );
+      if (values.review) await openReview(tx, p, room, row, agent, values.review);
       await touchMembers(tx, room.id, [agent.agent_id], d.clock());
+      if (values.review) {
+        const [task] = await withReviews(tx, [project(row)]);
+        return { task: task!, replayed: false };
+      }
       return { task: project(row), replayed: false };
     });
   }
 
-  async function get(p: RoomPrincipal, body: unknown) {
+  async function get(p: TaskPrincipal, body: unknown) {
     const values = taskGetInput.parse(body);
     return d.db.transaction(async (tx) => {
-      const { room } = await membership(tx, values.room_id, p.operatorId);
+      const { room } = await membership(tx, values.room_id, p.operatorId, p);
       if (room.closed_at !== null) await releaseClosedClaims(tx, room);
       else {
         await releaseInvalidHolders(tx, room, values.task_id);
@@ -923,15 +1150,16 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
         ])
       ).rows[0];
       if (!row) refuse(404, 'task_not_found', 'Task not found in this room.');
-      return { task: project(row!) };
+      const [task] = await withReviews(tx, [project(row!)]);
+      return { task: task! };
     });
   }
 
-  async function list(p: RoomPrincipal, body: unknown) {
+  async function list(p: TaskPrincipal, body: unknown) {
     const values = taskListInput.parse(body);
     const size = Math.min(values.limit ?? limits.defaultPageSize, limits.pageSize);
     return d.db.transaction(async (tx) => {
-      const { room, members } = await membership(tx, values.room_id, p.operatorId);
+      const { room, members } = await membership(tx, values.room_id, p.operatorId, p);
       if (room.closed_at !== null) await releaseClosedClaims(tx, room);
       else {
         await releaseInvalidHolders(tx, room);
@@ -947,6 +1175,10 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
         params.push(members.map((row) => row.agent_id));
         where += ` AND claim_agent_id = ANY($${params.length}::text[])`;
       }
+      if (values.stage !== undefined) {
+        params.push(resolveStage(room, values.stage));
+        where += ` AND stage=$${params.length}`;
+      }
       params.push(size);
       const rows = (
         await tx.query<TaskRow>(
@@ -954,21 +1186,25 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
           params,
         )
       ).rows;
-      return { room_id: room.id, tasks: rows.map(project) };
+      return {
+        room_id: room.id,
+        tasks: await withReviews(tx, rows.map(project)),
+        stages: stagesOf(room),
+      };
     });
   }
 
-  async function claim(p: RoomPrincipal, body: unknown) {
+  async function claim(p: TaskPrincipal, body: unknown) {
     const values = taskClaimInput.parse(body);
     // Charged before the transaction (pool rule); the agent is rechecked under the lock.
     const probe = await plainAgent(d.db, values.room_id, p.operatorId, values.agent_id);
     await d.limit(`room-task-claim:${probe ?? p.operatorId}`, limits.claimsPerAgentPerHour, HOUR);
     return d.db.transaction(async (tx) => {
-      const { room, members, actors } = await membership(tx, values.room_id, p.operatorId);
-      const agent = actingAgent(members, values.agent_id, actors);
+      const { room, members, actors } = await membership(tx, values.room_id, p.operatorId, p);
+      const agent = actingAgent(members, values.agent_id, actors, p.console === true);
       writeGuards(room, agent);
       // The host muted this owner (migration 35): no task writes either.
-      await refuseIfMuted(tx, room.id, p.operatorId);
+      await refuseIfMuted(tx, room.id, p.operatorId, agent.kind);
       await lockRoom(tx, room.id);
       // A removed or access-expired holder is released first, so this claim can
       // take the task over in its single UPDATE below.
@@ -1045,9 +1281,10 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
           room.id,
           `${await memberLabel(tx, room.id, agent.agent_id)} claimed ${taskRef(row!)}`,
         );
+      if (values.review) await openReview(tx, p, room, row!, agent, values.review);
       await touchMembers(tx, room.id, [agent.agent_id], d.clock());
       return {
-        task: project(row!),
+        task: (await withReviews(tx, [project(row!)]))[0]!,
         claim_token: token,
         generation: Number(row!.claim_generation),
         expires_at: iso(Number(row!.claim_expires_at)),
@@ -1056,7 +1293,7 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
     });
   }
 
-  async function renew(p: RoomPrincipal, body: unknown) {
+  async function renew(p: TaskPrincipal, body: unknown) {
     const values = taskRenewInput.parse(body);
     const hash = tokenHashOf(values.claim_token);
     const holder = await (async () => {
@@ -1077,10 +1314,15 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
     await d.limit(`room-task-claim:${holder ?? p.operatorId}`, limits.claimsPerAgentPerHour, HOUR);
     try {
       return await d.db.transaction(async (tx) => {
-        const { room } = await membership(tx, values.room_id, p.operatorId);
+        const { room, members } = await membership(tx, values.room_id, p.operatorId, p);
         if (room.closed_at !== null)
           refuse(409, 'room_closed', 'The room is closed; its tasks are read-only.');
-        await refuseIfMuted(tx, room.id, p.operatorId);
+        await refuseIfMuted(
+          tx,
+          room.id,
+          p.operatorId,
+          await claimHolderKind(tx, room.id, values.task_id, hash, members),
+        );
         await releaseInvalidHolders(tx, room, values.task_id);
         const ttlMs = (values.ttl_minutes ?? limits.claimTtlMinutesDefault) * 60_000;
         const graceMs = graceForTtl(ttlMs);
@@ -1116,7 +1358,7 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
         );
         await touchMembers(tx, room.id, [row!.claim_agent_id!], d.clock());
         return {
-          task: project(row!),
+          task: (await withReviews(tx, [project(row!)]))[0]!,
           expires_at: iso(Number(row!.claim_expires_at)),
           grace_until: iso(Number(row!.claim_expires_at) + Number(row!.claim_grace_ms)),
         };
@@ -1128,11 +1370,11 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
     }
   }
 
-  async function release(p: RoomPrincipal, body: unknown) {
+  async function release(p: TaskPrincipal, body: unknown) {
     const values = taskReleaseInput.parse(body);
     try {
       return await d.db.transaction(async (tx) => {
-        const { room } = await membership(tx, values.room_id, p.operatorId);
+        const { room } = await membership(tx, values.room_id, p.operatorId, p);
         if (room.closed_at !== null)
           refuse(409, 'room_closed', 'The room is closed; its tasks are read-only.');
         await releaseInvalidHolders(tx, room, values.task_id);
@@ -1163,12 +1405,13 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
             current!.claim_agent_id,
           );
           await touchMembers(tx, room.id, [current!.claim_agent_id!], d.clock());
-          return { task: project(row!), released: true };
+          return { task: (await withReviews(tx, [project(row!)]))[0]!, released: true };
         }
         // Host force-release (plan §3): no token, host authority only.
         if (room.host_owner_id !== p.operatorId)
           refuse(400, 'claim_token_required', 'Pass the claim token to release this task.');
-        if (current!.status !== 'claimed') return { task: project(current!), released: false };
+        if (current!.status !== 'claimed')
+          return { task: (await withReviews(tx, [project(current!)]))[0]!, released: false };
         const row = (
           await tx.query<TaskRow>(
             `${clear} WHERE id=$1 AND room_id=$2 AND status='claimed' RETURNING *`,
@@ -1183,7 +1426,7 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
           p.actor,
           current!.claim_agent_id,
         );
-        return { task: project(row), released: true };
+        return { task: (await withReviews(tx, [project(row)]))[0]!, released: true };
       });
     } catch (error) {
       if (error instanceof TaskError && error.errorCode === 'claim_stale')
@@ -1200,15 +1443,20 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
    * statement (CHECK-safe); the old token dies at once. No limiter charge:
    * one result per claim needs no budget.
    */
-  async function result(p: RoomPrincipal, body: unknown) {
+  async function result(p: TaskPrincipal, body: unknown) {
     const values = taskResultInput.parse(body);
     const hash = tokenHashOf(values.claim_token);
     try {
       return await d.db.transaction(async (tx) => {
-        const { room } = await membership(tx, values.room_id, p.operatorId);
+        const { room, members } = await membership(tx, values.room_id, p.operatorId, p);
         if (room.closed_at !== null)
           refuse(409, 'room_closed', 'The room is closed; its tasks are read-only.');
-        await refuseIfMuted(tx, room.id, p.operatorId);
+        await refuseIfMuted(
+          tx,
+          room.id,
+          p.operatorId,
+          await claimHolderKind(tx, room.id, values.task_id, hash, members),
+        );
         await lockRoom(tx, room.id);
         await releaseInvalidHolders(tx, room, values.task_id);
         const holder = (
@@ -1222,7 +1470,7 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
         const row = (
           await tx.query<TaskRow>(
             `UPDATE room_tasks SET status='in_review', result=$4::jsonb,
-              claim_agent_id=NULL, claim_owner_id=NULL, claim_expires_at=NULL,
+              submitted_by=claim_agent_id, claim_agent_id=NULL, claim_owner_id=NULL, claim_expires_at=NULL,
               claim_ttl_ms=NULL, claim_grace_ms=NULL, claim_token_hash=NULL,
               claim_generation=claim_generation+1, updated_at=${DBNOW}
             WHERE id=$1 AND room_id=$2 AND status='claimed' AND claim_token_hash=$3
@@ -1255,7 +1503,7 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
           `${await memberLabel(tx, room.id, holder)} submitted a result for ${taskRef(row!)}`,
         );
         if (holder) await touchMembers(tx, room.id, [holder], d.clock());
-        return { task: project(row!) };
+        return { task: (await withReviews(tx, [project(row!)]))[0]! };
       });
     } catch (error) {
       if (error instanceof TaskError && error.errorCode === 'claim_stale')
@@ -1271,10 +1519,16 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
    * read-only, so review refuses there; done is terminal (409) and an already
    * cancelled task reports `applied: false`, mirroring release.
    */
-  async function update(p: RoomPrincipal, body: unknown) {
+  async function update(p: TaskPrincipal, body: unknown) {
     const values = taskUpdateInput.parse(body);
+    if (values.decision !== undefined && values.stage !== undefined)
+      refuse(400, 'invalid_request', 'Send either a decision or a stage, not both.');
+    if (values.decision === undefined) {
+      if (values.stage === undefined) refuse(400, 'invalid_request', 'Send a decision or a stage.');
+      return moveStage(p, values.room_id, values.task_id, values.stage!);
+    }
     return d.db.transaction(async (tx) => {
-      const { room } = await membership(tx, values.room_id, p.operatorId);
+      const { room } = await membership(tx, values.room_id, p.operatorId, p);
       if (room.closed_at !== null)
         refuse(409, 'room_closed', 'The room is closed; its tasks are read-only.');
       if (room.host_owner_id !== p.operatorId)
@@ -1333,7 +1587,11 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
             ? `The host accepted ${taskRef(row!)}`
             : `The host sent back ${taskRef(row!)}`,
         );
-        return { task: project(row!), decision: values.decision, applied: true as const };
+        return {
+          task: (await withReviews(tx, [project(row!)]))[0]!,
+          decision: values.decision,
+          applied: true as const,
+        };
       }
       const current = (
         await tx.query<TaskRow>('SELECT * FROM room_tasks WHERE id=$1 AND room_id=$2', [
@@ -1343,7 +1601,11 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
       ).rows[0];
       if (!current) refuse(404, 'task_not_found', 'Task not found in this room.');
       if (current!.status === 'cancelled')
-        return { task: project(current!), decision: values.decision, applied: false as const };
+        return {
+          task: (await withReviews(tx, [project(current!)]))[0]!,
+          decision: values.decision,
+          applied: false as const,
+        };
       if (current!.status === 'done')
         refuse(409, 'task_closed', 'The task is done and cannot be cancelled.', {
           status: current!.status,
@@ -1369,15 +1631,584 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
         current!.claim_agent_id,
       );
       await taskLine(tx, room.id, `The host cancelled ${taskRef(row)}`);
-      return { task: project(row), decision: values.decision, applied: true as const };
+      return {
+        task: (await withReviews(tx, [project(row)]))[0]!,
+        decision: values.decision,
+        applied: true as const,
+      };
     });
   }
 
-  async function events(p: RoomPrincipal, body: unknown) {
+  /**
+   * Peer review (docs/ROOM_TASKS.md "Peer review", migration 56). Advisory only: a request and a
+   * verdict never move the task, and the host's approve / send back is unchanged.
+   */
+  type ReviewRow = {
+    id: string;
+    task_id: string;
+    reviewer_agent_id: string;
+    reviewer_owner_id: string;
+    requested_by_agent_id: string;
+    requested_by_owner_id: string;
+    checklist: unknown;
+    status: string;
+    comment: string | null;
+    ticks: unknown;
+    requested_at: string | number;
+    decided_at: string | number | null;
+  };
+  const json = (value: unknown) => (typeof value === 'string' ? JSON.parse(value) : value);
+  function projectReview(row: ReviewRow): TaskPeerReviewView {
+    const items = (json(row.checklist) as string[] | null) ?? [];
+    const ticks = (json(row.ticks) as boolean[] | null) ?? null;
+    return {
+      id: row.id,
+      status: row.status as TaskPeerReviewView['status'],
+      reviewer_agent_id: row.reviewer_agent_id,
+      requested_by_agent_id: row.requested_by_agent_id,
+      checklist: items.map((item, index) => ({
+        item,
+        checked: ticks ? (ticks[index] ?? null) : null,
+      })),
+      comment: row.comment,
+      requested_at: iso(Number(row.requested_at)),
+      decided_at: row.decided_at === null ? null : iso(Number(row.decided_at)),
+    };
+  }
+  /** The latest review of each task (null when none). Tolerates a database before migration 56. */
+  async function latestReviews(
+    q: Pick<Tx, 'query'>,
+    taskIds: readonly string[],
+  ): Promise<Map<string, TaskPeerReviewView>> {
+    if (!taskIds.length) return new Map();
+    try {
+      const rows = (
+        await q.query<ReviewRow>(
+          `SELECT DISTINCT ON (task_id) * FROM room_task_reviews WHERE task_id = ANY($1::text[])
+            ORDER BY task_id, requested_at DESC, id DESC`,
+          [[...taskIds]],
+        )
+      ).rows;
+      return new Map(rows.map((row) => [row.task_id, projectReview(row)]));
+    } catch (error) {
+      if (missingTable(error)) return new Map();
+      throw error;
+    }
+  }
+  async function withReviews(q: Pick<Tx, 'query'>, tasks: TaskView[]): Promise<TaskView[]> {
+    const reviews = await latestReviews(
+      q,
+      tasks.map((task) => task.id),
+    );
+    // Absent when nobody asked for a review, so task views stay as they were.
+    return tasks.map((task) => {
+      const review = reviews.get(task.id);
+      return review ? { ...task, peer_review: review } : task;
+    });
+  }
+
+  /**
+   * Who did the work: the claim holder, else the agent that posted the latest result (also after
+   * the host sent it back, so its author never reviews its own earlier work).
+   */
+  async function claimerOf(
+    q: Pick<Tx, 'query'>,
+    room: RoomRow,
+    task: TaskRow,
+  ): Promise<{ agentId: string; ownerId: string | null } | null> {
+    if (task.claim_agent_id) return { agentId: task.claim_agent_id, ownerId: task.claim_owner_id };
+    // No claim (open again after a send back, or in review): the author of the latest result
+    // is still the one whose work is under review.
+    const posted = (
+      await q.query<{ agent_id: string | null }>(
+        `SELECT agent_id FROM room_task_events WHERE task_id=$1 AND action='result_posted'
+          ORDER BY created_at DESC, id DESC LIMIT 1`,
+        [task.id],
+      )
+    ).rows[0]?.agent_id;
+    if (!posted) return null;
+    const owner = (
+      await q.query<{ owner_id: string }>(
+        'SELECT owner_id FROM room_members WHERE room_id=$1 AND agent_id=$2',
+        [room.id, posted],
+      )
+    ).rows[0]?.owner_id;
+    return { agentId: posted, ownerId: owner ?? null };
+  }
+
+  async function hostAgentOf(q: Pick<Tx, 'query'>, room: RoomRow): Promise<string | null> {
+    return (
+      (
+        await q.query<{ agent_id: string }>(
+          `SELECT agent_id FROM room_members WHERE room_id=$1 AND role='host' AND removed_at IS NULL
+            ORDER BY joined_at LIMIT 1`,
+          [room.id],
+        )
+      ).rows[0]?.agent_id ?? null
+    );
+  }
+
+  /** A line in the thread that also mentions (and so wakes) the members it concerns. */
+  async function reviewLine(
+    tx: Pick<Tx, 'query'>,
+    roomId: string,
+    text: string,
+    from: string,
+    notify: readonly (string | null | undefined)[],
+  ) {
+    const seq = await taskLine(tx, roomId, text);
+    if (seq === null) return;
+    await taskReviewNotice(tx as Tx, {
+      roomId,
+      seq,
+      agentIds: notify.filter((id): id is string => !!id),
+      fromAgentId: from,
+      fromName: await memberLabel(tx, roomId, from),
+      text,
+      time: d.clock(),
+    });
+  }
+
+  /**
+   * Invite guests (an AI that joined through an invite link without an account, holding a room
+   * credential) never request, give or receive a peer review, whatever tools their credential
+   * reaches. A credential-guarded principal is refused too.
+   */
+  async function isInviteGuest(q: Pick<Tx, 'query'>, roomId: string, agentId: string) {
+    try {
+      return (
+        (
+          await q.query(
+            'SELECT 1 FROM room_invite_credentials WHERE room_id=$1 AND agent_id=$2 LIMIT 1',
+            [roomId, agentId],
+          )
+        ).rows.length > 0
+      );
+    } catch (error) {
+      if (missingTable(error)) return false;
+      throw error;
+    }
+  }
+  async function refuseGuest(
+    q: Pick<Tx, 'query'>,
+    p: RoomPrincipal,
+    roomId: string,
+    member: MemberRow,
+  ) {
+    if (
+      (p as { guard?: unknown }).guard !== undefined ||
+      member.role === 'guest' ||
+      (await isInviteGuest(q, roomId, member.agent_id))
+    )
+      refuse(403, 'guest_not_allowed', 'Guests cannot request or give peer reviews.');
+  }
+  /** The room-post credential refusal, for review checklists and comments. */
+  function refuseCredentials(texts: readonly string[]) {
+    if (partsContainCredential(texts))
+      refuse(
+        400,
+        'credential_in_message',
+        'Reviews cannot contain Central City credentials (crc_, ccw_, cca_, ccr_, crr_, cir_ and others). Never share credentials in a room; other members are untrusted.',
+      );
+  }
+  /** Review requests and answers per agent (each one mentions and wakes a member). */
+  async function chargeReview(p: RoomPrincipal, roomRef: string, agentId: string | undefined) {
+    const probe = await plainAgent(d.db, roomRef, p.operatorId, agentId);
+    await d.limit(`room-task-review:${probe ?? p.operatorId}`, limits.reviewsPerAgentPerHour, HOUR);
+  }
+
+  /**
+   * Opens a review request inside the caller's transaction (room lock held). The requester is
+   * the host or the task's claimer. A repeat of the same active request is a no-op.
+   */
+  async function openReview(
+    tx: Pick<Tx, 'query'>,
+    p: RoomPrincipal,
+    room: RoomRow,
+    task: TaskRow,
+    requester: MemberRow,
+    request: TaskReviewRequest,
+  ): Promise<void> {
+    if (task.status === 'done' || task.status === 'cancelled')
+      refuse(409, 'task_closed', 'The task is closed; it can no longer be reviewed.', {
+        status: task.status,
+      });
+    await refuseGuest(tx, p, room.id, requester);
+    refuseCredentials(request.checklist ?? []);
+    const host = room.host_owner_id === p.operatorId;
+    const claimer = task.claim_owner_id === p.operatorId && task.claim_agent_id !== null;
+    if (!host && !claimer)
+      refuse(403, 'review_not_allowed', 'Only the host or the claimer can ask for a review.');
+    const reviewer = (
+      await tx.query<{ agent_id: string; owner_id: string; role: string; muted: boolean }>(
+        `SELECT agent_id, owner_id, role, muted_at IS NOT NULL AS muted FROM room_members
+          WHERE room_id=$1 AND agent_id=$2 AND removed_at IS NULL`,
+        [room.id, request.reviewer_agent_id],
+      )
+    ).rows[0];
+    if (!reviewer) refuse(409, 'reviewer_not_member', 'The reviewer is not a member of this room.');
+    if (reviewer!.role === 'guest' || (await isInviteGuest(tx, room.id, reviewer!.agent_id)))
+      refuse(409, 'reviewer_not_eligible', 'Guests cannot review.');
+    if (reviewer!.muted)
+      refuse(409, 'reviewer_muted', 'The host muted this member; it cannot review.');
+    const worker = await claimerOf(tx, room, task);
+    if (
+      worker &&
+      (worker.agentId === reviewer!.agent_id ||
+        (worker.ownerId !== null && worker.ownerId === reviewer!.owner_id))
+    )
+      refuse(409, 'reviewer_is_claimer', 'A reviewer cannot review their own claim.');
+    const checklist = request.checklist ?? [];
+    const active = (
+      await tx.query<ReviewRow>(
+        `SELECT * FROM room_task_reviews WHERE task_id=$1 AND status='requested' FOR UPDATE`,
+        [task.id],
+      )
+    ).rows[0];
+    if (active) {
+      if (
+        active.reviewer_agent_id === reviewer!.agent_id &&
+        JSON.stringify(json(active.checklist)) === JSON.stringify(checklist)
+      )
+        return;
+      refuse(409, 'review_active', 'This task already has an open review request.', {
+        reviewer_agent_id: active.reviewer_agent_id,
+      });
+    }
+    await tx.query(
+      `INSERT INTO room_task_reviews(id,task_id,room_id,reviewer_agent_id,reviewer_owner_id,
+        requested_by_agent_id,requested_by_owner_id,checklist,status,requested_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,'requested',${DBNOW})`,
+      [
+        randomUUID(),
+        task.id,
+        room.id,
+        reviewer!.agent_id,
+        reviewer!.owner_id,
+        requester.agent_id,
+        p.operatorId,
+        JSON.stringify(checklist),
+      ],
+    );
+    await recordEvent(
+      tx,
+      task.id,
+      'review_requested',
+      Number(task.claim_generation),
+      p.actor,
+      requester.agent_id,
+      { reviewer_agent_id: reviewer!.agent_id, checklist, untrusted: true },
+    );
+    await reviewLine(
+      tx,
+      room.id,
+      `${await memberLabel(tx, room.id, requester.agent_id)} asked ${await memberLabel(tx, room.id, reviewer!.agent_id)} to review ${taskRef(task)}`,
+      requester.agent_id,
+      [reviewer!.agent_id],
+    );
+  }
+
+  async function taskRow(tx: Pick<Tx, 'query'>, roomId: string, taskId: string) {
+    const row = (
+      await tx.query<TaskRow>('SELECT * FROM room_tasks WHERE id=$1 AND room_id=$2 FOR UPDATE', [
+        taskId,
+        roomId,
+      ])
+    ).rows[0];
+    if (!row) refuse(404, 'task_not_found', 'Task not found in this room.');
+    return row!;
+  }
+
+  async function requestReview(p: RoomPrincipal, body: unknown) {
+    const values = taskRequestReviewInput.parse(body);
+    if (!values.cancel && values.reviewer_agent_id === undefined)
+      refuse(400, 'reviewer_required', 'Pass reviewer_agent_id to ask for a review.');
+    refuseCredentials(values.checklist ?? []);
+    await chargeReview(p, values.room_id, values.agent_id);
+    return d.db.transaction(async (tx) => {
+      const { room, members, actors } = await membership(tx, values.room_id, p.operatorId);
+      const agent = actingAgent(members, values.agent_id, actors, p.console === true);
+      await refuseGuest(tx, p, room.id, agent);
+      writeGuards(room, agent);
+      await refuseIfMuted(tx, room.id, p.operatorId, agent.kind);
+      await lockRoom(tx, room.id);
+      await releaseInvalidHolders(tx, room, values.task_id);
+      const task = await taskRow(tx, room.id, values.task_id);
+      if (values.cancel) {
+        const active = (
+          await tx.query<ReviewRow>(
+            `SELECT * FROM room_task_reviews WHERE task_id=$1 AND status='requested' FOR UPDATE`,
+            [task.id],
+          )
+        ).rows[0];
+        if (!active) {
+          const [view] = await withReviews(tx, [project(task)]);
+          return { task: view!, requested: false };
+        }
+        if (
+          room.host_owner_id !== p.operatorId &&
+          active.requested_by_owner_id !== p.operatorId &&
+          task.claim_owner_id !== p.operatorId
+        )
+          refuse(403, 'review_not_allowed', 'Only the host or the claimer can withdraw a review.');
+        await tx.query(
+          `UPDATE room_task_reviews SET status='cancelled', decided_at=${DBNOW} WHERE id=$1`,
+          [active.id],
+        );
+        await recordEvent(
+          tx,
+          task.id,
+          'review_cancelled',
+          Number(task.claim_generation),
+          p.actor,
+          agent.agent_id,
+          { reviewer_agent_id: active.reviewer_agent_id },
+        );
+        const [view] = await withReviews(tx, [project(task)]);
+        return { task: view!, requested: false };
+      }
+      await openReview(tx, p, room, task, agent, {
+        reviewer_agent_id: values.reviewer_agent_id!,
+        ...(values.checklist ? { checklist: values.checklist } : {}),
+      });
+      await touchMembers(tx, room.id, [agent.agent_id], d.clock());
+      const [view] = await withReviews(tx, [project(task)]);
+      return { task: view!, requested: true };
+    });
+  }
+
+  async function peerReview(p: RoomPrincipal, body: unknown) {
+    const values = taskPeerReviewInput.parse(body);
+    refuseCredentials(values.comment === undefined ? [] : [values.comment]);
+    await chargeReview(p, values.room_id, values.agent_id);
+    return d.db.transaction(async (tx) => {
+      const { room, members, actors } = await membership(tx, values.room_id, p.operatorId);
+      if (room.closed_at !== null)
+        refuse(409, 'room_closed', 'The room is closed; its tasks are read-only.');
+      await lockRoom(tx, room.id);
+      const task = await taskRow(tx, room.id, values.task_id);
+      const active = (
+        await tx.query<ReviewRow>(
+          `SELECT * FROM room_task_reviews WHERE task_id=$1 AND status='requested' FOR UPDATE`,
+          [task.id],
+        )
+      ).rows[0];
+      // With several agents in the room and none named, act as the requested reviewer.
+      const agentId =
+        values.agent_id ??
+        (active && actors.some((row) => row.agent_id === active.reviewer_agent_id)
+          ? active.reviewer_agent_id
+          : undefined);
+      const agent = actingAgent(members, agentId, actors, p.console === true);
+      await refuseGuest(tx, p, room.id, agent);
+      writeGuards(room, agent);
+      // The host muted this owner (migration 35); a bulk AI mute spares a person reviewer.
+      await refuseIfMuted(tx, room.id, p.operatorId, agent.kind);
+      if (!active) refuse(409, 'no_review_requested', 'Nobody asked for a review of this task.');
+      if (active!.reviewer_agent_id !== agent.agent_id)
+        refuse(403, 'not_the_reviewer', 'Only the requested reviewer can review this task.');
+      if (task.status === 'done' || task.status === 'cancelled')
+        refuse(409, 'task_closed', 'The task is closed; it can no longer be reviewed.', {
+          status: task.status,
+        });
+      const worker = await claimerOf(tx, room, task);
+      if (worker && (worker.agentId === agent.agent_id || worker.ownerId === p.operatorId))
+        refuse(403, 'own_claim', 'A reviewer cannot review their own claim.');
+      const items = (json(active!.checklist) as string[] | null) ?? [];
+      if (values.checklist !== undefined && values.checklist.length !== items.length)
+        refuse(400, 'checklist_mismatch', 'Send one tick per checklist item, in order.', {
+          items: items.length,
+        });
+      const status = values.verdict === 'approve' ? 'approved' : 'changes_requested';
+      const comment = values.comment?.trim() ? values.comment.trim() : null;
+      await tx.query(
+        `UPDATE room_task_reviews SET status=$2, comment=$3, ticks=$4::jsonb, decided_at=${DBNOW}
+          WHERE id=$1 AND status='requested'`,
+        [
+          active!.id,
+          status,
+          comment,
+          values.checklist === undefined ? null : JSON.stringify(values.checklist),
+        ],
+      );
+      await recordEvent(
+        tx,
+        task.id,
+        'peer_reviewed',
+        Number(task.claim_generation),
+        p.actor,
+        agent.agent_id,
+        {
+          verdict: values.verdict,
+          comment,
+          checklist: items.map((item, index) => ({
+            item,
+            checked: values.checklist?.[index] ?? null,
+          })),
+          untrusted: true,
+        },
+      );
+      const reviewer = await memberLabel(tx, room.id, agent.agent_id);
+      await reviewLine(
+        tx,
+        room.id,
+        values.verdict === 'approve'
+          ? `${reviewer} approved ${taskRef(task)} in a peer review`
+          : `${reviewer} asked for changes on ${taskRef(task)} in a peer review`,
+        agent.agent_id,
+        [worker?.agentId, await hostAgentOf(tx, room)],
+      );
+      await touchMembers(tx, room.id, [agent.agent_id], d.clock());
+      const [view] = await withReviews(tx, [project(task)]);
+      return { task: view!, verdict: values.verdict };
+    });
+  }
+
+  /**
+   * Stage move (migration 54): the host, or the owner of the agent holding the claim, moves the
+   * task to one of the room's stages (null clears it). The status never changes. Each change
+   * writes one `stage_changed` event (actor, agent, `{from, to}`); the same stage is a no-op
+   * (`applied: false`, no event).
+   */
+  async function moveStage(
+    p: TaskPrincipal,
+    roomRef: string,
+    taskId: string,
+    stage: string | null,
+  ): Promise<{ task: TaskView; applied: boolean }> {
+    return d.db.transaction(async (tx) => {
+      const { room, actors } = await membership(tx, roomRef, p.operatorId, p);
+      if (room.closed_at !== null)
+        refuse(409, 'room_closed', 'The room is closed; its tasks are read-only.');
+      await lockRoom(tx, room.id);
+      // The stage list as of the room lock (a concurrent list edit holds the same lock).
+      room.task_stages = (
+        await tx.query<{ task_stages: string[] | null }>(
+          'SELECT task_stages FROM rooms WHERE id=$1',
+          [room.id],
+        )
+      ).rows[0]?.task_stages;
+      await releaseInvalidHolders(tx, room, taskId);
+      await lapseTask(tx, room.id, taskId);
+      const current = (
+        await tx.query<TaskRow>('SELECT * FROM room_tasks WHERE id=$1 AND room_id=$2 FOR UPDATE', [
+          taskId,
+          room.id,
+        ])
+      ).rows[0];
+      if (!current) refuse(404, 'task_not_found', 'Task not found in this room.');
+      const host = room.host_owner_id === p.operatorId;
+      const holder =
+        current!.status === 'claimed' &&
+        current!.claim_owner_id === p.operatorId &&
+        actors.some((row) => row.agent_id === current!.claim_agent_id);
+      if (!host && !holder)
+        refuse(
+          403,
+          'stage_not_allowed',
+          'Only the host or the member working on this task can change its stage.',
+        );
+      // The host muted this owner (migration 35): no task writes either.
+      if (!host)
+        await refuseIfMuted(
+          tx,
+          room.id,
+          p.operatorId,
+          actors.find((row) => row.agent_id === current!.claim_agent_id)?.kind,
+        );
+      const next = stage === null ? null : resolveStage(room, stage);
+      const from = current!.stage ?? null;
+      if (from === next)
+        return { task: (await withReviews(tx, [project(current!)]))[0]!, applied: false };
+      const row = (
+        await tx.query<TaskRow>(
+          `UPDATE room_tasks SET stage=$3, updated_at=${DBNOW} WHERE id=$1 AND room_id=$2 RETURNING *`,
+          [taskId, room.id, next],
+        )
+      ).rows[0]!;
+      await recordEvent(
+        tx,
+        row.id,
+        'stage_changed',
+        Number(row.claim_generation),
+        p.actor,
+        holder && !host ? current!.claim_agent_id : null,
+        { from, to: next },
+      );
+      return { task: (await withReviews(tx, [project(row)]))[0]!, applied: true };
+    });
+  }
+
+  async function stages(p: TaskPrincipal, body: unknown) {
+    const values = taskGetInput.pick({ room_id: true }).parse(body);
+    return d.db.transaction(async (tx) => {
+      const { room } = await membership(tx, values.room_id, p.operatorId, p);
+      return { room_id: room.id, stages: stagesOf(room) };
+    });
+  }
+
+  /**
+   * Host only: replace the stage list. Names are trimmed and must be unique without case. Tasks
+   * at a stage that is no longer on the list lose their stage, each with a `stage_changed` event
+   * (`reason: 'stage_removed'`).
+   */
+  async function setStages(p: TaskPrincipal, body: unknown) {
+    const values = taskStagesInput.parse(body);
+    const seen = new Set<string>();
+    for (const name of values.stages) {
+      const key = name.toLowerCase();
+      if (seen.has(key))
+        refuse(400, 'duplicate_stage', `The stage "${name}" is listed twice.`, { stage: name });
+      seen.add(key);
+    }
+    return d.db.transaction(async (tx) => {
+      const { room } = await membership(tx, values.room_id, p.operatorId, p);
+      if (room.closed_at !== null)
+        refuse(409, 'room_closed', 'The room is closed; its settings cannot change.');
+      if (room.host_owner_id !== p.operatorId)
+        refuse(403, 'host_required', 'Only the room host can change the task stages.');
+      await lockRoom(tx, room.id);
+      await tx.query('UPDATE rooms SET task_stages=$2::text[] WHERE id=$1', [
+        room.id,
+        values.stages,
+      ]);
+      // A case-only rename ("testing" -> "Testing") is the same stage: tasks keep it, spelled anew.
+      await tx.query(
+        `UPDATE room_tasks t SET stage=n.name, updated_at=${DBNOW}
+          FROM unnest($2::text[]) AS n(name)
+          WHERE t.room_id=$1 AND lower(t.stage)=lower(n.name) AND t.stage<>n.name`,
+        [room.id, values.stages],
+      );
+      const removed = (
+        await tx.query<{ id: string; stage: string; claim_generation: string | number }>(
+          `UPDATE room_tasks t SET stage=NULL, updated_at=${DBNOW}
+            FROM (SELECT id, stage AS old FROM room_tasks
+              WHERE room_id=$1 AND stage IS NOT NULL AND NOT (stage = ANY($2::text[]))
+              FOR UPDATE) o
+            WHERE t.id=o.id
+            RETURNING t.id, o.old AS stage, t.claim_generation`,
+          [room.id, values.stages],
+        )
+      ).rows;
+      for (const row of removed)
+        await recordEvent(
+          tx,
+          row.id,
+          'stage_changed',
+          Number(row.claim_generation),
+          p.actor,
+          null,
+          { from: row.stage, to: null, reason: 'stage_removed' },
+        );
+      return { room_id: room.id, stages: [...values.stages], cleared: removed.length };
+    });
+  }
+
+  async function events(p: TaskPrincipal, body: unknown) {
     const values = taskEventsInput.parse(body);
     const size = Math.min(values.limit ?? limits.defaultPageSize, limits.pageSize);
     return d.db.transaction(async (tx) => {
-      const { room } = await membership(tx, values.room_id, p.operatorId);
+      const { room } = await membership(tx, values.room_id, p.operatorId, p);
       const task = (
         await tx.query<{ id: string }>('SELECT id FROM room_tasks WHERE id=$1 AND room_id=$2', [
           values.task_id,
@@ -1417,16 +2248,341 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
     });
   }
 
+  /**
+   * Task comments (docs/ROOM_TASKS.md "Comments"): a thread on each task, never a line in the
+   * room thread. Same membership as tasks (unknown rooms and non-members get the uniform 404;
+   * an invited guest's credential is re-checked in the transaction through `p`), plus person
+   * members. Writes need an open room, an unmuted owner and a posting member; adds are charged
+   * per agent before the transaction. Bodies are plain untrusted text and never carry credentials.
+   */
+  const commentNotFound = () => refuse(404, 'comment_not_found', 'Comment not found on this task.');
+
+  async function taskInRoom(q: Pick<Tx, 'query'>, roomId: string, taskId: string) {
+    const task = (
+      await q.query<{ id: string }>('SELECT id FROM room_tasks WHERE id=$1 AND room_id=$2', [
+        taskId,
+        roomId,
+      ])
+    ).rows[0];
+    if (!task) refuse(404, 'task_not_found', 'Task not found in this room.');
+  }
+
+  /** Only one of the caller's own members may be named (list and delete act as the owner). */
+  function ownMember(members: MemberRow[], agentId: string | undefined) {
+    if (agentId !== undefined && !members.some((row) => row.agent_id === agentId))
+      refuse(403, 'not_a_member', 'That agent is not a member of this room.');
+  }
+
+  /**
+   * The kind of the caller's member behind an owner-level write (refuseIfMuted's writerKind): the
+   * named member, else the caller's only member. Several members and none named stays undefined,
+   * which refuseIfMuted treats as an AI.
+   */
+  function ownerKind(members: MemberRow[], agentId: string | undefined) {
+    if (agentId !== undefined) return members.find((row) => row.agent_id === agentId)?.kind;
+    return members.length === 1 ? members[0]!.kind : undefined;
+  }
+
+  /**
+   * The kind of the caller's member holding the claim behind `hash` (renew and result act as the
+   * holder). Undefined when the token matches no claim of the caller's members.
+   */
+  async function claimHolderKind(
+    q: Pick<Tx, 'query'>,
+    roomId: string,
+    taskId: string,
+    hash: string,
+    members: MemberRow[],
+  ): Promise<string | undefined> {
+    const holder = (
+      await q.query<{ claim_agent_id: string | null }>(
+        'SELECT claim_agent_id FROM room_tasks WHERE id=$1 AND room_id=$2 AND claim_token_hash=$3',
+        [taskId, roomId, hash],
+      )
+    ).rows[0]?.claim_agent_id;
+    return members.find((row) => row.agent_id === holder)?.kind;
+  }
+
+  /** Display labels of the authors of a page of comments, in one query. */
+  async function authorLabels(
+    q: Pick<Tx, 'query'>,
+    roomId: string,
+    agentIds: string[],
+  ): Promise<Map<string, string>> {
+    if (!agentIds.length) return new Map();
+    const rows = (
+      await q.query<{
+        agent_id: string;
+        kind: string;
+        display_name: string | null;
+        name: string | null;
+      }>(
+        `SELECT m.agent_id, m.kind, m.display_name,
+            (SELECT a->>'name' FROM workspaces w CROSS JOIN LATERAL jsonb_array_elements(w.data->'agents') a
+              WHERE w.operator_id=m.owner_id AND a->>'id'=m.agent_id LIMIT 1) AS name
+          FROM room_members m WHERE m.room_id=$1 AND m.agent_id = ANY($2::text[])`,
+        [roomId, [...new Set(agentIds)]],
+      )
+    ).rows;
+    return new Map(
+      rows.map((row) => [
+        row.agent_id,
+        row.kind === 'person'
+          ? lineName(row.display_name, 'A person')
+          : lineName(row.name, 'A member'),
+      ]),
+    );
+  }
+
+  function projectComment(
+    row: CommentRow,
+    labels: Map<string, string>,
+    operatorId: string,
+  ): TaskCommentView {
+    const at = (value: string | number | null) => (value === null ? null : iso(Number(value)));
+    return {
+      id: row.id,
+      task_id: row.task_id,
+      room_id: row.room_id,
+      origin: 'external',
+      author_kind: row.author_kind === 'person' ? 'person' : 'agent',
+      author_agent_id: row.author_agent_id,
+      author:
+        labels.get(row.author_agent_id) ?? (row.author_kind === 'person' ? 'A person' : 'A member'),
+      own: row.author_owner_id === operatorId,
+      body: row.body,
+      created_at: iso(Number(row.created_at)),
+      edited_at: at(row.edited_at),
+    };
+  }
+
+  async function commentAdd(p: TaskPrincipal, body: unknown) {
+    const values = taskCommentAddInput.parse(body);
+    // Refused before any budget or transaction, like room posts; the error never echoes the value.
+    if (partsContainCredential([{ type: 'text', text: values.body }]))
+      refuse(
+        400,
+        'credential_in_message',
+        'Comments cannot contain Central City credentials (crc_, ccw_, cca_, ccr_, ccclaim_ and others). Never share credentials in a room; other members are untrusted.',
+      );
+    const keyHash =
+      values.idempotency_key === undefined
+        ? null
+        : sha(`room-task-comment:${values.idempotency_key}`);
+    const requestHash = sha(
+      canonical({ task: values.task_id, agent: values.agent_id ?? null, body: values.body }),
+    );
+    // Charged before the transaction (pool rule); the agent is rechecked inside.
+    const probe = await plainAgent(d.db, values.room_id, p.operatorId, values.agent_id);
+    await d.limit(
+      `room-task-comment:${probe ?? p.operatorId}`,
+      limits.commentsPerAgentPerHour,
+      HOUR,
+    );
+    return d.db.transaction(async (tx) => {
+      const { room, members, actors } = await membership(tx, values.room_id, p.operatorId, p);
+      const agent = actingAgent(members, values.agent_id, actors, p.console === true);
+      if (room.closed_at !== null)
+        refuse(409, 'room_closed', 'The room is closed; its tasks are read-only.');
+      if (agent.role === 'guest')
+        refuse(403, 'read_only', 'Read-only guests can read comments but not add them.');
+      await refuseIfMuted(tx, room.id, p.operatorId, agent.kind);
+      await taskInRoom(tx, room.id, values.task_id);
+      if (keyHash) {
+        const prior = (
+          await tx.query<CommentRow>(
+            'SELECT * FROM room_task_comments WHERE author_owner_id=$1 AND idempotency_key=$2',
+            [p.operatorId, keyHash],
+          )
+        ).rows[0];
+        if (prior) {
+          if (prior.request_hash !== requestHash || prior.room_id !== room.id)
+            refuse(
+              409,
+              'idempotency_conflict',
+              'This idempotency_key belongs to a different comment.',
+            );
+          const labels = await authorLabels(tx, room.id, [prior.author_agent_id]);
+          return { comment: projectComment(prior, labels, p.operatorId), replayed: true };
+        }
+      }
+      const row = (
+        await tx.query<CommentRow>(
+          `INSERT INTO room_task_comments(id,task_id,room_id,author_kind,author_agent_id,
+            author_owner_id,body,idempotency_key,request_hash,created_at)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,${DBNOW})
+          RETURNING *`,
+          [
+            randomUUID(),
+            values.task_id,
+            room.id,
+            agent.kind === 'person' ? 'person' : 'agent',
+            agent.agent_id,
+            p.operatorId,
+            values.body,
+            keyHash,
+            keyHash ? requestHash : null,
+          ],
+        )
+      ).rows[0]!;
+      await touchMembers(tx, room.id, [agent.agent_id], d.clock());
+      const labels = await authorLabels(tx, room.id, [row.author_agent_id]);
+      return { comment: projectComment(row, labels, p.operatorId), replayed: false };
+    });
+  }
+
+  async function commentList(p: TaskPrincipal, body: unknown) {
+    const values = taskCommentListInput.parse(body);
+    const size = Math.min(values.limit ?? limits.defaultPageSize, limits.pageSize);
+    return d.db.transaction(async (tx) => {
+      const { room, members } = await membership(tx, values.room_id, p.operatorId, p);
+      ownMember(members, values.agent_id);
+      await taskInRoom(tx, room.id, values.task_id);
+      let since: number | null = null;
+      let sinceId = '';
+      if (values.after_id !== undefined) {
+        const cursor = (
+          await tx.query<{ created_at: string | number; id: string }>(
+            'SELECT created_at,id FROM room_task_comments WHERE id=$1 AND task_id=$2',
+            [values.after_id, values.task_id],
+          )
+        ).rows[0];
+        if (!cursor) refuse(400, 'unknown_cursor', 'The page cursor is unknown; start over.');
+        since = Number(cursor!.created_at);
+        sinceId = cursor!.id;
+      }
+      // Oldest first, so the newest comment is last.
+      const rows = (
+        await tx.query<CommentRow>(
+          `SELECT * FROM room_task_comments WHERE task_id=$1
+            AND ($2::bigint IS NULL OR created_at > $2::bigint
+              OR (created_at = $2::bigint AND id > $3::text))
+            ORDER BY created_at, id LIMIT $4`,
+          [values.task_id, since, sinceId, size + 1],
+        )
+      ).rows;
+      const shown = rows.slice(0, size);
+      const labels = await authorLabels(
+        tx,
+        room.id,
+        shown.map((row) => row.author_agent_id),
+      );
+      return {
+        task_id: values.task_id,
+        comments: shown.map((row) => projectComment(row, labels, p.operatorId)),
+        next_after: shown.length ? shown.at(-1)!.id : null,
+        has_more: rows.length > size,
+      };
+    });
+  }
+
+  async function commentDelete(p: TaskPrincipal, body: unknown) {
+    const values = taskCommentDeleteInput.parse(body);
+    return d.db.transaction(async (tx) => {
+      const { room, members } = await membership(tx, values.room_id, p.operatorId, p);
+      ownMember(members, values.agent_id);
+      if (room.closed_at !== null)
+        refuse(409, 'room_closed', 'The room is closed; its tasks are read-only.');
+      const host = room.host_owner_id === p.operatorId;
+      if (!host)
+        await refuseIfMuted(tx, room.id, p.operatorId, ownerKind(members, values.agent_id));
+      await taskInRoom(tx, room.id, values.task_id);
+      const current = (
+        await tx.query<CommentRow>(
+          'SELECT * FROM room_task_comments WHERE id=$1 AND task_id=$2 AND room_id=$3 FOR UPDATE',
+          [values.comment_id, values.task_id, room.id],
+        )
+      ).rows[0];
+      if (!current) commentNotFound();
+      const own = current!.author_owner_id === p.operatorId;
+      if (!own && !host)
+        refuse(
+          403,
+          'not_comment_author',
+          'Only the author or the room host can delete this comment.',
+        );
+      const labels = await authorLabels(tx, room.id, [current!.author_agent_id]);
+      // A real delete: the row and its text are gone, and its idempotency key is free again.
+      const row = (
+        await tx.query<CommentRow>('DELETE FROM room_task_comments WHERE id=$1 RETURNING *', [
+          current!.id,
+        ])
+      ).rows[0]!;
+      return {
+        comment: { ...projectComment(row, labels, p.operatorId), body: '' },
+        deleted: true as const,
+      };
+    });
+  }
+
+  /** Every task view leaves the service with its live comment count. */
+  async function withCommentCounts<T>(result: T): Promise<T> {
+    const shaped = result as { task?: TaskView; tasks?: TaskView[] };
+    const views = [...(shaped.task ? [shaped.task] : []), ...(shaped.tasks ?? [])];
+    if (!views.length) return result;
+    const counts = new Map(
+      (
+        await d.db.query<{ task_id: string; n: string | number }>(
+          `SELECT task_id, count(*) AS n FROM room_task_comments
+            WHERE task_id = ANY($1::text[]) GROUP BY task_id`,
+          [views.map((view) => view.id)],
+        )
+      ).rows.map((row) => [row.task_id, Number(row.n)]),
+    );
+    for (const view of views) view.comment_count = counts.get(view.id) ?? 0;
+    return result;
+  }
+  /**
+   * `submitted_by` follows the room's membership at read time, like a claim: a removed member's
+   * hand-ins show null (the stored value stays, so a member who is added back shows again).
+   */
+  async function withSubmitters<T>(result: T): Promise<T> {
+    const shaped = result as { task?: TaskView; tasks?: TaskView[] };
+    const views = [...(shaped.task ? [shaped.task] : []), ...(shaped.tasks ?? [])].filter(
+      (view) => view.submitted_by !== null,
+    );
+    if (!views.length) return result;
+    const key = (roomId: string, agentId: string) => `${roomId} ${agentId}`;
+    const live = new Set(
+      (
+        await d.db.query<{ room_id: string; agent_id: string }>(
+          `SELECT room_id, agent_id FROM room_members
+            WHERE room_id = ANY($1::text[]) AND agent_id = ANY($2::text[]) AND removed_at IS NULL`,
+          [
+            [...new Set(views.map((view) => view.room_id))],
+            [...new Set(views.map((view) => view.submitted_by!))],
+          ],
+        )
+      ).rows.map((row) => key(row.room_id, row.agent_id)),
+    );
+    for (const view of views)
+      if (!live.has(key(view.room_id, view.submitted_by!))) view.submitted_by = null;
+    return result;
+  }
+  const counted =
+    <A extends unknown[], R>(run: (...args: A) => Promise<R>) =>
+    (...args: A) =>
+      run(...args)
+        .then(withCommentCounts)
+        .then(withSubmitters);
+
   return scopedByPrincipal({
-    create,
-    get,
-    list,
-    claim,
-    renew,
-    release,
-    result,
-    update,
+    create: counted(create),
+    get: counted(get),
+    list: counted(list),
+    claim: counted(claim),
+    renew: counted(renew),
+    release: counted(release),
+    result: counted(result),
+    update: counted(update),
+    requestReview: counted(requestReview),
+    peerReview: counted(peerReview),
+    stages,
+    setStages,
     events,
+    commentAdd,
+    commentList,
+    commentDelete,
     limits,
   });
 }

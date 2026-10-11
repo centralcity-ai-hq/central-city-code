@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import fastifyStatic from '@fastify/static';
 import { createApp } from '../server/app.js';
-import { isClientRoute } from '../shared/routes.js';
+import { isClientRoute, shellFor } from '../shared/routes.js';
 import {
   FAKE_CLIENT_ID,
   FAKE_CLIENT_SECRET,
@@ -45,11 +45,14 @@ const app = await createApp({
       GOOGLE_OAUTH_CLIENT_SECRET: FAKE_CLIENT_SECRET,
     },
     transport: google.transport,
+    // One address (127.0.0.1) for every spec that signs in with Google, across the whole run: the
+    // production per-address budget (20 starts per 15 minutes) would fail later specs.
+    addressLimits: { startsPerAddress: 1000, callbacksPerAddress: 1000 },
   },
   notFound: (request, reply) => {
     const path = request.url.split(/[?#]/)[0]!;
     if (spa && request.method === 'GET' && isClientRoute(path))
-      return reply.type('text/html').sendFile('index.html');
+      return reply.type('text/html').sendFile(shellFor(path));
     return reply.code(404).send({ error: 'Page not found' });
   },
 });

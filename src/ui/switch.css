@@ -1,10 +1,10 @@
 /* The one-click on/off switch (src/ui/Switch.tsx): 44px hit area, a visible focus ring. */
 .cc-switch {
-  min-height: 44px;
+  min-height: calc(44 * var(--ws-px));
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-  padding: 0 4px;
+  gap: calc(10 * var(--ws-px));
+  padding: 0 calc(4 * var(--ws-px));
   border: 0;
   border-radius: 10px;
   background: none;
@@ -24,10 +24,23 @@
   cursor: progress;
   opacity: 1;
 }
+/* Busy is visible without a pointer: the thumb dims and pulses until the server answers. */
+.cc-switch[aria-busy='true'] .cc-switch-thumb {
+  opacity: 0.5;
+  animation: cc-switch-busy 900ms ease-in-out infinite alternate;
+}
+@keyframes cc-switch-busy {
+  from {
+    opacity: 0.35;
+  }
+  to {
+    opacity: 0.7;
+  }
+}
 .cc-switch-track {
   position: relative;
-  width: 40px;
-  height: 24px;
+  width: calc(40 * var(--ws-px));
+  height: calc(24 * var(--ws-px));
   flex: none;
   border-radius: 9999px;
   background: var(--border-strong, #c4c4c4);
@@ -37,8 +50,8 @@
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 20px;
-  height: 20px;
+  width: calc(20 * var(--ws-px));
+  height: calc(20 * var(--ws-px));
   border-radius: 9999px;
   background: #ffffff;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
@@ -55,10 +68,13 @@
   .cc-switch-thumb {
     transition: none;
   }
+  .cc-switch[aria-busy='true'] .cc-switch-thumb {
+    animation: none;
+  }
 }
 .cc-switch-state {
   min-width: 2em;
-  font-size: 14px;
+  font-size: calc(14 * var(--ws-type-px));
   color: inherit;
 }
 .cc-switch-toast-close {

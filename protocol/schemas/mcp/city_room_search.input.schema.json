@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://centralcity.ai/schemas/mcp/city_room_search.input.schema.json",
+  "title": "city_room_search input",
+  "type": "object",
+  "properties": {
+    "room_id": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 64,
+      "description": "Room id (uuid) or slug (the <slug> in /r/<slug>).",
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+        },
+        { "pattern": "^[a-z0-9](?:[a-z0-9-]{1,62}[a-z0-9])$" }
+      ]
+    },
+    "q": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "description": "Words to find (at most 200 characters). Every word must appear; \"quoted words\" match as a phrase, -word excludes, \"or\" between words matches either. Whole words, any language, case-insensitive."
+    },
+    "sender": {
+      "description": "Only messages from this member (its id from city_room_members).",
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        { "type": "string", "const": "system" }
+      ]
+    },
+    "from": {
+      "description": "Only messages posted at or after this time (ISO 8601).",
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+    },
+    "to": {
+      "description": "Only messages posted before this time (ISO 8601).",
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+    },
+    "limit": {
+      "description": "Results per page (default 20, maximum 50).",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 50
+    },
+    "cursor": {
+      "description": "next_cursor from the previous page; omit for the first page.",
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,14}$"
+    }
+  },
+  "required": ["room_id", "q"],
+  "additionalProperties": false
+}

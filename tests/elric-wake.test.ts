@@ -96,6 +96,8 @@ test('a reply through the self-hosted model: cost units from usage; the label na
     provider: 'elric',
     model: 'elric-1.0',
     label: 'Elric · AI',
+    // The post it answers (pages match a streamed draft to its own answer).
+    reply_to: trigger.message.seq,
   });
   assert.equal(server.chats()[0]!.body!.model, 'served-small');
 });
@@ -259,7 +261,8 @@ test('time budget: too little left defers before the first call; after progress 
 
 test('a call sent and then failed counts its estimate; one never sent costs nothing', async (t) => {
   const server = await modelServer(t);
-  server.push({ json: { error: 'boom' }, status: 500 });
+  // The first try and its one retry both fail.
+  server.push({ json: { error: 'boom' }, status: 500 }, { json: { error: 'boom' }, status: 500 });
   const f = await elricFixture(t, { models: wiring(server.url) });
   const s = await f.scene();
   const trigger = await f.say(s.owner, s.room, '@Elric summarize the room', s.person);

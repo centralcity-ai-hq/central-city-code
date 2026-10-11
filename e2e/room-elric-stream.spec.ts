@@ -31,7 +31,9 @@ test('in a room, the answer streams in place and the posted reply replaces it', 
   expect(created.status()).toBe(201);
   await page.goto(`${base}/settings/account`);
   await page.getByRole('button', { name: 'Continue with Google' }).click();
-  await expect(page.getByRole('status')).toHaveText('Google account linked.');
+  await expect(
+    page.getByRole('status').filter({ hasText: 'Google account linked.' }),
+  ).toBeVisible();
   await page.getByLabel('Date of birth (for Elric, 18 or over)').fill('1990-05-17');
   await page.getByRole('button', { name: 'Save' }).click();
   await expect(page.getByText('Saved.')).toBeVisible();
@@ -68,7 +70,22 @@ test('in a room, the answer streams in place and the posted reply replaces it', 
   await box.press('Enter');
 
   const draft = page.getByTestId('room-elric-draft');
-  await expect(draft).toContainText('Streaming reply,', { timeout: 15_000 });
+  // It is revealed smoothly, so it shows the answer's first words (a growing beginning of it).
+  const full = 'Streaming reply, part two, part three.';
+  await expect
+    .poll(
+      async () => {
+        const text = (
+          (await draft
+            .locator('.rm-bubble')
+            .textContent()
+            .catch(() => '')) ?? ''
+        ).trim();
+        return text.length > 0 && full.startsWith(text);
+      },
+      { timeout: 15_000 },
+    )
+    .toBe(true);
   await expect(draft).toContainText('AI');
   const reply = page
     .getByTestId('room-message')

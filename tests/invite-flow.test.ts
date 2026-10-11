@@ -87,7 +87,13 @@ test('invited AI joins, posts and reads with room-only authority', async (t) => 
     idempotency_key: randomUUID(),
   });
   assert.equal(posted.statusCode, 200, posted.body);
-  const read = await f.invoke(guest.credential, 'city_room_read');
+  // Its own post is not unread for it (no wake on its own post); a lookup (since 0) shows it.
+  const unread = await f.invoke(guest.credential, 'city_room_read');
+  assert.equal(unread.statusCode, 200, unread.body);
+  assert.ok(
+    !unread.json().messages.some((m: { text: string }) => m.text === 'Hello from invited AI'),
+  );
+  const read = await f.invoke(guest.credential, 'city_room_read', { since: 0 });
   assert.equal(read.statusCode, 200, read.body);
   assert.ok(read.json().messages.some((m: { text: string }) => m.text === 'Hello from invited AI'));
   assert.equal(
@@ -160,7 +166,8 @@ test('capacity rejection rolls back identity, membership, invitation use and pic
   const denied = await f.redeem(start.json().handle);
   assert.equal(denied.statusCode, 409, denied.body);
   assert.equal((await f.app.city.db.query('SELECT id FROM operators')).rows.length, before);
-  assert.equal((await f.app.city.db.query('SELECT * FROM room_members')).rows.length, 1);
+  // Only the host's members: its agent and itself as a person (in its room from creation).
+  assert.equal((await f.app.city.db.query('SELECT * FROM room_members')).rows.length, 2);
   assert.equal(
     (await f.app.city.db.query<{ uses: number }>('SELECT uses FROM join_links')).rows[0]!.uses,
     0,
@@ -295,11 +302,11 @@ test('invited identities share sponsoring host activity budget and refuse contro
 });
 
 test('source and host invitation quotas count only live credentials; identities are retained', async (t) => {
-  const previous = process.env.CITY_LIMIT_UNCLAIMED_AGENTS_PER_SOURCE;
-  process.env.CITY_LIMIT_UNCLAIMED_AGENTS_PER_SOURCE = '1';
+  const previous = process.env.CITY_LIMIT_INVITED_GUESTS_PER_SOURCE;
+  process.env.CITY_LIMIT_INVITED_GUESTS_PER_SOURCE = '1';
   t.after(() => {
-    if (previous === undefined) delete process.env.CITY_LIMIT_UNCLAIMED_AGENTS_PER_SOURCE;
-    else process.env.CITY_LIMIT_UNCLAIMED_AGENTS_PER_SOURCE = previous;
+    if (previous === undefined) delete process.env.CITY_LIMIT_INVITED_GUESTS_PER_SOURCE;
+    else process.env.CITY_LIMIT_INVITED_GUESTS_PER_SOURCE = previous;
   });
   const f = await fixture(t),
     guest = await f.admit();
@@ -351,7 +358,7 @@ test('invitation admission honors effective application capacity overrides', asy
   );
 });
 
-test('normal MCP accepts room credentials with exactly four room tools and no workspace authority', async (t) => {
+test('normal MCP accepts room credentials with exactly five room tools and no workspace authority', async (t) => {
   const { mcpCall, rpcResult } = await import('./oauth-helpers.js');
   const f = await fixture(t),
     guest = await f.admit();
@@ -361,7 +368,13 @@ test('normal MCP accepts room credentials with exactly four room tools and no wo
     rpcResult(listed.body)
       .result.tools.map((v: { name: string }) => v.name)
       .sort(),
-    ['city_room_leave', 'city_room_members', 'city_room_post', 'city_room_read'],
+    [
+      'city_room_leave',
+      'city_room_members',
+      'city_room_post',
+      'city_room_read',
+      'city_room_search',
+    ],
   );
   assert.equal(
     rpcResult(listed.body).result.tools.find((v: { name: string }) => v.name === 'city_room_read')

@@ -189,7 +189,7 @@ test('reads stay open: an owner whose only member in a room is their Elric lists
   const owner = await f.account('Elric only owner');
   await f.verify(owner);
   const elricId = await f.addElric(owner);
-  await f.joinAgent(owner, room, elricId); // the owner's only member in this room
+  await f.joinAgent(owner, room, elricId, { legacy: true }); // the owner's only member in this room
   const made = await f.call(host.cookie, 'POST', `/api/rooms/${room.id}/tasks`, {
     title: 'A visible task',
     idempotency_key: randomUUID(),

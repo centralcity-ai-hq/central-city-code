@@ -1,4 +1,6 @@
 import { registerElricDraftMigration } from './draft.js';
+import { registerElricTitlesMigration } from './titles.js';
+import { registerElricCatchUpMigration } from './catch-up-schema.js';
 import type { Database, Transaction as Tx } from '../database.js';
 import { registerMigration, type Migration } from '../migrations.js';
 import { registerElricPrivateChatMigration } from './chat-schema.js';
@@ -45,6 +47,10 @@ export function registerElricCeilingMigration(): void {
   registerElricPrivateChatMigration();
   // Migration 46 (streamed reply drafts) too.
   registerElricDraftMigration();
+  // Migration 52 (conversation titles) too.
+  registerElricTitlesMigration();
+  // Migration 66 (the room catch-up cache) too.
+  registerElricCatchUpMigration();
 }
 
 export interface CeilingAlert {
@@ -111,7 +117,11 @@ export async function reserve(
     kind: ElricKind;
     units: number;
     day: string;
-    invocation: { agentId: string; roomId: string; sourceSeq: number; leaseId: string };
+    /**
+     * The invocation holding the lease the reservation is recorded on. Omitted for a request that
+     * is not an invocation (the room catch-up, catch-up.ts): the caller settles it itself.
+     */
+    invocation?: { agentId: string; roomId: string; sourceSeq: number; leaseId: string };
   },
   env: Env = process.env,
 ): Promise<ReserveResult> {
@@ -179,6 +189,7 @@ export async function reserve(
           ceiling_units: config.globalDailyUnits,
         };
       }
+      if (!input.invocation) return { ok: true, units: input.units, day: input.day } as const;
       const held = await tx.query(
         `UPDATE elric_invocations SET reserved_units=$5, usage_day=$6, kind=$7
           WHERE agent_id=$1 AND room_id=$2 AND source_seq=$3 AND lease_id=$4 AND status='running'

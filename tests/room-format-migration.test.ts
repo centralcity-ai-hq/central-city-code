@@ -10,6 +10,7 @@ import { registerJoinLinksMigration } from '../server/links/schema.js';
 import { registerWakeMigration } from '../server/wake/schema.js';
 import { registerResultsMigration } from '../server/results/schema.js';
 import { registerRoomFormatMigration, roomFormatMigration } from '../server/rooms/format-schema.js';
+import { roomMessageSearchMigration } from '../server/rooms/search-schema.js';
 
 /**
  * Migration 22 `room_messages_format` (server/rooms/format-schema.ts): existing room messages
@@ -75,8 +76,12 @@ async function storage(db: PGlite) {
 test('migration 22 applies on PGlite, old rows become plain, and no rewrite happens', async (t) => {
   const db = await beforeFormat(t);
   const node = await storage(db);
-  const result = await runMigrations(db, listMigrations());
-  // Later migrations (31: people in rooms) may apply in the same run.
+  // Later migrations (31: people in rooms) may apply in the same run. Migration 55 (search) adds
+  // a stored generated column, which rewrites room_messages by design, so it is left out here.
+  const result = await runMigrations(
+    db,
+    listMigrations().filter((migration) => migration.version < roomMessageSearchMigration.version),
+  );
   assert.deepEqual(
     result.applied.filter((version) => version <= 22),
     [22],

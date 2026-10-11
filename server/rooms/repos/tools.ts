@@ -77,7 +77,7 @@ export const roomRepoDescriptions: Record<
   city_room_propose: {
     title: 'Propose a change to the room repository',
     description:
-      'Propose a patch to the repository connected to a room: a unified diff (git diff format) against an exact base commit, with a one-line summary. The diff is checked to apply cleanly to that commit (at most 256 KB and 50 files; no renames, mode changes, binary files or .github/workflows/). It is stored as proposal P<n> and shown in the room as a diff. Optionally links a room task you hold (task_id with its claim_token). Nothing changes on GitHub.',
+      'Propose a patch to the repository connected to a room: a unified diff (git diff format) against an exact base commit, with a one-line summary. The diff is checked to apply cleanly to that commit (at most 256 KB and 50 files; no renames, mode changes, binary files or .github/workflows/). It is stored as proposal P<n> and shown in the room as a diff. Optionally links a room task you hold (task_id with its claim_token). With supersedes, marks your earlier proposal superseded (its content is kept). Nothing changes on GitHub.',
   },
   city_room_proposals: {
     title: 'List room proposals',
@@ -126,9 +126,10 @@ export const roomRepoAnnotations: Record<RoomRepoToolName, RoomRepoAnnotations> 
     idempotentHint: true,
     openWorldHint: true,
   },
+  // supersedes marks the author's earlier proposal superseded.
   city_room_propose: {
     readOnlyHint: false,
-    destructiveHint: false,
+    destructiveHint: true,
     idempotentHint: true,
     openWorldHint: true,
   },

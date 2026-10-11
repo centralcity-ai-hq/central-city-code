@@ -1,0 +1,353 @@
+/*
+ * "Connect AI" inside the signed-in workspace (src/ConnectApp.tsx), the approved v4 design. It
+ * reuses the v4 row tokens and parts of src/agents/v4/agent-pane.css (.ap4, .ap4-group, .ap4-row,
+ * .ap4-k, .ap4-v, .ap4-chev, .ap4-dot), and adds the two-column layout: the address and the AI
+ * rows left, the chosen AI's steps right (below the rows when the view is narrow). The shared
+ * step parts and the mode switch are in src/connect.css. Dark: html[data-theme='dark'].
+ */
+
+.cx4 {
+  --cx4-selected: #f7f9ff;
+  /* Quiet text on the sunken tone (the mode switch, the pill): 4.5:1 or more. */
+  --cx4-muted-strong: #475569;
+  --cx4-r: calc(14 * var(--ws-px));
+  container-type: inline-size;
+  max-width: calc(1000 * var(--ws-px));
+  /* The shared mode switch reads these. */
+  --cx8-sunken: var(--ap4-sunken);
+  --cx8-text-2: var(--cx4-muted-strong);
+}
+:root[data-theme='dark'] .cx4 {
+  --cx4-selected: rgb(152 176 255 / 9%);
+  --cx4-muted-strong: var(--ap4-muted);
+}
+.cx4 code {
+  font-family: var(--font-mono);
+}
+
+.cx4-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: 'address' 'apps' 'steps' 'connected' 'more';
+  min-width: 0;
+}
+.cx4-address {
+  grid-area: address;
+}
+.cx4-apps {
+  grid-area: apps;
+}
+.cx4-steps {
+  grid-area: steps;
+  min-width: 0;
+  margin-top: calc(20 * var(--ws-px));
+}
+.cx4-connected {
+  grid-area: connected;
+}
+.cx4-more {
+  grid-area: more;
+}
+/* Wide: the steps beside the rows. The last, flexible row takes the panel's extra height, so the
+   left column's groups stay together. */
+@container (min-width: 760px) {
+  .cx4-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: auto auto auto auto 1fr;
+    grid-template-areas:
+      'address steps'
+      'apps steps'
+      'connected steps'
+      'more steps'
+      '. steps';
+    column-gap: calc(20 * var(--ws-px));
+  }
+  .cx4-steps {
+    align-self: start;
+    margin-top: calc(26 * var(--ws-px));
+  }
+}
+
+/* Section labels */
+.cx4-sec {
+  margin: calc(24 * var(--ws-px)) 0 calc(8 * var(--ws-px));
+  font-size: calc(12 * var(--ws-type-px));
+  font-weight: 600;
+  line-height: calc(18 * var(--ws-type-px));
+  letter-spacing: 0.02em;
+  color: var(--ap4-muted);
+}
+.cx4-address .cx4-sec {
+  margin-top: 0;
+}
+.cx4 .ap4-group {
+  border-radius: var(--cx4-r);
+}
+.cx4 ul.ap4-group {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.cx4 li + li .ap4-row {
+  box-shadow: inset 0 1px 0 var(--ap4-line);
+}
+
+/* Rows: icon tile, name over a quiet line, chevron */
+.cx4-row {
+  gap: calc(12 * var(--ws-px));
+  min-height: calc(52 * var(--ws-px));
+  padding: calc(8 * var(--ws-px)) calc(16 * var(--ws-px));
+  text-decoration: none;
+}
+.cx4-row .ap4-k b,
+.cx4-mode .ap4-k b {
+  display: block;
+  font-weight: 500;
+}
+.cx4-row .ap4-k small,
+.cx4-mode .ap4-k small {
+  display: block;
+  margin-top: 1px;
+  font-size: calc(12.5 * var(--ws-type-px));
+  line-height: 1.4;
+  color: var(--ap4-muted);
+}
+.cx4-row[aria-selected='true'] {
+  background: var(--cx4-selected);
+}
+.cx4-row[aria-selected='true'] .ap4-k small {
+  color: var(--cx4-muted-strong);
+}
+.cx4-row[aria-selected='true'] .ap4-chev {
+  color: var(--ap4-text);
+}
+.cx4 .ap4-row:focus-visible {
+  outline-offset: -2px;
+  border-radius: 0;
+}
+/* Quiet lines: the way to Connected apps while none is listed, and who it works with. */
+.cx4-quiet {
+  margin: calc(10 * var(--ws-px)) calc(4 * var(--ws-px)) 0;
+  font-size: calc(12.5 * var(--ws-type-px));
+  line-height: 1.5;
+  color: var(--cx4-muted-strong);
+}
+p.cx4-connected {
+  margin-top: calc(24 * var(--ws-px));
+}
+/* An inline text button with a 44 px tall hit area that keeps the line height. */
+.cx4-link {
+  display: inline-block;
+  margin: calc(-14 * var(--ws-px)) 0;
+  padding: calc(14 * var(--ws-px)) 0;
+  border: 0;
+  background: none;
+  color: var(--ap4-text);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.cx4-link:hover {
+  text-decoration-thickness: 2px;
+}
+.cx4-dot {
+  background: var(--ap4-ok);
+}
+
+/* The address: the line to copy, then the account row with the mode switch */
+.cx4-code {
+  padding: calc(12 * var(--ws-px)) calc(12 * var(--ws-px)) calc(12 * var(--ws-px))
+    calc(16 * var(--ws-px));
+}
+.cx4 .connect-code {
+  gap: calc(10 * var(--ws-px));
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 0;
+}
+.cx4 .connect-code > code {
+  padding: calc(9 * var(--ws-px)) calc(12 * var(--ws-px));
+  border-radius: calc(9 * var(--ws-px));
+  background: var(--ap4-sunken);
+  font-size: calc(13.5 * var(--ws-type-px));
+  line-height: 1.45;
+  color: var(--ap4-text);
+}
+.cx4 .connect-code.block {
+  align-items: flex-start;
+  border-radius: calc(9 * var(--ws-px));
+  background: var(--ap4-sunken);
+}
+.cx4 .connect-code.block pre {
+  color: var(--ap4-text);
+}
+.cx4 .connect-code.block .connect-copy-button {
+  margin: calc(6 * var(--ws-px));
+}
+.cx4-mode {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(10 * var(--ws-px)) calc(12 * var(--ws-px));
+  min-height: calc(52 * var(--ws-px));
+  padding: calc(10 * var(--ws-px)) calc(16 * var(--ws-px));
+  box-shadow: inset 0 1px 0 var(--ap4-line);
+}
+.cx4-mode .ap4-k {
+  flex: 1 1 calc(200 * var(--ws-px));
+}
+.cx4-seg span {
+  min-height: calc(30 * var(--ws-px));
+  font-size: calc(13 * var(--ws-type-px));
+}
+.cx4-seg input:checked + span {
+  background: var(--ap4-surface);
+  color: var(--ap4-text);
+  font-weight: 500;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 8%);
+}
+:root[data-theme='dark'] .cx4-seg input:checked + span {
+  background: #262c39;
+  box-shadow: none;
+}
+
+/* Buttons in the address and the steps: v4 sizes, one near-black primary */
+.cx4 .button {
+  position: relative;
+  min-height: calc(36 * var(--ws-px));
+  padding: 0 calc(14 * var(--ws-px));
+  border-radius: calc(10 * var(--ws-px));
+  font-size: calc(13.5 * var(--ws-type-px));
+  font-weight: 500;
+}
+/* A full-size tap area around the 36 px buttons. */
+.cx4 .button::after {
+  position: absolute;
+  inset: calc(-4 * var(--ws-px)) 0;
+  content: '';
+}
+.cx4 .button.secondary {
+  background: var(--ap4-surface);
+  border: 1px solid var(--ap4-line);
+  box-shadow: var(--ap4-shadow-s);
+  color: var(--ap4-text);
+}
+.cx4 .button.secondary:hover {
+  background: var(--ap4-sunken);
+}
+.cx4 .button.primary {
+  background: var(--ap4-ink);
+  border: 1px solid var(--ap4-ink);
+  color: var(--ap4-ink-text);
+}
+.cx4 .button.primary:hover {
+  opacity: 0.88;
+}
+.cx4 .connect-copy-button {
+  min-width: calc(72 * var(--ws-px));
+}
+.cx4 .connect-copy-button[data-copied] {
+  border-color: var(--ap4-ok);
+  color: var(--ap4-ok);
+}
+.cx4 .connect-copy-error {
+  flex-basis: 100%;
+  padding: calc(8 * var(--ws-px)) calc(12 * var(--ws-px));
+  border-radius: calc(8 * var(--ws-px));
+  background: rgb(220 38 38 / 8%);
+  font-size: calc(12.5 * var(--ws-type-px));
+  color: var(--ap4-bad);
+}
+.cx4 .connect-code:has(.connect-copy-error) {
+  flex-wrap: wrap;
+}
+
+/* The chosen AI's steps */
+.cx4-panel {
+  min-width: 0;
+  padding: calc(18 * var(--ws-px));
+  border-radius: var(--cx4-r);
+  background: var(--ap4-surface);
+  box-shadow: var(--ap4-shadow-s);
+}
+.cx4-panel[hidden] {
+  display: none;
+}
+.cx4 .cx-panel-head h3 {
+  color: var(--ap4-text);
+}
+.cx4 .cx-pill {
+  background: var(--ap4-sunken);
+  color: var(--cx4-muted-strong);
+}
+.cx4 .connect-steps,
+.cx4 .connect-steps strong {
+  color: var(--ap4-text);
+}
+.cx4 .connect-steps > li::before {
+  background: var(--ap4-sunken);
+  color: var(--cx4-muted-strong);
+}
+.cx4 .connect-steps .connect-code {
+  margin-top: calc(8 * var(--ws-px));
+}
+.cx4 .connect-note {
+  font-size: calc(12.5 * var(--ws-type-px));
+  line-height: 1.5;
+  color: var(--ap4-muted);
+}
+.cx4 .connect-note strong {
+  color: var(--ap4-text);
+}
+.cx4 .connect-alt {
+  margin-bottom: calc(12 * var(--ws-px));
+}
+.cx4 .connect-alt > .connect-note {
+  margin: 0;
+}
+.cx4 .connect-actions {
+  gap: calc(8 * var(--ws-px));
+  margin-top: calc(14 * var(--ws-px));
+}
+.cx4 .connect-manual {
+  margin-top: calc(14 * var(--ws-px));
+  padding-top: calc(4 * var(--ws-px));
+  border-top: 1px solid var(--ap4-line);
+}
+.cx4 .connect-manual summary {
+  min-height: calc(40 * var(--ws-px));
+  color: var(--ap4-muted);
+}
+.cx4 .connect-manual summary:hover {
+  color: var(--ap4-text);
+}
+.cx4 .connect-local p {
+  color: var(--ap4-muted);
+}
+
+@container (max-width: 520px) {
+  .cx4-seg {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    width: 100%;
+  }
+  .cx4-seg span {
+    justify-content: center;
+  }
+  /* Phones: 44 px touch targets, as everywhere in the workspace. */
+  .cx4 .button,
+  .cx4-seg span,
+  .cx4 .connect-manual summary {
+    min-height: 44px;
+  }
+  .cx4 .connect-actions .button {
+    flex: 1 1 100%;
+  }
+  .cx4-panel {
+    padding: calc(16 * var(--ws-px));
+  }
+}

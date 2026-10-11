@@ -148,12 +148,27 @@ export async function overlayPresence(
   workspace: Workspace,
 ): Promise<void> {
   if (!workspace.agents.some((agent) => agent.mode === 'external')) return;
-  const rows = (
-    await tx.query<PresenceRow>(
-      'SELECT agent_id,last_seen_at,sequence FROM agent_presence WHERE operator_id=$1',
-      [operatorId],
-    )
-  ).rows;
+  applyPresence(
+    workspace,
+    (
+      await tx.query<PresenceRow>(
+        'SELECT agent_id,last_seen_at,sequence FROM agent_presence WHERE operator_id=$1',
+        [operatorId],
+      )
+    ).rows,
+  );
+}
+
+/** The presence rows of a workspace as one JSON array (`$1` is the operator id). */
+export const PRESENCE_JSON_SQL = `(SELECT COALESCE(json_agg(json_build_object('agent_id',p.agent_id,
+  'last_seen_at',p.last_seen_at,'sequence',p.sequence)),'[]'::json)
+  FROM agent_presence p WHERE p.operator_id=$1)`;
+
+/** Applies presence rows (as overlayPresence reads them) to the workspace's external agents. */
+export function applyPresence(
+  workspace: Workspace,
+  rows: Pick<PresenceRow, 'agent_id' | 'last_seen_at' | 'sequence'>[],
+): void {
   if (!rows.length) return;
   const byId = new Map(rows.map((row) => [row.agent_id, row]));
   for (const agent of workspace.agents) {

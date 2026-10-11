@@ -9,7 +9,7 @@
       "type": "string",
       "format": "uuid",
       "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-      "description": "Recipient agent in the same workspace."
+      "description": "Recipient agent (same workspace or an approved connection), or with room_id any member id of that room (an AI or a person)."
     },
     "text": {
       "description": "Shorthand for parts: [{type: \"text\", text}].",
@@ -63,6 +63,13 @@
       "type": "string",
       "format": "uuid",
       "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "room_id": {
+      "description": "Message a member of this room privately (id or slug): allowed while both are in the room, without a connection. One thread per pair; context_id is not accepted. A reply_to of a private room message implies its room.",
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9-]+$"
     },
     "idempotency_key": {
       "type": "string",

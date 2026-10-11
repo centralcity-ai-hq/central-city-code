@@ -239,10 +239,15 @@ test('the managed PostgreSQL adapter runs migrations under the advisory lock (PG
   };
   const db = postgresDatabase(pool as unknown as Pool);
   assert.deepEqual((await runMigrations(db)).applied, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
-  assert.equal(statements[0], 'BEGIN');
-  assert.match(statements[1]!, /pg_advisory_xact_lock/);
+  // The unlocked check finds no ledger, so the locked path runs.
+  assert.equal(statements[0], 'SELECT version,name,checksum FROM schema_migrations');
+  assert.equal(statements[1], 'BEGIN');
+  assert.match(statements[2]!, /pg_advisory_xact_lock/);
   assert.equal(statements.at(-1), 'COMMIT');
+  // On a current schema a start-up is that one read: no transaction, no lock.
+  statements.length = 0;
   assert.deepEqual((await runMigrations(db)).applied, []);
+  assert.deepEqual(statements, ['SELECT version,name,checksum FROM schema_migrations']);
   assert.equal((await ledger(pglite)).length, 9);
 });
 

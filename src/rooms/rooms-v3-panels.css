@@ -1,0 +1,2237 @@
+/*
+ * Workspace v3: the room's side panels (Tasks, Members, Search) and sheets (New room, Join a
+ * room, Invite, Room settings). docs/design/WORKSPACE_V3.md §4.5 and §4.6, in the language of
+ * docs/design/workspace-v3-mockup.html.
+ *
+ * Imported last (RoomsApp.tsx), so at equal specificity these rules win over the v2 rules they
+ * restyle. Every rule starts from a v3 root:
+ *   panels  .rm-app .rm-v3-panel.rm-panel
+ *   sheets  .rm-app .rm-v3-sheet.rm-sheet (inside .rm-app .rm-backdrop.rm-v3-scrim)
+ * Sizes are design pixels times --ws-px / --ws-type-px (the workspace is drawn 10% smaller; on
+ * phones and touch screens --ws-px is 1px, so targets stay 44px and fields 16px). Colours are the
+ * v3 tokens from rooms-v2.css. Motion 150 to 250 ms, off under prefers-reduced-motion.
+ */
+
+/* ===== Shared: header, round close, buttons, fields, switch ===== */
+
+/* Muted text on the inset fill (tabs, placeholders): a shade darker than --text-muted, which is
+   4.40:1 on --bg-inset in light; this mix stays above 4.5:1 in light and dark. */
+.rm-app :is(.rm-v3-panel, .rm-v3-sheet) {
+  --rm-v3-muted-on-inset: color-mix(in srgb, var(--text-muted) 80%, var(--text-primary));
+}
+
+.rm-app :is(.rm-v3-panel.rm-panel, .rm-v3-sheet.rm-sheet) .rm-v3-head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(12 * var(--ws-px));
+  min-width: 0;
+  margin: 0;
+}
+.rm-app :is(.rm-v3-panel.rm-panel, .rm-v3-sheet.rm-sheet) .rm-v3-head-titles {
+  display: grid;
+  gap: calc(2 * var(--ws-px));
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.rm-app :is(.rm-v3-panel.rm-panel, .rm-v3-sheet.rm-sheet) .rm-v3-head h2 {
+  display: flex;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+  min-width: 0;
+  margin: 0;
+  color: var(--text);
+  font: 600 calc(18 * var(--ws-type-px)) / calc(24 * var(--ws-type-px)) var(--font-sans);
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+.rm-app :is(.rm-v3-panel.rm-panel, .rm-v3-sheet.rm-sheet) .rm-v3-head .rm-v2-subtitle {
+  margin: 0;
+  color: var(--text-muted);
+  font: 400 max(12px, calc(13 * var(--ws-type-px))) / calc(18 * var(--ws-type-px)) var(--font-sans);
+}
+.rm-app .rm-v3-head-count {
+  padding: calc(2 * var(--ws-px)) calc(8 * var(--ws-px));
+  border-radius: 999px;
+  background: var(--bg-inset);
+  color: var(--text-secondary);
+  font: 600 12px/16px var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+.rm-app .rm-v3-close {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: calc(32 * var(--ws-px));
+  height: calc(32 * var(--ws-px));
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--bg-inset);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition:
+    background-color 150ms ease-out,
+    color 150ms ease-out;
+}
+/* The visible circle is 32px; the hit area is 44px. */
+.rm-app .rm-v3-close::after {
+  content: '';
+  position: absolute;
+  inset: calc(-6 * var(--ws-px));
+  border-radius: 50%;
+}
+.rm-app .rm-v3-close:hover {
+  background: var(--bg-surface-active);
+  color: var(--text);
+}
+.rm-app .rm-v3-close:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* Buttons: 999px pills. Primary is the deeper blue (--primary) so white text stays at AA. */
+.rm-app .rm-v3-btn {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: calc(8 * var(--ws-px));
+  height: calc(42 * var(--ws-px));
+  min-height: 0;
+  padding: 0 calc(18 * var(--ws-px));
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font: 600 calc(14 * var(--ws-type-px)) / 1 var(--font-sans);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 150ms ease-out,
+    border-color 150ms ease-out,
+    box-shadow 150ms ease-out,
+    transform 150ms ease-out;
+}
+.rm-app .rm-v3-btn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+.rm-app .rm-v3-btn:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.rm-app .rm-v3-btn:disabled {
+  opacity: 0.45;
+  box-shadow: none;
+  cursor: not-allowed;
+}
+.rm-app .rm-v3-btn-primary {
+  background: var(--primary);
+  color: var(--on-primary);
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--primary) 28%, transparent);
+}
+.rm-app .rm-v3-btn-primary:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+.rm-app .rm-v3-btn-ghost {
+  border-color: var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+.rm-app .rm-v3-btn-ghost:hover:not(:disabled) {
+  border-color: var(--accent-border);
+  background: var(--bg-inset);
+}
+.rm-app .rm-v3-btn-sm {
+  height: calc(34 * var(--ws-px));
+  padding: 0 calc(14 * var(--ws-px));
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+}
+.rm-app .rm-v3-btn-block {
+  width: 100%;
+}
+.rm-app .rm-v3-btn-count {
+  padding: 1px calc(7 * var(--ws-px));
+  border-radius: 999px;
+  background: var(--bg-inset);
+  color: var(--text-secondary);
+  font: 600 12px/16px var(--font-sans);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Fields: 14px radius, the inset fill, a quiet border that turns accent on focus. */
+.rm-app :is(.rm-v3-panel.rm-panel, .rm-v3-sheet.rm-sheet) .rm-input {
+  width: 100%;
+  min-height: calc(44 * var(--ws-px));
+  padding: 0 calc(14 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(14 * var(--ws-px));
+  background: var(--bg-inset);
+  color: var(--text);
+  font: 400 calc(15 * var(--ws-type-px)) / calc(22 * var(--ws-type-px)) var(--font-sans);
+  transition:
+    border-color 150ms ease-out,
+    box-shadow 150ms ease-out;
+}
+.rm-app :is(.rm-v3-panel.rm-panel, .rm-v3-sheet.rm-sheet) textarea.rm-input {
+  padding: calc(12 * var(--ws-px)) calc(14 * var(--ws-px));
+}
+.rm-app :is(.rm-v3-panel.rm-panel, .rm-v3-sheet.rm-sheet) .rm-input::placeholder {
+  color: var(--rm-v3-muted-on-inset);
+}
+.rm-app :is(.rm-v3-panel.rm-panel, .rm-v3-sheet.rm-sheet) .rm-input:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.rm-app :is(.rm-v3-panel.rm-panel, .rm-v3-sheet.rm-sheet) .rm-input:disabled {
+  opacity: 0.6;
+}
+.rm-app :is(.rm-v3-panel.rm-panel, .rm-v3-sheet.rm-sheet) .rm-field {
+  display: grid;
+  gap: calc(6 * var(--ws-px));
+  color: var(--text);
+  font: 600 max(12px, calc(13 * var(--ws-type-px))) / calc(18 * var(--ws-type-px)) var(--font-sans);
+}
+.rm-app :is(.rm-v3-panel.rm-panel, .rm-v3-sheet.rm-sheet) .rm-field > span {
+  font: inherit;
+}
+
+/* The on/off switch: a native checkbox drawn as a 42 x 24 track (PanelV3.tsx SwitchRow). */
+.rm-app .rm-v3-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(14 * var(--ws-px));
+  min-height: calc(44 * var(--ws-px));
+  color: var(--text);
+  font: 500 calc(14 * var(--ws-type-px)) / calc(20 * var(--ws-type-px)) var(--font-sans);
+  cursor: pointer;
+}
+.rm-app .rm-v3-switch-text {
+  display: grid;
+  gap: calc(2 * var(--ws-px));
+  min-width: 0;
+}
+.rm-app .rm-v3-switch-hint {
+  color: var(--text-muted);
+  font: 400 max(12px, calc(12.5 * var(--ws-type-px))) / calc(18 * var(--ws-type-px))
+    var(--font-sans);
+}
+.rm-app input.rm-v3-switch {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  flex: none;
+  width: calc(42 * var(--ws-px));
+  height: calc(24 * var(--ws-px));
+  margin: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--border-strong);
+  cursor: pointer;
+  transition: background-color 200ms ease-out;
+}
+.rm-app input.rm-v3-switch::after {
+  content: '';
+  position: absolute;
+  top: calc(3 * var(--ws-px));
+  left: calc(3 * var(--ws-px));
+  width: calc(18 * var(--ws-px));
+  height: calc(18 * var(--ws-px));
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  transition: transform 200ms var(--motion-ease-out);
+}
+.rm-app input.rm-v3-switch:checked {
+  background: var(--primary);
+}
+.rm-app input.rm-v3-switch:checked::after {
+  transform: translateX(calc(18 * var(--ws-px)));
+}
+.rm-app input.rm-v3-switch:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.rm-app input.rm-v3-switch:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+/* Empty states and the footnote. */
+.rm-app :is(.rm-v3-panel.rm-panel, .rm-v3-sheet.rm-sheet) .rm-v3-empty {
+  display: grid;
+  gap: calc(4 * var(--ws-px));
+  margin: 0;
+  padding: calc(36 * var(--ws-px)) calc(16 * var(--ws-px));
+  color: var(--text-muted);
+  font: 400 calc(14 * var(--ws-type-px)) / calc(20 * var(--ws-type-px)) var(--font-sans);
+  text-align: center;
+}
+.rm-app :is(.rm-v3-panel.rm-panel, .rm-v3-sheet.rm-sheet) .rm-v3-empty strong {
+  color: var(--text);
+  font: 600 calc(16 * var(--ws-type-px)) / calc(22 * var(--ws-type-px)) var(--font-sans);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-note {
+  margin: 0;
+  padding: calc(6 * var(--ws-px));
+  color: var(--text-muted);
+  font: 400 max(12px, calc(12.5 * var(--ws-type-px))) / calc(18 * var(--ws-type-px))
+    var(--font-sans);
+  text-align: center;
+}
+
+/* ===== Panel shell: 360px on the right, full room height; full screen under 900px ===== */
+
+.rm-app .rm-v3-panel.rm-panel {
+  position: relative;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-self: stretch;
+  gap: 0;
+  width: calc(360 * var(--ws-px));
+  min-width: 0;
+  min-height: 0;
+  max-height: none;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-left: 1px solid var(--border);
+  border-radius: 0;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: none;
+  animation: rm-v3-fade-in 180ms var(--motion-ease-out) both;
+}
+.rm-app .rm-v3-panel.rm-panel > .rm-v3-head {
+  padding: calc(18 * var(--ws-px)) calc(20 * var(--ws-px));
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.rm-app .rm-v3-panel.rm-panel > .rm-v3-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: calc(16 * var(--ws-px));
+  min-height: 0;
+  padding: calc(16 * var(--ws-px)) calc(20 * var(--ws-px));
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.rm-app .rm-v3-panel.rm-panel > .rm-v3-foot {
+  flex: none;
+  padding: calc(12 * var(--ws-px)) calc(20 * var(--ws-px)) calc(16 * var(--ws-px));
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-inline-error {
+  margin: 0;
+}
+
+@media (max-width: 899px) {
+  .rm-app .rm-v3-panel.rm-panel {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    width: auto;
+    max-width: none;
+    max-height: none;
+    border: 0;
+    border-radius: 0;
+  }
+  .rm-app .rm-v3-panel.rm-panel > .rm-v3-head {
+    padding: calc(12 * var(--ws-px)) calc(16 * var(--ws-px));
+  }
+  .rm-app .rm-v3-panel.rm-panel > .rm-v3-body {
+    padding: calc(16 * var(--ws-px));
+  }
+  .rm-app .rm-v3-panel.rm-panel > .rm-v3-foot {
+    padding: calc(12 * var(--ws-px)) calc(16 * var(--ws-px))
+      max(calc(16 * var(--ws-px)), env(safe-area-inset-bottom));
+  }
+}
+
+/* ===== Tasks panel ===== */
+
+/* Stage tabs: one pill that scrolls sideways (fading where tabs continue), wrapping on phones. */
+.rm-app .rm-v3-panel.rm-panel .rm-v3-tabs {
+  display: flex;
+  flex: none;
+  flex-wrap: nowrap;
+  gap: calc(4 * var(--ws-px));
+  width: max-content;
+  max-width: 100%;
+  padding: calc(4 * var(--ws-px));
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  border-radius: 999px;
+  background: var(--bg-inset);
+  scrollbar-width: none;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-tabs::-webkit-scrollbar {
+  display: none;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-tabs[data-fade='end'] {
+  mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent 100%);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-tabs[data-fade='start'] {
+  mask-image: linear-gradient(to left, #000 calc(100% - 32px), transparent 100%);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-tabs[data-fade='both'] {
+  mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 32px,
+    #000 calc(100% - 32px),
+    transparent 100%
+  );
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-tab {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: calc(6 * var(--ws-px));
+  height: calc(34 * var(--ws-px));
+  padding: 0 calc(12 * var(--ws-px));
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--rm-v3-muted-on-inset);
+  font: 600 calc(13.5 * var(--ws-type-px)) / 1 var(--font-sans);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 150ms ease-out,
+    color 150ms ease-out,
+    box-shadow 150ms ease-out;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-tab:hover {
+  color: var(--text);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-tab[aria-pressed='true'] {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-float-sm);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-tab:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-tab-count {
+  color: var(--rm-v3-muted-on-inset);
+  font: 600 max(11px, calc(12 * var(--ws-type-px))) / 1 var(--font-sans);
+  font-variant-numeric: tabular-nums;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-tab[aria-pressed='true'] .rm-v3-tab-count {
+  color: var(--text-muted);
+}
+
+@media (max-width: 599px) {
+  .rm-app .rm-v3-panel.rm-panel .rm-v3-tabs {
+    flex-wrap: wrap;
+    width: auto;
+    overflow-x: visible;
+    border-radius: calc(20 * var(--ws-px));
+    mask-image: none;
+  }
+}
+
+/* Task cards: the title opens the task, and the whole card is its hit area. */
+.rm-app .rm-v3-panel.rm-panel .rm-v3-task-list {
+  display: grid;
+  flex: none;
+  gap: calc(12 * var(--ws-px));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-task {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: calc(10 * var(--ws-px));
+  min-width: 0;
+  padding: calc(14 * var(--ws-px)) calc(16 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(18 * var(--ws-px));
+  background: var(--surface);
+  transition:
+    border-color 150ms ease-out,
+    box-shadow 150ms ease-out;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-task:hover {
+  border-color: var(--accent-border);
+  box-shadow: var(--shadow-float-sm);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-task:has(.rm-v3-task-open:focus-visible) {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-task-top {
+  display: flex;
+  align-items: flex-start;
+  gap: calc(8 * var(--ws-px));
+  min-width: 0;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-number {
+  flex: none;
+  padding-top: calc(2 * var(--ws-px));
+  color: var(--text-muted);
+  font: 600 max(12px, calc(12.5 * var(--ws-type-px))) / calc(20 * var(--ws-type-px))
+    var(--font-sans);
+  font-variant-numeric: tabular-nums;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-task-open {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-task-open::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: calc(18 * var(--ws-px));
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-task-open:focus-visible {
+  outline: none;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-card-title {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--text);
+  font: 600 calc(15 * var(--ws-type-px)) / calc(21 * var(--ws-type-px)) var(--font-sans);
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+/* Buttons on the card sit above the card's hit area. */
+.rm-app .rm-v3-panel.rm-panel .rm-v3-task-pin,
+.rm-app .rm-v3-panel.rm-panel .rm-v3-task-actions {
+  position: relative;
+  z-index: 1;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-task-pin {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: calc(32 * var(--ws-px));
+  height: calc(32 * var(--ws-px));
+  margin: calc(-6 * var(--ws-px)) calc(-6 * var(--ws-px)) 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background-color 150ms ease-out;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-task-pin:hover {
+  background: var(--bg-inset);
+  color: var(--text);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-task-pin:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-task-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(6 * var(--ws-px));
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-task-actions .rm-v3-btn-sm {
+  padding: 0 calc(12 * var(--ws-px));
+}
+
+/* Stage pills: the flow, with the current stage highlighted (green when done, amber while in
+   progress, accent otherwise). */
+.rm-app .rm-v3-panel.rm-panel .rm-v3-stages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(4 * var(--ws-px));
+  min-width: 0;
+}
+.rm-app .rm-v3-panel.rm-panel :is(.rm-v3-stage, .rm-v2-pill) {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(4 * var(--ws-px));
+  min-height: 0;
+  height: auto;
+  padding: calc(2 * var(--ws-px)) calc(8 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font: 600 max(11px, calc(12 * var(--ws-type-px))) / calc(18 * var(--ws-type-px)) var(--font-sans);
+  white-space: nowrap;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-pill {
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-pill[data-tone='accent'] {
+  border-color: var(--status-warn-line);
+  background: var(--status-warn-bg);
+  color: var(--status-warn);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-pill[data-tone='done'] {
+  border-color: color-mix(in srgb, var(--status-live) 30%, transparent);
+  background: var(--status-live-bg);
+  color: var(--status-live);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-pill[data-tone='muted'] {
+  border-color: var(--border);
+  background: var(--bg-inset);
+  color: var(--text-secondary);
+}
+
+/* Claimed by: avatar (AI rounded square, person round), name, AI badge. */
+.rm-app .rm-v3-panel.rm-panel .rm-v2-claimer {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+  min-width: 0;
+  max-width: 100%;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-avatar {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: calc(24 * var(--ws-px));
+  height: calc(24 * var(--ws-px));
+  border-radius: calc(7 * var(--ws-px));
+  font: 700 11px/1 var(--font-sans);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-avatar[data-kind='person'] {
+  border-radius: 50%;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-claimer-name,
+.rm-app .rm-v3-panel.rm-panel .rm-v2-unclaimed {
+  overflow: hidden;
+  color: var(--text-muted);
+  font: 400 max(12px, calc(13 * var(--ws-type-px))) / calc(18 * var(--ws-type-px)) var(--font-sans);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Progress: a thin track with a green fill. */
+.rm-app .rm-v3-panel.rm-panel .rm-v3-progress {
+  display: block;
+  flex: none;
+  height: calc(8 * var(--ws-px));
+  overflow: hidden;
+  border-radius: calc(4 * var(--ws-px));
+  background: var(--border);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-progress > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--status-live);
+  transition: width 250ms var(--motion-ease-out);
+}
+
+/* New task form (Start from, title, details). */
+.rm-app .rm-v3-panel.rm-panel .rm-task-form {
+  display: grid;
+  flex: none;
+  gap: calc(12 * var(--ws-px));
+  padding: calc(16 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(18 * var(--ws-px));
+  background: var(--surface);
+  box-shadow: var(--shadow-float-sm);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-task-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(8 * var(--ws-px));
+}
+
+/* Buttons inside the form and the task detail: v3 pills. */
+.rm-app .rm-v3-panel.rm-panel :is(.rm-task, .rm-task-form, .rm-leave, .rm-inline-error) .rm-primary,
+.rm-app .rm-v3-panel.rm-panel :is(.rm-task, .rm-task-form, .rm-leave, .rm-inline-error) .rm-quiet,
+.rm-app .rm-v3-panel.rm-panel :is(.rm-task, .rm-task-form) .rm-danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(6 * var(--ws-px));
+  min-height: calc(34 * var(--ws-px));
+  padding: 0 calc(14 * var(--ws-px));
+  border-radius: 999px;
+  font: 600 max(12px, calc(13 * var(--ws-type-px))) / 1 var(--font-sans);
+}
+.rm-app .rm-v3-panel.rm-panel :is(.rm-task, .rm-task-form) .rm-primary {
+  border: 1px solid transparent;
+  background: var(--primary);
+  color: var(--on-primary);
+}
+.rm-app .rm-v3-panel.rm-panel :is(.rm-task, .rm-task-form, .rm-leave) .rm-quiet {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+.rm-app
+  .rm-v3-panel.rm-panel
+  :is(.rm-task, .rm-task-form, .rm-leave)
+  .rm-quiet:hover:not(:disabled) {
+  background: var(--bg-inset);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-leave .rm-quiet.danger {
+  color: var(--error);
+}
+
+/* Task detail: back, title, then the stage pills, claimer and progress in one card. */
+.rm-app .rm-v3-panel.rm-panel > .rm-v3-detail-head {
+  align-items: flex-start;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-back {
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  gap: calc(6 * var(--ws-px));
+  height: calc(30 * var(--ws-px));
+  margin: 0 0 calc(6 * var(--ws-px));
+  padding: 0 calc(12 * var(--ws-px)) 0 calc(8 * var(--ws-px));
+  border: 0;
+  border-radius: 999px;
+  background: var(--bg-inset);
+  color: var(--text-secondary);
+  font: 600 max(12px, calc(13 * var(--ws-type-px))) / 1 var(--font-sans);
+  cursor: pointer;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-back:hover {
+  color: var(--text);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-back:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-head h2.rm-v2-detail-title {
+  display: block;
+  font-size: calc(17 * var(--ws-type-px));
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v3-detail-meta {
+  display: grid;
+  flex: none;
+  gap: calc(10 * var(--ws-px));
+  padding: calc(14 * var(--ws-px)) calc(16 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(18 * var(--ws-px));
+}
+.rm-app .rm-v3-panel.rm-panel .rm-task {
+  display: grid;
+  gap: calc(12 * var(--ws-px));
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-task > .rm-meta {
+  margin: 0;
+  color: var(--text-muted);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-task > .rm-quiet {
+  justify-self: start;
+}
+
+/* ===== Members panel ===== */
+
+.rm-app .rm-v3-panel.rm-panel.rm-v2-members {
+  width: calc(360 * var(--ws-px));
+}
+/* The search stays at the top of the scrolling body. */
+.rm-app .rm-v3-panel.rm-panel .rm-v2-members-search {
+  position: sticky;
+  top: calc(-16 * var(--ws-px));
+  z-index: 2;
+  display: flex;
+  flex: none;
+  align-items: center;
+  margin: calc(-16 * var(--ws-px)) calc(-20 * var(--ws-px)) 0;
+  padding: calc(16 * var(--ws-px)) calc(20 * var(--ws-px)) calc(4 * var(--ws-px));
+  background: var(--surface);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-members-search :is(.rm-v2-kbd, .rm-v2-spinner) {
+  right: calc(32 * var(--ws-px));
+  background: var(--surface);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-members-search .rm-input {
+  padding-left: calc(40 * var(--ws-px));
+  padding-right: calc(56 * var(--ws-px));
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-search-icon {
+  position: absolute;
+  left: calc(34 * var(--ws-px));
+  color: var(--text-muted);
+  pointer-events: none;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-member-group {
+  display: grid;
+  gap: calc(2 * var(--ws-px));
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-group-title,
+.rm-app .rm-v3-panel.rm-panel .rm-left > h3 {
+  display: flex;
+  align-items: center;
+  gap: calc(6 * var(--ws-px));
+  margin: 0 0 calc(4 * var(--ws-px));
+  color: var(--text-muted);
+  font: 600 max(11px, calc(11.5 * var(--ws-type-px))) / calc(16 * var(--ws-type-px))
+    var(--font-sans);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-group-count {
+  color: var(--text-muted);
+  font: inherit;
+  letter-spacing: 0;
+}
+.rm-app .rm-v3-panel.rm-panel :is(.rm-v2-member-list, .rm-left .rm-members) {
+  display: block;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.rm-app .rm-v3-panel.rm-panel :is(.rm-v2-member-list, .rm-left .rm-members) > li + li {
+  border-top: 1px solid var(--border);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-member {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(12 * var(--ws-px));
+  min-width: 0;
+  padding: calc(12 * var(--ws-px)) calc(2 * var(--ws-px));
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-member + .rm-v2-member {
+  border-top: 1px solid var(--border);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-member:hover {
+  border-color: var(--border);
+  background: none;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-member .rm-avatar {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: calc(34 * var(--ws-px));
+  height: calc(34 * var(--ws-px));
+  border-radius: calc(10 * var(--ws-px));
+  font: 700 calc(14 * var(--ws-type-px)) / 1 var(--font-sans);
+  box-shadow: 0 0 0 2px var(--surface);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-member .rm-avatar[data-kind='person'] {
+  border-radius: 50%;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-member-name {
+  font: 600 calc(14.5 * var(--ws-type-px)) / calc(20 * var(--ws-type-px)) var(--font-sans);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-mbadge {
+  padding: 1px calc(7 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(7 * var(--ws-px));
+  background: var(--bg-inset);
+  color: var(--text-secondary);
+  font: 600 max(11px, calc(11.5 * var(--ws-type-px))) / calc(16 * var(--ws-type-px))
+    var(--font-sans);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-mbadge[data-kind='elric'] {
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-member-activity {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(6 * var(--ws-px));
+  justify-self: start;
+  max-width: 100%;
+  color: var(--text-muted);
+  font: 400 max(12px, calc(12.5 * var(--ws-type-px))) / calc(18 * var(--ws-type-px))
+    var(--font-sans);
+}
+/* Active now (the header badge's rule): a green status pill. */
+.rm-app .rm-v3-panel.rm-panel .rm-v2-member-activity[data-active] {
+  margin-top: calc(2 * var(--ws-px));
+  padding: calc(2 * var(--ws-px)) calc(10 * var(--ws-px));
+  border-radius: 999px;
+  background: var(--status-live-bg);
+  color: var(--status-live);
+  font-weight: 600;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-member-activity-text {
+  white-space: normal;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-member-activity[data-active] .rm-v2-member-dot {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-live) 18%, transparent);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-member-actions {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: calc(6 * var(--ws-px));
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-dm {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: calc(6 * var(--ws-px));
+  height: calc(34 * var(--ws-px));
+  min-height: 0;
+  padding: 0 calc(14 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  font: 600 max(12px, calc(13 * var(--ws-type-px))) / 1 var(--font-sans);
+  text-decoration: none;
+  transition:
+    background-color 150ms ease-out,
+    border-color 150ms ease-out;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-dm:hover {
+  border-color: var(--accent-border);
+  background: var(--bg-inset);
+}
+/* The pill is 34px; its hit area reaches 44px. */
+.rm-app .rm-v3-panel.rm-panel .rm-v2-dm::after,
+.rm-app .rm-v3-panel.rm-panel .rm-v2-row-menu-btn::after {
+  content: '';
+  position: absolute;
+  inset: calc(-5 * var(--ws-px)) -2px;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-row-menu-btn {
+  position: relative;
+  width: calc(34 * var(--ws-px));
+  height: calc(34 * var(--ws-px));
+  border: 1px solid transparent;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-muted);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-row-menu-btn:hover,
+.rm-app .rm-v3-panel.rm-panel .rm-v2-row-menu-btn[aria-expanded='true'] {
+  border-color: var(--border);
+  background: var(--bg-inset);
+  color: var(--text);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-row-menu-list {
+  border: 1px solid var(--border);
+  border-radius: calc(14 * var(--ws-px));
+  background: var(--surface);
+  box-shadow: var(--shadow-elevated);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-members-note {
+  margin: 0;
+  color: var(--text-muted);
+  font: 400 max(12px, calc(13 * var(--ws-type-px))) / calc(18 * var(--ws-type-px)) var(--font-sans);
+  text-align: center;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-v2-more {
+  border-radius: 999px;
+}
+/* Recently left: listed only, as plain rows. */
+.rm-app .rm-v3-panel.rm-panel .rm-left {
+  display: grid;
+  gap: calc(2 * var(--ws-px));
+}
+.rm-app .rm-v3-panel.rm-panel .rm-left .rm-members li {
+  padding: calc(10 * var(--ws-px)) calc(2 * var(--ws-px));
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-left .rm-members li + li {
+  border-top: 1px solid var(--border);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-left .rm-members li > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: calc(8 * var(--ws-px));
+}
+.rm-app .rm-v3-panel.rm-panel .rm-left .rm-members strong {
+  color: var(--text);
+  font: 500 calc(14 * var(--ws-type-px)) / calc(20 * var(--ws-type-px)) var(--font-sans);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-left .rm-members .rm-meta {
+  color: var(--text-muted);
+}
+/* Removed: like Recently left, with the Allow back in button (or its confirm) on the row. */
+.rm-app .rm-v3-panel.rm-panel .rm-removed .rm-members li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+}
+.rm-app .rm-v3-panel.rm-panel .rm-removed .rm-members li > div:first-child {
+  flex: 1 1 16ch;
+  min-width: 0;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-removed .rm-members li > .rm-quiet {
+  flex: none;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-removed .rm-members li > .rm-confirm {
+  flex: 1 1 100%;
+}
+@media (max-width: 899px) {
+  .rm-app .rm-v3-panel.rm-panel .rm-v2-members-search {
+    margin: calc(-16 * var(--ws-px)) calc(-16 * var(--ws-px)) 0;
+    padding: calc(16 * var(--ws-px)) calc(16 * var(--ws-px)) calc(4 * var(--ws-px));
+  }
+  .rm-app .rm-v3-panel.rm-panel .rm-v2-search-icon {
+    left: calc(30 * var(--ws-px));
+  }
+  .rm-app .rm-v3-panel.rm-panel .rm-v2-members-search :is(.rm-v2-kbd, .rm-v2-spinner) {
+    right: calc(28 * var(--ws-px));
+  }
+}
+@media (max-width: 599px) {
+  .rm-app .rm-v3-panel.rm-panel.rm-v2-members {
+    width: auto;
+    max-width: none;
+  }
+  .rm-app .rm-v3-panel.rm-panel .rm-v2-member {
+    gap: calc(10 * var(--ws-px));
+    padding: calc(12 * var(--ws-px)) 0;
+  }
+}
+
+/* ===== Search panel ===== */
+
+.rm-app .rm-v3-panel.rm-panel .rm-search-form {
+  display: grid;
+  flex: none;
+  gap: calc(10 * var(--ws-px));
+}
+.rm-app .rm-v3-panel.rm-panel .rm-search-box > svg {
+  left: calc(14 * var(--ws-px));
+  color: var(--text-muted);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-search-box .rm-input {
+  padding-left: calc(40 * var(--ws-px));
+}
+.rm-app .rm-v3-panel.rm-panel .rm-search-filters > summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: calc(32 * var(--ws-px));
+  color: var(--text-muted);
+  font: 600 max(12px, calc(13 * var(--ws-type-px))) / 1 var(--font-sans);
+  cursor: pointer;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-search-filters[open] {
+  padding: calc(12 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(14 * var(--ws-px));
+}
+.rm-app .rm-v3-panel.rm-panel .rm-search-filters .rm-quiet {
+  justify-self: start;
+  border-radius: 999px;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-search-status.rm-meta {
+  margin: 0;
+  color: var(--text-muted);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-search-status.rm-meta:empty {
+  display: none;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-search-empty {
+  display: grid;
+  gap: calc(4 * var(--ws-px));
+  padding: calc(28 * var(--ws-px)) calc(16 * var(--ws-px));
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  text-align: center;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-search-empty strong {
+  color: var(--text);
+  font: 600 calc(16 * var(--ws-type-px)) / calc(22 * var(--ws-type-px)) var(--font-sans);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-search-results {
+  display: grid;
+  gap: calc(8 * var(--ws-px));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-search-result {
+  display: grid;
+  gap: calc(4 * var(--ws-px));
+  padding: calc(12 * var(--ws-px)) calc(14 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(14 * var(--ws-px));
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+  transition:
+    border-color 150ms ease-out,
+    background-color 150ms ease-out;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-search-result:hover {
+  border-color: var(--accent-border);
+  background: var(--bg-inset);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-search-byline strong {
+  font: 600 calc(14 * var(--ws-type-px)) / calc(20 * var(--ws-type-px)) var(--font-sans);
+}
+.rm-app .rm-v3-panel.rm-panel .rm-search-byline time {
+  color: var(--text-muted);
+  font: 400 12px/18px var(--font-sans);
+  font-variant-numeric: tabular-nums;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-search-snippet {
+  color: var(--text-muted);
+  font: 400 calc(14 * var(--ws-type-px)) / calc(21 * var(--ws-type-px)) var(--font-sans);
+  overflow-wrap: anywhere;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-search-snippet mark {
+  padding: 0 2px;
+  border-radius: 4px;
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+.rm-app .rm-v3-panel.rm-panel .rm-search-more {
+  align-self: center;
+  border-radius: 999px;
+}
+
+/* A comment's Delete is quiet: it appears when the comment is hovered or focused (touch and
+   keyboard always show it; reduced motion skips the fade). */
+@media (hover: hover) {
+  .rm-app .rm-v3-panel.rm-panel .rm-comment-delete {
+    opacity: 0;
+    transition: opacity 150ms ease-out;
+  }
+  .rm-app .rm-v3-panel.rm-panel .rm-comment:hover .rm-comment-delete,
+  .rm-app .rm-v3-panel.rm-panel .rm-comment:focus-within .rm-comment-delete {
+    opacity: 1;
+  }
+}
+
+/* ===== Sheets: a centred card on a scrim (also on phones) ===== */
+
+.rm-app .rm-backdrop.rm-v3-scrim {
+  place-items: center;
+  padding: calc(20 * var(--ws-px));
+  background: rgba(9, 13, 22, 0.45);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  animation: rm-v3-fade-in 150ms ease-out both;
+}
+/* Solid scrim when the blur can't or shouldn't run (no backdrop-filter support, or the user
+   asked for less transparency): a touch deeper, so the sheet still lifts off. */
+@supports not ((backdrop-filter: blur(4px)) or (-webkit-backdrop-filter: blur(4px))) {
+  .rm-app .rm-backdrop.rm-v3-scrim {
+    background: rgba(9, 13, 22, 0.6);
+  }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .rm-app .rm-backdrop.rm-v3-scrim {
+    background: rgba(9, 13, 22, 0.6);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+.rm-app .rm-v3-sheet.rm-sheet {
+  display: grid;
+  gap: calc(16 * var(--ws-px));
+  width: min(calc(560 * var(--ws-px)), 100%);
+  max-height: min(90vh, calc(100dvh - 2 * calc(20 * var(--ws-px))));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: calc(22 * var(--ws-px)) calc(24 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(22 * var(--ws-px));
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-elevated);
+  animation: rm-v3-sheet-in 220ms var(--motion-ease-out) both;
+}
+.rm-app .rm-v3-sheet.rm-sheet > .rm-v3-head {
+  margin-bottom: calc(-4 * var(--ws-px));
+}
+.rm-app .rm-v3-sheet.rm-sheet :is(.rm-muted, .rm-meta, .rm-instruction) {
+  margin: 0;
+  color: var(--text-muted);
+  font: 400 calc(14 * var(--ws-type-px)) / calc(21 * var(--ws-type-px)) var(--font-sans);
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-meta {
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-v3-sheet-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: calc(10 * var(--ws-px));
+  margin-top: calc(4 * var(--ws-px));
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-disclosure > summary {
+  border-radius: calc(10 * var(--ws-px));
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-inline-error {
+  margin: 0;
+}
+@media (max-width: 899px) {
+  .rm-app .rm-backdrop.rm-v3-scrim {
+    place-items: center;
+    padding: 16px;
+  }
+  .rm-app .rm-v3-sheet.rm-sheet {
+    width: 100%;
+    max-height: calc(100dvh - 32px);
+    padding: calc(20 * var(--ws-px)) calc(18 * var(--ws-px));
+    border-radius: calc(22 * var(--ws-px));
+  }
+}
+
+/* Invite: the link and Copy invite in one inset row; stacked under 600px. */
+.rm-app .rm-v3-sheet.rm-sheet .rm-v3-snippet {
+  display: flex;
+  align-items: center;
+  gap: calc(10 * var(--ws-px));
+  min-width: 0;
+  padding: calc(6 * var(--ws-px)) calc(6 * var(--ws-px)) calc(6 * var(--ws-px))
+    calc(16 * var(--ws-px));
+  border: 1px solid transparent;
+  border-radius: calc(14 * var(--ws-px));
+  background: var(--bg-inset);
+  transition: border-color 150ms ease-out;
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-v3-snippet:focus-within {
+  border-color: var(--accent);
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-v3-snippet .rm-link {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: calc(34 * var(--ws-px));
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: 400 calc(14 * var(--ws-type-px)) / calc(20 * var(--ws-type-px)) var(--font-mono);
+  text-overflow: ellipsis;
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-v3-snippet .rm-link:focus-visible {
+  outline: none;
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-v3-snippet .rm-copy {
+  height: calc(36 * var(--ws-px));
+  box-shadow: none;
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-invite-options {
+  display: grid;
+  gap: calc(4 * var(--ws-px));
+  padding-top: calc(8 * var(--ws-px));
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-invite-options .rm-quiet {
+  justify-self: start;
+  border-radius: 999px;
+}
+
+/* Invite a person (docs/design/ROOM_WHO_JOINS.md §4): the ghost glyph head, the wide copy
+   button, the room code, and the Room access disclosure with the −/+ member limit and the
+   link's quiet footer line. */
+.rm-app .rm-v3-sheet.rm-sheet .rm-invite-sheet-head .rm-v3-head-titles {
+  display: flex;
+  align-items: flex-start;
+  gap: calc(14 * var(--ws-px));
+}
+.rm-app .rm-invite-ghost {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: calc(40 * var(--ws-px));
+  height: calc(40 * var(--ws-px));
+  border: 1.5px dashed var(--accent-line, var(--accent));
+  border-radius: 50%;
+  background: var(--accent-soft, var(--accent-subtle));
+  color: var(--accent);
+}
+.rm-app .rm-invite-titles {
+  display: grid;
+  gap: calc(2 * var(--ws-px));
+  min-width: 0;
+}
+.rm-app .rm-invite-sub {
+  margin: 0;
+  color: var(--text-muted);
+  font: 400 calc(14 * var(--ws-type-px)) / calc(20 * var(--ws-type-px)) var(--font-sans);
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-invite-copy {
+  width: 100%;
+  min-height: calc(40 * var(--ws-px));
+  height: calc(40 * var(--ws-px));
+  margin-top: calc(10 * var(--ws-px));
+  gap: calc(7 * var(--ws-px));
+  font: 600 max(12px, calc(13.5 * var(--ws-type-px))) / 1 var(--font-sans);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 14%, transparent);
+  transition:
+    background 0.15s var(--motion-ease-out, ease-out),
+    box-shadow 0.15s var(--motion-ease-out, ease-out);
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-invite-copy:hover {
+  box-shadow: 0 3px 12px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-invite-copy svg {
+  width: calc(15 * var(--ws-px));
+  height: calc(15 * var(--ws-px));
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-invite-code {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(10 * var(--ws-px));
+  margin: 0;
+  padding: calc(4 * var(--ws-px)) 0 0;
+  font: 600 calc(16 * var(--ws-type-px)) var(--font-mono, ui-monospace, monospace);
+  letter-spacing: 0.08em;
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-invite-code .rm-code {
+  color: var(--text);
+  font-size: inherit;
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-invite-codecap {
+  margin-top: calc(-10 * var(--ws-px));
+  text-align: center;
+  font-size: max(12px, calc(12.5 * var(--ws-type-px)));
+}
+.rm-app .rm-v3-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(28 * var(--ws-px));
+  height: calc(28 * var(--ws-px));
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--surface-sunken);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.rm-app .rm-v3-icon-btn:hover {
+  color: var(--text);
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-invite-url {
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-invite-access {
+  border-top: 1px solid var(--border);
+  padding-top: calc(4 * var(--ws-px));
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-invite-access > summary {
+  display: flex;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+  width: 100%;
+  min-height: calc(40 * var(--ws-px));
+  color: var(--text-muted);
+  font: 600 max(12px, calc(13 * var(--ws-type-px))) / 1 var(--font-sans);
+  cursor: pointer;
+  list-style: none;
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-invite-access > summary::-webkit-details-marker {
+  display: none;
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-invite-access > summary svg {
+  transition: transform 0.2s var(--motion-ease-out, ease-out);
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-invite-access[open] > summary svg {
+  transform: rotate(90deg);
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-invite-cap {
+  display: flex;
+  align-items: center;
+  gap: calc(12 * var(--ws-px));
+  min-height: calc(44 * var(--ws-px));
+  font: 400 calc(14 * var(--ws-type-px)) / calc(20 * var(--ws-type-px)) var(--font-sans);
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-invite-cap > span {
+  flex: 1;
+}
+.rm-app .rm-stepper {
+  display: flex;
+  align-items: center;
+  gap: calc(2 * var(--ws-px));
+  padding: calc(3 * var(--ws-px));
+  border-radius: 999px;
+  background: var(--surface-sunken);
+}
+.rm-app .rm-stepper button {
+  width: calc(28 * var(--ws-px));
+  height: calc(28 * var(--ws-px));
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-weight: 700;
+  cursor: pointer;
+}
+.rm-app .rm-stepper button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.rm-app .rm-stepper output {
+  min-width: calc(38 * var(--ws-px));
+  text-align: center;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-invite-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+  margin: calc(6 * var(--ws-px)) 0 0;
+  color: var(--text-faint, var(--text-muted));
+  font-size: max(12px, calc(12.5 * var(--ws-type-px)));
+}
+.rm-app .rm-invite-foot-gap {
+  flex: 1;
+}
+.rm-app .rm-invite-foot-btn {
+  padding: calc(4 * var(--ws-px)) calc(8 * var(--ws-px));
+  border: 0;
+  border-radius: calc(8 * var(--ws-px));
+  background: none;
+  color: var(--text-muted);
+  font-size: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.rm-app .rm-invite-foot-btn:hover {
+  background: var(--surface-sunken);
+}
+.rm-app .rm-invite-foot-btn.rm-invite-foot-danger {
+  color: var(--error);
+}
+@media (max-width: 599px) {
+  .rm-app .rm-v3-sheet.rm-sheet .rm-v3-snippet {
+    flex-direction: column;
+    align-items: stretch;
+    padding: calc(6 * var(--ws-px));
+  }
+  .rm-app .rm-v3-sheet.rm-sheet .rm-v3-snippet .rm-link {
+    min-height: 44px;
+    padding: 0 calc(10 * var(--ws-px));
+  }
+}
+
+/* New room: the Start-from chips. The checked chip wears the accent (subtle fill, accent text);
+   Create room stays the vibrant accent even while empty (it says what's missing on submit). */
+.rm-app .rm-v3-sheet.rm-sheet .rm-room-template-chip {
+  min-height: calc(36 * var(--ws-px));
+  font: 500 calc(13.5 * var(--ws-type-px)) / 1.3 var(--font-sans);
+}
+.rm-app .rm-v3-sheet.rm-sheet input:checked + .rm-room-template-chip {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+  font-weight: 600;
+  box-shadow: none;
+}
+@media (max-width: 640px), (pointer: coarse) {
+  .rm-app .rm-v3-sheet.rm-sheet .rm-room-template-chip {
+    min-height: 44px;
+  }
+}
+
+/* Join: the identity line under the single invite field. */
+.rm-app .rm-v3-sheet.rm-sheet .rm-join-identity {
+  margin: 0;
+}
+
+/* New room: name, the switch, Start from, Settings, then Cancel / Create room. */
+/* New room v3 (docs/design/NEW_ROOM.md, new-room.html): one column, the Who should join scale
+   (10% under the base sheet). Labels are small caps; Start from shows the picked template's topic
+   and who it suggests; Host is a collapsed radio list (no native select). */
+.rm-app .rm-v3-sheet.rm-sheet.rm-new-room {
+  width: min(calc(432 * var(--ws-px)), 100%);
+  gap: calc(16 * var(--ws-px));
+}
+.rm-app .rm-new-room :is(.rm-new-room-name, .rm-new-room-agent) > span,
+.rm-app .rm-new-room .rm-room-templates legend {
+  margin-bottom: calc(6 * var(--ws-px));
+  color: var(--text-muted);
+  font: 600 max(11px, calc(10.5 * var(--ws-type-px))) / 1.4 var(--font-sans);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.rm-app .rm-new-room :is(.rm-new-room-name, .rm-new-room-agent) .rm-input {
+  min-height: calc(47 * var(--ws-px));
+  padding: 0 calc(14 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(14 * var(--ws-px));
+  background: var(--bg-inset);
+  font: 500 calc(15 * var(--ws-type-px)) / 1.4 var(--font-sans);
+}
+.rm-app .rm-new-room :is(.rm-new-room-name, .rm-new-room-agent) .rm-input:focus {
+  border-color: var(--accent);
+  background: var(--surface);
+  box-shadow: 0 0 0 3px var(--accent-subtle);
+  outline: none;
+}
+.rm-app .rm-new-room .rm-new-room-hint {
+  display: block;
+  margin-top: calc(4 * var(--ws-px));
+  color: var(--text-muted);
+  font: 400 max(12px, calc(11.5 * var(--ws-type-px))) / 1.4 var(--font-sans);
+}
+.rm-app .rm-new-room .rm-room-template-chips {
+  gap: calc(6 * var(--ws-px));
+}
+.rm-app .rm-new-room .rm-room-template-chip {
+  min-height: calc(34 * var(--ws-px));
+  padding: 0 calc(13 * var(--ws-px));
+  color: var(--text-secondary);
+  font: 600 max(12px, calc(12.5 * var(--ws-type-px))) / 1 var(--font-sans);
+}
+.rm-app .rm-new-room .rm-room-template input:checked + .rm-room-template-chip {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+  box-shadow: none;
+  color: var(--accent-text);
+}
+.rm-app .rm-new-room .rm-room-template-about {
+  display: flex;
+  align-items: center;
+  gap: calc(10 * var(--ws-px));
+  min-height: calc(40 * var(--ws-px));
+  margin: calc(8 * var(--ws-px)) 0 0;
+  padding: calc(9 * var(--ws-px)) calc(12 * var(--ws-px));
+  border-radius: calc(14 * var(--ws-px));
+  background: var(--bg-inset);
+  color: var(--text-muted);
+  font: 400 max(12px, calc(12.5 * var(--ws-type-px))) / 1.45 var(--font-sans);
+}
+.rm-app .rm-new-room .rm-room-template-who {
+  display: flex;
+  flex: none;
+}
+.rm-app .rm-new-room .rm-room-template-who i {
+  width: calc(20 * var(--ws-px));
+  height: calc(20 * var(--ws-px));
+  margin-left: calc(-4 * var(--ws-px));
+  border: 1.5px dashed var(--accent-border);
+  border-radius: calc(6 * var(--ws-px));
+  background: var(--accent-subtle);
+}
+.rm-app .rm-new-room .rm-room-template-who i:first-child {
+  margin-left: 0;
+}
+.rm-app .rm-new-room .rm-room-template-who i[data-kind='person'] {
+  border-radius: 50%;
+}
+.rm-app .rm-new-room .rm-new-room-settings {
+  width: 100%;
+  padding-top: calc(2 * var(--ws-px));
+  border-top: 1px solid var(--border);
+}
+.rm-app .rm-v3-sheet.rm-sheet.rm-new-room .rm-new-room-settings > summary {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+  min-height: calc(40 * var(--ws-px));
+  color: var(--text-muted);
+  font: 600 max(12px, calc(13 * var(--ws-type-px))) / 1 var(--font-sans);
+  cursor: pointer;
+}
+.rm-app .rm-v3-sheet.rm-sheet.rm-new-room .rm-new-room-host-now {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+.rm-app .rm-new-room .rm-new-room-hosts {
+  display: grid;
+  gap: calc(4 * var(--ws-px));
+  padding: calc(2 * var(--ws-px)) 0 calc(6 * var(--ws-px));
+}
+.rm-app .rm-new-room .rm-new-room-host {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: calc(10 * var(--ws-px));
+  min-height: calc(44 * var(--ws-px));
+  padding: 0 calc(10 * var(--ws-px));
+  border: 1px solid transparent;
+  border-radius: calc(13 * var(--ws-px));
+  color: var(--text);
+  font: 600 max(12px, calc(13 * var(--ws-type-px))) / 1.3 var(--font-sans);
+  cursor: pointer;
+}
+.rm-app .rm-new-room .rm-new-room-host:hover {
+  background: var(--bg-inset);
+}
+.rm-app .rm-new-room .rm-new-room-host input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.rm-app .rm-new-room .rm-new-room-host:has(input:checked) {
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
+}
+.rm-app .rm-new-room .rm-new-room-host:has(input:focus-visible) {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.rm-app .rm-new-room .rm-new-room-host-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rm-app .rm-new-room .rm-new-room-host-dot {
+  position: relative;
+  flex: none;
+  width: calc(16 * var(--ws-px));
+  height: calc(16 * var(--ws-px));
+  border: 1.5px solid var(--border);
+  border-radius: 50%;
+}
+.rm-app .rm-new-room .rm-new-room-host:has(input:checked) .rm-new-room-host-dot {
+  border-color: var(--accent);
+  background: var(--accent);
+  box-shadow: inset 0 0 0 calc(3.5 * var(--ws-px)) var(--surface);
+}
+
+/* Room settings as a sheet: sections divided by hairlines; the red buttons as pills. */
+.rm-app .rm-v3-sheet.rm-sheet.rm-settings {
+  gap: calc(14 * var(--ws-px));
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-settings-section {
+  padding-bottom: calc(14 * var(--ws-px));
+  border-bottom: 1px solid var(--border);
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-settings-section:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-settings-section h3 {
+  color: var(--text);
+  font: 600 calc(14 * var(--ws-type-px)) / calc(20 * var(--ws-type-px)) var(--font-sans);
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-settings-actions .rm-primary {
+  min-height: calc(44 * var(--ws-px));
+  padding: 0 calc(18 * var(--ws-px));
+  border-radius: 999px;
+  font: 600 calc(14 * var(--ws-type-px)) / 1 var(--font-sans);
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-settings-link {
+  border-radius: calc(14 * var(--ws-px));
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-danger.rm-danger-solid,
+.rm-app .rm-v3-sheet.rm-sheet .rm-secondary,
+.rm-app .rm-v3-sheet.rm-sheet .rm-confirm .rm-quiet {
+  border-radius: 999px;
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-delete-confirm {
+  border-radius: calc(14 * var(--ws-px));
+}
+
+/* ===== Who should join? and Add an AI (docs/design/ROOM_WHO_JOINS.md §2, §3) =====
+   The card, its tiles and the Add an AI sheet are design pixels times --ws-px, as the rest of the
+   workspace (10% smaller than the base scale; full size on phones and touch screens). */
+
+.rm-app .rm-who {
+  width: min(calc(760 * var(--ws-px)), 100%);
+  margin: 0 auto calc(20 * var(--ws-px));
+  padding: calc(18 * var(--ws-px)) calc(18 * var(--ws-px)) calc(10 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(22 * var(--ws-px));
+  background: var(--surface);
+  box-shadow: var(--shadow-float-sm);
+  color: var(--text);
+  text-align: left;
+}
+.rm-app .rm-who-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(12 * var(--ws-px));
+  padding: 0 calc(4 * var(--ws-px)) calc(10 * var(--ws-px));
+}
+.rm-app .rm-who-head h2 {
+  margin: 0;
+  color: var(--text);
+  font: 600 calc(16 * var(--ws-type-px)) / 1.5 var(--font-sans);
+  letter-spacing: -0.01em;
+}
+.rm-app .rm-who-head p {
+  margin: 1px 0 0;
+  color: var(--text-muted);
+  font: 400 max(12px, calc(13 * var(--ws-type-px))) / 1.5 var(--font-sans);
+}
+.rm-app .rm-who-hide {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: calc(30 * var(--ws-px));
+  height: calc(30 * var(--ws-px));
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--bg-inset);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition:
+    background-color 150ms ease-out,
+    color 150ms ease-out;
+}
+/* The visible circle is 30px; the hit area is 44px. */
+.rm-app .rm-who-hide::after {
+  content: '';
+  position: absolute;
+  inset: calc(-7 * var(--ws-px));
+  border-radius: 50%;
+}
+.rm-app .rm-who-hide:hover {
+  background: var(--bg-surface-active);
+  color: var(--text);
+}
+.rm-app .rm-who-tiles {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: calc(10 * var(--ws-px));
+}
+.rm-app .rm-who-tile {
+  display: flex;
+  align-items: center;
+  gap: calc(14 * var(--ws-px));
+  min-width: 0;
+  min-height: 44px;
+  padding: calc(16 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(18 * var(--ws-px));
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 150ms ease-out,
+    background-color 150ms ease-out;
+}
+.rm-app .rm-who-tile:hover {
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
+}
+.rm-app :is(.rm-who-tile, .rm-who-hide, .rm-add-ai-app):focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.rm-app .rm-who-tile-text {
+  display: grid;
+  min-width: 0;
+}
+.rm-app .rm-who-tile-text strong {
+  font: 600 calc(15 * var(--ws-type-px)) / 1.5 var(--font-sans);
+}
+.rm-app .rm-who-tile-text span {
+  color: var(--text-muted);
+  font: 400 max(12px, calc(13 * var(--ws-type-px))) / 1.5 var(--font-sans);
+}
+.rm-app .rm-who-plus {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: calc(30 * var(--ws-px));
+  height: calc(30 * var(--ws-px));
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--primary);
+  color: var(--on-primary);
+  font: 600 calc(18 * var(--ws-type-px)) / 1 var(--font-sans);
+}
+.rm-app .rm-who-glyph {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: calc(40 * var(--ws-px));
+  height: calc(40 * var(--ws-px));
+  border: 1.5px dashed var(--accent-border);
+  border-radius: calc(12 * var(--ws-px));
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+.rm-app .rm-who-glyph-round {
+  border-radius: 50%;
+}
+.rm-app .rm-who-glyph svg {
+  width: calc(19 * var(--ws-px));
+  height: calc(19 * var(--ws-px));
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+@media (max-width: 520px) {
+  .rm-app .rm-who {
+    padding: 16px 16px 10px;
+  }
+  .rm-app .rm-who-tiles {
+    grid-template-columns: 1fr;
+  }
+  .rm-app .rm-who-tile {
+    gap: 12px;
+    padding: 14px;
+  }
+}
+
+/* The sheet: 460 wide, the 3x2 app grid, a steps block of one fixed height for every app. */
+.rm-app .rm-v3-sheet.rm-sheet.rm-add-ai {
+  gap: calc(18 * var(--ws-px));
+  width: min(calc(460 * var(--ws-px)), 100%);
+  padding: calc(22 * var(--ws-px));
+  border-radius: calc(26 * var(--ws-px));
+}
+.rm-app .rm-add-ai-head {
+  display: flex;
+  align-items: flex-start;
+  gap: calc(14 * var(--ws-px));
+}
+.rm-app .rm-add-ai-titles {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.rm-app .rm-add-ai-titles h2 {
+  margin: 0;
+  color: var(--text);
+  font: 600 calc(19 * var(--ws-type-px)) / 1.5 var(--font-sans);
+  letter-spacing: -0.02em;
+}
+.rm-app .rm-add-ai-titles p {
+  margin: calc(2 * var(--ws-px)) 0 0;
+  color: var(--text-muted);
+  font: 400 calc(14 * var(--ws-type-px)) / 1.5 var(--font-sans);
+}
+.rm-app .rm-add-ai-head .rm-v3-close {
+  width: calc(30 * var(--ws-px));
+  height: calc(30 * var(--ws-px));
+}
+.rm-app .rm-add-ai-label {
+  margin: 0 0 calc(-8 * var(--ws-px));
+  color: var(--text-faint);
+  font: 600 max(11px, calc(11.5 * var(--ws-type-px))) / 1.5 var(--font-sans);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.rm-app .rm-add-ai-apps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: calc(8 * var(--ws-px));
+}
+/* Seven tiles: the last one spans the row instead of sitting alone (3+3+1, 2+2+2+1 on phones). */
+.rm-app .rm-add-ai-apps > :last-child {
+  grid-column: 1 / -1;
+}
+.rm-app .rm-add-ai-app {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+  min-width: 0;
+  padding: calc(14 * var(--ws-px)) calc(6 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(16 * var(--ws-px));
+  background: var(--surface);
+  color: var(--text);
+  font: 600 max(12px, calc(13 * var(--ws-type-px))) / 1.5 var(--font-sans);
+  cursor: pointer;
+  transition:
+    border-color 150ms ease-out,
+    background-color 150ms ease-out;
+}
+.rm-app .rm-add-ai-app:hover {
+  border-color: var(--accent-border);
+}
+.rm-app .rm-add-ai-app[aria-checked='true'] {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+.rm-app .rm-add-ai-app i {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(34 * var(--ws-px));
+  height: calc(34 * var(--ws-px));
+  border-radius: calc(10 * var(--ws-px));
+  /* A faint ring keeps the darkest app colours visible on the dark surface. */
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 12%, transparent);
+  color: #fff;
+  font: 700 calc(14 * var(--ws-type-px)) / 1 var(--font-sans);
+  font-style: normal;
+}
+.rm-app .rm-add-ai-how {
+  display: flex;
+  flex-direction: column;
+  gap: calc(12 * var(--ws-px));
+  /* Fits the longest app (Gemini CLI: a two-line second step) with the same gap above
+     the invite button as every other app. */
+  height: calc(262 * var(--ws-px));
+  padding: calc(14 * var(--ws-px));
+  overflow: hidden;
+  border-radius: calc(18 * var(--ws-px));
+  background: var(--bg-inset);
+}
+.rm-app .rm-add-ai-step {
+  display: flex;
+  align-items: flex-start;
+  gap: calc(10 * var(--ws-px));
+  margin: 0;
+  color: var(--text);
+  font: 400 calc(14 * var(--ws-type-px)) / 1.5 var(--font-sans);
+}
+.rm-app .rm-add-ai-n {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: calc(22 * var(--ws-px));
+  height: calc(22 * var(--ws-px));
+  margin-top: 1px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface);
+  font: 700 max(11px, calc(12 * var(--ws-type-px))) / 1 var(--font-sans);
+}
+.rm-app .rm-add-ai-row {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+  min-width: 0;
+  padding: calc(5 * var(--ws-px)) calc(5 * var(--ws-px)) calc(5 * var(--ws-px))
+    calc(14 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(14 * var(--ws-px));
+  background: var(--surface);
+}
+.rm-app .rm-add-ai-row-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font: 400 max(12px, calc(13 * var(--ws-type-px))) / 1.5 var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rm-app .rm-add-ai-row[data-action='open'] .rm-add-ai-row-text {
+  font-family: var(--font-sans);
+}
+.rm-app .rm-add-ai-row .rm-v3-btn-sm {
+  height: calc(32 * var(--ws-px));
+  padding: 0 calc(13 * var(--ws-px));
+  box-shadow: none;
+  text-decoration: none;
+}
+.rm-app .rm-add-ai-invite {
+  margin-top: auto;
+}
+.rm-app .rm-add-ai-wait {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(10 * var(--ws-px));
+  margin: 0;
+  color: var(--text-muted);
+  font: 400 calc(13.5 * var(--ws-type-px)) / 1.5 var(--font-sans);
+  text-align: center;
+}
+.rm-app .rm-add-ai-error {
+  color: var(--error);
+}
+.rm-app .rm-add-ai-pulse {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: rm-add-ai-pulse 1.4s ease-in-out infinite;
+}
+@keyframes rm-add-ai-pulse {
+  50% {
+    opacity: 0.25;
+    transform: scale(0.7);
+  }
+}
+.rm-app .rm-add-ai-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+@media (max-width: 899px) {
+  .rm-app .rm-v3-sheet.rm-sheet.rm-add-ai {
+    width: min(calc(460 * var(--ws-px)), 100%);
+    padding: calc(20 * var(--ws-px)) calc(18 * var(--ws-px));
+  }
+}
+/* Phones and touch: 44px buttons make the steps taller; still one height for every app. */
+@media (max-width: 640px), (pointer: coarse) {
+  .rm-app .rm-who-hide,
+  .rm-app .rm-add-ai-head .rm-v3-close {
+    width: 44px;
+    height: 44px;
+  }
+  .rm-app .rm-add-ai-app {
+    min-height: 44px;
+  }
+  .rm-app .rm-add-ai-row .rm-v3-btn-sm {
+    height: 44px;
+  }
+  .rm-app .rm-add-ai-how {
+    height: 326px;
+  }
+}
+@media (max-width: 480px) {
+  .rm-app .rm-add-ai-apps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rm-app :is(.rm-who-tile, .rm-who-hide, .rm-add-ai-app, .rm-add-ai-pulse) {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/* Room settings (Workspace v3): the minimal sheet — the description, the quiet End/Delete
+   rows, the collapsed More settings with General, Task stages, Members and the bulk mute. */
+.rm-app .rm-v3-sheet.rm-sheet .rm-settings-description textarea {
+  min-height: calc(90 * var(--ws-px));
+  resize: vertical;
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-settings-description textarea[readonly] {
+  color: var(--text-muted);
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-settings-danger {
+  display: grid;
+  gap: calc(10 * var(--ws-px));
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-settings-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(10 * var(--ws-px));
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-settings-row .rm-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* End room / Delete: quiet text rows, lower than the sheet's Done (phones keep 44px targets). */
+@media (min-width: 641px) and (pointer: fine) {
+  .rm-app .rm-v3-sheet.rm-sheet .rm-settings-row .rm-quiet {
+    min-height: calc(32 * var(--ws-px));
+    height: calc(32 * var(--ws-px));
+    padding: 0 calc(12 * var(--ws-px));
+  }
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-settings-row .rm-settings-danger-quiet {
+  color: var(--error);
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-settings-danger-text {
+  color: var(--error);
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-settings-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(8 * var(--ws-px));
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-settings-more > summary {
+  display: flex;
+  align-items: center;
+  gap: calc(6 * var(--ws-px));
+  color: var(--text-muted);
+  font: 500 calc(14 * var(--ws-type-px)) / calc(20 * var(--ws-type-px)) var(--font-sans);
+  list-style: none;
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-settings-more > summary::-webkit-details-marker {
+  display: none;
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-settings-more > summary svg {
+  transition: transform 150ms ease-out;
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-settings-more[open] > summary svg {
+  transform: rotate(90deg);
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-settings-more-body {
+  display: grid;
+  gap: calc(16 * var(--ws-px));
+  padding-top: calc(12 * var(--ws-px));
+}
+.rm-app .rm-v3-sheet.rm-sheet .rm-settings-bulk {
+  display: grid;
+  gap: calc(8 * var(--ws-px));
+}
+
+/* ===== Phones and touch: 44px targets ===== */
+@media (max-width: 640px), (pointer: coarse) {
+  .rm-app .rm-v3-btn,
+  .rm-app .rm-v3-btn-sm,
+  .rm-app .rm-v3-panel.rm-panel .rm-v3-tab {
+    height: 44px;
+  }
+  /* The Invite sheet's small controls: the code's copy button, the −/+ stepper and the link
+     footer's New link / Revoke. */
+  .rm-app .rm-v3-icon-btn {
+    width: 44px;
+    height: 44px;
+  }
+  .rm-app .rm-stepper button {
+    width: 44px;
+    height: 44px;
+  }
+  .rm-app .rm-invite-foot-btn {
+    min-height: 44px;
+  }
+  .rm-app .rm-v3-sheet.rm-sheet .rm-v3-snippet .rm-copy {
+    height: 44px;
+  }
+  /* Small on desktop, 44px on touch: the card's Pin, All tasks, the buttons in the task detail
+     and the New task form, Filters and the search panel's quiet buttons. */
+  .rm-app .rm-v3-panel.rm-panel .rm-v3-task-pin {
+    width: 44px;
+    height: 44px;
+    margin: -12px -12px 0 0;
+  }
+  .rm-app .rm-v3-panel.rm-panel .rm-v2-back {
+    height: 44px;
+    padding: 0 16px 0 12px;
+  }
+  .rm-app
+    .rm-v3-panel.rm-panel
+    :is(.rm-task, .rm-task-form, .rm-leave, .rm-inline-error)
+    .rm-primary,
+  .rm-app .rm-v3-panel.rm-panel :is(.rm-task, .rm-task-form, .rm-leave, .rm-inline-error) .rm-quiet,
+  .rm-app .rm-v3-panel.rm-panel :is(.rm-task, .rm-task-form) .rm-danger,
+  .rm-app .rm-v3-panel.rm-panel :is(.rm-task, .rm-task-form) select,
+  .rm-app .rm-v3-panel.rm-panel .rm-search-filters > summary,
+  .rm-app .rm-v3-panel.rm-panel .rm-search-filters .rm-quiet,
+  .rm-app .rm-v3-panel.rm-panel .rm-search-more {
+    min-height: 44px;
+  }
+  /* A member's ⋯ and the sheets' own buttons (Room settings: Save, Update stages). */
+  .rm-app .rm-v3-panel.rm-panel .rm-v2-row-menu-btn {
+    width: 44px;
+    height: 44px;
+  }
+  .rm-app .rm-v3-sheet.rm-sheet :is(.rm-primary, .rm-quiet, .rm-danger) {
+    min-height: 44px;
+  }
+}
+
+/* ===== Motion ===== */
+@keyframes rm-v3-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes rm-v3-sheet-in {
+  from {
+    opacity: 0;
+    transform: translateY(calc(8 * var(--ws-px))) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rm-app .rm-v3-panel.rm-panel,
+  .rm-app .rm-v3-panel.rm-panel *,
+  .rm-app .rm-backdrop.rm-v3-scrim,
+  .rm-app .rm-v3-sheet.rm-sheet,
+  .rm-app .rm-v3-sheet.rm-sheet *,
+  .rm-app input.rm-v3-switch,
+  .rm-app input.rm-v3-switch::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/*
+ * The rooms overview (/rooms with no room open): the v3 page title, a 22px card list and pill
+ * buttons, so it matches the room view and the sidebar instead of the v1 list.
+ */
+.rm-app .rm-overview-head h1 {
+  font-size: calc(30 * var(--ws-type-px));
+  letter-spacing: -0.02em;
+}
+.rm-app .rm-overview-list {
+  padding: calc(6 * var(--ws-px));
+  border-radius: calc(22 * var(--ws-px));
+  box-shadow: var(--shadow-float-sm);
+}
+.rm-app .rm-overview-list li + li {
+  border-top: 0;
+}
+.rm-app .rm-overview-room {
+  min-height: calc(52 * var(--ws-px));
+  border-radius: calc(14 * var(--ws-px));
+  font-size: calc(15 * var(--ws-type-px));
+}
+.rm-app .rm-overview-room-role {
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+}
+.rm-app .rm-overview-empty {
+  border-radius: calc(22 * var(--ws-px));
+}
+.rm-app .rm-overview-empty-actions :is(.rm-primary, .rm-quiet) {
+  min-height: calc(44 * var(--ws-px));
+  padding: 0 calc(18 * var(--ws-px));
+  border-radius: 999px;
+}
+/* Touch screens have no hover title: long room names wrap instead of ending in an ellipsis. */
+@media (hover: none) {
+  .rm-app .rm-overview-room-name {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
+@media (max-width: 899px) {
+  .rm-app .rm-overview-head h1 {
+    font-size: calc(22 * var(--ws-type-px));
+  }
+}

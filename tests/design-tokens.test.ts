@@ -96,7 +96,8 @@ test('tokens.css contains all required v8 foundation tokens', () => {
   assert.ok(css.includes('--nav-border'), 'tokens.css missing --nav-border');
   assert.ok(css.includes('--room-bubble'), 'tokens.css missing --room-bubble');
 
-  // Light by default: dark comes only from the chosen theme attribute, never the OS setting
+  // Dark comes only from the data-theme attribute (src/shell/theme.ts sets it from the chosen
+  // theme or, with none chosen, the device setting), never from a CSS media query
   assert.ok(
     !css.includes('prefers-color-scheme: dark'),
     'tokens.css must not follow the OS dark-mode setting',
@@ -155,8 +156,20 @@ test('links.ts has docs, and the footer mirrors the header groups, then Help & l
       ...(external ? { external } : {}),
     })),
   );
+  // Workflows is in no header menu, nor the footer that mirrors them. The page stays at
+  // /workflows and the Docs sidebar links it.
+  assert.ok(!NAV_GROUPS.some((group) => group.items.some((item) => item.href === LINKS.workflows)));
+  assert.ok(!FOOTER_COLUMNS.some((col) => col.links.some((link) => link.href === LINKS.workflows)));
   // Elric leads Product, the way the site presents its AI assistant.
   assert.equal(productCol.links[0]!.label, 'Elric');
+  // Base Agents (the Agent Explorer's On Base view) follows Connect AI, with its own line.
+  assert.deepEqual(
+    NAV_GROUPS[0]!.items.map((item) => item.label),
+    ['Elric', 'Workspace', 'Connect AI', 'Base Agents', 'Use cases'],
+  );
+  const baseAgents = NAV_GROUPS[0]!.items.find((item) => item.label === 'Base Agents');
+  assert.equal(baseAgents?.href, '/explorer/base');
+  assert.equal(baseAgents?.description, 'Agents with a passport on Base');
 
   const live = liveFooterColumns();
   const liveProduct = live.find((col) => col.title === 'Product');
@@ -185,7 +198,7 @@ test('every external header and footer link is one of the public GitHub reposito
   }
   // Only these repositories, and all of them public GitHub URLs of the organization.
   for (const repo of PUBLIC_REPOS)
-    assert.match(repo, /^https:\/\/github\.com\/centralcity-ai-org\/[a-z-]+$/);
+    assert.match(repo, /^https:\/\/github\.com\/centralcity-ai-hq\/[a-z-]+$/);
   // Same-site links never claim to be external.
   for (const link of links.filter((item) => item.href?.startsWith('/')))
     assert.notEqual(link.external, true, link.label);
@@ -204,10 +217,10 @@ test('no token is defined as a reference to itself', () => {
 test('"Elric on GitHub" has one switch and a public repository URL', () => {
   assert.match(
     ELRIC_CODE_URL,
-    /^https:\/\/github\.com\/centralcity-ai-org\/central-city-code\/tree\/main\/server\/elric$/,
+    /^https:\/\/github\.com\/centralcity-ai-hq\/central-city-code\/tree\/main\/server\/elric$/,
   );
   assert.ok(PUBLIC_REPOS.some((repo) => ELRIC_CODE_URL.startsWith(`${repo}/`)));
-  const developers = NAV_GROUPS.find((group) => group.id === 'developers')!;
-  const listed = developers.items.some((item) => item.href === ELRIC_CODE_URL);
+  const openSource = NAV_GROUPS.find((group) => group.id === 'open-source')!;
+  const listed = openSource.items.some((item) => item.href === ELRIC_CODE_URL);
   assert.equal(listed, ELRIC_CODE_PUBLISHED, 'listed exactly when published');
 });

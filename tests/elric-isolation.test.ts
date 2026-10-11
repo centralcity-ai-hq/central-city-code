@@ -16,7 +16,7 @@ test('cross-room: invoking in R1 sends nothing of R2, even when R2 is newer and 
   const s = await f.scene('Room one');
   const r2 = await f.room(s.host, s.hostAgent, 'Room two');
   const person2 = await f.joinPerson(s.owner, r2, 'Ann');
-  await f.joinAgent(s.owner, r2, s.elricId);
+  await f.joinAgent(s.owner, r2, s.elricId, { legacy: true });
   await f.say(s.host, s.room, 'R1: the deploy is on Friday', s.hostAgent);
   const trigger = await f.say(s.owner, s.room, '@Elric when is the deploy?', s.person);
   // Newer text in R2, written after the trigger in R1.
@@ -58,7 +58,7 @@ test('from_join: Elric never receives a message at or before its own join point'
   await f.verify(owner);
   const elricId = await f.addElric(owner);
   const person = await f.joinPerson(owner, r3, 'Jo');
-  await f.joinAgent(owner, r3, elricId);
+  await f.joinAgent(owner, r3, elricId, { legacy: true });
   const visible = Number(
     (
       await f.db.query<{ v: string }>(
@@ -106,6 +106,7 @@ test("a room where the owner is only a person: Elric's access is the uniform not
 });
 
 test('cross-user: two owners, two Elrics in one room; no data, access or billing crosses', async (t) => {
+  // Two member Elrics in one room: only possible in a room from before the host-only rule.
   const f = await elricFixture(t);
   const host = await f.account('Shared host');
   const hostAgent = await f.agent(host, 'Shared desk');
@@ -118,8 +119,8 @@ test('cross-user: two owners, two Elrics in one room; no data, access or billing
   const elricB = await f.addElric(b, 'Elric Bruno');
   const personA = await f.joinPerson(a, shared, 'Alice');
   const personB = await f.joinPerson(b, shared, 'Bruno');
-  await f.joinAgent(a, shared, elricA);
-  await f.joinAgent(b, shared, elricB);
+  await f.joinAgent(a, shared, elricA, { legacy: true });
+  await f.joinAgent(b, shared, elricB, { legacy: true });
   // Alice's private room (her agent hosts it), with a message and a task.
   const aliceAgent = await f.agent(a, 'Alice desk');
   const privateA = await f.room(a, aliceAgent, 'Alice private');

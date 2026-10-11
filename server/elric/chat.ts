@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { registerElricDraftRoutes } from './draft.js';
 import { assertConversationCaps, registerElricConversations } from './conversations.js';
 import type { Database } from '../database.js';
-import { closePrivateRoom, createPrivateRoom } from '../rooms/private.js';
+import { AGENT_CHAT_KEY_PREFIX, closePrivateRoom, createPrivateRoom } from '../rooms/private.js';
 import { RoomError } from '../rooms/service.js';
 
 /**
@@ -166,7 +166,10 @@ export interface PickerRoom {
   elric_member: boolean;
 }
 
-/** The "@ room" picker: open shared rooms with the owner's active person member. */
+/**
+ * The "@ room" picker: open shared rooms with the owner's active person member. Never a private
+ * chat (Elric's own, or one with an own agent: Elric can never join it).
+ */
 export async function elricRooms(db: Q, ownerId: string): Promise<{ rooms: PickerRoom[] }> {
   const rows = (
     await db.query<{
@@ -183,6 +186,7 @@ export async function elricRooms(db: Q, ownerId: string): Promise<{ rooms: Picke
                    AND a.status='active') AS elric
          FROM rooms r
         WHERE r.closed_at IS NULL AND r.deleted_at IS NULL AND NOT r.elric_private
+          AND r.idempotency_key NOT LIKE '${AGENT_CHAT_KEY_PREFIX}%'
           AND EXISTS (SELECT 1 FROM room_members p WHERE p.room_id=r.id AND p.owner_id=$1
                         AND p.kind='person' AND p.removed_at IS NULL)
         ORDER BY r.created_at DESC, r.id LIMIT 100`,
@@ -213,7 +217,7 @@ export async function elricAskCheck(db: Q, ownerId: string, roomRef: string) {
                    AND a.status='active') AS elric
          FROM rooms r
         WHERE (r.id=$1 OR r.slug=$1) AND r.closed_at IS NULL AND r.deleted_at IS NULL
-          AND NOT r.elric_private
+          AND NOT r.elric_private AND r.idempotency_key NOT LIKE '${AGENT_CHAT_KEY_PREFIX}%'
           AND EXISTS (SELECT 1 FROM room_members m WHERE m.room_id=r.id AND m.owner_id=$2
                         AND m.removed_at IS NULL)`,
       [roomRef, ownerId],

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createApp } from '../server/app.js';
+import { ownerLabel } from '../server/connections/service.js';
 import { MockAdapter } from '../server/elric/adapter.js';
 import type { ElricConfig } from '../server/elric/config.js';
 import type { ElricModelWiring } from '../server/elric/endpoints.js';
@@ -45,6 +46,10 @@ export async function elricFixture(
     models?: ElricModelWiring;
     /** The wall clock of the run budget (default Date.now). */
     wallClock?: () => number;
+    /** Receives the operator log lines of failed turns. */
+    log?: (line: string) => void;
+    /** Receives the retry backoff waits (default: not waited for). */
+    sleep?: (ms: number) => Promise<void>;
   } = {},
 ) {
   let now = Date.UTC(2026, 8, 30, 12, 0, 0);
@@ -65,6 +70,9 @@ export async function elricFixture(
       ...(options.models ? { models: options.models } : {}),
       ...(options.wallClock ? { wallClock: options.wallClock } : {}),
       autoDrain: false,
+      // The model retry's backoff is not waited for in tests.
+      sleep: options.sleep ?? (async () => {}),
+      log: options.log ?? (() => {}),
       ...(options.config ? { config: options.config } : {}),
       probe: async (point) => probe?.(point),
     },
@@ -140,13 +148,45 @@ export async function elricFixture(
       link,
     };
   };
-  const joinAgent = async (who: Account, r: Room, agentId: string) => {
+  /**
+   * Joins `agentId` to the room through the API. `legacy` seeds a member's Elric directly instead:
+   * a room from before only the host could add Elric (kept as is by the server). Only tests that
+   * need such a room pass it, so a broken host-only guard still fails every other test.
+   */
+  const joinAgent = async (
+    who: Account,
+    r: Room,
+    agentId: string,
+    options: { legacy?: boolean } = {},
+  ) => {
+    if (options.legacy) {
+      await legacyElricMember(who, r, agentId);
+      return;
+    }
     const res = await call(who.cookie, 'POST', `/api/rooms/${r.slug}/join`, {
       token: r.token,
       agent_id: agentId,
       idempotency_key: randomUUID(),
     });
     assert.equal(res.statusCode, 200, res.body);
+  };
+  /** A member's Elric already in a room before the host-only rule (left as is by the server). */
+  const legacyElricMember = async (who: Account, r: Room, agentId: string) => {
+    await db.query(
+      `INSERT INTO room_members(room_id,agent_id,owner_id,role,owner_label,visible_from_seq,joined_at,
+         joined_by,last_read_seq,kind)
+       SELECT $1,$2,$3,'member',$4,
+              CASE WHEN history='full' THEN 0 ELSE next_seq-1 END,$5,'the owner',
+              CASE WHEN history='full' THEN 0 ELSE next_seq-1 END,'agent'
+         FROM rooms WHERE id=$1`,
+      [
+        r.id,
+        agentId,
+        who.operatorId,
+        ownerLabel({ id: who.operatorId, name: who.name, kind: 'owner' }),
+        now,
+      ],
+    );
   };
   /** The signed-in person joins as themselves; returns their person member id. */
   const joinPerson = async (who: Account, r: Room, name = who.name) => {
@@ -245,7 +285,8 @@ export async function elricFixture(
     await verify(owner);
     const elricId = await addElric(owner);
     const person = await joinPerson(owner, r, 'Ann');
-    await joinAgent(owner, r, elricId);
+    // The owner is a member, not the host: a room from before the host-only rule.
+    await joinAgent(owner, r, elricId, { legacy: true });
     return { host, hostAgent, room: r, owner, elricId, person };
   };
 
@@ -262,6 +303,7 @@ export async function elricFixture(
     addElric,
     room,
     joinAgent,
+    legacyElricMember,
     joinPerson,
     say,
     invocations,

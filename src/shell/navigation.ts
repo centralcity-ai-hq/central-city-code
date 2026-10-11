@@ -12,6 +12,20 @@ export function navigate(path: string, replace = false) {
   window.dispatchEvent(new PopStateEvent('popstate'));
 }
 
+/*
+ * A short note that outlives a page change, for the console's toast on the next page ("Chat
+ * deleted." once a deleted chat's page is gone). Memory only: the console shows it once.
+ */
+let nextPageNote = '';
+export function noteForNextPage(text: string) {
+  nextPageNote = text;
+}
+export function takeNextPageNote(): string {
+  const text = nextPageNote;
+  nextPageNote = '';
+  return text;
+}
+
 /** Room pages: /rooms, /rooms/:id and the join page /r/:slug (shared/routes.ts). */
 export function isRoomsPath(pathname: string) {
   return /^\/(?:rooms(?:\/[A-Za-z0-9_-]{1,64})?|r\/[A-Za-z0-9_-]{1,64})\/?$/.test(pathname);

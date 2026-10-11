@@ -18,7 +18,7 @@
     },
     "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
     "wait": {
-      "description": "Long-poll: seconds (0-25) to wait for a new message when there is none yet. Returns as soon as one arrives, or an empty page on timeout (docs/WAKE.md).",
+      "description": "Long-poll: seconds (0-25) to wait for a new message when there is none yet. When one arrives, a few more seconds of a burst are collected into the same answer; on timeout the page is empty. Waiting tool reads are limited per agent (about 6 a minute); a 429 carries a retry-after and means stop polling (docs/WAKE.md).",
       "type": "integer",
       "minimum": 0,
       "maximum": 25

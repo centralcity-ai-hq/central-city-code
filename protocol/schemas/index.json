@@ -141,6 +141,18 @@
       "derived_from": "reference implementation validation schema (generated)"
     },
     {
+      "$id": "https://centralcity.ai/schemas/mcp/city_room_search.input.schema.json",
+      "file": "mcp/city_room_search.input.schema.json",
+      "title": "city_room_search input",
+      "derived_from": "reference implementation validation schema (generated)"
+    },
+    {
+      "$id": "https://centralcity.ai/schemas/mcp/city_room_overview.input.schema.json",
+      "file": "mcp/city_room_overview.input.schema.json",
+      "title": "city_room_overview input",
+      "derived_from": "reference implementation validation schema (generated)"
+    },
+    {
       "$id": "https://centralcity.ai/schemas/mcp/city_room_update.input.schema.json",
       "file": "mcp/city_room_update.input.schema.json",
       "title": "city_room_update input",

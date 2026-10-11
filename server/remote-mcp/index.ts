@@ -2,7 +2,7 @@ import type { createRoomInvites } from '../links/invites.js';
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { createMcpHandler, type AuthInfo } from '@modelcontextprotocol/server';
+import type { AuthInfo } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { AssistantToolName } from '../assistant-access.js';
 import type { AssistantScope } from '../../shared/assistant.js';
@@ -19,12 +19,20 @@ import {
   type OAuthDependencies,
   type OAuthServer,
 } from '../oauth/server.js';
-import { createRemoteServer } from './tools.js';
-import { withUniformValidation } from './validation.js';
-import { isOpenInviteTool, invokeOpenInvite, openInviteInputSchemas } from './open-invite.js';
+import {
+  isOpenInviteTool,
+  invokeOpenInvite,
+  openInviteInputSchemas,
+  openInviteTaskInputSchemas,
+} from './open-invite.js';
 import { describeValidation } from '../validation-errors.js';
 import { sendGuide, wantsGuide } from './guide.js';
-import { clientAddressKey } from '../rate-limit.js';
+import {
+  clientAddressKey,
+  limitRequestRate,
+  PrincipalCache,
+  presentedPrincipal,
+} from '../rate-limit.js';
 import { extendForWait } from '../wake/routes.js';
 
 /**
@@ -45,6 +53,8 @@ export const DEFAULT_CHALLENGE_SCOPES = [
 ] as const satisfies readonly AssistantScope[];
 
 export interface RemoteMcpDependencies extends OAuthDependencies {
+  /** The general per-principal request limit, shared with the REST API (limitRequestRate). */
+  apiRequestsPerMinute: number;
   roomInvites: ReturnType<typeof createRoomInvites>;
   fail(code: number, message: string): never;
   /** Unauthenticated (unclaimed-mode) tool execution for the anonymous tool subset. */
@@ -96,76 +106,96 @@ export async function registerRemoteMcp(
   d: RemoteMcpDependencies,
 ): Promise<OAuthServer> {
   let oauth!: OAuthServer;
-  const mcp = createMcpHandler(
-    ({ authInfo }) => {
-      const identity = authInfo?.extra as Identity | undefined;
-      const server = createRemoteServer(
-        (tool: string, args: unknown) => {
-          if (!identity) return d.fail(401, 'Authentication is required.');
-          if (identity.anonymous && isOpenInviteTool(tool))
-            return invokeOpenInvite(d.roomInvites, tool, args, identity.address, identity.origin);
-          if (identity.anonymous)
-            return tool === 'city_create_workspace'
-              ? d.createWorkspace(identity.address, args, identity.origin)
-              : d.anonymousTool(identity.address, tool, args, identity.origin);
-          if ('roomOnly' in identity)
-            return d.roomInvites.invoke(identity.token, tool, args, identity.origin);
-          if ('workspaceKey' in identity)
+  const principals = new PrincipalCache(d.clock);
+  // The MCP SDK and the tool registry are loaded on the first /mcp request, not at start-up:
+  // they are a large part of the bundle and most cold starts serve the web app.
+  type McpHandler = ReturnType<typeof import('@modelcontextprotocol/server').createMcpHandler>;
+  let mcpHandler: Promise<McpHandler> | undefined;
+  const loadMcp = (): Promise<McpHandler> =>
+    (mcpHandler ??= createMcp().catch((error: unknown) => {
+      mcpHandler = undefined;
+      throw error;
+    }));
+  async function createMcp(): Promise<McpHandler> {
+    const [{ createMcpHandler }, { createRemoteServer }, { withUniformValidation }] =
+      await Promise.all([
+        import('@modelcontextprotocol/server'),
+        import('./tools.js'),
+        import('./validation.js'),
+      ]);
+    return createMcpHandler(
+      ({ authInfo }) => {
+        const identity = authInfo?.extra as Identity | undefined;
+        const server = createRemoteServer(
+          (tool: string, args: unknown) => {
+            if (!identity) return d.fail(401, 'Authentication is required.');
+            if (identity.anonymous && isOpenInviteTool(tool))
+              return invokeOpenInvite(d.roomInvites, tool, args, identity.address, identity.origin);
+            if (identity.anonymous)
+              return tool === 'city_create_workspace'
+                ? d.createWorkspace(identity.address, args, identity.origin)
+                : d.anonymousTool(identity.address, tool, args, identity.origin);
+            if ('roomOnly' in identity)
+              return d.roomInvites.invoke(identity.token, tool, args, identity.origin);
+            if ('workspaceKey' in identity)
+              return d.access.executeTool(
+                {
+                  grantId: identity.keyId,
+                  operatorId: identity.operatorId,
+                  keyHash: identity.keyHash,
+                  address: identity.address,
+                },
+                tool,
+                args,
+                { origin: identity.origin },
+              );
             return d.access.executeTool(
               {
-                grantId: identity.keyId,
+                grantId: identity.grantId,
                 operatorId: identity.operatorId,
-                keyHash: identity.keyHash,
+                clientId: identity.clientId,
                 address: identity.address,
               },
               tool,
               args,
               { origin: identity.origin },
             );
-          return d.access.executeTool(
-            {
-              grantId: identity.grantId,
-              operatorId: identity.operatorId,
-              clientId: identity.clientId,
-              address: identity.address,
-            },
-            tool,
-            args,
-            { origin: identity.origin },
-          );
-        },
-        (error) => {
-          // Same field-level format as REST 400s: paths and constraints, never received values.
-          if (error instanceof z.ZodError) return { status: 400, ...describeValidation(error) };
-          const status = statusOf(error);
-          const issues = (error as { issues?: unknown }).issues;
-          return {
-            status,
-            message:
-              status === 500 ? 'The operation could not be completed.' : (error as Error).message,
-            ...(status !== 500 && Array.isArray(issues) ? { issues } : {}),
-          };
-        },
-        {
-          anonymous: identity?.anonymous === true,
-          roomOnly: !!identity && 'roomOnly' in identity,
-          workspaceKey: !!identity && 'workspaceKey' in identity,
-          openInvites: d.roomInvites.enabled(),
-          origin: identity?.origin,
-        },
-      );
-      // Every schema failure answers with our invalid_arguments body (see validation.ts).
-      return withUniformValidation(server);
-    },
-    {
-      legacy: 'stateless',
-      maxRequestBodySize: 65536,
-      keepAliveMs: 0,
-      onerror: () => {},
-    },
-  );
+          },
+          (error) => {
+            // Same field-level format as REST 400s: paths and constraints, never received values.
+            if (error instanceof z.ZodError) return { status: 400, ...describeValidation(error) };
+            const status = statusOf(error);
+            const issues = (error as { issues?: unknown }).issues;
+            return {
+              status,
+              message:
+                status === 500 ? 'The operation could not be completed.' : (error as Error).message,
+              ...(status !== 500 && Array.isArray(issues) ? { issues } : {}),
+            };
+          },
+          {
+            anonymous: identity?.anonymous === true,
+            roomOnly: !!identity && 'roomOnly' in identity,
+            workspaceKey: !!identity && 'workspaceKey' in identity,
+            grantedScopes: authInfo?.scopes,
+            openInvites: d.roomInvites.enabled(),
+            origin: identity?.origin,
+          },
+        );
+        // Every schema failure answers with our invalid_arguments body (see validation.ts).
+        return withUniformValidation(server);
+      },
+      {
+        legacy: 'stateless',
+        maxRequestBodySize: 65536,
+        keepAliveMs: 0,
+        onerror: () => {},
+      },
+    );
+  }
   app.addHook('onClose', async () => {
-    await mcp.close();
+    const loaded = mcpHandler && (await mcpHandler.catch(() => undefined));
+    await loaded?.close();
   });
 
   await app.register(async (scope) => {
@@ -185,7 +215,27 @@ export async function registerRemoteMcp(
       },
     );
     scope.addHook('onRequest', async (request) => {
-      await d.limit(`ip:${clientAddressKey(request.ip)}`, 600, 60_000);
+      // As the REST API: per principal for a valid credential, per address otherwise
+      // (limitRequestRate). /mcp authenticates with OAuth or a workspace key; /mcp/open and the
+      // rest of this scope only honour a guest room credential, so other bearers stay per address.
+      const path = request.url.split('?')[0];
+      const authenticated = path === '/mcp' || path === '/mcp/';
+      await limitRequestRate(
+        d.limit,
+        request.ip,
+        presentedPrincipal(request.headers.authorization, undefined, {
+          guest: (token) => d.roomInvites.verify(token),
+          ...(authenticated
+            ? {
+                workspaceKey: (token: string) => d.verifyWorkspaceKey(token),
+                accessToken: (token: string) =>
+                  oauth.verifyAccessToken(token, requestOrigin(request, d.hosted)),
+              }
+            : {}),
+        }),
+        d.apiRequestsPerMinute,
+        principals,
+      );
     });
     scope.setErrorHandler((error, request, reply) => {
       const status = statusOf(error);
@@ -277,8 +327,14 @@ export async function registerRemoteMcp(
           error_description: 'Authorize with OAuth to use this MCP endpoint.',
         });
       }
+      // A guest room credential (on /mcp, or as a bearer on /mcp/open) is limited per credential,
+      // not per address: guests of unrelated people share cloud egress addresses.
+      const guest =
+        invited ??
+        (open && presented?.startsWith('crc_') ? await d.roomInvites.verify(presented) : null);
       if (key) await d.limit(`workspace-key:${key.keyId}`, 120, 60_000);
       else if (verified) await d.limit(`assistant:${verified.grantId}`, 120, 60_000);
+      else if (guest) await d.limit(`guest-mcp:${guest.agent_id}`, 120, 60_000);
       else await d.limit(`anon-mcp:${clientAddressKey(request.ip)}`, 120, 60_000);
       if (key || verified) extendForWait(request); // authenticated wait= tool calls (docs/WAKE.md)
       if (
@@ -354,6 +410,7 @@ export async function registerRemoteMcp(
         headers,
         ...(request.method === 'POST' ? { body: request.rawBody ?? '' } : {}),
       });
+      const mcp = await loadMcp();
       const response = await mcp.fetch(webRequest, {
         authInfo,
         ...(request.method === 'POST' ? { parsedBody: request.body } : {}),
@@ -386,7 +443,7 @@ export async function registerRemoteMcp(
 
 /** Open room tools that take a room_credential argument (city_join_invite does not). */
 const CREDENTIAL_TOOLS = new Set(
-  Object.entries(openInviteInputSchemas)
+  Object.entries({ ...openInviteInputSchemas, ...openInviteTaskInputSchemas })
     .filter(([, schema]) => 'room_credential' in (schema as z.ZodObject<z.ZodRawShape>).shape)
     .map(([name]) => name),
 );

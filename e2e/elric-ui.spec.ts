@@ -6,7 +6,7 @@ import {
   type BrowserContext,
   type Route,
 } from '@playwright/test';
-import { ELRIC_AI_NOTICE, ELRIC_MEMBER_BADGE } from '../shared/elric-copy';
+import { ELRIC_AI_NOTICE, ELRIC_MEMBER_BADGE, ELRIC_ROOM_HINT } from '../shared/elric-copy';
 
 /**
  * The real response of an intercepted request as JSON, or null when the page dropped the request
@@ -185,8 +185,10 @@ test('Members panel shows Elric with AI agent badge and server first_party marke
   const host = await account(browser, 'Host-Elric-Member');
   const room = await hostRoom(host, 'Elric Member Room');
 
-  // Route members to include Elric marked with auto_reply: { provider: 'elric' }
-  await host.page.route(`**/api/rooms/${room.id}/members`, async (route) => {
+  // Route members to include Elric marked with auto_reply: { provider: 'elric' }. The v2 panel
+  // pages the list (?limit=…), so the route matches with or without a query.
+  const membersUrl = (url: URL) => url.pathname === `/api/rooms/${room.id}/members`;
+  await host.page.route(membersUrl, async (route) => {
     const json = await fetchJson(route);
     if (!json) return;
     json.members.push({
@@ -206,18 +208,26 @@ test('Members panel shows Elric with AI agent badge and server first_party marke
   await host.page.goto(`/rooms/${room.id}`);
 
   // Open Members panel
-  await host.page.getByRole('button', { name: /^Members, / }).click();
+  await host.page.getByRole('button', { name: /^Members of / }).click();
   const panel = host.page.getByRole('complementary', { name: 'Members' });
-  const elricRow = panel.getByRole('listitem').filter({ hasText: 'Elric' });
+  // Elric is an AI: listed under AIs, never under People.
+  const elricRow = panel
+    .getByRole('list', { name: 'AIs', exact: true })
+    .getByRole('listitem')
+    .filter({ hasText: 'Elric' });
   await expect(elricRow).toBeVisible();
+  await expect(
+    // The host's own person (A1) is a person; its account name may contain "Elric", never is.
+    panel.getByRole('list', { name: 'People' }).getByText('Elric', { exact: true }),
+  ).toHaveCount(0);
 
   // Avatar has data-kind="elric"
   const avatar = elricRow.locator('.rm-avatar');
   await expect(avatar).toHaveAttribute('data-kind', 'elric');
 
-  // Meta subtitle shows ELRIC_MEMBER_BADGE
-  const meta = elricRow.locator('.rm-meta');
-  await expect(meta).toHaveText(ELRIC_MEMBER_BADGE);
+  // Its AI badge shows ELRIC_MEMBER_BADGE, and nothing else
+  await expect(elricRow.getByTestId('member-badge')).toHaveText([ELRIC_MEMBER_BADGE]);
+  await expect(elricRow.getByTestId('member-badge')).toHaveAttribute('data-kind', 'elric');
 });
 
 test('waking pill displays while waiting for Elric response after @Elric mention', async ({
@@ -278,6 +288,10 @@ test('waking pill displays while waiting for Elric response after @Elric mention
   });
 
   await host.page.goto(`/rooms/${room.id}`);
+
+  // The room knows Elric is a member (its hint shows) before the post: the composer can draw
+  // before the members read answers, and a post sent earlier rightly wakes no one.
+  await expect(host.page.locator('.rm-ai-notice')).toBeVisible();
 
   // Composer: type message mentioning @Elric
   const composer = host.page.locator('textarea[aria-label="Message"]');
@@ -525,7 +539,10 @@ test('message with server auto_reply.label renders Elric badge in post byline', 
 
   const badge = msg.locator('.rm-byline .rm-badge-elric');
   await expect(badge).toBeVisible();
-  await expect(badge).toHaveText('AI');
+  // One badge, "built in"; "AI" stays for assistive technology.
+  await expect(badge).toHaveText('built in AI');
+  await expect(badge.locator('.rm-visually-hidden')).toHaveText('AI');
+  await expect(msg.locator('.rm-byline .rm3-tag:visible')).toHaveCount(1);
   await expect(badge).toHaveAttribute('title', 'Elric v1.0');
 
   // Ensure no model name is displayed to users
@@ -1009,7 +1026,7 @@ test('Add Elric card in room with 30+ messages is visible above composer, Not no
   await host.page.goto(`/rooms/${room.id}`);
   await expect(host.page.locator('.rm-elric-card')).toHaveCount(0);
 
-  await host.page.getByRole('button', { name: /^Members, / }).click();
+  await host.page.getByRole('button', { name: /^Members of / }).click();
   const panel = host.page.getByRole('complementary', { name: 'Members' });
   await expect(panel).toBeVisible();
   const toggle = panel.getByRole('switch', { name: 'Elric in this room' });
@@ -1020,7 +1037,7 @@ test('Add Elric card in room with 30+ messages is visible above composer, Not no
   await host.page.getByRole('button', { name: 'More room actions' }).click();
   const menu = host.page.getByRole('menu', { name: 'More room actions' });
   await expect(menu.getByRole('menuitem', { name: 'Add Elric' })).toHaveCount(0);
-  await expect(menu.getByRole('menuitem', { name: 'Manage Elric' })).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: 'Manage Elric' })).toHaveCount(0);
 });
 
 test('Add Elric card does NOT appear for non-host members', async ({ browser }) => {
@@ -1058,10 +1075,49 @@ test('Add Elric card does NOT appear for non-host members', async ({ browser }) 
 
   // Non-host guest never sees Add Elric card
   await expect(guest.page.locator('.rm-elric-card')).toHaveCount(0);
+  // Nor the header Elric switch: it is left out of the page, not shown disabled.
+  await expect(guest.page.getByRole('button', { name: /^Members of / })).toBeVisible();
+  await expect(guest.page.locator('.rm-room-head').getByRole('switch')).toHaveCount(0);
 
   // Non-host guest never sees Add Elric in MoreMenu
   await guest.page.getByRole('button', { name: 'More room actions' }).click();
   await expect(guest.page.getByRole('menuitem', { name: 'Add Elric' })).toHaveCount(0);
+});
+
+test('a host under 18 has no Elric switch in the room header', async ({ browser }) => {
+  const host = await account(browser, 'Host-Under18-Header');
+  const room = await hostRoom(host, 'Under 18 Header Room');
+  await host.page.route('**/api/elric', async (route) => {
+    if (route.request().method() !== 'GET') return route.continue();
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        agent_id: null,
+        status: null,
+        host_may_invoke: false,
+        eligible: false,
+        eligibility_reason: 'age_under_18',
+        over_18: false,
+        usage: {
+          allowance: { short: 20, summary: 4, tool: 5 },
+          used: { short: 0, summary: 0, tool: 0 },
+          resets_at: '2026-10-01T00:00:00Z',
+        },
+        limit_notices: [],
+      }),
+    });
+  });
+  await host.page.goto(`/rooms/${room.id}`);
+  await expect(host.page.getByRole('button', { name: /^Members of / })).toBeVisible();
+  // The status has loaded: the Members panel explains why Elric can't be added.
+  await host.page.getByRole('button', { name: /^Members of / }).click();
+  await expect(host.page.getByRole('switch', { name: 'Elric in this room' })).toHaveAttribute(
+    'title',
+    'Elric is available from age 18.',
+  );
+  await expect(host.page.locator('.rm-room-head').getByRole('switch')).toHaveCount(0);
+  await expect(host.page.locator('.rm-head-elric')).toHaveCount(0);
 });
 
 test('composer Post as dropdown never includes Elric', async ({ browser }) => {
@@ -1129,8 +1185,9 @@ test('composer Post as dropdown never includes Elric', async ({ browser }) => {
   expect(options).not.toContain('Elric');
   expect(options.some((opt) => opt.includes('Elric'))).toBe(false);
 
-  // The options should only be the host's actual posting agents (2 agents)
-  expect(options.length).toBe(2);
+  // The host as themselves (their own person, A1) and their two posting agents; never Elric.
+  expect(options.length).toBe(3);
+  expect(options.filter((opt) => opt.endsWith('(you)'))).toHaveLength(1);
 });
 
 test('owner sees Elric reply with avatar, Elric name, and AI badge even when message has own: true', async ({
@@ -1196,7 +1253,10 @@ test('owner sees Elric reply with avatar, Elric name, and AI badge even when mes
   // Byline displays AI badge with tooltip "Elric v1.0"
   const badge = msg.locator('.rm-byline .rm-badge-elric');
   await expect(badge).toBeVisible();
-  await expect(badge).toHaveText('AI');
+  // One badge, "built in"; "AI" stays for assistive technology.
+  await expect(badge).toHaveText('built in AI');
+  await expect(badge.locator('.rm-visually-hidden')).toHaveText('AI');
+  await expect(msg.locator('.rm-byline .rm3-tag:visible')).toHaveCount(1);
   await expect(badge).toHaveAttribute('title', 'Elric v1.0');
 });
 
@@ -1647,7 +1707,7 @@ test('ELRIC_AI_NOTICE is shown on Add Elric card and in DOB dialog', async ({ br
   await expect(dialog).toHaveCount(0);
 });
 
-test('ELRIC_AI_NOTICE is shown once per room when Elric is in the room and can be dismissed', async ({
+test('the Elric hint (the room AI notice) is shown once per room when Elric is in the room and can be dismissed', async ({
   browser,
 }) => {
   const host = await account(browser, 'Host-Ai-Notice-Room');
@@ -1683,7 +1743,25 @@ test('ELRIC_AI_NOTICE is shown once per room when Elric is in the room and can b
   await host.page.goto(`/rooms/${room1.id}`);
   const notice1 = host.page.locator('.rm-ai-notice');
   await expect(notice1).toBeVisible();
-  await expect(notice1.locator('.rm-ai-notice-text')).toHaveText(ELRIC_AI_NOTICE);
+  await expect(notice1.locator('.rm-ai-notice-text')).toHaveText(ELRIC_ROOM_HINT);
+  // Workspace v3 §4.3: a small centred pill above the composer; "Ask Elric" starts a message.
+  // Measured together once the room has settled (the composer mounts after the thread loads).
+  await expect
+    .poll(() =>
+      host.page.evaluate(() => {
+        const pill = document.querySelector('.rm-ai-notice')!.getBoundingClientRect();
+        const card = document.querySelector('.rm-compose-card')?.getBoundingClientRect();
+        if (!card) return 'no composer';
+        const centred = Math.abs(pill.x + pill.width / 2 - (card.x + card.width / 2)) < 2;
+        return pill.bottom <= card.top && centred ? 'above and centred' : 'misplaced';
+      }),
+    )
+    .toBe('above and centred');
+  await notice1.getByRole('button', { name: 'Ask Elric' }).click();
+  const box = host.page.getByRole('textbox', { name: 'Message' });
+  await expect(box).toHaveValue('@Elric ');
+  await expect(box).toBeFocused();
+  await box.fill('');
 
   // Minimal: extra info icon is dropped
   await expect(notice1.locator('svg')).toHaveCount(1); // Only the X dismiss icon
@@ -1701,7 +1779,7 @@ test('ELRIC_AI_NOTICE is shown once per room when Elric is in the room and can b
   await host.page.goto(`/rooms/${room2.id}`);
   const notice2 = host.page.locator('.rm-ai-notice');
   await expect(notice2).toBeVisible();
-  await expect(notice2.locator('.rm-ai-notice-text')).toHaveText(ELRIC_AI_NOTICE);
+  await expect(notice2.locator('.rm-ai-notice-text')).toHaveText(ELRIC_ROOM_HINT);
 
   // 5. Dismiss in Room 2: now dismissed in Room 2 as well
   await notice2.locator('.rm-notice-dismiss').click();
@@ -1724,5 +1802,5 @@ test('ELRIC_AI_NOTICE is shown once per room when Elric is in the room and can b
   await guest.page.goto(`/rooms/${room1.id}`);
   const guestNotice = guest.page.locator('.rm-ai-notice');
   await expect(guestNotice).toBeVisible();
-  await expect(guestNotice.locator('.rm-ai-notice-text')).toHaveText(ELRIC_AI_NOTICE);
+  await expect(guestNotice.locator('.rm-ai-notice-text')).toHaveText(ELRIC_ROOM_HINT);
 });

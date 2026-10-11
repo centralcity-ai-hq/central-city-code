@@ -654,6 +654,7 @@ test('presence: holder status is derived, never added to the views', async (t) =
     'attachment_ids',
     'body',
     'claim',
+    'comment_count',
     'created_at',
     'created_by_agent_id',
     'from_message_seq',
@@ -661,7 +662,10 @@ test('presence: holder status is derived, never added to the views', async (t) =
     'number',
     'result',
     'room_id',
+    'stage',
     'status',
+    'submitted_by',
+    'template',
     'title',
     'updated_at',
   ]);
@@ -883,4 +887,140 @@ test('06c rejected: the event keeps a copy of the cleared evidence', async (t) =
   assert.equal(approved.length, 1);
   assert.equal(approved[0]!.details, null);
   void member;
+});
+
+test('submitted_by: the hand-in records the holder and keeps it through done', async (t) => {
+  const { app, tasks, a, b, member, roomId } = await roomFixture(t);
+  const made = await tasks.create(p(a.id), {
+    room_id: roomId,
+    title: 'Who did it',
+    idempotency_key: randomUUID(),
+  });
+  assert.equal(made.task.submitted_by, null);
+  const claimed = await tasks.claim(p(b.id), {
+    room_id: roomId,
+    task_id: made.task.id,
+    agent_id: member,
+    idempotency_key: randomUUID(),
+  });
+  assert.equal(claimed.task.submitted_by, null);
+  const posted = await tasks.result(p(b.id), {
+    room_id: roomId,
+    task_id: made.task.id,
+    claim_token: claimed.claim_token,
+    evidence: evidence(),
+  });
+  assert.equal(posted.task.status, 'in_review');
+  assert.equal(posted.task.claim, null);
+  assert.equal(posted.task.submitted_by, member);
+  const done = await tasks.update(p(a.id), {
+    room_id: roomId,
+    task_id: made.task.id,
+    decision: 'approve',
+  });
+  assert.equal(done.task.status, 'done');
+  assert.equal(done.task.submitted_by, member);
+  // Every reader (the host here) sees it on get and list.
+  const seen = await tasks.get(p(a.id), { room_id: roomId, task_id: made.task.id });
+  assert.equal(seen.task.submitted_by, member);
+  const listed = await tasks.list(p(a.id), { room_id: roomId, status: 'done' });
+  assert.equal(listed.tasks[0]!.submitted_by, member);
+  const stored = (
+    await app.city.db.query<{ submitted_by: string | null }>(
+      'SELECT submitted_by FROM room_tasks WHERE id=$1',
+      [made.task.id],
+    )
+  ).rows[0];
+  assert.equal(stored?.submitted_by, member);
+});
+
+test('submitted_by: a send back (reopen) keeps it until the next hand-in replaces it', async (t) => {
+  const { tasks, a, b, host, member, roomId } = await roomFixture(t);
+  const made = await tasks.create(p(a.id), {
+    room_id: roomId,
+    title: 'Try again',
+    idempotency_key: randomUUID(),
+  });
+  const first = await tasks.claim(p(b.id), {
+    room_id: roomId,
+    task_id: made.task.id,
+    agent_id: member,
+    idempotency_key: randomUUID(),
+  });
+  await tasks.result(p(b.id), {
+    room_id: roomId,
+    task_id: made.task.id,
+    claim_token: first.claim_token,
+    evidence: evidence(),
+  });
+  const back = await tasks.update(p(a.id), {
+    room_id: roomId,
+    task_id: made.task.id,
+    decision: 'reject',
+  });
+  assert.equal(back.task.status, 'open');
+  assert.equal(back.task.result, null);
+  assert.equal(back.task.submitted_by, member, 'names whose work was sent back');
+  // A new claim does not clear it; the claim itself names the new holder.
+  const second = await tasks.claim(p(a.id), {
+    room_id: roomId,
+    task_id: made.task.id,
+    agent_id: host,
+    idempotency_key: randomUUID(),
+  });
+  assert.equal(second.task.claim?.agent_id, host);
+  assert.equal(second.task.submitted_by, member);
+  const again = await tasks.result(p(a.id), {
+    room_id: roomId,
+    task_id: made.task.id,
+    claim_token: second.claim_token,
+    evidence: evidence({ revision: 'rev-4' }),
+  });
+  assert.equal(again.task.submitted_by, host);
+  // Cancel keeps it too, like the evidence.
+  const cancelled = await tasks.update(p(a.id), {
+    room_id: roomId,
+    task_id: made.task.id,
+    decision: 'cancel',
+  });
+  assert.equal(cancelled.task.status, 'cancelled');
+  assert.equal(cancelled.task.submitted_by, host);
+});
+
+test('submitted_by: hidden while the member is removed, shown again when added back', async (t) => {
+  const { app, tasks, a, b, member, roomId } = await roomFixture(t);
+  const made = await tasks.create(p(a.id), {
+    room_id: roomId,
+    title: 'Left the room',
+    idempotency_key: randomUUID(),
+  });
+  const claimed = await tasks.claim(p(b.id), {
+    room_id: roomId,
+    task_id: made.task.id,
+    agent_id: member,
+    idempotency_key: randomUUID(),
+  });
+  await tasks.result(p(b.id), {
+    room_id: roomId,
+    task_id: made.task.id,
+    claim_token: claimed.claim_token,
+    evidence: evidence(),
+  });
+  await tasks.update(p(a.id), { room_id: roomId, task_id: made.task.id, decision: 'approve' });
+  await app.city.db.query(
+    'UPDATE room_members SET removed_at=$3, removed_by=$4 WHERE room_id=$1 AND agent_id=$2',
+    [roomId, member, Date.now(), 'the test owner'],
+  );
+  const seen = await tasks.get(p(a.id), { room_id: roomId, task_id: made.task.id });
+  assert.equal(seen.task.status, 'done');
+  assert.equal(seen.task.submitted_by, null);
+  const listed = await tasks.list(p(a.id), { room_id: roomId });
+  assert.equal(listed.tasks.find((item) => item.id === made.task.id)?.submitted_by, null);
+  // The stored value stays: re-adding the member shows it again.
+  await app.city.db.query(
+    'UPDATE room_members SET removed_at=NULL, removed_by=NULL WHERE room_id=$1 AND agent_id=$2',
+    [roomId, member],
+  );
+  const back = await tasks.get(p(a.id), { room_id: roomId, task_id: made.task.id });
+  assert.equal(back.task.submitted_by, member);
 });

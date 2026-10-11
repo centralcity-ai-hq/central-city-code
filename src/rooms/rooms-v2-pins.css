@@ -1,0 +1,210 @@
+/*
+ * Smart Rooms v2 (preview): context pins (ContextPins.tsx, the Pin action in MessageList.tsx and
+ * TasksV2.tsx). Every rule is scoped to .rm-app[data-rooms='v2'], so with the rooms_v2 flag off
+ * nothing here matches. Tokens come from rooms-v2.css. Colours: blue accent and neutral greys;
+ * no orange.
+ */
+
+/* The thin "Context" row right below the room header (SPEC: Context Pins bar). */
+.rm-app[data-rooms='v2'] .rm-v2-pins {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+  min-width: 0;
+  padding: calc(6 * var(--ws-px)) calc(16 * var(--ws-px));
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface-elevated);
+  font: 500 12px/16px var(--font-sans);
+}
+.rm-app[data-rooms='v2'] .rm-v2-pins-label {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: calc(4 * var(--ws-px));
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.rm-app[data-rooms='v2'] .rm-v2-pins-label svg {
+  color: var(--accent);
+}
+.rm-app[data-rooms='v2'] .rm-v2-pins-list {
+  display: flex;
+  flex: 0 1 auto;
+  gap: calc(6 * var(--ws-px));
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  overflow-x: auto;
+  list-style: none;
+  scrollbar-width: none;
+}
+.rm-app[data-rooms='v2'] .rm-v2-pins-list::-webkit-scrollbar {
+  display: none;
+}
+.rm-app[data-rooms='v2'] .rm-v2-pin {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  max-width: calc(260 * var(--ws-px));
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+}
+.rm-app[data-rooms='v2'] .rm-v2-pin:hover {
+  border-color: var(--border);
+}
+.rm-app[data-rooms='v2'] .rm-v2-pin-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(4 * var(--ws-px));
+  min-width: 0;
+  height: calc(24 * var(--ws-px));
+  padding: 2px calc(8 * var(--ws-px));
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+.rm-app[data-rooms='v2'] .rm-v2-pin-kind {
+  flex: none;
+  color: var(--accent-text);
+  font: 700 11px/16px var(--font-mono);
+}
+.rm-app[data-rooms='v2'] .rm-v2-pin-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rm-app[data-rooms='v2'] .rm-v2-pin-remove,
+.rm-app[data-rooms='v2'] .rm-v2-pins-more {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+.rm-app[data-rooms='v2'] .rm-v2-pin-remove {
+  width: calc(22 * var(--ws-px));
+  height: calc(22 * var(--ws-px));
+  margin-right: 2px;
+  border-radius: var(--radius-full);
+}
+.rm-app[data-rooms='v2'] .rm-v2-pin-remove:hover {
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+}
+.rm-app[data-rooms='v2'] .rm-v2-pins-more {
+  height: calc(24 * var(--ws-px));
+  padding: 2px calc(8 * var(--ws-px));
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.rm-app[data-rooms='v2'] .rm-v2-pin-chip:focus-visible,
+.rm-app[data-rooms='v2'] .rm-v2-pin-remove:focus-visible,
+.rm-app[data-rooms='v2'] .rm-v2-pins-more:focus-visible,
+.rm-app[data-rooms='v2'] .rm-v2-message-action:focus-visible,
+.rm-app[data-rooms='v2'] .rm-v2-card-pin:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+@media (max-width: 599px) {
+  .rm-app[data-rooms='v2'] .rm-v2-pins {
+    padding: calc(6 * var(--ws-px)) calc(12 * var(--ws-px));
+  }
+  .rm-app[data-rooms='v2'] .rm-v2-pin {
+    max-width: calc(180 * var(--ws-px));
+  }
+}
+
+/* The message menu: a small floating toolbar at the message's top right, on hover or focus. */
+.rm-app[data-rooms='v2'] .rm-message {
+  position: relative;
+}
+.rm-app[data-rooms='v2'] .rm-v2-message-menu {
+  position: absolute;
+  top: calc(-10 * var(--ws-px));
+  right: calc(4 * var(--ws-px));
+  z-index: 1;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-s);
+  background: var(--bg-surface-elevated);
+  box-shadow: var(--shadow-sm);
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+.rm-app[data-rooms='v2'] .rm-message:hover .rm-v2-message-menu,
+.rm-app[data-rooms='v2'] .rm-message:focus-within .rm-v2-message-menu {
+  opacity: 1;
+}
+@media (hover: none) {
+  .rm-app[data-rooms='v2'] .rm-v2-message-menu {
+    position: static;
+    grid-column: 2;
+    justify-self: end;
+    margin-top: 2px;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    opacity: 1;
+  }
+}
+.rm-app[data-rooms='v2'] .rm-v2-message-action {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(4 * var(--ws-px));
+  height: calc(24 * var(--ws-px));
+  padding: 2px calc(8 * var(--ws-px));
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font: 500 12px/16px var(--font-sans);
+  cursor: pointer;
+}
+.rm-app[data-rooms='v2'] .rm-v2-message-action:hover {
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+
+/* The task card menu: a Pin button beside the card. */
+.rm-app[data-rooms='v2'] .rm-v2-task {
+  display: flex;
+  gap: calc(4 * var(--ws-px));
+  align-items: stretch;
+}
+.rm-app[data-rooms='v2'] .rm-v2-card-pin {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: calc(32 * var(--ws-px));
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-s);
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.rm-app[data-rooms='v2'] .rm-v2-card-pin:hover {
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+@media (prefers-reduced-motion: reduce) {
+  .rm-app[data-rooms='v2'] .rm-v2-message-menu {
+    transition: none;
+  }
+}

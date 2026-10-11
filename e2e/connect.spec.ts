@@ -1,16 +1,28 @@
 import { test, expect, type Page } from '@playwright/test';
+import { lowContrast } from './contrast';
 import { e2eOrigin } from './port';
 
 /*
- * The Connect page (src/Connect.tsx): one address with a mode switch, one tab per app, plain
- * steps, at /connect and /#connect.
+ * The Connect page (src/Connect.tsx), the approved v4 design: a hero with the three steps and the
+ * address card (one address, a mode switch), then one tile per app (a tab list), the chosen app's
+ * steps with a side note, and the trust line, at /connect and /#connect.
  */
 const origin = e2eOrigin();
 const mcpUrl = `${origin}/mcp`;
 const openUrl = `${origin}/mcp/open`;
 /** Off a local server every connection points at production (never a short-lived preview). */
 const PRODUCTION = 'https://centralcity.ai';
-const APPS = ['ChatGPT', 'Claude', 'Claude Code', 'Cursor', 'VS Code', 'Codex'];
+const APPS = ['ChatGPT', 'Claude', 'Cursor', 'VS Code', 'Claude Code', 'Gemini CLI', 'Codex'];
+/** The line under each tile's name. */
+const KINDS = [
+  'Custom app',
+  'Connector',
+  'One click',
+  'One click',
+  'Terminal',
+  'Terminal',
+  'App or terminal',
+];
 const ARROWS = /[←-⇿⟰-⟿⤀-⥿⬀-⬯]|->|=>|>>/;
 
 /** VS Code: the HTTPS redirect on vscode.dev, config = { type: 'http', url }; a new tab. */
@@ -51,7 +63,7 @@ async function hosted(page: Page, path = '/connect') {
 const tab = (page: Page, name: string) => page.getByRole('tab', { name, exact: true });
 const panel = (page: Page) => page.getByRole('tabpanel');
 const address = (page: Page) => page.getByRole('group', { name: 'MCP server address' });
-const openMode = (page: Page) => page.getByRole('radio', { name: 'Open mode, no account' });
+const openMode = (page: Page) => page.getByRole('radio', { name: 'No account', exact: true });
 
 test('the Connect page has its own title, /#connect becomes /connect, and Back and Forward work', async ({
   page,
@@ -97,8 +109,8 @@ test('/connect and /#connect both open the page; no arrows; no sideways scroll a
   for (const path of ['/connect', 'hosted']) {
     if (path === 'hosted') await hosted(page);
     else await page.goto(path);
-    for (const mode of ['Workspace account', 'Open mode, no account']) {
-      await page.getByRole('radio', { name: mode }).check();
+    for (const mode of ['Workspace account', 'No account']) {
+      await page.getByRole('radio', { name: mode, exact: true }).check();
       for (const name of APPS) {
         await tab(page, name).click();
         await expect(panel(page)).toBeVisible();
@@ -189,17 +201,20 @@ test('the mode switch changes the address and every command and install link', a
   expect(await page.evaluate(() => document.body.innerText)).not.toMatch(/\/mcp(?!\/open|\.json)/);
 });
 
-test('each of the six tabs shows its steps; the rail follows the arrow keys', async ({ page }) => {
+test('each of the seven tiles shows its steps; the tiles follow the arrow keys', async ({
+  page,
+}) => {
   await hosted(page);
   const rail = page.getByRole('tablist', { name: 'Which AI do you use?' });
-  await expect(rail.getByRole('tab')).toHaveText(APPS);
+  await expect(rail.getByRole('tab')).toHaveText(APPS.map((name, index) => name + KINDS[index]));
   const expected: Record<string, string> = {
     ChatGPT: 'Build MCP Apps',
     Claude: 'Add custom connector',
-    'Claude Code': 'Run this command in your terminal',
+    'Claude Code': 'Install Central City in Claude Code',
     Cursor: 'Cursor opens with Central City ready to add',
     'VS Code': 'VS Code opens and asks you to install Central City',
     Codex: 'Settings / MCP servers / Add server',
+    'Gemini CLI': 'Install the Central City extension',
   };
   for (const name of APPS) {
     await tab(page, name).click();
@@ -209,8 +224,13 @@ test('each of the six tabs shows its steps; the rail follows the arrow keys', as
       'aria-labelledby',
       (await tab(page, name).getAttribute('id'))!,
     );
-    expect(await panel(page).locator('ol > li').count(), name).toBeGreaterThanOrEqual(2);
+    expect(await panel(page).locator('ol > li').count(), name).toBeGreaterThanOrEqual(3);
     await expect(panel(page), name).toContainText(expected[name]!);
+    await expect(panel(page).getByRole('heading', { name: `Connect ${name}` })).toBeVisible();
+    // The step every app shares: what happens after connecting.
+    await expect(panel(page).locator('ol > li').last()).toHaveText(
+      `Paste a room link in ${name}. Your AI joins the room.`,
+    );
   }
   await tab(page, 'ChatGPT').click();
   await page.keyboard.press('ArrowRight');
@@ -268,7 +288,7 @@ test('hosted: production links for ChatGPT, Claude, Cursor and VS Code in both m
   expect(claude.searchParams.get('modal')).toBe('add-custom-connector');
   expect(claude.searchParams.get('connectorName')).toBe('Central City');
   expect(claude.searchParams.get('connectorUrl')).toBe(open);
-  await expect(panel(page).locator('ol > li')).toHaveCount(3);
+  await expect(panel(page).locator('ol > li')).toHaveCount(4);
   await expect(panel(page)).toContainText('Claude Desktop');
   await page.getByRole('radio', { name: 'Workspace account' }).check();
   claude = await claudeHref();
@@ -310,6 +330,50 @@ test('hosted: production links for ChatGPT, Claude, Cursor and VS Code in both m
     expect((await link.boundingBox())!.height).toBeGreaterThanOrEqual(44);
 });
 
+test('hosted: Claude Code and Gemini CLI install the published packages first, by hand second', async ({
+  page,
+}) => {
+  await hosted(page);
+  const account = `${PRODUCTION}/mcp`;
+  const open = `${PRODUCTION}/mcp/open`;
+  await tab(page, 'Claude Code').click();
+  await expect(
+    panel(page).getByRole('group', { name: 'Claude Code marketplace command' }),
+  ).toHaveText('/plugin marketplace add centralcity-ai-hq/toolkit');
+  await expect(panel(page).getByRole('group', { name: 'Claude Code install command' })).toHaveText(
+    '/plugin install central-city@centralcity-ai',
+  );
+  await expect(panel(page)).toContainText('Or add the server directly');
+  await expect(panel(page).getByRole('group', { name: 'Claude Code command' })).toHaveText(
+    `claude mcp add --transport http central-city ${account}`,
+  );
+  await expect(panel(page)).toContainText('Authenticate');
+  await tab(page, 'Gemini CLI').click();
+  await expect(panel(page).getByRole('group', { name: 'Gemini CLI extension command' })).toHaveText(
+    'gemini extensions install https://github.com/centralcity-ai-hq/gemini-cli-extension',
+  );
+  await expect(panel(page)).toContainText('/mcp auth central-city');
+  await expect(panel(page).getByRole('group', { name: 'Gemini CLI command' })).toHaveText(
+    `gemini mcp add --transport http central-city ${account}`,
+  );
+  // No account: the same packages, the open address by hand, nothing to sign in to.
+  await openMode(page).check();
+  await expect(panel(page).getByRole('group', { name: 'Gemini CLI command' })).toHaveText(
+    `gemini mcp add --transport http central-city-open ${open}`,
+  );
+  await expect(panel(page)).not.toContainText('/mcp auth');
+  await tab(page, 'Claude Code').click();
+  await expect(panel(page).getByRole('group', { name: 'Claude Code command' })).toHaveText(
+    `claude mcp add --transport http central-city-open ${open}`,
+  );
+  await expect(panel(page)).not.toContainText('Authenticate');
+  // VS Code: also in its MCP server list; Claude: the directory listing is in review.
+  await tab(page, 'VS Code').click();
+  await expect(panel(page)).toContainText('ai.centralcity/central-city');
+  await tab(page, 'Claude').click();
+  await expect(panel(page)).toContainText('connector directory is in review');
+});
+
 test('on a local server ChatGPT and Claude point to the live site; coding apps use this one', async ({
   page,
 }) => {
@@ -328,6 +392,21 @@ test('on a local server ChatGPT and Claude point to the live site; coding apps u
     await panel(page).getByRole('link', { name: 'Add to Cursor' }).getAttribute('href'),
     'central-city',
     mcpUrl,
+  );
+  // The published packages point at production, so a local server adds its own address.
+  await tab(page, 'Claude Code').click();
+  await expect(panel(page).getByRole('group', { name: /marketplace|install command/ })).toHaveCount(
+    0,
+  );
+  await expect(panel(page).getByRole('group', { name: 'Claude Code command' })).toHaveText(
+    `claude mcp add --transport http central-city ${mcpUrl}`,
+  );
+  await tab(page, 'Gemini CLI').click();
+  await expect(
+    panel(page).getByRole('group', { name: 'Gemini CLI extension command' }),
+  ).toHaveCount(0);
+  await expect(panel(page).getByRole('group', { name: 'Gemini CLI command' })).toHaveText(
+    `gemini mcp add --transport http central-city ${mcpUrl}`,
   );
 });
 
@@ -389,67 +468,24 @@ test('signed in: /connect opens the console view, which offers the claim box', a
   await page.getByLabel('Account name').fill('Browser-Connect');
   await page.getByLabel('Password', { exact: true }).fill('Local-test-only-passphrase-2026');
   await page.getByRole('button', { name: 'Create account', exact: true }).click();
-  // A new account lands on the console Overview.
-  await expect(page.getByRole('heading', { name: 'Everything, at a glance.' })).toBeVisible();
+  // A new account lands on the Overview (the Network map in the workspace).
+  await expect(page.getByRole('heading', { name: 'Network map', level: 1 })).toBeVisible();
   await page.goto('/connect');
-  await expect(page).toHaveURL(/\/#connect$/);
+  // The console reads #connect and then removes it from the address.
+  await expect(page).toHaveURL(/\/(#connect)?$/);
   await expect(
     page
       .getByRole('navigation', { name: 'Workspace' })
-      .getByRole('button', { name: 'Connect your AI', exact: true }),
-  ).toHaveClass(/active/);
-  await expect(page.getByRole('heading', { name: 'Which AI do you use?' })).toBeVisible();
+      .getByRole('button', { name: 'Connect AI', exact: true }),
+  ).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByRole('heading', { name: 'Choose your AI' })).toBeVisible();
   await expect(tab(page, 'Codex')).toBeVisible();
   await page.getByRole('button', { name: 'Claim agents' }).click();
   await expect(page.getByLabel('Claim agents your AI created')).toBeVisible();
 });
 
-/** Every visible text node against its nearest opaque background (WCAG AA, 0.1 margin). */
-async function lowContrast(page: Page) {
-  return page.evaluate(() => {
-    const canvas = document.createElement('canvas').getContext('2d')!;
-    const rgba = (color: string) => {
-      canvas.clearRect(0, 0, 1, 1);
-      canvas.fillStyle = color;
-      canvas.fillRect(0, 0, 1, 1);
-      return [...canvas.getImageData(0, 0, 1, 1).data];
-    };
-    const luminance = ([r, g, b]: number[]) =>
-      [r!, g!, b!]
-        .map((value) => value / 255)
-        .map((value) => (value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4))
-        .reduce((sum, value, index) => sum + value * [0.2126, 0.7152, 0.0722][index]!, 0);
-    const background = (element: Element | null): number[] => {
-      for (; element; element = element.parentElement) {
-        const value = rgba(getComputedStyle(element).backgroundColor);
-        if (value[3]! > 200) return value;
-      }
-      return rgba(getComputedStyle(document.body).backgroundColor);
-    };
-    const low: string[] = [];
-    let count = 0;
-    const walker = document.createTreeWalker(document.querySelector('main')!, NodeFilter.SHOW_TEXT);
-    while (walker.nextNode()) {
-      const node = walker.currentNode;
-      const element = node.parentElement!;
-      const style = getComputedStyle(element);
-      if (!node.textContent!.trim() || !element.checkVisibility({ opacityProperty: true }))
-        continue;
-      count += 1;
-      const [a, b] = [luminance(rgba(style.color)), luminance(background(element))];
-      const ratio = (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
-      const large =
-        parseFloat(style.fontSize) >= 24 ||
-        (parseFloat(style.fontSize) >= 18.66 && Number(style.fontWeight) >= 700);
-      if (ratio < (large ? 3.1 : 4.6))
-        low.push(`${node.textContent!.trim().slice(0, 40)} (${ratio.toFixed(2)})`);
-    }
-    return { count, low };
-  });
-}
-
 for (const scheme of ['light', 'dark'] as const) {
-  test(`every tab meets text contrast in ${scheme}`, async ({ page }) => {
+  test(`every tile meets text contrast in ${scheme}`, async ({ page }) => {
     // The site is light unless dark is chosen: store the choice so dark is really checked.
     await page.addInitScript((theme) => localStorage.setItem('cc-theme', theme), scheme);
     await hosted(page);
@@ -468,3 +504,153 @@ for (const scheme of ['light', 'dark'] as const) {
     expect((await lowContrast(page)).low).toEqual([]);
   });
 }
+
+test('the hero: kicker, headline, three steps and the address card with its mode note', async ({
+  page,
+}) => {
+  await hosted(page);
+  const hero = page.getByRole('region', { name: 'Connect your AI' });
+  await expect(hero.getByText('Bring the AI you already use.', { exact: true })).toBeVisible();
+  await expect(
+    hero.getByText(
+      'Add Central City to ChatGPT, Claude, Cursor, VS Code, Gemini CLI or Codex once. Then paste a room link and your AI joins.',
+    ),
+  ).toBeVisible();
+  await expect(hero.getByRole('listitem')).toHaveText([
+    '1Add the server address to your AI app.',
+    '2Sign in to Central City, or connect without an account.',
+    '3Paste a room link. Your AI joins and works with others.',
+  ]);
+  const card = page.getByRole('region', { name: 'Server address' });
+  await expect(card.getByRole('group', { name: 'MCP server address' })).toHaveText(
+    `${PRODUCTION}/mcp`,
+  );
+  await expect(card).toContainText('Your AI signs in to your Central City account');
+  // The Copy button is filled in Central City blue.
+  expect(
+    await card
+      .getByRole('button', { name: 'Copy MCP server address' })
+      .evaluate((button) => getComputedStyle(button).backgroundColor),
+  ).toBe('rgb(36, 87, 245)');
+  await openMode(page).check();
+  await expect(card.getByRole('group', { name: 'MCP server address' })).toHaveText(
+    `${PRODUCTION}/mcp/open`,
+  );
+  await expect(card).toContainText('No account needed.');
+  await expect(card).not.toContainText('signs in to your Central City account');
+  // Wide: copy left, the card right.
+  const copy = (await hero.getByText('Bring the AI you already use.').boundingBox())!;
+  const box = (await card.boundingBox())!;
+  expect(box.x).toBeGreaterThan(copy.x + copy.width);
+});
+
+test('the chosen tile is outlined in blue; the side note and the trust line stay factual', async ({
+  page,
+}) => {
+  await hosted(page);
+  const ring = (name: string) =>
+    tab(page, name).evaluate((tile) => getComputedStyle(tile).boxShadow);
+  await expect.poll(() => ring('ChatGPT')).toContain('rgb(36, 87, 245) 0px 0px 0px 2px');
+  expect(await ring('Claude')).not.toContain('rgb(36, 87, 245)');
+  await tab(page, 'Claude').click();
+  await expect.poll(() => ring('Claude')).toContain('rgb(36, 87, 245) 0px 0px 0px 2px');
+  const note = panel(page).getByRole('complementary', { name: 'What your AI can do' });
+  await expect(note).toContainText(
+    'Join rooms you give it a link to, read and post messages there, and work on tasks with other AIs.',
+  );
+  await expect(note).toContainText('It gets only the permissions you approve when it signs in.');
+  await expect(note).toContainText('remove its access any time in Settings, Connected apps');
+  const trust = page.getByRole('list', { name: 'Good to know' }).getByRole('listitem');
+  await expect(trust).toHaveText([
+    'Open protocol (MCP)',
+    'Sign in with OAuth, no keys to paste',
+    'Remove access any time',
+  ]);
+  // No account: nothing signs in, so neither the note nor the trust line talks about sign-in.
+  await openMode(page).check();
+  await expect(note).toContainText(
+    'Join rooms from invite links, use templates, plan a team and create agents you claim later.',
+  );
+  await expect(note).toContainText(
+    'This address never signs in, so your AI can’t see your account.',
+  );
+  await expect(note).not.toContainText('permissions you approve');
+  await expect(note).not.toContainText('OAuth');
+  await expect(trust).toHaveText([
+    'Open protocol (MCP)',
+    'No account, no sign-in, no keys',
+    'Can’t see your account',
+  ]);
+  await expect(page.getByRole('list', { name: 'Good to know' })).not.toContainText('OAuth');
+  // Claude's panel names Claude Desktop too, as before.
+  await expect(
+    panel(page).getByRole('heading', { name: 'Connect Claude and Claude Desktop' }),
+  ).toBeVisible();
+});
+
+for (const scheme of ['light', 'dark'] as const) {
+  test(`phone at 390 px in ${scheme}: everything stacks, tiles wrap, no sideways scroll`, async ({
+    page,
+  }) => {
+    await page.addInitScript((theme) => localStorage.setItem('cc-theme', theme), scheme);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await hosted(page);
+    await expect(page.locator('html')).toHaveAttribute('data-theme', scheme);
+    // The card below the copy, the side note below the steps.
+    const headline = (await page.getByText('Bring the AI you already use.').boundingBox())!;
+    const card = (await page.getByRole('region', { name: 'Server address' }).boundingBox())!;
+    expect(card.y).toBeGreaterThan(headline.y + headline.height);
+    expect(card.x + card.width).toBeLessThanOrEqual(390);
+    const tops = await page
+      .getByRole('tab')
+      .evaluateAll((tiles) => tiles.map((tile) => Math.round(tile.getBoundingClientRect().top)));
+    expect(new Set(tops).size).toBeGreaterThan(1);
+    // Measured in one pass: the prerendered tiles are swapped for the live ones while the app
+    // mounts, so a handle taken earlier can be detached (no box) by the time it is measured.
+    await expect
+      .poll(() =>
+        page.getByRole('tab').evaluateAll((tiles) =>
+          tiles.every((tile) => {
+            const box = tile.getBoundingClientRect();
+            return tile.isConnected && box.width > 0 && box.left >= 0 && box.right <= 390;
+          }),
+        ),
+      )
+      .toBe(true);
+    const steps = (await panel(page).locator('ol').boundingBox())!;
+    const side = (await panel(page).getByRole('complementary').boundingBox())!;
+    expect(side.y).toBeGreaterThan(steps.y + steps.height);
+    for (const name of APPS) {
+      await tab(page, name).click();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+        true,
+      );
+    }
+    await openMode(page).check();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+    expect((await lowContrast(page)).low).toEqual([]);
+  });
+}
+
+test('app tiles: white glyphs and marks on the app colour in both themes', async ({ page }) => {
+  for (const scheme of ['light', 'dark'] as const) {
+    await page.addInitScript((theme) => localStorage.setItem('cc-theme', theme), scheme);
+    await page.goto('/connect');
+    await expect(page.locator('html')).toHaveAttribute('data-theme', scheme);
+    const icons = await page
+      .locator('.cx8-tile .cx-app-icon')
+      .evaluateAll((tiles) =>
+        tiles.map((tile) => [
+          getComputedStyle(tile, '::before').color,
+          tile.querySelector('svg') ? getComputedStyle(tile.querySelector('svg')!).fill : null,
+        ]),
+      );
+    expect(icons).toHaveLength(7);
+    for (const [glyph, mark] of icons) {
+      expect(glyph).toBe('rgb(255, 255, 255)');
+      if (mark) expect(mark).toBe('rgb(255, 255, 255)');
+    }
+  }
+});

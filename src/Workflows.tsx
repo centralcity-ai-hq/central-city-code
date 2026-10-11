@@ -26,12 +26,61 @@ const labels: Record<Workflow['status'], string> = {
 const sampleSource =
   'Project: River Library\nThe team plans a reading room with 24 seats.\nThe proposed opening date is 15 November; funding approval is still pending.\nThe coordinator will confirm the budget on 3 October.\nSource note: This is fictional sample material for a private test.';
 
+const steps = ['Add your source', 'Review brief', 'Check against source', 'Accept result'];
+
+/**
+ * Where a collaboration stands on the four steps, from its recorded status only: how many steps
+ * are done and which one (if any) is current. Failed and canceled records have no current step.
+ */
+export function workflowProgress(workflow: Pick<Workflow, 'status' | 'checkJobId'>): {
+  done: number;
+  current: number | null;
+} {
+  switch (workflow.status) {
+    case 'briefing':
+    case 'awaiting_review':
+      return { done: 1, current: 1 };
+    case 'checking':
+      return { done: 2, current: 2 };
+    case 'completed':
+      return { done: 3, current: 3 };
+    case 'accepted':
+      return { done: 4, current: null };
+    default:
+      return { done: workflow.checkJobId ? 2 : 1, current: null };
+  }
+}
+
+function WorkflowSteps({ workflow }: { workflow: Workflow }) {
+  const { done, current } = workflowProgress(workflow);
+  return (
+    <ol className="collaboration-steps adv2-track" aria-label="Collaboration progress">
+      {steps.map((label, index) => {
+        const state = index === current ? 'current' : index < done ? 'done' : 'todo';
+        return (
+          <li
+            key={label}
+            className={`adv2-step-${state}`}
+            aria-current={state === 'current' ? 'step' : undefined}
+          >
+            <span>{String(index + 1).padStart(2, '0')}</span> {label}
+            {state === 'done' ? <span className="visually-hidden"> (done)</span> : null}
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
 export function Workflows({
   snapshot,
   refresh,
+  v2 = false,
 }: {
   snapshot: Snapshot;
   refresh: () => Promise<void>;
+  /** Workspace v2: progress track and source, brief and check side by side. */
+  v2?: boolean;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -75,7 +124,7 @@ export function Workflows({
           </li>
         </ol>
         <p className="field-note">
-          Private to this workspace. Demo agents follow a script; an agent connected to a real AI
+          Private to this workspace. CC agents follow a script; an agent connected to a real AI
           model writes a real brief. A checker can make mistakes: review the source yourself.
         </p>
       </section>
@@ -96,6 +145,7 @@ export function Workflows({
           workflow={selected}
           snapshot={snapshot}
           refresh={refresh}
+          v2={v2}
         />
       ) : null}
       <section className="panel">
@@ -130,7 +180,7 @@ export function Workflows({
             ))}
           </div>
         ) : (
-          <EmptyState title="Your first shared result">
+          <EmptyState title="Your first shared result" live={v2}>
             Start with a source note, project brief or document excerpt. Every step will be recorded
             here.
           </EmptyState>
@@ -227,7 +277,7 @@ function NewWorkflow({
       <option value="">Select an agent</option>
       {items.map((agent) => (
         <option key={agent.id} value={agent.id}>
-          {agent.name} · {agent.mode === 'hosted' ? 'scripted demo' : 'external runtime'} ·{' '}
+          {agent.name} · {agent.mode === 'hosted' ? 'CC agent' : 'external runtime'} ·{' '}
           {agent.status}
         </option>
       ))}
@@ -367,10 +417,12 @@ function WorkflowReview({
   workflow,
   snapshot,
   refresh,
+  v2,
 }: {
   workflow: Workflow;
   snapshot: Snapshot;
   refresh: () => Promise<void>;
+  v2: boolean;
 }) {
   const [detail, setDetail] = useState<WorkflowDetail | null>(null);
   const [error, setError] = useState('');
@@ -442,10 +494,14 @@ function WorkflowReview({
         <span className={`workflow-state state-${current.status}`}>{labels[current.status]}</span>
       </div>
       <div className="workflow-review-body">
-        <details className="workflow-source">
-          <summary>Original source material</summary>
-          <pre>{workflow.source}</pre>
-        </details>
+        {v2 ? (
+          <WorkflowSteps workflow={current} />
+        ) : (
+          <details className="workflow-source">
+            <summary>Original source material</summary>
+            <pre>{workflow.source}</pre>
+          </details>
+        )}
         {error ? (
           <div role="alert" className="form-error">
             {error}{' '}
@@ -454,18 +510,34 @@ function WorkflowReview({
             </button>
           </div>
         ) : null}
+        {v2 ? (
+          <div className="workflow-output-grid adv2-review-grid">
+            <article className="workflow-result workflow-source-card">
+              <h3>Original source material</h3>
+              <pre>{workflow.source}</pre>
+            </article>
+            {detail ? (
+              <>
+                <ResultCard title="Research brief" job={detail.briefJob} />
+                <ResultCard title="Source check" job={detail.checkJob} />
+              </>
+            ) : null}
+          </div>
+        ) : null}
         {!detail && !error ? (
-          <p className="field-note">
+          <p className="field-note" role="status">
             <LoaderCircle size={15} className="spin" />
             Loading the full record…
           </p>
         ) : null}
         {detail ? (
           <>
-            <div className="workflow-output-grid">
-              <ResultCard title="Research brief" job={detail.briefJob} />
-              <ResultCard title="Source check" job={detail.checkJob} />
-            </div>
+            {v2 ? null : (
+              <div className="workflow-output-grid">
+                <ResultCard title="Research brief" job={detail.briefJob} />
+                <ResultCard title="Source check" job={detail.checkJob} />
+              </div>
+            )}
             {current.error ? (
               <p role="alert" className="form-error">
                 {current.error}
@@ -553,7 +625,7 @@ function ResultCard({ title, job }: { title: string; job: Job | null }) {
         <>
           <p className="field-note">
             {statusLabels[job.status] ?? job.status} ·{' '}
-            {job.isDemo ? 'Demo agent' : 'Agent on its own computer'} ·{' '}
+            {job.isDemo ? 'CC agent' : 'Agent on its own computer'} ·{' '}
             {job.costCents === null
               ? 'Cost not tracked'
               : `${(job.costCents / 100).toFixed(2)} USD recorded`}

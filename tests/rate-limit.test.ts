@@ -23,6 +23,7 @@ import {
   type LimiterOutageMode,
 } from '../server/rate-limit.js';
 import { readdir, readFile } from 'node:fs/promises';
+import { windowClock } from './window-clock.js';
 import { join } from 'node:path';
 
 // Hosted apps refuse to start without a shared secret; this one is synthetic and test-only.
@@ -571,6 +572,7 @@ test('X-Forwarded-For is trusted for one hop only on Vercel', async (t) => {
         hosted: loadHostedConfig({ ...hostedEnv, ...(vercel ? { VERCEL: '1' } : {}) }),
         database: await PGlite.create('memory://'),
         rateLimiter: 'memory',
+        now: windowClock(),
       });
       st.after(() => app.close());
       for (let index = 0; index < 20; index++)
@@ -587,7 +589,7 @@ test('X-Forwarded-For is trusted for one hop only on Vercel', async (t) => {
 test('capacity limits default to the reviewed bounds and accept validated overrides', () => {
   assert.deepEqual(loadLimits({}), { ...DEFAULT_LIMITS });
   assert.deepEqual(DEFAULT_LIMITS, {
-    operators: 50,
+    operators: 0,
     registrationsPerWindow: 10,
     apiRequestsPerMinute: 600,
     agentsPerWorkspace: 100,
@@ -603,7 +605,7 @@ test('capacity limits default to the reviewed bounds and accept validated overri
     unclaimedAgentsPerSite: 500,
     unclaimedAgentsPerNetwork: 1000,
     unclaimedAgentsPerRegion: 5000,
-    unclaimedAgentsGlobal: 1_000_000,
+    unclaimedAgentsGlobal: 10_000_000,
     unclaimedBucketsGlobal: 200_000,
     unclaimedCreatesPerSourcePerHour: 200,
     unclaimedCreatesPerSitePerHour: 200,
@@ -638,6 +640,15 @@ test('capacity limits default to the reviewed bounds and accept validated overri
     countedFlagsPerPrincipalPerDay: 20,
     countedReusePerPrincipalPerDay: 100,
     inviteGuestsPerHost: 10_000,
+    invitedGuestsPerSource: 10_000,
+    invitedGuestsPerSite: 100_000,
+    invitedGuestsPerNetwork: 100_000,
+    invitedGuestsPerRegion: 100_000,
+    invitePickupsPerSource: 10_000,
+    inviteRequestsPerSourcePerHour: 20_000,
+    inviteRequestsPerSitePerHour: 50_000,
+    inviteRequestsPerNetworkPerHour: 100_000,
+    inviteRequestsPerRegionPerHour: 200_000,
   });
   const raised = loadLimits(
     {
@@ -649,10 +660,65 @@ test('capacity limits default to the reviewed bounds and accept validated overri
   );
   assert.equal(raised.agentsPerWorkspace, 250);
   assert.equal(raised.operators, 80);
+  // 0 means no account ceiling (the default); only the operator ceiling accepts it.
+  assert.equal(loadLimits({ CITY_LIMIT_OPERATORS: '0' }).operators, 0);
+  assert.equal(loadLimits({}, { operators: 0 }).operators, 0);
+  assert.throws(() => loadLimits({ CITY_LIMIT_OPERATORS: '-1' }), /positive integer/);
   assert.equal(raised.apiRequestsPerMinute, 100000);
   for (const bad of ['0', '-1', '1.5', 'many', '99999999999'])
     assert.throws(() => loadLimits({ CITY_LIMIT_JOBS_PER_WORKSPACE: bad }), /positive integer/);
   assert.throws(() => loadLimits({}, { jobsPerWorkspace: 0 }), /positive integer/);
+});
+
+test('sign-up has no site-wide account ceiling by default and takes no table lock', async (t) => {
+  const app = await createApp({
+    dataDir: 'memory://',
+    startWorkers: false,
+    limits: { registrationsPerWindow: 1000, apiRequestsPerMinute: 100_000 },
+  });
+  t.after(() => app.close());
+  const local = { 'content-type': 'application/json', 'x-city-request': '1' };
+  const register = (name: string) =>
+    app.inject({
+      method: 'POST',
+      url: '/api/auth/register',
+      headers: local,
+      payload: JSON.stringify({ name, password: 'Synthetic signup password' }),
+    });
+  // Past the old default ceiling of 50 owner accounts.
+  for (let index = 1; index <= 55; index++)
+    assert.equal((await register(`Owner ${index}`)).statusCode, 201, `sign-up ${index}`);
+  // Concurrent sign-ups for one name: the unique name settles it, exactly one wins.
+  const raced = await Promise.all(Array.from({ length: 5 }, () => register('Raced name')));
+  assert.deepEqual(raced.map((reply) => reply.statusCode).sort(), [201, 409, 409, 409, 409]);
+  for (const reply of raced.filter((entry) => entry.statusCode === 409))
+    assert.equal(reply.json().error, 'That account name is unavailable.');
+  // The sign-up path never serializes on a table lock.
+  const source = await readFile(join(process.cwd(), 'server', 'app.ts'), 'utf8');
+  const createOwner = source.slice(source.indexOf('async function createOwner('));
+  assert.doesNotMatch(createOwner.slice(0, createOwner.indexOf('\n  }\n')), /LOCK TABLE/i);
+});
+
+test('CITY_LIMIT_OPERATORS still works as an emergency sign-up brake', async (t) => {
+  const app = await createApp({
+    dataDir: 'memory://',
+    startWorkers: false,
+    limits: { ...loadLimits({ CITY_LIMIT_OPERATORS: '2' }), registrationsPerWindow: 100 },
+  });
+  t.after(() => app.close());
+  const local = { 'content-type': 'application/json', 'x-city-request': '1' };
+  const register = (name: string) =>
+    app.inject({
+      method: 'POST',
+      url: '/api/auth/register',
+      headers: local,
+      payload: JSON.stringify({ name, password: 'Synthetic signup password' }),
+    });
+  assert.equal((await register('Brake one')).statusCode, 201);
+  assert.equal((await register('Brake two')).statusCode, 201);
+  const refused = await register('Brake three');
+  assert.equal(refused.statusCode, 409);
+  assert.equal(refused.json().error, 'Account limit reached.');
 });
 
 test('the per-address API budget is the configured limit (600 a minute by default)', async (t) => {
@@ -718,4 +784,23 @@ test('limiters report a window count without counting a hit', async (t) => {
     now += 60_000;
     assert.equal(await limiter.count('login-fail:x', 60_000), 0);
   }
+});
+
+test('JWKS and Agent Cards share the per-address budget at its configured size', async (t) => {
+  // A fixed 600 here once tripped 429s on the shared counter when the budget was raised.
+  const app = await createApp({
+    dataDir: 'memory://',
+    startWorkers: false,
+    limits: { apiRequestsPerMinute: 3 },
+  });
+  t.after(() => app.close());
+  const statuses: number[] = [];
+  for (const url of [
+    '/api/session',
+    '/api/session',
+    '/.well-known/jwks.json',
+    '/.well-known/jwks.json',
+  ])
+    statuses.push((await app.inject({ method: 'GET', url })).statusCode);
+  assert.deepEqual(statuses, [200, 200, 200, 429]);
 });

@@ -440,6 +440,8 @@ test('only server/google/pii.ts reads dob_*; pii.ts exports only the allowed fun
   const walk = (dir: string) => {
     for (const name of readdirSync(dir)) {
       const path = join(dir, name);
+      // The generated server bundle (scripts/build-api.mjs) inlines server/google/pii.ts.
+      if (path === join('api', '_bundle')) continue;
       if (statSync(path).isDirectory()) walk(path);
       else if (/\.(ts|tsx|mjs|js)$/.test(name)) files.push(path);
     }

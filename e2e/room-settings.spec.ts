@@ -1,9 +1,16 @@
-import { test, expect as baseExpect, type Browser, type Page } from '@playwright/test';
+import {
+  test,
+  expect as baseExpect,
+  type Browser,
+  type Locator,
+  type Page,
+} from '@playwright/test';
+import { WORKSPACE_SCALE } from './workspace-density';
 
 /*
- * Room settings (docs/ROOM_MANAGEMENT.md): the "…" menu opens a Room settings panel. The host
- * renames the room and edits its topic, removes a member with a reason and a rejoin block, and
- * deletes the room after typing its exact name. Members who don't host see no host controls.
+ * Room settings (docs/ROOM_MANAGEMENT.md): the "…" menu opens the Room settings sheet (a modal
+ * dialog, Workspace v3). The host renames the room and edits its topic, removes a member with a
+ * reason and a rejoin block, and deletes the room after typing its exact name. Members who don't host see no host controls.
  */
 const expect = baseExpect.configure({ timeout: 15_000 });
 const PASSWORD = 'Local-test-only-passphrase-2026';
@@ -63,9 +70,14 @@ async function join(owner: Account, room: { id: string; token: string }, agentNa
 async function openSettings(page: Page) {
   await page.locator('.rm-room-head').getByRole('button', { name: 'More room actions' }).click();
   await page.getByRole('menuitem', { name: 'Room settings', exact: true }).click();
-  const panel = page.getByRole('complementary', { name: 'Room settings' });
+  const panel = page.getByRole('dialog', { name: 'Room settings' });
   await expect(panel).toBeVisible();
   return panel;
+}
+
+/** Workspace v3: the host's extra settings (name, stages, members, bulk mute) sit collapsed. */
+async function moreSettings(panel: Locator) {
+  await panel.getByText('More settings', { exact: true }).click();
 }
 
 test('host renames the room and edits its topic; the thread shows the system lines', async ({
@@ -77,9 +89,13 @@ test('host renames the room and edits its topic; the thread shows the system lin
   const panel = await openSettings(host.page);
   // The Members panel is not what opens.
   await expect(host.page.getByRole('complementary', { name: 'Members' })).toHaveCount(0);
+  // Workspace v3: the minimal sheet leads with the description; the name form sits under More
+  // settings.
+  const topic = panel.getByLabel('What this room is for');
+  await expect(topic).toHaveValue('');
+  await moreSettings(panel);
 
   const name = panel.getByLabel('Room name');
-  const topic = panel.getByLabel('Topic or rules');
   const save = panel.getByRole('button', { name: 'Save' });
   await expect(name).toHaveValue('Launch plan');
   await expect(save).toBeDisabled();
@@ -96,6 +112,9 @@ test('host renames the room and edits its topic; the thread shows the system lin
   await expect(panel.getByRole('status').filter({ hasText: 'Saved' })).toBeVisible();
   await expect(save).toBeDisabled();
   await expect(name).toHaveValue('Launch plan v2');
+  // The topic saves with Done (the sheet's footer), not with the name's Save.
+  await panel.getByRole('button', { name: 'Done' }).click();
+  await expect(panel).toHaveCount(0);
 
   const lines = host.page.getByTestId('room-system-line');
   await expect(lines.filter({ hasText: 'The host renamed the room.' })).toHaveCount(1);
@@ -104,19 +123,27 @@ test('host renames the room and edits its topic; the thread shows the system lin
   await expect(lines.filter({ hasText: 'Ship the beta' })).toHaveCount(0);
   await expect(host.page.getByRole('heading', { level: 1, name: 'Launch plan v2' })).toHaveCount(1);
 
-  // Close room lives in the collapsed Danger zone; a closed room's settings are read-only.
-  const toggle = panel.getByRole('button', { name: 'Danger zone' });
-  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  // End room is a quiet row on the sheet (no danger-zone toggle); a closed room's settings are
+  // read-only.
+  await expect(panel.getByRole('button', { name: 'Danger zone' })).toHaveCount(0);
   await expect(panel.getByRole('button', { name: 'Delete room' })).toHaveCount(0);
-  await toggle.click();
-  await panel.getByRole('button', { name: 'Close room' }).click();
-  await panel.getByRole('button', { name: 'Confirm close' }).click();
+  // Done closed the sheet: open it, end the room, then open the closed room's settings.
+  const ending = await openSettings(host.page);
+  await ending.getByRole('button', { name: 'End room' }).click();
+  await ending.getByRole('button', { name: 'Confirm close' }).click();
+  await expect(host.page.getByRole('heading', { level: 1, name: 'Launch plan v2' })).toHaveCount(1);
+  if (await ending.isVisible()) await host.page.keyboard.press('Escape');
+  await expect(ending).toBeHidden();
+  const closedPanel = await openSettings(host.page);
+  await expect(closedPanel.getByLabel('What this room is for')).toHaveAttribute('readonly', '');
+  await moreSettings(closedPanel);
   await expect(
-    panel.getByText("This room is closed. Its name and topic can't change."),
+    closedPanel.getByText("This room is closed. Its name and topic can't change."),
   ).toBeVisible();
-  await expect(name).toBeDisabled();
-  await expect(topic).toBeDisabled();
-  await expect(save).toBeDisabled();
+  await expect(closedPanel.getByLabel('Room name')).toBeDisabled();
+  await expect(closedPanel.getByRole('button', { name: 'Save' })).toBeDisabled();
+  await expect(closedPanel.getByRole('button', { name: 'End room' })).toHaveCount(0);
+  await expect(closedPanel.getByRole('button', { name: 'Delete', exact: true })).toBeVisible();
   expect(host.errors).toEqual([]);
   await host.context.close();
 });
@@ -131,10 +158,11 @@ test('remove with a reason always blocks rejoining: the removed member sees the 
 
   await host.page.goto(`/rooms/${room.id}`);
   const settings = await openSettings(host.page);
+  await moreSettings(settings);
   await settings.getByRole('button', { name: /Manage members/ }).click();
   const members = host.page.getByRole('complementary', { name: 'Members' });
   await expect(members).toBeVisible();
-  await members.getByRole('button', { name: 'Remove Guest agent' }).click();
+  await memberAction(members, 'Guest agent', 'Remove');
   const confirm = members.getByRole('group', { name: "Remove Guest agent? They can't rejoin." });
   await expect(confirm.getByRole('button', { name: 'Cancel' })).toBeFocused();
   // Removal always blocks rejoining: there is no choice to make.
@@ -150,9 +178,8 @@ test('remove with a reason always blocks rejoining: the removed member sees the 
   );
   await confirm.getByRole('button', { name: 'Remove', exact: true }).click();
   expect((await sent).postDataJSON()).toEqual({ reason: said, block_rejoin: true });
-  await expect(
-    members.getByRole('list', { name: 'Current members' }).getByRole('listitem'),
-  ).toHaveCount(1);
+  // The host agent and the host's own person (A1) remain.
+  await expect(members.getByTestId('member-row')).toHaveCount(2);
 
   // The removed member tries the room link again: refused, with the host's words as plain text.
   await guest.page.goto(room.link);
@@ -180,8 +207,28 @@ test('remove with a reason always blocks rejoining: the removed member sees the 
   await guest.context.close();
 });
 
+/** The host's row menu in the Members panel: "Actions for <name>", then Mute, Unmute or Remove. */
+async function memberAction(members: Locator, name: string, action: 'Mute' | 'Unmute' | 'Remove') {
+  await members.getByRole('button', { name: `Actions for ${name}` }).click();
+  await members
+    .getByRole('menu', { name: `Actions for ${name}` })
+    .getByRole('menuitem', { name: action, exact: true })
+    .click();
+}
+
+/** The actions the host's row menu offers for a member (the menu is closed again after). */
+async function memberActions(members: Locator, name: string) {
+  await members.getByRole('button', { name: `Actions for ${name}` }).click();
+  const menu = members.getByRole('menu', { name: `Actions for ${name}` });
+  await expect(menu).toBeVisible();
+  const items = await menu.getByRole('menuitem').allTextContents();
+  await menu.press('Escape');
+  await expect(menu).toHaveCount(0);
+  return items;
+}
+
 async function openMembers(page: Page) {
-  await page.getByRole('button', { name: /^Members, / }).click();
+  await page.getByRole('button', { name: /^Members of / }).click();
   const panel = page.getByRole('complementary', { name: 'Members' });
   await expect(panel).toBeVisible();
   return panel;
@@ -197,19 +244,27 @@ test('host mutes a member: "Muted" shows, their post is refused in plain words; 
 
   await host.page.goto(`/rooms/${room.id}`);
   const members = await openMembers(host.page);
-  const current = members.getByRole('list', { name: 'Current members' });
-  const guestRow = current.getByRole('listitem').filter({ hasText: 'Guest agent' });
-  // Nobody mutes the host (or themselves).
-  await expect(members.getByRole('button', { name: 'Mute Host agent' })).toHaveCount(0);
+  const guestRow = members.getByTestId('member-row').filter({ hasText: 'Guest agent' });
+  // Nobody mutes the host (or themselves): the host's row has no actions at all.
+  await expect(members.getByRole('button', { name: 'Actions for Host agent' })).toHaveCount(0);
   await expect(guestRow.getByText('Muted', { exact: true })).toHaveCount(0);
+  expect(await memberActions(members, 'Guest agent')).toEqual([
+    'Message privately',
+    'Mute',
+    'Remove',
+  ]);
 
   const sent = host.page.waitForRequest(
     (request) => request.method() === 'POST' && request.url().endsWith(`/rooms/${room.id}/mute`),
   );
-  await guestRow.getByRole('button', { name: 'Mute Guest agent' }).click();
+  await memberAction(members, 'Guest agent', 'Mute');
   expect((await sent).postDataJSON()).toMatchObject({ muted: true });
   await expect(guestRow.getByText('Muted', { exact: true })).toBeVisible();
-  await expect(guestRow.getByRole('button', { name: 'Unmute Guest agent' })).toBeVisible();
+  expect(await memberActions(members, 'Guest agent')).toEqual([
+    'Message privately',
+    'Unmute',
+    'Remove',
+  ]);
   // No confirmation opened.
   await expect(members.getByRole('group')).toHaveCount(0);
 
@@ -223,17 +278,24 @@ test('host mutes a member: "Muted" shows, their post is refused in plain words; 
       'Not sent. The host muted you in this room. You can still read, but not post.',
     ),
   ).toBeVisible();
-  await expect(guest.page.getByText(/muted_in_room|403/)).toHaveCount(0);
+  // No raw code or status. "403" only as a word: a random name on the page (Guest-5a403c1e) may
+  // hold those digits.
+  await expect(guest.page.getByText(/muted_in_room|\b403\b/)).toHaveCount(0);
 
   // A member who does not host sees no Mute (and no Remove).
   const guestMembers = await openMembers(guest.page);
   await expect(guestMembers.getByRole('button', { name: /^(Mute|Unmute|Remove) / })).toHaveCount(0);
+  await expect(guestMembers.getByRole('button', { name: /^Actions for / })).toHaveCount(0);
   await expect(guestMembers.getByText('Muted', { exact: true })).toHaveCount(0);
 
   // Unmute: the label goes, and the same message now posts.
-  await guestRow.getByRole('button', { name: 'Unmute Guest agent' }).click();
+  await memberAction(members, 'Guest agent', 'Unmute');
   await expect(guestRow.getByText('Muted', { exact: true })).toHaveCount(0);
-  await expect(guestRow.getByRole('button', { name: 'Mute Guest agent' })).toBeVisible();
+  expect(await memberActions(members, 'Guest agent')).toEqual([
+    'Message privately',
+    'Mute',
+    'Remove',
+  ]);
   await guest.page.getByRole('button', { name: 'Retry' }).click();
   await expect(guest.page.getByText(/^Not sent\./)).toHaveCount(0);
   await expect(guest.page.getByTestId('room-message-pending')).toHaveCount(0);
@@ -250,6 +312,8 @@ test('host mutes a member: "Muted" shows, their post is refused in plain words; 
 });
 
 const RED_LIGHT = 'rgb(217, 45, 32)';
+// Quiet red text on the v3 sheet (End room's confirm, Delete): the sheet's danger token.
+const SHEET_RED_LIGHT = 'rgb(220, 38, 38)';
 const style = (locator: ReturnType<Page['locator']>) =>
   locator.evaluate((element) => {
     const computed = getComputedStyle(element);
@@ -262,7 +326,7 @@ const style = (locator: ReturnType<Page['locator']>) =>
     };
   });
 
-test('Danger zone and member Remove use filled red buttons; Cancel stays neutral', async ({
+test('End and Delete use quiet red rows; the typed confirmation keeps the filled red; Cancel stays neutral', async ({
   browser,
 }) => {
   const host = await account(browser, 'Host', { width: 1440, height: 900 });
@@ -272,29 +336,24 @@ test('Danger zone and member Remove use filled red buttons; Cancel stays neutral
   await host.page.emulateMedia({ colorScheme: 'light' });
   await host.page.goto(`/rooms/${room.id}`);
   const panel = await openSettings(host.page);
-  await panel.getByRole('button', { name: 'Danger zone' }).click();
 
-  const close = panel.getByRole('button', { name: 'Close room' });
-  expect(await style(close)).toMatchObject({
-    background: RED_LIGHT,
-    color: 'rgb(255, 255, 255)',
-    weight: '500',
-  });
-  const primaryHeight = await panel
-    .getByRole('button', { name: 'Save' })
-    .evaluate((element) => element.getBoundingClientRect().height);
-  // Compact: Close room and Delete room never outweigh Save.
-  const closeHeight = (await close.boundingBox())!.height;
-  expect(closeHeight).toBe(32);
-  expect(closeHeight).toBeLessThan(primaryHeight);
-  expect((await panel.getByRole('button', { name: 'Delete room' }).boundingBox())!.height).toBe(32);
-  expect(await style(panel.getByRole('button', { name: 'Delete room' }))).toMatchObject({
-    background: RED_LIGHT,
-    color: 'rgb(255, 255, 255)',
-  });
+  // Workspace v3: End room and Delete are quiet rows on the sheet itself — red text, never a
+  // filled block; the sheet's primary action is Done.
+  const end = panel.getByRole('button', { name: 'End room' });
+  expect((await style(end)).background).not.toBe(RED_LIGHT);
+  const done = panel.getByRole('button', { name: 'Done', exact: true });
+  const doneHeight = (await done.boundingBox())!.height;
+  const endHeight = (await end.boundingBox())!.height;
+  expect(endHeight).toBeLessThan(doneHeight);
+  const del = panel.getByRole('button', { name: 'Delete', exact: true });
+  // Delete's text is the same red as its row's warning line (the sheet's danger token).
+  const warning = panel.locator('.rm-settings-danger-text');
+  expect((await style(del)).color).toBe((await style(warning)).color);
+  expect((await style(del)).background).not.toBe(RED_LIGHT);
+  expect((await del.boundingBox())!.height).toBeLessThan(doneHeight);
 
-  // Delete: disabled until the exact name is typed (the same red, faded, not-allowed).
-  await panel.getByRole('button', { name: 'Delete room' }).click();
+  // Delete: the typed confirmation keeps the filled red button, disabled until the exact name.
+  await del.click();
   const form = panel.getByRole('form', { name: 'Delete this room' });
   const submit = form.getByRole('button', { name: 'Delete room' });
   await expect(submit).toBeDisabled();
@@ -310,16 +369,19 @@ test('Danger zone and member Remove use filled red buttons; Cancel stays neutral
   expect((await style(cancel)).background).not.toBe(RED_LIGHT);
   await cancel.click();
 
-  // Close room keeps its confirm step, with the same filled red button.
-  await panel.getByRole('button', { name: 'Close room' }).click();
+  // End room keeps its confirm step, back on its quiet row.
+  await panel.getByRole('button', { name: 'End room' }).click();
   const confirmClose = panel.getByRole('button', { name: 'Confirm close' });
-  expect((await style(confirmClose)).background).toBe(RED_LIGHT);
-  await panel.getByRole('button', { name: 'Cancel' }).click();
+  expect((await style(confirmClose)).color).toBe(SHEET_RED_LIGHT);
+  // The confirm row's Cancel (the sheet's footer has its own Cancel further down).
+  await panel.getByRole('button', { name: 'Cancel' }).first().click();
+  await expect(panel.getByRole('button', { name: 'End room' })).toBeVisible();
 
-  // The member Remove confirmation uses it too.
+  // The member Remove confirmation uses the filled red.
+  await moreSettings(panel);
   await panel.getByRole('button', { name: /Manage members/ }).click();
   const members = host.page.getByRole('complementary', { name: 'Members' });
-  await members.getByRole('button', { name: 'Remove Guest agent' }).click();
+  await memberAction(members, 'Guest agent', 'Remove');
   const remove = members
     .getByRole('group', { name: "Remove Guest agent? They can't rejoin." })
     .getByRole('button', { name: 'Remove', exact: true });
@@ -351,14 +413,14 @@ test('removing a guest offers to reset the invite link (off by default); checked
   const members = await openMembers(host.page);
 
   // A member with an account: no link option.
-  await members.getByRole('button', { name: 'Remove Other agent' }).click();
+  await memberAction(members, 'Other agent', 'Remove');
   const otherConfirm = members.getByRole('group', {
     name: "Remove Other agent? They can't rejoin.",
   });
   await expect(otherConfirm.getByRole('checkbox')).toHaveCount(0);
   await otherConfirm.getByRole('button', { name: 'Cancel' }).click();
 
-  await members.getByRole('button', { name: 'Remove Guest agent' }).click();
+  await memberAction(members, 'Guest agent', 'Remove');
   const confirm = members.getByRole('group', { name: "Remove Guest agent? They can't rejoin." });
   const reset = confirm.getByLabel('Also reset the invite link');
   await expect(reset).not.toBeChecked();
@@ -374,9 +436,8 @@ test('removing a guest offers to reset the invite link (off by default); checked
   const rotation = await rotated;
   expect(typeof rotation.postDataJSON().idempotency_key).toBe('string');
   expect((await rotation.response())!.ok()).toBe(true);
-  await expect(
-    members.getByRole('list', { name: 'Current members' }).getByRole('listitem'),
-  ).toHaveCount(2);
+  // The host agent, the host's own person (A1) and the member who stays.
+  await expect(members.getByTestId('member-row')).toHaveCount(3);
   await expect(members.getByRole('alert')).toHaveCount(0);
   // The earlier link no longer admits anyone.
   const late = await account(browser, 'Late');
@@ -420,8 +481,7 @@ test('delete needs the exact room name, then leaves for /rooms and the room is g
   const room = await hostRoom(host, 'Doomed plan');
   await host.page.goto(`/rooms/${room.id}`);
   const panel = await openSettings(host.page);
-  await panel.getByRole('button', { name: 'Danger zone' }).click();
-  await panel.getByRole('button', { name: 'Delete room' }).click();
+  await panel.getByRole('button', { name: 'Delete', exact: true }).click();
   const form = panel.getByRole('form', { name: 'Delete this room' });
   await expect(form).toContainText('messages, tasks and files are erased');
   const typed = form.getByLabel('Room name to confirm');
@@ -435,8 +495,8 @@ test('delete needs the exact room name, then leaves for /rooms and the room is g
   // Cancel keeps the room.
   await form.getByRole('button', { name: 'Cancel' }).click();
   await expect(form).toHaveCount(0);
-  await panel.getByRole('button', { name: 'Delete room' }).click();
-  await form.getByLabel('Room name to confirm').fill('Doomed plan');
+  await panel.getByRole('button', { name: 'Delete', exact: true }).click();
+  await panel.getByLabel('Room name to confirm').fill('Doomed plan');
   await expect(remove).toBeEnabled();
   await remove.click();
 
@@ -446,6 +506,31 @@ test('delete needs the exact room name, then leaves for /rooms and the room is g
   expect(((await rooms.json()).rooms as { id: string }[]).map((item) => item.id)).not.toContain(
     room.id,
   );
+  expect(host.errors).toEqual([]);
+  await host.context.close();
+});
+
+test('the Room settings sheet is a modal dialog; closing it returns focus to More room actions', async ({
+  browser,
+}) => {
+  const host = await account(browser, 'Host', { width: 1440, height: 900 });
+  const room = await hostRoom(host, 'Focus plan');
+  await host.page.goto(`/rooms/${room.id}`);
+  const more = host.page
+    .locator('.rm-room-head')
+    .getByRole('button', { name: 'More room actions' });
+  // Escape closes it; focus lands on the ⋯ button (the menu item that opened it is gone).
+  let sheet = await openSettings(host.page);
+  await expect(sheet).toHaveAttribute('aria-modal', 'true');
+  await expect(sheet.locator(':focus')).toHaveCount(1);
+  await host.page.keyboard.press('Escape');
+  await expect(sheet).toHaveCount(0);
+  await expect(more).toBeFocused();
+  // The round Close button does the same.
+  sheet = await openSettings(host.page);
+  await sheet.getByRole('button', { name: 'Close settings' }).click();
+  await expect(sheet).toHaveCount(0);
+  await expect(more).toBeFocused();
   expect(host.errors).toEqual([]);
   await host.context.close();
 });
@@ -462,11 +547,13 @@ test('a member who does not host sees only Members; Manage members opens the Mem
   await expect(panel.getByRole('button', { name: /Manage members/ })).toBeVisible();
   await expect(panel.getByRole('heading', { name: 'General' })).toHaveCount(0);
   await expect(panel.getByLabel('Room name')).toHaveCount(0);
+  await expect(panel.getByText('More settings', { exact: true })).toHaveCount(0);
   await expect(panel.getByRole('button', { name: 'Danger zone' })).toHaveCount(0);
-  await expect(panel.getByRole('button', { name: /Delete room|Close room/ })).toHaveCount(0);
+  await expect(panel.getByRole('button', { name: /^(Delete|End room)$/ })).toHaveCount(0);
+  await expect(panel.getByLabel('What this room is for')).toHaveAttribute('readonly', '');
   await panel.getByRole('button', { name: /Manage members/ }).click();
   await expect(guest.page.getByRole('complementary', { name: 'Members' })).toBeVisible();
-  await expect(guest.page.getByRole('complementary', { name: 'Room settings' })).toHaveCount(0);
+  await expect(guest.page.getByRole('dialog', { name: 'Room settings' })).toHaveCount(0);
   expect(guest.errors).toEqual([]);
   await host.context.close();
   await guest.context.close();
@@ -484,10 +571,9 @@ test('screenshots: settings panel and delete confirmation at 1440 and 390, light
     await host.page.emulateMedia({ colorScheme: 'light' });
     await host.page.goto(`/rooms/${room.id}`);
     const panel = await openSettings(host.page);
-    await panel.getByLabel('Topic or rules').fill('Ship the beta by Friday. Be kind.');
-    await panel.getByRole('button', { name: 'Danger zone' }).click();
+    await panel.getByLabel('What this room is for').fill('Ship the beta by Friday. Be kind.');
     await host.page.screenshot({ path: `${dir}/settings-${width}.png` });
-    await panel.getByRole('button', { name: 'Delete room' }).click();
+    await panel.getByRole('button', { name: 'Delete', exact: true }).click();
     await panel.getByLabel('Room name to confirm').fill('Launch');
     await panel.getByRole('form', { name: 'Delete this room' }).scrollIntoViewIfNeeded();
     await host.page.screenshot({ path: `${dir}/delete-confirm-${width}.png` });
@@ -531,6 +617,7 @@ test('host sees blocked guest networks and clears them; members never see the ro
   await withGuestBlocks(host.page, room.id, () => blocks);
   await host.page.goto(`/rooms/${room.id}`);
   const panel = await openSettings(host.page);
+  await moreSettings(panel);
   await expect(panel.getByText('2 networks blocked', { exact: true })).toBeVisible();
   await expect(
     panel.getByText("Guest AIs you removed can't rejoin from these networks for 30 days."),
@@ -566,6 +653,7 @@ test('host sees blocked guest networks and clears them; members never see the ro
   blocks = 1;
   await host.page.reload();
   const again = await openSettings(host.page);
+  await moreSettings(again);
   await expect(again.getByText('1 network blocked', { exact: true })).toBeVisible();
 
   // A member who doesn't host never sees the row, even if the view carried a count.
@@ -606,11 +694,11 @@ test('screenshots: members panel with a muted member, recently left and remove, 
     await host.page.emulateMedia({ colorScheme: 'light' });
     await host.page.goto(`/rooms/${room.id}`);
     const members = await openMembers(host.page);
-    await members.getByRole('button', { name: 'Mute Writer agent' }).click();
+    await memberAction(members, 'Writer agent', 'Mute');
     await expect(members.getByText('Muted', { exact: true })).toBeVisible();
     await expect(members.getByText('Recently left')).toBeVisible();
     await host.page.screenshot({ path: `${dir}/members-${width}.png` });
-    await members.getByRole('button', { name: 'Remove Research agent' }).click();
+    await memberAction(members, 'Research agent', 'Remove');
     await members.getByLabel('Reason (shown to the removed member)').fill('Off-topic posts');
     await host.page.screenshot({ path: `${dir}/members-remove-confirm-${width}.png` });
     for (const owner of [host, ben, cleo, dev]) await owner.context.close();

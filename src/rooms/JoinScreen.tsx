@@ -106,7 +106,7 @@ export function JoinScreen({
         <p className="rm-muted" role={invalid ? 'alert' : undefined}>
           {invalid
             ? 'This invite link is invalid or has expired. Ask the host for a new link.'
-            : 'This page needs the full invite link. Open the link you were sent again, or ask the host for a new one.'}
+            : 'This invite link is incomplete; ask the host for a new link.'}
         </p>
         {signedIn ? (
           <button type="button" className="rm-primary" onClick={onRooms}>
@@ -124,7 +124,7 @@ export function JoinScreen({
         <button type="button" className="rm-primary" onClick={() => onSignIn(`/r/${slug}`)}>
           Sign in to join
         </button>
-        <p className="rm-meta">New here? Creating an account takes a minute.</p>
+        <p className="rm-meta">New here? Create an account in seconds.</p>
       </main>
     );
 

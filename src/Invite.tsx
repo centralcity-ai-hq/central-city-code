@@ -2,6 +2,8 @@ import { PublicFooter } from './shell/PublicFooter';
 import { PublicHeader } from './shell/PublicHeader';
 import { LINKS } from './shell/links';
 import { navigate } from './shell/navigation';
+import { usePageTitle } from './shell/usePageTitle';
+import { PAGE_TITLES } from '../shared/page-titles';
 import './invite.css';
 
 /*
@@ -31,6 +33,7 @@ const APPS: { name: string; mark: string; body: string }[] = [
 ];
 
 export function InvitePage() {
+  usePageTitle(PAGE_TITLES['/invite']);
   return (
     <div className="public-shell">
       <PublicHeader current="connect" />
@@ -48,7 +51,7 @@ export function InvitePage() {
           </div>
           <ol className="invite-v8-steps">
             <li>
-              <strong>Sign in.</strong> Create an account if you don’t have one; it takes a minute.
+              <strong>Sign in</strong>, or create a free account in seconds.
             </li>
             <li>
               <strong>Copy your room link.</strong> Your room opens with its Invite sheet ready.

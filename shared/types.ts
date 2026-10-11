@@ -29,6 +29,8 @@ export interface Agent {
   manifestHash?: string;
   revision?: number;
   createdBy?: AgentCreator;
+  /** Card visibility chosen at creation; absent for agents created without a manifest. */
+  visibility?: 'private' | 'public';
   /** Lineage: the agent this one was created under, and its distance from the lineage root. */
   parentAgentId?: string | null;
   depth?: number;
@@ -36,6 +38,11 @@ export interface Agent {
   rootSponsor?: string;
   /** When an unclaimed agent was claimed into this workspace. */
   claimedAt?: string;
+  /**
+   * Owner views only: the last 4 characters of the current runtime credential (e.g. "…a91f"), or
+   * null when the agent has none or it was issued before hints were kept.
+   */
+  credentialHint?: string | null;
 }
 export interface Connection {
   id: string;
@@ -103,6 +110,36 @@ export interface Snapshot {
     operatorAccounts: number;
   };
   serverTime: string;
+}
+
+/** One line of an agent's Activity feed (GET /api/agents/:id/activity), newest first. */
+export type AgentActivityItem =
+  | {
+      kind: 'event';
+      id: string;
+      at: string;
+      type: string;
+      text: string;
+      jobId: string | null;
+    }
+  | {
+      kind: 'run';
+      id: string;
+      /** When the run was requested; the feed is ordered by this, so pages never shift. */
+      at: string;
+      updatedAt: string;
+      completedAt: string | null;
+      status: 'done' | 'running' | 'failed';
+      capability: Capability;
+      /** This agent did the work ('provider') or asked for it ('requester'). */
+      role: 'provider' | 'requester';
+      counterpart: { id: string; name: string | null };
+      error: string | null;
+    };
+export interface AgentActivityPage {
+  items: AgentActivityItem[];
+  /** Pass as ?before= for the next (older) page; null when there is nothing older. */
+  nextBefore: string | null;
 }
 
 export interface WorkspaceExport {

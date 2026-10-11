@@ -2,11 +2,24 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import cookie from '@fastify/cookie';
 import type { PGlite } from '@electric-sql/pglite';
 import { openPostgres, type Database, type Transaction as Tx } from './database.js';
-import { runMigrations } from './migrations.js';
+import {
+  agentMessageCountsMigration,
+  agentTotalsMigration,
+  registerMigration,
+  runMigrations,
+  sessionsExpiryMigration,
+} from './migrations.js';
 import { loadLimits, type CityLimits } from './limits.js';
-import { stressTestMaxGuests, stressTestMaxRooms } from './stress-allowlist.js';
+import {
+  stressTestMaxGuests,
+  stressTestMaxRooms,
+  stressTestOperators,
+} from './stress-allowlist.js';
 import {
   clientAddressKey,
+  limitRequestRate,
+  PrincipalCache,
+  presentedPrincipal,
   FAIL_CLOSED_RETRY_MS,
   LOGIN_FAILURES,
   MemoryRateLimiter,
@@ -16,7 +29,9 @@ import {
 import {
   acceptNonce,
   announcedOnline,
+  applyPresence,
   overlayPresence,
+  PRESENCE_JSON_SQL,
   recordHeartbeat,
   resetPresence,
   type PresenceIdentity,
@@ -41,6 +56,7 @@ import {
   hasPermission,
   iso,
   LEASE_TTL,
+  ownerAgent,
   publicAgent,
   publicJob,
   reachable,
@@ -55,7 +71,15 @@ import {
   type Workspace,
 } from './model.js';
 import { executeTemplate } from './templates.js';
-import { descendants, issueRuntimeCredential, revokeStoredAgent } from './agent-lifecycle.js';
+import { agentActivity, decodeCursor } from './activity.js';
+import {
+  currentManifest,
+  descendants,
+  issueRuntimeCredential,
+  revokeStoredAgent,
+  setAgentPaused,
+  updateStoredAgent,
+} from './agent-lifecycle.js';
 import { acquireDataLock } from './data-lock.js';
 import { exportWorkspace } from './export.js';
 import {
@@ -72,12 +96,21 @@ import { registerPairRemediationMigration } from './messaging/remediation-schema
 import { registerAiWorkspacesMigration } from './workspaces/schema.js';
 import { registerAiWorkspaces } from './workspaces/service.js';
 import { registerCrossConnectionsMigration } from './connections/schema.js';
-import { createConnections, loadInbound } from './connections/service.js';
+import {
+  createConnections,
+  inboundFromRows,
+  INBOUND_JSON_SQL,
+  loadInbound,
+} from './connections/service.js';
 import { registerConnectionRoutes } from './connections/routes.js';
 import { registerRoomsMigration } from './rooms/schema.js';
 import { registerRoomFormatMigration } from './rooms/format-schema.js';
 import { createRooms } from './rooms/service.js';
-import { createRoomTasks } from './rooms/tasks-service.js';
+import {
+  createRoomTasks,
+  existingStarterTasks,
+  insertStarterTasks,
+} from './rooms/tasks-service.js';
 import { registerTaskRoutes } from './rooms/tasks-routes.js';
 import { roomTasksEnabled } from './rooms/tasks-tools.js';
 import {
@@ -87,7 +120,10 @@ import {
 } from './rooms/repos/index.js';
 import { registerRoomRepoRoutes } from './rooms/repos/routes.js';
 import { registerRoomTasksMigration } from './rooms/tasks-schema.js';
+import { registerRoomOverviewMigration } from './rooms/overview.js';
 import { registerRoomRoutes } from './rooms/routes.js';
+import { createRoomPins, deliverBriefOnce, registerRoomPinsMigration } from './rooms/pins.js';
+import { registerPinRoutes } from './rooms/pins-routes.js';
 import { registerWakeMigration } from './wake/schema.js';
 import { createWake, type WakeOptions } from './wake/service.js';
 import { inboxWaiter, registerWakeRoutes } from './wake/routes.js';
@@ -98,6 +134,12 @@ import { registerResponderMigration } from './responder/schema.js';
 import { registerResponderExecutionMigration } from './responder/execution-schema.js';
 import { responderKeys } from './responder/keys.js';
 import { createResponder, ResponderError } from './responder/service.js';
+import {
+  AgentPayError,
+  createAgentPayService,
+  type AgentPayDeps,
+} from './base/payments/agent-pay.js';
+import { registerPaymentRecoveryCron } from './base/payments/recover-cron.js';
 import { registerResponderRoutes } from './responder/routes.js';
 import type { ProviderPostTransport, ProviderTransport } from './responder/providers.js';
 import { createResponderDelivery } from './responder/deliver.js';
@@ -110,6 +152,18 @@ import {
   type GoogleSignInOptions,
 } from './google/index.js';
 import { GOOGLE_SALT_NO_PASSWORD, GOOGLE_SALT_PENDING_NAME } from './google/routes.js';
+import { registerEmail, registerEmailMigration, type EmailOptions } from './email/index.js';
+import { registerBaseMigration } from './base/schema.js';
+import { baseRegistrationStarted, registerShortLinks } from './base/identity/short-links.js';
+import { registerBaseRegistrationRoutes } from './base/identity/routes.js';
+import { chainRuntimes } from './base/chain/runtime.js';
+import { registerOnBaseRoutes } from './base/explorer/routes.js';
+import { baseChainReader } from './base/explorer/head.js';
+import { registerBaseWalletRoutes, WALLET_CHAIN_ID, walletReaders } from './base/wallet/routes.js';
+import { ownerRevokePortFromEnv } from './base/chain/owner-revoke.js';
+import { BASE_MAINNET, BASE_NETWORKS } from '../shared/base/chains.js';
+import { PUBLIC_BASE_RPC } from '../shared/base/on-base.js';
+import { newsletterEmailSchema } from '../shared/newsletter-schema.js';
 import {
   OnboardingRequiredError,
   assertOnboarded as assertOnboardedIn,
@@ -118,6 +172,7 @@ import {
 } from './onboarding.js';
 import { TERMS_VERSION } from '../shared/terms.js';
 import { registerElric } from './elric/index.js';
+import { ELRIC_MANAGED, elricAgentIds } from './elric/access.js';
 import { unavailableAdapter, type ModelAdapter } from './elric/adapter.js';
 import {
   elricEnabled,
@@ -141,6 +196,7 @@ import {
   parseExcludedOperators,
   registerPublicStatsRoutes,
 } from './stats/public-stats.js';
+import { registerFastCountCheckRoute } from './stats/fast-count-check.js';
 import { loadPlatformSigner } from './autonomy/signing.js';
 import {
   createCountLog,
@@ -166,7 +222,19 @@ export interface AppOptions {
    * `/api/` routes always get the same body, and nothing echoes the requested path or query.
    */
   notFound?: (request: FastifyRequest, reply: FastifyReply) => unknown;
+  /**
+   * The passport page (the SPA shell) for a browser at /a/<short> (short-links.ts wantsHtml); the
+   * local server passes it. Hosted, vercel.json rewrites those requests to the shell before they
+   * reach the function. Without it every client gets the registration file.
+   */
+  passportPage?: (request: FastifyRequest, reply: FastifyReply) => unknown;
   now?: () => number;
+  /**
+   * Tests only: the clock of the count-log cron gate, pinned so cron tests do not depend on the
+   * time of day (CITY_COUNT_LOG_CRON_NOW in the e2e server). Defaults to the app clock (`now`).
+   * When set, the cron seals without the noon cut.
+   */
+  countLogCronNow?: () => number;
   startWorkers?: boolean;
   secureCookies?: boolean;
   hosted?: HostedConfig;
@@ -204,9 +272,14 @@ export interface AppOptions {
     limit(key: string, max: number, windowMs: number): Promise<void>;
   }) => RoomRepos;
   /** Agent messaging bounds (docs/MESSAGING.md); defaults 1000 unacknowledged and 60 sends/min. */
-  messaging?: { inboxDepth?: number; sendsPerMinute?: number };
+  messaging?: { inboxDepth?: number; sendsPerMinute?: number; crossPairPerMinute?: number };
   /** Room limit overrides (docs/ROOMS.md). */
   rooms?: Partial<RoomLimits>;
+  /**
+   * Tests only: the agent payment chain and the recipient reader of Base Pay P2c (fakes without
+   * any network) instead of the wallet network's chain runtime and configured endpoint.
+   */
+  agentPay?: Pick<AgentPayDeps, 'chain' | 'recipients'>;
   /** Wake-up tuning and the test webhook transport (docs/WAKE.md). */
   wake?: WakeOptions;
   /** Results tuning (ask timeout, candidate cap, principal age; docs/ANSWERS.md). */
@@ -248,9 +321,14 @@ export interface AppOptions {
     models?: ElricModelWiring | null;
     /** Tests only: the wall clock of the run budget (default Date.now). */
     wallClock?: () => number;
+    /** Tests only: the wait before a model retry, and the operator log of a failed turn. */
+    sleep?: (ms: number) => Promise<void>;
+    log?: (line: string) => void;
   };
   /** Sign in with Google (docs/GOOGLE_SIGNIN.md); off unless CITY_GOOGLE_SIGNIN=1. */
   google?: GoogleSignInOptions;
+  /** Email (docs/EMAIL.md): the CITY_EMAIL_* environment and the provider transport (tests). */
+  email?: EmailOptions;
 }
 export interface CityServices {
   tick(): Promise<void>;
@@ -283,8 +361,15 @@ const ONBOARDING_ROUTES = new Set([
   'POST /api/auth/onboarding',
   'POST /api/auth/logout',
 ]);
-function fail(code: number, message: string): never {
-  throw new ApiError(code, message);
+function fail(code: number, message: string, errorCode?: string): never {
+  throw Object.assign(new ApiError(code, message), errorCode ? { errorCode } : {});
+}
+/** Refuses a per-agent destructive console route when the target (or a descendant) is Elric. */
+async function refuseElric(tx: Pick<Tx, 'query'>, agentIds: readonly string[]) {
+  if ((await elricAgentIds(tx, agentIds)).size)
+    throw Object.assign(new ApiError(409, ELRIC_MANAGED.message), {
+      errorCode: ELRIC_MANAGED.code,
+    });
 }
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
 function constantEqual(left: string, right: string): boolean {
@@ -334,7 +419,31 @@ const authSchema = z
     password: z.string().min(12).max(256),
   })
   .strict();
+/** Password sign-up: the newsletter tick needs an address; without it none is accepted. */
+const registerSchema = authSchema
+  .extend({ newsletter: z.boolean().optional(), email: newsletterEmailSchema.optional() })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.newsletter === true && !value.email)
+      context.addIssue({
+        code: 'custom',
+        path: ['email'],
+        message: 'Enter your email address for the newsletter.',
+      });
+    if (value.newsletter !== true && value.email !== undefined)
+      context.addIssue({
+        code: 'custom',
+        path: ['email'],
+        message: 'An email address is only needed for the newsletter.',
+      });
+  });
 const agentSchema = assistantAgentSchema;
+/** The built-in template behind each capability (server/manifest/templates.ts). */
+const CAPABILITY_TEMPLATES = {
+  research: 'template:research-analyst@1.0.0',
+  extract: 'template:extractor@1.0.0',
+  verify: 'template:fact-checker@1.0.0',
+} as const;
 const pairSchema = z
   .object({ fromAgentId: z.string().uuid(), toAgentId: z.string().uuid() })
   .strict();
@@ -398,7 +507,9 @@ export async function createApp(options: AppOptions = {}): Promise<FastifyInstan
   try {
     if (dataDir !== 'memory://') await mkdir(dirname(dataDir), { recursive: true });
     const { PGlite } = await import('@electric-sql/pglite');
-    const db = (openedDb = await PGlite.create(dataDir));
+    // btree_gin: the composite (room_id, search_tsv) index of room search (migration 55).
+    const { btree_gin } = await import('@electric-sql/pglite/contrib/btree_gin');
+    const db = (openedDb = await PGlite.create(dataDir, { extensions: { btree_gin } }));
     return await createDatabaseApp(options, clock, db, () => dataLock?.release());
   } catch (error) {
     if (openedDb) await openedDb.close();
@@ -432,6 +543,8 @@ async function createDatabaseApp(
   registerRoomFormatMigration();
   // Room tasks: the schema always exists; the MCP tools are behind CITY_ROOM_TASKS=1.
   registerRoomTasksMigration();
+  // 68: room pins and the handoff brief ledger (docs/ROOMS.md "Pins and the handoff brief").
+  registerRoomPinsMigration();
   // 23: room repos, proposals, reviews and evidence; the tools are behind
   // CITY_ROOM_REPOS=1 (docs/ROOM_REPOS.md).
   registerRoomCodeMigration();
@@ -447,6 +560,18 @@ async function createDatabaseApp(
   registerElricCeilingMigration();
   // 41: Sign in with Google (flows, and the Workspace domain on Elric's verified identities).
   registerGoogleMigration();
+  // 61: the sessions expiry index (server/migrations.ts).
+  registerMigration(sessionsExpiryMigration);
+  // 74: the My agents Overview totals' indexes (server/migrations.ts).
+  registerMigration(agentTotalsMigration);
+  // 75: messages each agent sent (counter + trigger, server/migrations.ts).
+  registerMigration(agentMessageCountsMigration);
+  // 64: room overview counters, messages today and the "Needs you" indexes; 71: dismissed
+  // "Needs you" items (rooms/overview.ts).
+  registerRoomOverviewMigration();
+  // 76: the email outbox and the newsletter consent (server/email/schema.ts).
+  registerEmailMigration();
+  registerBaseMigration();
   await runMigrations(db);
   const caps = loadLimits(process.env, options.limits);
   // Number of trusted proxy hops nearest the socket; 0 disables X-Forwarded-For entirely.
@@ -472,13 +597,41 @@ async function createDatabaseApp(
   });
   // Fastify's default 404 body repeats the method, path and query string; this one never does.
   app.setNotFoundHandler((request, reply) => {
+    // A build file that doesn't exist (yet): Vercel serves every existing /assets/ file itself and
+    // only a miss reaches here (vercel.json rewrite). Never cacheable, so a chunk asked for during a
+    // deploy is fetched again instead of staying a 404 for a year under /assets' immutable header.
+    if (request.url.startsWith('/assets/'))
+      return reply.code(404).header('Cache-Control', 'no-store').send({ error: 'Not found' });
     if (!request.url.startsWith('/api/') && options.notFound)
       return options.notFound(request, reply);
     return reply
       .code(404)
       .send({ error: request.url.startsWith('/api/') ? 'Unknown API route' : 'Not found' });
   });
-  app.setErrorHandler((error, _request, reply) => {
+  // With a stress-test allowlist set, the invite joins charge the per-IP API limit in their
+  // handler (server/links/invites.ts deferredApiLimit). A request refused before the handler
+  // (bad JSON, content type, body size) is charged here instead, so it is never free.
+  const DEFERRED_LIMIT_ROUTES = new Set([
+    '/api/public/invites/bootstrap',
+    '/api/public/invites/redeem',
+  ]);
+  const apiLimitDeferred = (method: string, path: string | undefined) =>
+    method === 'POST' && DEFERRED_LIMIT_ROUTES.has(path ?? '') && stressTestOperators().size > 0;
+  const reachedHandler = new WeakSet<FastifyRequest>();
+  app.addHook('preHandler', async (request) => {
+    reachedHandler.add(request);
+  });
+  app.setErrorHandler(async (error, _request, reply) => {
+    if (
+      !reachedHandler.has(_request) &&
+      apiLimitDeferred(_request.method, _request.routeOptions.url)
+    ) {
+      try {
+        await limit(`ip:${clientAddressKey(_request.ip)}`, caps.apiRequestsPerMinute, 60_000);
+      } catch (limited) {
+        error = limited as typeof error;
+      }
+    }
     const retryAfterMs = (error as { retryAfterMs?: unknown }).retryAfterMs;
     if (typeof retryAfterMs === 'number')
       reply.header('Retry-After', String(Math.max(1, Math.ceil(retryAfterMs / 1000))));
@@ -507,6 +660,8 @@ async function createDatabaseApp(
               (error instanceof ResultError &&
                 error.statusCode === 503 &&
                 errorCode === 'ask_timeout') ||
+              // Base Pay: unavailable or no sponsor (503; nothing was sent, a retry may work).
+              (error instanceof AgentPayError && error.statusCode === 503) ||
               // The responder provider could not be reached (502), or the feature has no root key (503).
               (error instanceof ResponderError &&
                 (error.statusCode === 502 || error.statusCode === 503)))
@@ -538,10 +693,15 @@ async function createDatabaseApp(
       : (options.rateLimiter ?? (options.hosted ? 'postgres' : 'memory')) === 'postgres'
         ? new PostgresRateLimiter(db, clock)
         : new MemoryRateLimiter(clock);
-  async function limit(key: string, max: number, window: number): Promise<void> {
+  const principals = new PrincipalCache(clock);
+  async function limit(key: string, max: number, window: number, message?: string): Promise<void> {
     const result = await limiter.hit(key, max, window);
     if (!result.allowed)
-      throw new ApiError(429, 'Too many requests. Try again later.', result.retryAfterMs);
+      throw new ApiError(
+        429,
+        message ?? 'Too many requests. Try again later.',
+        result.retryAfterMs,
+      );
   }
   // Session renewal happens during the operator lookup, which only receives the request.
   const replies = new WeakMap<FastifyRequest, FastifyReply>();
@@ -579,14 +739,42 @@ async function createDatabaseApp(
           fail(403, 'Cross-origin requests are not allowed.');
       }
     }
-    await limit(`ip:${clientAddressKey(request.ip)}`, caps.apiRequestsPerMinute, 60_000);
+    // Deferred for the invite joins while a stress-test allowlist is set (apiLimitDeferred).
+    // Otherwise per principal for a valid session, workspace key, OAuth access token or guest room
+    // credential, with a much higher per-address floor; per address without a valid credential
+    // (shared cloud egress; rate-limit.ts limitRequestRate).
+    if (!apiLimitDeferred(request.method, request.url.split('?')[0]))
+      await limitRequestRate(
+        limit,
+        request.ip,
+        presentedPrincipal(request.headers.authorization, request.cookies.cc_session, {
+          guest: (token) => links.invites.verify(token),
+          workspaceKey: (token) => workspaces.verifyKey(token),
+          accessToken: (token) => oauthServer.verifyAccessToken(token, originOf(request)),
+          session: async (token) =>
+            (
+              await db.query<{ operator_id: string }>(
+                'SELECT operator_id FROM sessions WHERE token_hash=$1 AND expires_at>$2',
+                [sha(token), clock()],
+              )
+            ).rows[0]?.operator_id ?? null,
+        }),
+        caps.apiRequestsPerMinute,
+        principals,
+      );
     const runtime = request.url.startsWith('/api/runtime/');
-    // Anonymous creation carries no cookie authority, so it needs no CSRF header.
-    const cookieless = runtime || request.url.startsWith('/api/public/');
+    // Anonymous creation carries no cookie authority, so it needs no CSRF header. Nor do the
+    // newsletter link POSTs (the confirm/unsubscribe page buttons and the RFC 8058 one-click
+    // unsubscribe from the mail client), authorized only by the signed link; docs/EMAIL.md.
+    const newsletterLink =
+      request.method === 'POST' &&
+      (request.url.startsWith('/api/newsletter/unsubscribe?') ||
+        request.url.startsWith('/api/newsletter/confirm?'));
+    const cookieless = runtime || request.url.startsWith('/api/public/') || newsletterLink;
     if (!runtime && !['GET', 'HEAD'].includes(request.method)) {
       if (!cookieless && request.headers['x-city-request'] !== '1')
         fail(403, 'Missing request protection header.');
-      if (!request.headers['content-type']?.startsWith('application/json'))
+      if (!newsletterLink && !request.headers['content-type']?.startsWith('application/json'))
         fail(415, 'Use application/json.');
     }
   });
@@ -600,6 +788,25 @@ async function createDatabaseApp(
     }
   }
   async function readWorkspace(tx: Tx, operatorId: string, lock = false): Promise<Workspace> {
+    if (!lock) {
+      // Unlocked reads (snapshots) take the document, its presence rows and its inbound
+      // connections in one round trip; the result is the same as the three reads below.
+      const row = (
+        await tx.query<{
+          data: Workspace;
+          presence: Parameters<typeof applyPresence>[1];
+          inbound: Parameters<typeof inboundFromRows>[0];
+        }>(
+          `SELECT ws.data, ${PRESENCE_JSON_SQL} AS presence, ${INBOUND_JSON_SQL} AS inbound
+             FROM workspaces ws WHERE ws.operator_id=$1`,
+          [operatorId],
+        )
+      ).rows[0];
+      if (!row) fail(401, 'Sign in to continue.');
+      applyPresence(row.data, row.presence);
+      attachInbound(row.data, inboundFromRows(row.inbound));
+      return row.data;
+    }
     const row = (
       await tx.query<{ data: Workspace }>(
         `SELECT data FROM workspaces WHERE operator_id=$1${lock ? ' FOR UPDATE' : ''}`,
@@ -914,6 +1121,8 @@ async function createDatabaseApp(
       name: authSchema.shape.name.optional(),
       terms_version: z.string().max(32),
       accept_terms: z.literal(true),
+      // The newsletter opt-in (unticked by default, never required; docs/EMAIL.md).
+      newsletter: z.boolean().optional(),
     })
     .strict();
   // Finish onboarding: the account name (if still needed) and the Terms/Privacy acceptance, with
@@ -956,8 +1165,16 @@ async function createDatabaseApp(
         current = input.name;
       }
       await recordAcceptance(tx, signedIn.id);
+      // A new account created with Google: the welcome email, queued once (only when sending is on).
+      if (row.salt === GOOGLE_SALT_PENDING_NAME || row.salt === GOOGLE_SALT_NO_PASSWORD)
+        await email.queueWelcome(tx, signedIn.id, current, requestOrigin(request, options.hosted));
+      // The opt-in goes to the Google account's verified address.
+      if (input.newsletter === true)
+        await email.optIn(tx, signedIn.id, 'onboarding', requestOrigin(request, options.hosted));
       return current;
     });
+    // Sent after the response path is free (never blocking sign-up); the cron drain retries.
+    email.kick();
     return { operator: { id: signedIn.id, name }, onboarding: await onboardingOf(signedIn.id) };
   });
   app.get('/api/session', async (request) => {
@@ -965,17 +1182,29 @@ async function createDatabaseApp(
     return {
       operator,
       // Present for a signed-in account; `required` sends the app to the onboarding screen.
-      ...(operator ? { onboarding: await onboardingOf(operator.id) } : {}),
-      setupRequired:
-        Number(
-          (await db.query<{ count: string }>("SELECT count(*) FROM operators WHERE kind='owner'"))
-            .rows[0]?.count,
-        ) === 0,
+      ...(operator
+        ? {
+            onboarding: {
+              ...(await onboardingOf(operator.id)),
+              // Whether onboarding offers the newsletter opt-in (the account has a Google address).
+              newsletter_available: (await email.emailOf(db, operator.id)) !== null,
+            },
+          }
+        : {}),
+      // One probe of the operators_owner partial index (migration 59), not a count of every
+      // operator: unclaimed partitions make that table grow with every agent.
+      setupRequired: !(
+        await db.query<{ any: boolean }>(
+          "SELECT EXISTS (SELECT 1 FROM operators WHERE kind='owner') AS any",
+        )
+      ).rows[0]?.any,
     };
   });
   /**
-   * Creates an owner account and its workspace under the account cap (shared by the password
-   * sign-up and Continue with Google; a Google-only account's hash and salt: google/routes.ts).
+   * Creates an owner account and its workspace (shared by the password sign-up and Continue with
+   * Google; a Google-only account's hash and salt: google/routes.ts). No table lock: the unique
+   * name_key settles concurrent sign-ups for one name. `caps.operators` is 0 (no ceiling) unless
+   * CITY_LIMIT_OPERATORS is set as an emergency brake; that check is a plain count.
    */
   async function createOwner(
     tx: Tx,
@@ -984,21 +1213,19 @@ async function createDatabaseApp(
     hash: string,
     salt: string,
   ): Promise<'created' | 'limit' | 'name_taken'> {
-    await tx.query('LOCK TABLE operators IN SHARE ROW EXCLUSIVE MODE');
-    const count = Number(
-      (await tx.query<{ count: string }>("SELECT count(*) FROM operators WHERE kind='owner'"))
-        .rows[0]?.count,
-    );
-    if (count >= caps.operators) return 'limit';
-    if (
-      (await tx.query('SELECT id FROM operators WHERE name_key=$1', [name.toLowerCase()])).rows
-        .length
-    )
-      return 'name_taken';
-    await tx.query(
-      'INSERT INTO operators(id,name,name_key,password_hash,salt,created_at) VALUES($1,$2,$3,$4,$5,$6)',
+    if (caps.operators > 0) {
+      const count = Number(
+        (await tx.query<{ count: string }>("SELECT count(*) FROM operators WHERE kind='owner'"))
+          .rows[0]?.count,
+      );
+      if (count >= caps.operators) return 'limit';
+    }
+    const inserted = await tx.query(
+      `INSERT INTO operators(id,name,name_key,password_hash,salt,created_at) VALUES($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (name_key) DO NOTHING RETURNING id`,
       [id, name, name.toLowerCase(), hash, salt, clock()],
     );
+    if (!inserted.rows.length) return 'name_taken';
     const workspace = emptyWorkspace();
     event(workspace, clock(), 'operator.created', 'Operator account created.');
     await tx.query('INSERT INTO workspaces(operator_id,data) VALUES($1,$2::jsonb)', [
@@ -1027,7 +1254,7 @@ async function createDatabaseApp(
       caps.registrationsPerWindow,
       15 * 60_000,
     );
-    const { name, password } = authSchema.parse(request.body);
+    const { name, password, newsletter, email: address } = registerSchema.parse(request.body);
     const salt = randomBytes(16).toString('hex'),
       hash = await passwordHash(password, salt);
     const operator = { id: randomUUID(), name };
@@ -1037,8 +1264,19 @@ async function createDatabaseApp(
       if (created === 'name_taken') fail(409, 'That account name is unavailable.');
       // The sign-up form states that creating the account accepts the Terms and Privacy Policy.
       await recordAcceptance(tx, operator.id);
+      // The newsletter opt-in (unticked by default): a pending sign-up and its confirmation email.
+      // Without the tick no address is collected or stored.
+      if (newsletter && address)
+        await email.optIn(
+          tx,
+          operator.id,
+          'signup',
+          requestOrigin(request, options.hosted),
+          address,
+        );
       await session(tx, reply, operator.id);
     });
+    if (newsletter) email.kick();
     return reply.code(201).send({ operator });
   });
   // Known-device cookie: a browser that has signed in to an account before carries an HMAC of
@@ -1131,6 +1369,88 @@ async function createDatabaseApp(
     });
     return { ok: true };
   });
+  registerShortLinks(app, {
+    db,
+    originOf: (request) => requestOrigin(request, options.hosted),
+    page: options.passportPage,
+  });
+  // Keys, bundler and RPC from the environment; a missing setting answers 503 (fails closed).
+  const baseRuntimes = chainRuntimes(db, process.env);
+  registerBaseRegistrationRoutes(app, {
+    db,
+    env: process.env,
+    // The selected workspace, like every console route (a co-owned AI workspace via
+    // X-City-Workspace, else 404); signed out stays null, which the routes answer with 401.
+    currentOperator: async (request) => ((await optionalOperator(request)) ? owner(request) : null),
+    // With wallets on, a new registration's wallet is owned by this person's wallet key.
+    currentPerson: optionalOperator,
+    runtime: baseRuntimes,
+    cronSecret: process.env.CRON_SECRET,
+  });
+  // Operation Base Wallet (behind CITY_BASE_WALLET=1): the person's owner vault and each agent's
+  // wallet on the wallet network (shared/base/wallet-network.ts). Balances, spend permissions and
+  // Pay's recipient check (ownerOf at one block) are read through that network's configured
+  // endpoint, on Base only with its gate open (walletReaders); without them a balance read answers
+  // 503, a limit view is stale, a recipient is not verified, and nothing is invented.
+  let limitOperations: ReturnType<typeof ownerRevokePortFromEnv> | null = null;
+  registerBaseWalletRoutes(app, {
+    db,
+    env: process.env,
+    currentPerson: optionalOperator,
+    currentWorkspace: async (request) =>
+      (await optionalOperator(request)) ? owner(request) : null,
+    runtime: baseRuntimes,
+    ...walletReaders(process.env),
+    // Built on first use; a missing setting answers 503 and is not cached.
+    limitOperations: async () =>
+      (limitOperations ??= ownerRevokePortFromEnv(db, process.env, WALLET_CHAIN_ID)),
+    limit,
+    // The withdrawals sweep (vercel.json crons): expired and finished operations release the
+    // sponsor's exposure even when nobody reads them.
+    cronSecret: process.env.CRON_SECRET,
+    now: clock,
+  });
+  // The Agent Explorer's On Base view: public, read-only, cached. The server reads Base (the head
+  // and ownerOf) through the configured Base endpoint, else (hosted only) the public one; locally
+  // and in tests without either, owners and readAt come from the stored evidence instead.
+  const onBaseUrl =
+    process.env[BASE_NETWORKS[BASE_MAINNET].bundlerEnv]?.trim() ||
+    (options.hosted ? PUBLIC_BASE_RPC : undefined);
+  const onBaseRegistry = BASE_NETWORKS[BASE_MAINNET].contracts.identityRegistry;
+  registerOnBaseRoutes(app, {
+    db,
+    limit,
+    chain:
+      onBaseUrl && onBaseRegistry
+        ? baseChainReader(
+            onBaseUrl,
+            BASE_MAINNET,
+            onBaseRegistry,
+            undefined,
+            BASE_NETWORKS[BASE_MAINNET].contracts.reputationRegistry,
+          )
+        : undefined,
+  });
+  const email = registerEmail(app, {
+    db,
+    clock,
+    options: options.email,
+    originOf: (request) => requestOrigin(request, options.hosted),
+    elricEnabled: () => options.elric?.enabled ?? elricEnabled(),
+    owner: person,
+    cronSecret: process.env.CRON_SECRET,
+    limit,
+    clientKey: (request) => clientAddressKey(request.ip),
+  });
+  // Locally (not hosted), a worker drains the email queue every minute; Vercel Cron does it hosted.
+  if (!options.hosted && options.startWorkers !== false) {
+    const emailTimer = setInterval(() => {
+      email.kick();
+      void email.purge().catch(() => undefined);
+    }, 60_000);
+    emailTimer.unref();
+    app.addHook('onClose', async () => clearInterval(emailTimer));
+  }
   registerGoogleSignIn(app, {
     db,
     clock,
@@ -1149,7 +1469,17 @@ async function createDatabaseApp(
     const operator = await owner(request);
     // Polling advances hosted demonstrations. Controls must apply without first
     // completing work that the operator is trying to cancel, pause or revoke.
-    if (options.hosted) await performTick(operator.id);
+    if (options.hosted) {
+      // Most polls find nothing to advance: decide that from an unlocked read and answer from it,
+      // without the locked tick transaction or a second read. A workspace with work to advance
+      // takes the locked tick exactly as before.
+      const current = await readWorkspace(db, operator.id);
+      if (!advances(current, clock())) {
+        await sweepExpired();
+        return snapshot(current, operator, clock());
+      }
+      await performTick(operator.id);
+    }
     return snapshot(await readWorkspace(db, operator.id), operator, clock());
   });
   app.get('/api/events', async (request, reply) => {
@@ -1212,10 +1542,68 @@ async function createDatabaseApp(
   });
 
   app.post('/api/agents', async (request, reply) => {
-    const operator = await owner(request),
-      values = agentSchema.parse(request.body);
+    const operator = await owner(request);
+    const { visibility, ...rest } = z
+      .object({ visibility: z.enum(['private', 'public']).optional() })
+      .passthrough()
+      .parse(request.body);
+    const values = agentSchema.parse(rest);
     // Elric (docs/ELRIC.md): the name is reserved for first-party Elric agents.
     if (reservedName(values.name)) fail(409, ELRIC_RESERVED_NAME_MESSAGE);
+    // A visibility choice needs a manifest, which only hosted agents get here: refuse it for
+    // external agents instead of silently dropping the choice.
+    if (visibility && values.mode !== 'hosted')
+      fail(400, 'Visibility can only be chosen for hosted agents.');
+    // With a visibility choice, a hosted agent is created like city_create_agent does: from a
+    // manifest (template by capability), so it has a signed Agent Card and, when public, a public
+    // profile that agent explorers and the Base registration can use.
+    if (visibility && values.mode === 'hosted') {
+      const created = await mutate(operator.id, async (workspace, tx, time) => {
+        if (workspace.agents.length >= caps.agentsPerWorkspace)
+          fail(409, `Local workspace limit of ${caps.agentsPerWorkspace} agents reached.`);
+        const base = values.name
+          .normalize('NFKD')
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '')
+          .slice(0, 48);
+        const result = await autonomy.service.createAgentTool(
+          tx,
+          workspace,
+          time,
+          {
+            mode: 'owned',
+            operatorId: operator.id,
+            createdBy: { kind: 'owner', id: operator.id },
+            rootSponsor: operator.id,
+            label: operator.name,
+            canConnect: true,
+            origin: requestOrigin(request, options.hosted),
+          },
+          {
+            manifest: {
+              apiVersion: 'centralcity.agent/v1',
+              kind: 'Agent',
+              metadata: {
+                // Unique per agent, so two agents with the same display name never merge.
+                name: `${base || 'agent'}-${randomBytes(3).toString('hex')}`,
+                displayName: values.name,
+                description: values.description,
+              },
+              spec: { extends: CAPABILITY_TEMPLATES[values.capability], visibility },
+            },
+            idempotency_key: randomUUID(),
+          },
+        );
+        // Remembered on the agent so the owner's pages know whether it has a public profile.
+        const stored =
+          result.agent && workspace.agents.find((item) => item.id === result.agent!.id);
+        if (stored) stored.visibility = visibility;
+        return result.agent ? { ...result, agent: { ...result.agent, visibility } } : result;
+      });
+      if (!('agent_card_url' in created) || !created.agent) fail(500, 'The agent was not created.');
+      return reply.code(201).send({ agent: created.agent, agent_card_url: created.agent_card_url });
+    }
     const response = await mutate(operator.id, async (workspace, tx, time) => {
       if (workspace.agents.length >= caps.agentsPerWorkspace)
         fail(409, `Local workspace limit of ${caps.agentsPerWorkspace} agents reached.`);
@@ -1244,8 +1632,9 @@ async function createDatabaseApp(
           'INSERT INTO credentials(token_hash,operator_id,agent_id) VALUES($1,$2,$3)',
           [sha(token), operator.id, agent.id],
         );
+        agent.credentialHint = token.slice(-4);
       }
-      return { agent: publicAgent(agent, workspace.jobs, time), ...(token ? { token } : {}) };
+      return { agent: ownerAgent(agent, workspace.jobs, time), ...(token ? { token } : {}) };
     });
     return reply.code(201).send(response);
   });
@@ -1255,7 +1644,12 @@ async function createDatabaseApp(
     return mutate(operator.id, async (workspace, tx, time) => {
       const agent = ensureAgent(workspace, id);
       // Revocation cascades down the parentAgentId lineage (agents created under this one).
-      for (const target of [agent, ...descendants(workspace, agent.id)])
+      const targets = [agent, ...descendants(workspace, agent.id)];
+      await refuseElric(
+        tx,
+        targets.map((item) => item.id),
+      );
+      for (const target of targets)
         await revokeStoredAgent(
           workspace,
           tx,
@@ -1269,12 +1663,149 @@ async function createDatabaseApp(
       return { ok: true };
     });
   });
+  // My agents' Overview totals: tasks the agent handed in that were approved (one indexed count,
+  // migration 74) and messages it sent in rooms (a counter row, migration 75). Owner only, like the rest of the agent routes.
+  app.get('/api/agents/:id/totals', async (request) => {
+    const operator = await owner(request),
+      id = idFrom(request);
+    ensureAgent(await readWorkspace(db, operator.id), id);
+    const [tasks, messages] = await Promise.all([
+      db.query<{ count: string | number }>(
+        "SELECT count(*) AS count FROM room_tasks WHERE submitted_by=$1 AND status='done'",
+        [id],
+      ),
+      db.query<{ sent: string | number }>(
+        'SELECT sent FROM agent_message_counts WHERE agent_id=$1',
+        [id],
+      ),
+    ]);
+    return {
+      tasks_done: Number(tasks.rows[0]?.count ?? 0),
+      messages_sent: Number(messages.rows[0]?.sent ?? 0),
+    };
+  });
+  // My agents' Activity feed: this agent's events and runs, newest first, paged (server/activity.ts),
+  // plus a line per confirmed Base registration read from base_identities. Owner only.
+  app.get('/api/agents/:id/activity', async (request) => {
+    const operator = await owner(request),
+      id = idFrom(request);
+    const query = z
+      .object({
+        before: z.string().max(200).optional(),
+        limit: z
+          .string()
+          .regex(/^\d{1,3}$/)
+          .transform(Number)
+          .optional(),
+      })
+      .strict()
+      .parse(request.query);
+    if (query.before !== undefined && !decodeCursor(query.before)) fail(400, 'Invalid cursor.');
+    const workspace = await readWorkspace(db, operator.id);
+    ensureAgent(workspace, id);
+    const identities = await db.query<{
+      chain_id: number;
+      erc8004_agent_id: string;
+      updated_at: string | number;
+    }>(
+      "SELECT chain_id, erc8004_agent_id::text AS erc8004_agent_id, updated_at FROM base_identities WHERE agent_id=$1 AND operator_id=$2 AND state='confirmed'",
+      [id, operator.id],
+    );
+    return agentActivity(
+      workspace,
+      id,
+      identities.rows.map((row) => ({
+        chainId: Number(row.chain_id),
+        erc8004AgentId: row.erc8004_agent_id,
+        confirmedAt: Number(row.updated_at),
+      })),
+      query,
+    );
+  });
+  // Rename one agent and/or make its profile public or private from My agents (owner only, Elric
+  // refused, audit events). The name follows the creation rules (names need not be unique); both
+  // changes together make one manifest revision; the same values are a no-op. Answers with the agent.
+  app.patch('/api/agents/:id', async (request) => {
+    const operator = await owner(request),
+      id = idFrom(request);
+    const { name, visibility } = z
+      .object({
+        name: agentSchema.shape.name.optional(),
+        visibility: z.enum(['private', 'public']).optional(),
+      })
+      .strict()
+      .refine((body) => body.name !== undefined || body.visibility !== undefined, {
+        message: 'Give a name or a visibility.',
+      })
+      .parse(request.body);
+    return mutate(operator.id, async (workspace, tx, time) => {
+      const agent = ensureAgent(workspace, id);
+      await refuseElric(tx, [agent.id]);
+      if (agent.revokedAt)
+        fail(
+          409,
+          name !== undefined
+            ? 'Removed agents cannot be renamed.'
+            : 'Removed agents cannot be changed.',
+        );
+      // Elric (docs/ELRIC.md): the name is reserved for first-party Elric agents.
+      if (name !== undefined && name !== agent.name && reservedName(name))
+        fail(409, ELRIC_RESERVED_NAME_MESSAGE);
+      const manifest = await currentManifest(tx, agent);
+      // The card, and so the Base registration file, is compiled from the manifest: an agent
+      // created without one has no card at all and stays private (which is what it already is).
+      if (visibility === 'public' && !manifest)
+        fail(
+          409,
+          'This agent was created without a profile, so it cannot be made public. Create a new agent with a public profile instead.',
+          'no_profile',
+        );
+      // A Base agent's on-chain URI (/a/<id>) is read from its public card, so it stays public.
+      // The workspace row lock taken by mutate is the one Base registration takes before it
+      // assigns the short id, so the two cannot interleave.
+      if (
+        visibility === 'private' &&
+        manifest &&
+        manifest.spec.visibility !== 'private' &&
+        (await baseRegistrationStarted(tx, agent.id))
+      )
+        fail(409, "A Base agent's profile stays public.", 'base_stays_public');
+      const changed = await updateStoredAgent(
+        workspace,
+        tx,
+        operator.id,
+        agent,
+        manifest,
+        { name, visibility },
+        time,
+      );
+      return { agent: ownerAgent(agent, workspace.jobs, time), changed };
+    });
+  });
+  // Pause / Resume one agent from My agents: the same change as city_control without the cascade
+  // (owner only, Elric refused, audit event). Idempotent; answers with the agent as it is now.
+  for (const action of ['pause', 'resume'] as const)
+    app.post(`/api/agents/:id/${action}`, async (request) => {
+      const operator = await owner(request),
+        id = idFrom(request);
+      z.object({})
+        .strict()
+        .parse(request.body ?? {});
+      return mutate(operator.id, async (workspace, tx, time) => {
+        const agent = ensureAgent(workspace, id);
+        await refuseElric(tx, [agent.id]);
+        if (agent.revokedAt) fail(409, 'Removed agents cannot be paused or resumed.');
+        const changed = setAgentPaused(workspace, agent, time, action === 'pause', operator.name);
+        return { agent: ownerAgent(agent, workspace.jobs, time), changed };
+      });
+    });
   app.post('/api/agents/:id/rotate-credential', async (request) => {
     const operator = await owner(request),
       id = idFrom(request);
     z.object({}).strict().parse(request.body);
     return mutate(operator.id, async (workspace, tx, time) => {
       const agent = ensureAgent(workspace, id);
+      await refuseElric(tx, [agent.id]);
       if (agent.mode !== 'external') fail(409, 'Hosted agents do not use runtime credentials.');
       if (agent.revokedAt) fail(409, 'Revoked agents cannot rotate credentials.');
       // Replaced in the same transaction as presence, cancellation and the audit event.
@@ -1286,7 +1817,7 @@ async function createDatabaseApp(
         time,
         'rotated',
       );
-      return { agent: publicAgent(agent, workspace.jobs, time), token };
+      return { agent: ownerAgent(agent, workspace.jobs, time), token };
     });
   });
   app.post('/api/connections', async (request, reply) => {
@@ -1510,8 +2041,19 @@ async function createDatabaseApp(
     mutate,
     mutateMany,
     appendEvents,
+    // Room tasks on or off (same flag as the task tools). Templates never create tasks.
+    starterTasks: {
+      enabled: () => roomTasksEnabled(process.env),
+      insert: insertStarterTasks,
+      existing: existingStarterTasks,
+    },
+    // An AI's first read of a room carries the handoff brief once (docs/ROOMS.md).
+    handoffBrief: deliverBriefOnce,
   });
-  registerRoomRoutes(app, { rooms, owner, originOf });
+  registerRoomRoutes(app, { rooms, owner, originOf, limit });
+  // Context pins (docs/ROOMS.md "Pins and the handoff brief"): console REST and MCP tools.
+  const pins = createRoomPins({ db: wake.db, clock, limit });
+  registerPinRoutes(app, { pins, owner, originOf });
   // Room tasks (docs/ROOM_TASKS.md): limits are charged before its transactions.
   const tasks = createRoomTasks({ db, clock, limit, secret: roomsSecret });
   // Owner console REST mirror of the task tools, behind the same flag (no routes when off: 404).
@@ -1542,7 +2084,7 @@ async function createDatabaseApp(
     mutate,
   });
   registerResultRoutes(app, { results, owner, originOf });
-  const links = createJoinLinks({ db, clock, limit, rooms, caps });
+  const links = createJoinLinks({ db, clock, limit, rooms, caps, tasks, messaging });
   registerJoinLinkRoutes(app, {
     links,
     owner,
@@ -1562,7 +2104,19 @@ async function createDatabaseApp(
     }),
     owner,
     cronSecret: process.env.CRON_SECRET,
+    // The Berlin-noon gate reads the app's injected clock so tests can pin it; the e2e server can
+    // override the gate alone through CITY_COUNT_LOG_CRON_NOW (server/index.ts). A pinned gate
+    // seals without the noon cut: the pinned day is not the time the database stamps on the
+    // agents those suites create, so its cut would leave all of them out.
+    now: options.countLogCronNow ?? clock,
+    noonCut: options.countLogCronNow === undefined,
     limit,
+  });
+  // Daily guard that the fast count still equals the published scan (CRON_SECRET).
+  registerFastCountCheckRoute(app, {
+    db,
+    excludedOperators: parseExcludedOperators(process.env.CITY_STATS_EXCLUDED_OPERATORS),
+    cronSecret: process.env.CRON_SECRET,
   });
   // Homepage ticker: AI agents that ever joined, cached per instance and at the edge.
   registerPublicStatsRoutes(app, {
@@ -1572,6 +2126,39 @@ async function createDatabaseApp(
       excludedOperators: parseExcludedOperators(process.env.CITY_STATS_EXCLUDED_OPERATORS),
     }),
     limit,
+  });
+  // Base Pay P2c: agents pay other Central City agents on their own (tools behind CITY_BASE_WALLET=1
+  // and CITY_BASE_AGENT_PAY=1, read per call). Payments use the wallet network's chain runtime and
+  // its endpoint for recipients; without them a payment answers unavailable and nothing is stored.
+  const agentPayChain: AgentPayDeps['chain'] =
+    options.agentPay?.chain ??
+    (async (authorize) => {
+      const runtime = await baseRuntimes(WALLET_CHAIN_ID);
+      if (!runtime.agentPayments) throw new Error('Agent payments are not configured.');
+      return runtime.agentPayments(authorize);
+    });
+  const agentPay = createAgentPayService({
+    db,
+    env: process.env,
+    now: clock,
+    chain: agentPayChain,
+    recipients: options.agentPay
+      ? options.agentPay.recipients
+      : walletReaders(process.env).payChain,
+  });
+  // Its recovery cron (CRON_SECRET): the same payment chain, whatever the agent-pay flags say, so
+  // reservations held by earlier payments still settle after the flags are turned off. Recovery
+  // never sends for the first time; its authority check refuses everything all the same.
+  registerPaymentRecoveryCron(app, {
+    db,
+    chainId: WALLET_CHAIN_ID,
+    chain: () =>
+      agentPayChain(async () => {
+        throw new Error('Payment recovery never authorizes a broadcast.');
+      }),
+    cronSecret: process.env.CRON_SECRET,
+    env: process.env,
+    now: clock,
   });
   const assistantAccess = await registerAssistantAccess(app, {
     db,
@@ -1590,9 +2177,11 @@ async function createDatabaseApp(
     connections,
     rooms,
     tasks,
+    pins,
     repos,
     wake,
     results,
+    agentPay,
   });
   const oauthServer = await registerRemoteMcp(app, {
     roomInvites: links.invites,
@@ -1601,6 +2190,7 @@ async function createDatabaseApp(
     anonymousTool: autonomy.anonymousTool,
     createWorkspace: workspaces.createWorkspace,
     verifyWorkspaceKey: workspaces.verifyKey,
+    apiRequestsPerMinute: caps.apiRequestsPerMinute,
     mutate,
     limit,
     fail,
@@ -1700,10 +2290,13 @@ async function createDatabaseApp(
       clock,
       mutate,
       owner,
+      limit,
       agentsPerWorkspace: caps.agentsPerWorkspace,
       config: elricConfig,
       ...(elricProbe ? { probe: elricProbe } : {}),
       ...(elricWallClock ? { wallClock: elricWallClock } : {}),
+      ...(options.elric?.sleep ? { sleep: options.elric.sleep } : {}),
+      ...(options.elric?.log ? { log: options.elric.log } : {}),
       adapterFor:
         options.elric?.adapterFor ??
         elricModelWiring?.adapterFor ??
@@ -2042,7 +2635,7 @@ async function createDatabaseApp(
         const agent: StoredAgent = {
           id: randomUUID(),
           name: definition.name,
-          description: `Hosted ${definition.capability} demonstration; deterministic local text processing.`,
+          description: `Zero-cost ${definition.capability} agent that runs on Central City; deterministic text processing.`,
           capability: definition.capability,
           mode: 'hosted',
           isDemo: true,
@@ -2098,9 +2691,11 @@ async function createDatabaseApp(
   app.get('/api/workspace/export', async (request, reply) => {
     const operator = await owner(request);
     reply.header('Content-Disposition', 'attachment; filename="central-city-workspace.json"');
-    return mutate(operator.id, (workspace, _tx, time) =>
+    const exported = await mutate(operator.id, (workspace, _tx, time) =>
       exportWorkspace(workspace, operator, time),
     );
+    // The newsletter subscription and its consent record, if any (Privacy Policy 2.14).
+    return { ...exported, newsletter: await email.record(db, operator.id) };
   });
 
   app.post('/api/runtime/a2a/:providerId', async (request, reply) => {
@@ -2439,6 +3034,14 @@ async function createDatabaseApp(
   }
   let tickRunning: Promise<void> | null = null;
   let closing = false;
+  /** Advances the workspace in place (the tick's step); true when that changed it. */
+  function advances(workspace: Workspace, time: number): boolean {
+    const before = JSON.stringify(workspace);
+    syncWorkflows(workspace, time);
+    advanceWorkspace(workspace, time);
+    syncWorkflows(workspace, time);
+    return before !== JSON.stringify(workspace);
+  }
   async function performTick(operatorId?: string): Promise<void> {
     const owners = operatorId
       ? [{ operator_id: operatorId }]
@@ -2448,11 +3051,7 @@ async function createDatabaseApp(
       await db.transaction(async (tx) => {
         const workspace = await readWorkspace(tx, row.operator_id, true),
           time = clock();
-        const before = JSON.stringify(workspace);
-        syncWorkflows(workspace, time);
-        advanceWorkspace(workspace, time);
-        syncWorkflows(workspace, time);
-        changed = before !== JSON.stringify(workspace);
+        changed = advances(workspace, time);
         if (changed)
           await tx.query('UPDATE workspaces SET data=$2::jsonb WHERE operator_id=$1', [
             row.operator_id,
@@ -2470,17 +3069,19 @@ async function createDatabaseApp(
     const time = clock();
     if (time - lastSweep < 60_000) return;
     lastSweep = time;
+    // One round trip for the three expiry deletes (independent tables, nothing references them).
+    // Expired guest source blocks (migration 37) stop blocking at expires_at anyway.
     await db.query(
-      'DELETE FROM replay_nonces WHERE (agent_id,nonce) IN (SELECT agent_id,nonce FROM replay_nonces WHERE expires_at<=$1 LIMIT 1000)',
-      [time],
-    );
-    await db.query(
-      'DELETE FROM sessions WHERE token_hash IN (SELECT token_hash FROM sessions WHERE expires_at<=$1 LIMIT 1000)',
-      [time],
-    );
-    // Expired guest source blocks (migration 37); they stop blocking at expires_at anyway.
-    await db.query(
-      'DELETE FROM room_guest_blocks WHERE (room_id,source_hash) IN (SELECT room_id,source_hash FROM room_guest_blocks WHERE expires_at<=$1 LIMIT 1000)',
+      `WITH nonces AS (
+         DELETE FROM replay_nonces WHERE (agent_id,nonce) IN
+           (SELECT agent_id,nonce FROM replay_nonces WHERE expires_at<=$1 LIMIT 1000)),
+       expired_sessions AS (
+         DELETE FROM sessions WHERE token_hash IN
+           (SELECT token_hash FROM sessions WHERE expires_at<=$1 LIMIT 1000)),
+       blocks AS (
+         DELETE FROM room_guest_blocks WHERE (room_id,source_hash) IN
+           (SELECT room_id,source_hash FROM room_guest_blocks WHERE expires_at<=$1 LIMIT 1000))
+       SELECT 1`,
       [time],
     );
     // Answers: asks, receipts and revoked tombstones older than 30 days.

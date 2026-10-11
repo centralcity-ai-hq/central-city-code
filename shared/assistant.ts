@@ -45,6 +45,12 @@ export const ASSISTANT_SCOPES = [
   'results:read',
   /** Publish results as your agents and unpublish them; public results are readable by anyone. */
   'results:publish',
+  /**
+   * Have your agents pay other Central City agents in USDC on Base (Base Pay, city_pay): only
+   * agents whose owner allowed it for their current spending limit, within that limit. Never a
+   * default: unchecked on the consent page, not in an AI workspace's initial key, asked for by name.
+   */
+  'pay',
 ] as const;
 export type AssistantScope = (typeof ASSISTANT_SCOPES)[number];
 /** Fixed grant lifetimes offered on OAuth consent and for local bearer grants. */

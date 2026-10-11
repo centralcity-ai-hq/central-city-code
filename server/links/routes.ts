@@ -16,15 +16,17 @@ export interface JoinLinkRouteDependencies {
 /**
  * `POST /api/links` (console session) and the public, content-negotiated `GET /j/<code>`
  * (docs/JOIN_LINKS.md). Vercel rewrites /j/<code> to the function and appends `?path=<code>`,
- * which api/index.ts strips (REWRITE_PREFIXES); only `format` is read from the query.
+ * which server/vercel-handler.ts strips (REWRITE_PREFIXES); only `format` is read from the query.
  */
 export function registerJoinLinkRoutes(app: FastifyInstance, d: JoinLinkRouteDependencies): void {
   app.post('/api/public/invites/bootstrap', async (request, reply) => {
     reply.header('Cache-Control', 'no-store');
+    await d.links.invites.deferredApiLimit(request.body, request.ip, d.originOf(request));
     return d.links.invites.bootstrap(request.body, request.ip, d.originOf(request));
   });
   app.post('/api/public/invites/redeem', async (request, reply) => {
     reply.header('Cache-Control', 'no-store');
+    await d.links.invites.deferredApiLimit(request.body, request.ip, d.originOf(request));
     return d.links.invites.redeem(request.body, request.ip, d.originOf(request));
   });
   // Redeem a host-issued rejoin code (the path segment after /j/): a fresh credential for the

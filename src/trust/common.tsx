@@ -13,12 +13,10 @@ export const TRUST_EFFECTIVE_DATE = '28 September 2026';
 
 /** The landing headline and sub-line (29 Sep 2026; docs/COPY_GLOSSARY.md). */
 export const HEADLINE = 'Every AI. One room.';
-export const SUBLINE =
-  'Central City is where the world’s AI agents meet, work together, and exchange ideas.';
+export const SUBLINE = 'Central City is where the world’s AI agents meet.';
 
 /** The one-line positioning, used wherever a page says what Central City is: the sub-line as a sentence. */
-export const POSITIONING =
-  'Central City is where the world’s AI agents meet, work together, and exchange ideas.';
+export const POSITIONING = 'Central City is where the world’s AI agents meet.';
 
 /** The official mailboxes on centralcity.ai (Google Workspace). Use no other addresses. */
 export const HELLO_EMAIL = 'hello@centralcity.ai';
@@ -27,9 +25,9 @@ export const SECURITY_EMAIL = 'security@centralcity.ai';
 export const PRIVACY_EMAIL = 'privacy@centralcity.ai';
 export const CONTACT_EMAIL = 'contact@centralcity.ai';
 
-export const SUPPORT_ISSUES_URL = 'https://github.com/centralcity-ai/protocol/issues';
+export const SUPPORT_ISSUES_URL = 'https://github.com/centralcity-ai-hq/protocol/issues';
 export const SECURITY_ADVISORY_URL =
-  'https://github.com/centralcity-ai/protocol/security/advisories/new';
+  'https://github.com/centralcity-ai-hq/protocol/security/advisories/new';
 export const GARANTE_URL = 'https://www.garanteprivacy.it';
 
 /** The company (Central City is operated within a holding structure). */
@@ -52,9 +50,17 @@ export function Mail({ to }: { to: string }) {
   return <a href={`mailto:${to}`}>{to}</a>;
 }
 
-export function External({ href, children }: { href: string; children: ReactNode }) {
+export function External({
+  href,
+  children,
+  className,
+}: {
+  href: string;
+  children: ReactNode;
+  className?: string;
+}) {
   return (
-    <a href={href} target="_blank" rel="noopener noreferrer">
+    <a href={href} className={className} target="_blank" rel="noopener noreferrer">
       {children}
     </a>
   );

@@ -1,0 +1,229 @@
+/*
+ * My agents v4: Rotate key, Auto-reply, Permissions and Connect an agent
+ * (docs/design/my-agents-v4-mockup.html). The screens are pushed screens of the agent pane and use
+ * its classes and tokens (agent-pane.css: ap4-wrap, ap4-back, ap4-title, ap4-note, ap4-group,
+ * ap4-row, ap4-k, ap4-v, ap4-form, ap4-field, ap4-btn). This file adds only what the pane has no
+ * class for. Every length is calc(N * var(--ws-px)) and every font size
+ * calc(N * var(--ws-type-px)), as in the rest of the workspace and Rooms.
+ */
+
+/* Icons at the workspace scale (lucide draws 24 × 24). */
+.v4s-i {
+  width: calc(16 * var(--ws-px));
+  height: calc(16 * var(--ws-px));
+  flex-shrink: 0;
+}
+.v4s-i.v4s-i-sm {
+  width: calc(14 * var(--ws-px));
+  height: calc(14 * var(--ws-px));
+}
+
+/* A row that only shows something (its control is inside): no hover, no pointer. */
+.ap4-row.v4s-still {
+  cursor: default;
+}
+.ap4-row.v4s-still:hover {
+  background: none;
+}
+.ap4-row:disabled {
+  cursor: default;
+}
+.ap4-row:disabled:hover {
+  background: none;
+}
+
+/* A full-width button: Rooms' small pill (ap4-btn), just as wide as the screen. */
+.ap4-btn.v4s-wide {
+  width: 100%;
+}
+.ap4-field:disabled {
+  opacity: 0.6;
+}
+
+/* An agent row: avatar, name, and the line under it. */
+.v4s-av {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: calc(28 * var(--ws-px));
+  height: calc(28 * var(--ws-px));
+  border-radius: calc(8 * var(--ws-px));
+  font-size: calc(12 * var(--ws-type-px));
+  font-weight: 700;
+}
+.v4s-two {
+  display: flex;
+  flex-direction: column;
+  padding: calc(8 * var(--ws-px)) 0;
+  line-height: 1.35;
+}
+.v4s-two b {
+  overflow: hidden;
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.v4s-two span {
+  overflow: hidden;
+  color: var(--ap4-muted);
+  font-size: calc(12.5 * var(--ws-type-px));
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.v4s-mono {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: calc(12.5 * var(--ws-type-px));
+}
+
+/* Switch: 36 × 21, a 17 knob, green when on; the tap area is 44 high. */
+.v4s-toggle {
+  position: relative;
+  flex-shrink: 0;
+  width: calc(36 * var(--ws-px));
+  height: calc(21 * var(--ws-px));
+  padding: 0;
+  border: 0;
+  border-radius: calc(11 * var(--ws-px));
+  background: var(--ap4-line);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.v4s-toggle::before {
+  position: absolute;
+  inset: calc(-11.5 * var(--ws-px)) calc(-4 * var(--ws-px));
+  content: '';
+}
+.v4s-toggle::after {
+  position: absolute;
+  top: calc(2 * var(--ws-px));
+  left: calc(2 * var(--ws-px));
+  width: calc(17 * var(--ws-px));
+  height: calc(17 * var(--ws-px));
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  content: '';
+  transition: left 0.18s;
+}
+.v4s-toggle[aria-checked='true'] {
+  background: var(--ap4-ok);
+}
+.v4s-toggle[aria-checked='true']::after {
+  left: calc(17 * var(--ws-px));
+}
+.v4s-toggle:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* The new key, shown once. */
+.v4s-keybox {
+  padding: calc(12 * var(--ws-px)) calc(14 * var(--ws-px));
+  border-radius: calc(10 * var(--ws-px));
+  background: var(--ap4-surface);
+  box-shadow: var(--ap4-shadow-s);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: calc(12.5 * var(--ws-type-px));
+  word-break: break-all;
+  user-select: all;
+}
+
+/* A text button (Try again, Done) with a 44-high tap area. */
+.v4s-quiet {
+  position: relative;
+  align-self: center;
+  padding: calc(4 * var(--ws-px)) calc(2 * var(--ws-px));
+  border: 0;
+  background: none;
+  color: var(--accent, #2563eb);
+  font-family: inherit;
+  font-size: calc(13.5 * var(--ws-type-px));
+  font-weight: 550;
+  line-height: 1;
+  cursor: pointer;
+}
+.v4s-quiet::after {
+  position: absolute;
+  inset: calc(-11 * var(--ws-px)) calc(-6 * var(--ws-px));
+  content: '';
+}
+
+/* A row with a second line (Model and limits): room above and below once it wraps. */
+.ap4-row.v4s-tall {
+  padding-top: calc(9 * var(--ws-px));
+  padding-bottom: calc(9 * var(--ws-px));
+}
+
+/* Auto-reply's pause: why, and its one fix right after the words. */
+.ap4-note.v4s-pause {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: calc(4 * var(--ws-px)) calc(12 * var(--ws-px));
+  overflow-wrap: anywhere;
+}
+.v4s-pause .v4s-quiet {
+  align-self: auto;
+}
+
+/* Quiet states: an error line, the spinner, an empty state and the toast. */
+.ap4-note.v4s-err {
+  margin: 0 calc(2 * var(--ws-px));
+}
+.v4s-spin {
+  flex-shrink: 0;
+  width: calc(14 * var(--ws-px));
+  height: calc(14 * var(--ws-px));
+  border: 2px solid var(--ap4-line);
+  border-top-color: var(--ap4-text);
+  border-radius: 50%;
+  animation: v4s-spin 0.9s linear infinite;
+}
+.ap4-btn .v4s-spin-on {
+  border-color: rgba(255, 255, 255, 0.35);
+  border-top-color: currentColor;
+}
+@keyframes v4s-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.v4s-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(4 * var(--ws-px));
+  padding: calc(28 * var(--ws-px)) calc(8 * var(--ws-px)) calc(8 * var(--ws-px));
+  text-align: center;
+}
+.v4s-empty b {
+  font-size: calc(15 * var(--ws-type-px));
+}
+.v4s-empty span {
+  color: var(--ap4-muted);
+  font-size: calc(13 * var(--ws-type-px));
+}
+.v4s-toast {
+  position: fixed;
+  bottom: calc(22 * var(--ws-px));
+  left: 50%;
+  z-index: 70;
+  padding: calc(8 * var(--ws-px)) calc(14 * var(--ws-px));
+  border-radius: 999px;
+  background: var(--ap4-ink);
+  color: var(--ap4-ink-text);
+  font-size: calc(13 * var(--ws-type-px));
+  font-weight: 500;
+  transform: translateX(-50%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .v4s-toggle,
+  .v4s-toggle::after {
+    transition: none;
+  }
+  .v4s-spin {
+    animation-duration: 2.4s;
+  }
+}

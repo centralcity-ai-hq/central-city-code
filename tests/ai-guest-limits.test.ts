@@ -198,13 +198,14 @@ describe('ai-guest limits (issue #140: rooms of 100)', () => {
     assert.equal(agentIds.size, 30);
     const members = await f.get(`/api/rooms/${f.roomId}/members`, f.host);
     assert.equal(members.statusCode, 200, members.body);
-    assert.equal(members.json().members.length, 31);
+    // The host agent, the host as a person (in its room from creation) and the 30 guests.
+    assert.equal(members.json().members.length, 32);
     const list = await f.get('/api/rooms', f.host);
     assert.equal(list.statusCode, 200, list.body);
     const room = (
       list.json().rooms as Array<{ id: string; member_count: number; member_cap: number }>
     ).find((entry) => entry.id === f.roomId)!;
-    assert.equal(room.member_count, 31);
+    assert.equal(room.member_count, 32);
     assert.equal(room.member_cap, 100);
   });
 
@@ -243,21 +244,22 @@ describe('ai-guest limits (issue #140: rooms of 100)', () => {
       f.post(`/api/rooms/${f.roomId}/settings`, { member_cap: cap }, as);
     // A member cannot change the cap.
     assert.equal((await setCap(other, 50)).statusCode, 403);
-    // Below the four members: refused with the exact #140 code, and nobody is removed.
-    const below = await setCap(f.host, 3);
+    // Below the five members (the host agent, the host as a person, two guests and the other
+    // owner's AI): refused with the exact #140 code, and nobody is removed.
+    const below = await setCap(f.host, 4);
     assert.equal(below.statusCode, 409, below.body);
     assert.equal(below.json().code, 'cap_below_members');
     const kept = await f.get(`/api/rooms/${f.roomId}/members`, f.host);
     assert.equal(kept.statusCode, 200, kept.body);
-    assert.equal(kept.json().members.length, 4);
+    assert.equal(kept.json().members.length, 5);
     assert.equal((await readAsGuest(f.transport, first.guest!.credential)).ok, true);
     // Out of range stays out of range.
     assert.equal((await setCap(f.host, 1)).statusCode, 400);
     assert.equal((await setCap(f.host, ROOM_LIMITS.memberCapMax + 1)).statusCode, 400);
     // At exactly the member count: further joins are refused with room_full.
-    const exact = await setCap(f.host, 4);
+    const exact = await setCap(f.host, 5);
     assert.equal(exact.statusCode, 200, exact.body);
-    assert.equal(exact.json().room.member_cap, 4);
+    assert.equal(exact.json().room.member_cap, 5);
     const spare = await f.post(
       '/api/agents',
       { name: 'Spare', capability: 'research', mode: 'hosted' },
@@ -312,17 +314,18 @@ describe('ai-guest limits (issue #140: rooms of 100)', () => {
       pages++;
       assert.ok(pages <= 10, 'paging ends');
     } while (cursor !== undefined);
-    // The host and five guests, each exactly once, over three pages of two.
-    assert.equal(pages, 3);
-    assert.equal(seen.length, 6);
-    assert.equal(new Set(seen).size, 6);
+    // The host agent, the host as a person and five guests, each exactly once, over four pages
+    // of at most two.
+    assert.equal(pages, 4);
+    assert.equal(seen.length, 7);
+    assert.equal(new Set(seen).size, 7);
     for (const guest of guests) assert.ok(seen.includes(guest.agentId));
     // Without limit the whole room fits the default page and no cursor is returned.
     const all = await callOpenTool(f.transport, 'city_room_members', {
       room_credential: credential,
     });
     const whole = all.result!.structuredContent as { members: unknown[]; next_cursor?: string };
-    assert.equal(whole.members.length, 6);
+    assert.equal(whole.members.length, 7);
     assert.equal(whole.next_cursor, undefined);
     // A malformed cursor is refused, not ignored.
     const bad = await callOpenTool(f.transport, 'city_room_members', {
@@ -336,7 +339,7 @@ describe('ai-guest limits (issue #140: rooms of 100)', () => {
     // Small hourly budget the way the diff's own tests configure it; each join spends two
     // (bootstrap and redeem), so three joins succeed and the fourth exceeds it. Never sleeps:
     // the fixture clock backdates past the hour to prove the window resets.
-    const f = await fixture(t, { unclaimedCreatesPerSourcePerHour: 6 });
+    const f = await fixture(t, { inviteRequestsPerSourcePerHour: 6 });
     for (let index = 0; index < 3; index++) {
       const joined = await joinWithInvite(
         f.transport,

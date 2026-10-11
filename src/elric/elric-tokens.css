@@ -1,0 +1,159 @@
+/*
+ * Elric, Workspace v3 (docs/design/WORKSPACE_V3_ELRIC_AGENTS.md; WORKSPACE_V3.md §2): the tokens
+ * of the signed-in /elric page and its skeleton, and Elric's avatar (ElricMark.tsx). Part of the
+ * main bundle (ElricSkeleton imports it), so the frame is drawn before the dashboard's chunk.
+ *
+ * The values are the Rooms v2 / v3 ones (src/rooms/rooms-v2.css; tests/elric-v3.test.ts keeps
+ * them in step). No orange or amber anywhere on Elric: one blue accent,
+ * neutral greys, green for "on" and "done", red only for errors and destructive actions.
+ */
+.elx3,
+.elx-skel {
+  --bg-page: #ffffff;
+  --bg-page-2: #f6f8fc;
+  --bg-surface: #f8fafc;
+  --bg-surface-elevated: #ffffff;
+  --bg-surface-hover: #f8fafc;
+  --bg-inset: #f4f6fa;
+  --border: #e5e9f0;
+  --border-strong: rgba(15, 23, 42, 0.18);
+  --border-focus: #2563eb;
+  --text-primary: #0f172a;
+  --text-secondary: #334155;
+  --text-muted: #5f6f86;
+  --text-faint: #94a3b8;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-subtle: #eaf1ff;
+  --accent-border: #c7d7fb;
+  --accent-text: #1d4ed8;
+  --accent-contrast: #ffffff;
+  --status-live: #15803d;
+  --status-live-bg: rgba(22, 163, 74, 0.08);
+  --status-danger: #dc2626;
+  --status-danger-bg: rgba(220, 38, 38, 0.08);
+  --shadow-elevated: 0 14px 40px rgba(15, 23, 42, 0.08);
+  --shadow-float-sm: 0 6px 18px rgba(15, 23, 42, 0.06);
+  --primary: #2563eb;
+  --primary-hover: #1d4ed8;
+  /* Aliases the shared rules (thinking dots, Markdown, the old dashboard sheet) read. */
+  --surface: var(--bg-surface-elevated);
+  --text: var(--text-primary);
+  --focus: var(--border-focus);
+  --on-primary: var(--accent-contrast);
+  --elx-text: var(--text-primary);
+  --elx-muted: var(--text-muted);
+  --elx-bg: var(--bg-surface-elevated);
+  --elx-bubble: var(--bg-inset);
+  --elx-line: var(--border);
+  --elx-hover: var(--bg-inset);
+  --elx3-scrim: rgba(15, 23, 42, 0.4);
+  /* §1: the top bar is 10% smaller than the room's (every bar length times this). */
+  --elx3-bar: 0.9;
+  --elx3-side-w: calc(250 * var(--ws-px));
+  color: var(--text-primary);
+}
+:root[data-theme='dark'] .elx3,
+:root[data-theme='dark'] .elx-skel {
+  --bg-page: #0b1020;
+  --bg-page-2: #0d1326;
+  --bg-surface: #0d1326;
+  --bg-surface-elevated: #121a31;
+  --bg-surface-hover: #18213b;
+  --bg-inset: #18213b;
+  --border: #243049;
+  --border-strong: rgba(255, 255, 255, 0.22);
+  --border-focus: #5b8cff;
+  --text-primary: #eef2f8;
+  --text-secondary: #cbd5e1;
+  --text-muted: #a3b0c6;
+  --text-faint: #6b7a96;
+  --accent: #5b8cff;
+  --accent-hover: #93c5fd;
+  --accent-subtle: #1a2a52;
+  --accent-border: #2c4380;
+  --accent-text: #60a5fa;
+  --accent-contrast: #ffffff;
+  --status-live: #4ade80;
+  --status-live-bg: rgba(74, 222, 128, 0.14);
+  --status-danger: #f87171;
+  --status-danger-bg: rgba(248, 113, 113, 0.14);
+  --shadow-elevated: 0 14px 40px rgba(0, 0, 0, 0.35);
+  --shadow-float-sm: 0 6px 18px rgba(0, 0, 0, 0.3);
+  /* White text needs the deeper blue as a fill (rooms-v2.css). */
+  --primary: #2563eb;
+  --primary-hover: #1d4ed8;
+  --elx3-scrim: rgba(2, 6, 23, 0.6);
+}
+
+/* Elric's avatar: the Central City mark in white on the accent fill, a rounded square. */
+.elx3-mark {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: calc(40 * var(--ws-px));
+  height: calc(40 * var(--ws-px));
+  border-radius: calc(10 * var(--ws-px));
+  background: var(--primary);
+}
+.elx3-mark-glyph {
+  display: block;
+  width: 58%;
+  height: 58%;
+  background: #ffffff;
+  -webkit-mask: url('/brand/central-city-mark.png') center / contain no-repeat;
+  mask: url('/brand/central-city-mark.png') center / contain no-repeat;
+}
+.elx3-mark-sm {
+  width: calc(28 * var(--ws-px));
+  height: calc(28 * var(--ws-px));
+  border-radius: calc(8 * var(--ws-px));
+}
+.elx3-mark-xs {
+  width: calc(24 * var(--ws-px));
+  height: calc(24 * var(--ws-px));
+  border-radius: calc(7 * var(--ws-px));
+}
+/* The Home orb (§1 Home): 52px, 16px radius, a slow 4 s breathing halo (none with reduced
+   motion). Small on purpose: the logo must not dominate. */
+.elx3-mark-orb {
+  width: calc(52 * var(--ws-px));
+  height: calc(52 * var(--ws-px));
+  border-radius: calc(16 * var(--ws-px));
+  box-shadow:
+    0 0 0 calc(6 * var(--ws-px)) color-mix(in srgb, var(--accent) 8%, transparent),
+    0 calc(12 * var(--ws-px)) calc(30 * var(--ws-px))
+      color-mix(in srgb, var(--accent) 22%, transparent);
+  animation: elx3-breathe 4s ease-in-out infinite;
+}
+.elx3-mark-orb .elx3-mark-glyph {
+  width: 56%;
+  height: 56%;
+}
+@keyframes elx3-breathe {
+  50% {
+    box-shadow:
+      0 0 0 calc(11 * var(--ws-px)) color-mix(in srgb, var(--accent) 5%, transparent),
+      0 calc(12 * var(--ws-px)) calc(30 * var(--ws-px))
+        color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .elx3-mark-orb {
+    animation: none;
+  }
+}
+
+/*
+ * Phones and tablets in the Workspace v3 shell: Elric's page has one top bar. The shell's ☰ row
+ * steps aside and Elric's own bar (the dashboard's and the skeleton's) carries the ☰ chip
+ * (.elx3-menu), as a room page does (src/rooms/rooms-v3.css). Here because both bars load it.
+ */
+@media (max-width: 899px) {
+  .app-shell[data-workspace='v2']:has(#workspace-page-content .elx3-menu) {
+    --ws-topbar-h: 0px;
+  }
+  .app-shell[data-workspace='v2']:has(#workspace-page-content .elx3-menu) .topbar.cc-app-header {
+    display: none;
+  }
+}

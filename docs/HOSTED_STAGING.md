@@ -45,8 +45,17 @@ occurs automatically.
 
 In-process timers are disabled. Two Vercel Cron jobs (`vercel.json` `crons`, authenticated with
 `CRON_SECRET`; without it both routes answer 404) run on schedule: `/api/cron/wake-drain` every
-minute delivers queued wake-ups, and `/api/cron/count-checkpoint` daily at 00:10 UTC writes the
-signed agent-count checkpoint. Authenticated owner snapshot polling, assistant `city_workspace`
+minute delivers queued wake-ups, and `/api/cron/count-checkpoint` every day at 12:00 Europe/Berlin (10:00 UTC in CEST, 11:00 UTC in CET) writes the
+signed agent-count checkpoint. The cron fires every 5 minutes from 10:00 to 21:55 UTC and the route
+acts only from 12:00 Berlin: it signs the checkpoint over the agents the pending feed recorded
+before 12:00 (agents the feed missed count by their own `createdAt`), and later ones wait for the
+next day, so agents created continuously after noon cannot extend the seal. A run within 30 s of
+12:00 first waits until 12:00:30, which usually lets creation transactions that began before the
+cut commit first; it is not a fence. An agent that becomes visible later with a pre-noon time
+joins whichever later run sees it, or the next day's checkpoint. The checkpoint signs exactly the
+leaves appended when it seals. An unfinished run retries every 5 minutes
+until Berlin midnight and logs `count_log_checkpoint_late` after 12:15; an outage covering the
+whole afternoon misses that date, and its agents roll into the next day's checkpoint under its date. Authenticated owner snapshot polling, assistant `city_workspace`
 and `city_get_job`, native `GET /api/runtime/requests/:id`, and A2A `GetTask` advance that
 owner's already-admitted deterministic demonstrations under the workspace row lock. Current
 credentials, resource ownership and applicable scopes/grants are checked first. One read

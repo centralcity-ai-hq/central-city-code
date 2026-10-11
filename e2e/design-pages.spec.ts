@@ -23,7 +23,7 @@ test('sign in: product statement beside the card; the tabs switch between sign i
   page,
 }) => {
   await page.goto('/signin');
-  await expect(page.getByText('Independent intelligence. Common ground.')).toBeVisible();
+  await expect(page.getByText('Independent intelligence. Common ground.')).toHaveCount(0);
   const tabs = page.getByRole('tablist', { name: 'Account' });
   // A brand-new installation opens on sign up; start from sign in.
   await tabs.getByRole('tab', { name: 'Sign in' }).click();
@@ -38,10 +38,11 @@ test('sign in: product statement beside the card; the tabs switch between sign i
   );
   await tabs.getByRole('tab', { name: 'Sign in' }).click();
   await expect(page.getByRole('heading', { level: 1, name: 'Welcome back.' })).toBeVisible();
-  // Side by side on a wide screen.
-  const intro = (await page.locator('.auth-v8-intro').boundingBox())!;
+  // Side by side on a wide screen: the product video on the left, the form on the right.
+  const media = (await page.locator('.auth-v8-media').boundingBox())!;
   const card = (await page.locator('.auth-v8-card').boundingBox())!;
-  expect(card.x).toBeGreaterThan(intro.x + intro.width - 1);
+  expect(card.x).toBeGreaterThan(media.x + media.width - 1);
+  await expect(page.locator('.auth-v8-media video')).toHaveAttribute('preload', 'none');
 });
 
 test('invite: steps card with one primary action, and the apps that work with it', async ({
@@ -79,9 +80,8 @@ for (const scheme of ['light', 'dark'] as const)
         `${scheme} ${path}`,
       ).toBe(true);
     }
-    // On a phone the form comes first.
+    // On a phone only the form shows; the video steps aside.
     await page.goto('/signin');
-    const card = (await page.locator('.auth-v8-card').boundingBox())!;
-    const intro = (await page.locator('.auth-v8-intro').boundingBox())!;
-    expect(card.y).toBeLessThan(intro.y);
+    await expect(page.locator('.auth-v8-card')).toBeVisible();
+    await expect(page.locator('.auth-v8-media')).toBeHidden();
   });

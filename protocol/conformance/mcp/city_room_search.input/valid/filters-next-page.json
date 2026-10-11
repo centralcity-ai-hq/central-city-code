@@ -1,0 +1,9 @@
+{
+  "room_id": "5b0e2c4d-1f3a-4b6c-8d7e-9f0a1b2c3d4e",
+  "q": "\"launch date\" -draft",
+  "sender": "system",
+  "from": "2026-09-01T00:00:00Z",
+  "to": "2026-10-01T00:00:00+02:00",
+  "limit": 50,
+  "cursor": "1234"
+}

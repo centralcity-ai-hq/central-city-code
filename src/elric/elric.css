@@ -1,14 +1,14 @@
 /* The owner's Elric page (ElricActivity.tsx). Theme tokens only, so light and dark follow. */
 .elric-page {
   display: grid;
-  gap: 22px;
+  gap: calc(22 * var(--ws-px));
   min-width: 0;
 }
 .elric-head,
 .elric-log {
-  padding: 24px;
+  padding: calc(24 * var(--ws-px));
   display: grid;
-  gap: 18px;
+  gap: calc(18 * var(--ws-px));
   min-width: 0;
 }
 .elric-head {
@@ -18,7 +18,7 @@
 .elric-state {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: calc(12 * var(--ws-px));
 }
 .elric-state h2,
 .elric-log-head h2 {
@@ -29,8 +29,8 @@
   display: inline-flex;
   align-items: center;
   border-radius: 999px;
-  padding: 2px 10px;
-  font-size: 13px;
+  padding: 2px calc(10 * var(--ws-px));
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
   font-weight: 600;
   background: var(--neutral-tint);
   color: var(--text-muted);
@@ -55,7 +55,7 @@
 }
 .elric-controls {
   display: flex;
-  gap: 10px;
+  gap: calc(10 * var(--ws-px));
   flex-wrap: wrap;
   justify-content: flex-end;
 }
@@ -63,13 +63,13 @@
   grid-column: 1 / -1;
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
+  gap: calc(12 * var(--ws-px));
   margin: 0;
 }
 .elric-usage > div {
   border: 1px solid var(--border);
   border-radius: var(--radius-m, 8px);
-  padding: 12px 14px;
+  padding: calc(12 * var(--ws-px)) calc(14 * var(--ws-px));
   background: var(--surface-sunken);
 }
 .elric-usage dt,
@@ -79,8 +79,8 @@
   color: var(--text-muted);
 }
 .elric-usage dd {
-  margin: 4px 0 0;
-  font-size: 18px;
+  margin: calc(4 * var(--ws-px)) 0 0;
+  font-size: calc(18 * var(--ws-type-px));
   font-weight: 600;
   color: var(--text);
   font-variant-numeric: tabular-nums;
@@ -88,8 +88,8 @@
 /* Today's use per kind (U3): a thin meter under the count; amber from 80%, red at the limit. */
 .elric-meter {
   display: block;
-  height: 6px;
-  margin-top: 8px;
+  height: calc(6 * var(--ws-px));
+  margin-top: calc(8 * var(--ws-px));
   border-radius: 9999px;
   background: var(--border);
   overflow: hidden;
@@ -116,46 +116,46 @@
   display: flex;
   align-items: end;
   justify-content: space-between;
-  gap: 16px;
+  gap: calc(16 * var(--ws-px));
   flex-wrap: wrap;
 }
 .elric-filters {
   display: flex;
-  gap: 12px;
+  gap: calc(12 * var(--ws-px));
   flex-wrap: wrap;
 }
 .elric-filters label {
   display: grid;
-  gap: 4px;
+  gap: calc(4 * var(--ws-px));
 }
 .elric-filters select {
-  min-height: 40px;
-  min-width: 160px;
+  min-height: calc(40 * var(--ws-px));
+  min-width: calc(160 * var(--ws-px));
   border: 1px solid var(--border-control);
   border-radius: var(--radius-control, 8px);
   background: var(--surface);
   color: var(--text);
-  padding: 0 10px;
+  padding: 0 calc(10 * var(--ws-px));
 }
 .elric-turns {
   list-style: none;
   margin: 0;
   padding: 0;
   display: grid;
-  gap: 10px;
+  gap: calc(10 * var(--ws-px));
 }
 .elric-turn {
   border: 1px solid var(--border);
   border-radius: var(--radius-m, 8px);
-  padding: 14px 16px;
+  padding: calc(14 * var(--ws-px)) calc(16 * var(--ws-px));
   display: grid;
-  gap: 10px;
+  gap: calc(10 * var(--ws-px));
   min-width: 0;
 }
 .elric-turn-main {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: calc(10 * var(--ws-px));
   flex-wrap: wrap;
   min-width: 0;
 }
@@ -165,18 +165,18 @@
 }
 .elric-turn-main time {
   margin-left: auto;
-  font-size: 13px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
   color: var(--text-muted);
 }
 .elric-turn-facts {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px 22px;
+  gap: calc(8 * var(--ws-px)) calc(22 * var(--ws-px));
   margin: 0;
 }
 .elric-turn-facts dd {
   margin: 2px 0 0;
-  font-size: 14px;
+  font-size: calc(14 * var(--ws-type-px));
   color: var(--text);
   overflow-wrap: anywhere;
 }
@@ -184,15 +184,15 @@
   justify-self: start;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: 14px;
-  min-height: 32px;
+  gap: calc(6 * var(--ws-px));
+  font-size: calc(14 * var(--ws-type-px));
+  min-height: calc(32 * var(--ws-px));
 }
 .elric-quiet {
   color: var(--text-muted);
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: calc(8 * var(--ws-px));
 }
 .elric-summary {
   margin: 0;
@@ -207,12 +207,12 @@
 }
 .elric-confirm {
   color: var(--text-muted);
-  margin: 0 0 18px;
+  margin: 0 0 calc(18 * var(--ws-px));
 }
 @media (max-width: 720px) {
   .elric-head,
   .elric-log {
-    padding: 18px 16px;
+    padding: calc(18 * var(--ws-px)) calc(16 * var(--ws-px));
   }
   .elric-head {
     grid-template-columns: 1fr;

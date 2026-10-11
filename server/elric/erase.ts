@@ -160,6 +160,8 @@ export async function eraseElricOwner(
       'DELETE FROM elric_drafts WHERE agent_id IN (SELECT agent_id FROM elric_agents WHERE owner_id=$1)',
       [ownerId],
     );
+    // The owner's cached room catch-ups (migration 66): summaries for this owner only.
+    await tx.query('DELETE FROM elric_catch_ups WHERE owner_id=$1', [ownerId]);
     const result: ElricEraseResult = {
       turns: await del('DELETE FROM elric_turns WHERE owner_id=$1'),
       posts: await del('DELETE FROM elric_posts WHERE owner_id=$1'),

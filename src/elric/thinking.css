@@ -2,36 +2,36 @@
 .cc-thinking {
   display: grid;
   justify-items: start;
-  gap: 6px;
+  gap: calc(6 * var(--ws-px));
   color: var(--elx-muted, var(--text-muted));
 }
 .cc-thinking-name {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: calc(6 * var(--ws-px));
   margin: 0;
   color: var(--elx-text, var(--text-primary));
-  font-size: 13px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
   font-weight: 600;
 }
 .cc-thinking-tag {
-  padding: 0 6px;
+  padding: 0 calc(6 * var(--ws-px));
   border: 1px solid var(--elx-line, var(--border));
   border-radius: 9999px;
   color: var(--elx-muted, var(--text-muted));
-  font-size: 13px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
   font-weight: 400;
-  line-height: 18px;
+  line-height: calc(18 * var(--ws-type-px));
 }
 .cc-thinking-dots {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  height: 28px;
+  gap: calc(5 * var(--ws-px));
+  height: calc(28 * var(--ws-px));
 }
 .cc-thinking-dots > span {
-  width: 7px;
-  height: 7px;
+  width: calc(7 * var(--ws-px));
+  height: calc(7 * var(--ws-px));
   border-radius: 9999px;
   background: currentColor;
   animation: cc-thinking-bounce 1.2s ease-in-out infinite;
@@ -55,7 +55,7 @@
   }
 }
 .cc-thinking-line {
-  font-size: 13px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
 }
 @media (prefers-reduced-motion: reduce) {
   /* One still dot instead of the bounce. */

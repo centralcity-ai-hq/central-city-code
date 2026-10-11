@@ -181,8 +181,8 @@ test('opening a room leaves the room order unchanged', async ({ browser }) => {
     { timeout: 15_000 },
   );
   await page
-    .getByRole('navigation', { name: 'Rooms' })
-    .getByRole('link', { name: 'Room list', exact: true })
+    .getByRole('navigation', { name: 'Workspace' })
+    .getByRole('button', { name: 'Rooms', exact: true })
     .click();
   await expect(badge(page, 'Order first')).toHaveCount(0);
   expect(await order(page)).toEqual(before);

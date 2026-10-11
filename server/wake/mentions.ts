@@ -35,10 +35,76 @@ export function slugOf(name: string): string {
     .replace(/^-+|-+$/g, '');
 }
 
+/** The form a display name is compared in (`@Name` prefixes and `@"Name"`). */
+export function nameKeyOf(name: string): string {
+  return fold(name).trim();
+}
+
+/** Lowercased slug token right after an `@` (the `@city-desk` form). */
+function slugToken(rest: string): string {
+  let token = '';
+  for (const char of rest) {
+    if (!SLUG_CHAR.test(char)) break;
+    token += char;
+  }
+  return token.replace(/[._-]+$/, '');
+}
+
+export interface MentionKeys {
+  /** nameKeyOf values a mentioned candidate's name may have. */
+  names: string[];
+  /** slugOf values a mentioned candidate's name may have. */
+  slugs: string[];
+  /** Lowercased agent ids written as `@<id>`. */
+  ids: string[];
+}
+
+/**
+ * Every key a candidate must have for findMentions(text, ...) to be able to match it, without
+ * knowing the candidates: for each `@` findMentions would scan, the quoted label, the id, every
+ * prefix of the following text that ends where a name match may end, and the slug token. A
+ * candidate with none of these keys never affects the result (it is neither a hit nor part of an
+ * ambiguity), so findMentions over only the candidates having one of them returns exactly what it
+ * returns over all of them (server/wake/hooks.ts roomPosted, tests/mention-keys.test.ts).
+ */
+export function mentionKeys(text: string): MentionKeys {
+  const names = new Set<string>();
+  const slugs = new Set<string>();
+  const ids = new Set<string>();
+  if (!text.includes('@')) return { names: [], slugs: [], ids: [] };
+  const folded = fold(text);
+  let scanned = 0;
+  for (let at = folded.indexOf('@'); at >= 0; at = folded.indexOf('@', at + 1)) {
+    if (++scanned > WAKE_LIMITS.mentionScan) break;
+    const before = at > 0 ? folded[at - 1]! : '';
+    if (before && (WORD.test(before) || '.-+'.includes(before))) continue;
+    const rest = folded.slice(at + 1, at + 1 + 200);
+    if (rest.startsWith('"')) {
+      const end = rest.indexOf('"', 1);
+      if (end >= 1) names.add(rest.slice(1, end).trim());
+      continue;
+    }
+    if (UUID.test(rest) && !WORD.test(rest[36] ?? '')) {
+      ids.add(rest.slice(0, 36));
+      continue;
+    }
+    for (let length = 1; length <= rest.length; length++) {
+      const next = rest[length] ?? '';
+      if (!WORD.test(next) && next !== '-') names.add(rest.slice(0, length));
+    }
+    const token = slugToken(rest);
+    if (token) slugs.add(token);
+  }
+  return { names: [...names], slugs: [...slugs], ids: [...ids] };
+}
+
 export function findMentions(
   text: string,
   candidates: readonly MentionCandidate[],
-  /** `exclude`: ids that resolve as names but are never mentioned (the sender, its own host). */
+  /**
+   * `exclude`: ids that resolve as names but are never mentioned (the sender; for an agent
+   * sender, also its owner's room host).
+   */
   options: { exclude?: string | readonly string[]; max?: number } = {},
 ): MentionMatch {
   const max = options.max ?? WAKE_LIMITS.mentionsPerMessage;
@@ -52,7 +118,7 @@ export function findMentions(
   // The sender stays a candidate so "@its-own-name" resolves to it (and is then dropped)
   // instead of falling back to a shorter name that happens to be a prefix.
   const pool = candidates
-    .map((item) => ({ id: item.id, name: fold(item.name).trim(), slug: slugOf(item.name) }))
+    .map((item) => ({ id: item.id, name: nameKeyOf(item.name), slug: slugOf(item.name) }))
     .filter((item) => item.slug.length > 0);
   const result: MentionMatch = { ids: [], offsets: new Map(), ambiguous: [] };
   if (!pool.length || !text.includes('@')) return result;
@@ -86,12 +152,7 @@ export function findMentions(
           } else if (length === best) hits.push(item.id);
         }
       }
-      let token = '';
-      for (const char of rest) {
-        if (!SLUG_CHAR.test(char)) break;
-        token += char;
-      }
-      token = token.replace(/[._-]+$/, '');
+      const token = slugToken(rest);
       const slugHits = token ? pool.filter((item) => item.slug === token) : [];
       if (slugHits.length && token.length >= best) {
         if (token.length > best) hits = slugHits.map((item) => item.id);

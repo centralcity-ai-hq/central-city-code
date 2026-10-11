@@ -1,6 +1,18 @@
 # Claude Code and Claude apps
 
-## Fastest: one command
+## Install: the published plugin
+
+In Claude Code (both servers and the `central-city` skill):
+
+```text
+/plugin marketplace add centralcity-ai-hq/toolkit
+/plugin install central-city@centralcity-ai
+```
+
+Then run `/mcp`, choose `plugin:central-city:central-city` and choose **Authenticate** to use your
+own workspace; `central-city-open` needs no sign-in. Details below.
+
+## By hand: one command
 
 ```sh
 # No account: plan and create unclaimed, zero-cost agents
@@ -35,12 +47,12 @@ claude plugin validate integrations/claude-code/central-city
 claude plugin validate integrations/claude-code
 ```
 
-Once the marketplace is published (see [docs/DISTRIBUTION.md](../../docs/DISTRIBUTION.md#claude-code-plugin-marketplace);
-Claude Code reads a GitHub marketplace from the repository root), users install in Claude Code
-with:
+The marketplace is published from the public `centralcity-ai-hq/toolkit` repository (see
+[docs/DISTRIBUTION.md](../../docs/DISTRIBUTION.md#claude-code-plugin-marketplace); Claude Code
+reads a GitHub marketplace from the repository root). Users install in Claude Code with:
 
 ```text
-/plugin marketplace add centralcity-ai/toolkit
+/plugin marketplace add centralcity-ai-hq/toolkit
 /plugin install central-city@centralcity-ai
 ```
 
@@ -50,7 +62,8 @@ user signs in there; nothing in the plugin contains a credential.
 
 ## Claude.ai, Claude Desktop and mobile
 
-Custom connectors are added under **Customize → Connectors → Add custom connector** (Team and
+Central City's listing in Claude's connector directory is in review (no link yet). Until then,
+custom connectors are added under **Customize → Connectors → Add custom connector** (Team and
 Enterprise Owners: **Organization settings → Connectors**). These links open the dialog with the
 name and URL prefilled; the user still reviews and confirms:
 

@@ -78,6 +78,8 @@ export function withMentions(text: string, names: readonly string[], key: string
 type Context = {
   names: readonly string[];
   definitions: Map<string, { url: string; title?: string | null }>;
+  /** Text still being written: code is shown without highlighting (it changes every frame). */
+  forming?: boolean;
 };
 
 function collectDefinitions(root: Nodes, into: Context['definitions']) {
@@ -171,7 +173,14 @@ function renderNode(node: Nodes, ctx: Context, depth: number, key: string): Reac
         </li>
       );
     case 'code':
-      return <CodeBlock key={key} code={node.value} language={node.lang ?? ''} />;
+      return (
+        <CodeBlock
+          key={key}
+          code={node.value}
+          language={node.lang ?? ''}
+          highlight={!ctx.forming}
+        />
+      );
     case 'inlineCode':
       return <code key={key}>{node.value}</code>;
     case 'emphasis':
@@ -351,4 +360,19 @@ export function Markdown({
       ) : null}
     </div>
   );
+}
+
+/**
+ * Renders a parsed tree as the children of an `.md-body` (no wrapper), for the streamed reveal
+ * (Streaming.tsx), which renders an answer block by block. `forming`: the text is still being
+ * written (code is not highlighted yet).
+ */
+export function renderTree(tree: Root, names: readonly string[] = [], forming = false): ReactNode {
+  try {
+    const definitions: Context['definitions'] = new Map();
+    collectDefinitions(tree, definitions);
+    return renderNode(tree, { names, definitions, forming }, 0, 'm');
+  } catch {
+    return null;
+  }
 }

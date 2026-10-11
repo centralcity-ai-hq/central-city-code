@@ -189,5 +189,5 @@ test('the reserved name holds on every path: grant create, join-with-new-agent, 
   await f.verify(owner);
   const elricId = await f.addElric(owner);
   await f.joinPerson(owner, room, 'Olive');
-  await f.joinAgent(owner, room, elricId);
+  await f.joinAgent(owner, room, elricId, { legacy: true });
 });

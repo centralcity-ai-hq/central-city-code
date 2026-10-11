@@ -46,6 +46,28 @@ export const MEMBER_STATUS_LABEL: Record<MemberStatus, string> = {
   access_expired: 'Access expired',
 };
 
+/**
+ * "Active now": the one definition behind both the room overview's `ais_active_now` count and
+ * each member's `active_now` flag (the header badge and the Active-now list). An AI member (any
+ * non-person member, Elric and the host's own agent included) counts when it is still listed
+ * (in the room, agent not revoked), its room credential (invite guests) is still valid, and its
+ * last room activity (or join) is at or after `activeNowSince(now)`: the start of the minute
+ * 5 minutes ago (`MEMBER_STATUS.activeMs`). An AI long-polling the room records activity at least
+ * every 30 seconds (`touchThrottleMs`), so a connected AI always counts. The window starts on a
+ * whole minute, so it reveals activity only to the minute, like the overview always did.
+ */
+export function activeNowSince(now: number): number {
+  return Math.floor((now - MEMBER_STATUS.activeMs) / 60_000) * 60_000;
+}
+
+export function isActiveNow(input: StatusInput & { kind?: string | null }): boolean {
+  if (input.kind === 'person') return false;
+  const credential = input.credential;
+  if (credential && (credential.revokedAt !== null || credential.expiresAt <= input.now))
+    return false;
+  return lastActivity(input) >= activeNowSince(input.now);
+}
+
 export interface MemberStatusFields {
   /** Coarse, server-derived: 'active' | 'idle' | 'offline' | 'access_expired'. */
   status: MemberStatus;
@@ -54,6 +76,8 @@ export interface MemberStatusFields {
    * own owner see it; other members get null (they see the coarse status only).
    */
   last_active_at: string | null;
+  /** The shared "active now" rule (isActiveNow), the same for every viewer. */
+  active_now: boolean;
 }
 
 export interface StatusInput {
@@ -117,31 +141,54 @@ export function bucketOffset(secret: string, roomId: string, agentId: string): n
  * and stays exact.
  */
 export function presentMemberStatus(
-  input: StatusInput,
+  input: StatusInput & { kind?: string | null },
   exact: boolean,
   offset = 0,
 ): MemberStatusFields {
+  // The same minute-aligned rule as the overview count, so the badge equals the list. For an AI,
+  // "active" is exactly active_now, so the status dot never disagrees with the Active-now list.
+  const active_now = isActiveNow(input);
+  const aligned = (status: MemberStatus): MemberStatus =>
+    input.kind === 'person' || status === 'access_expired'
+      ? status
+      : active_now
+        ? 'active'
+        : status === 'active'
+          ? 'idle'
+          : status;
   if (exact)
-    return { status: deriveMemberStatus(input), last_active_at: coarseTime(lastActivity(input)) };
+    return {
+      status: aligned(deriveMemberStatus(input)),
+      last_active_at: coarseTime(lastActivity(input)),
+      active_now,
+    };
   return {
-    status: deriveMemberStatus({
-      ...input,
-      lastActiveAt: input.lastActiveAt === null ? null : snap(input.lastActiveAt, offset),
-      joinedAt: snap(input.joinedAt, offset),
-      now: snap(input.now, offset),
-      credential: input.credential
-        ? {
-            ...input.credential,
-            // Compare expiry against the real clock, not the snapped one.
-            expiresAt: input.credential.expiresAt - (input.now - snap(input.now, offset)),
-          }
-        : input.credential,
-    }),
+    status: aligned(
+      deriveMemberStatus({
+        ...input,
+        lastActiveAt: input.lastActiveAt === null ? null : snap(input.lastActiveAt, offset),
+        joinedAt: snap(input.joinedAt, offset),
+        now: snap(input.now, offset),
+        credential: input.credential
+          ? {
+              ...input.credential,
+              // Compare expiry against the real clock, not the snapped one.
+              expiresAt: input.credential.expiresAt - (input.now - snap(input.now, offset)),
+            }
+          : input.credential,
+      }),
+    ),
     last_active_at: null,
+    active_now,
   };
 }
 
-type Row = { agent_id: string; owner_id: string; joined_at: string | number };
+type Row = {
+  agent_id: string;
+  owner_id: string;
+  joined_at: string | number;
+  kind?: string | null;
+};
 type Room = { id: string; host_owner_id: string };
 
 /**
@@ -193,6 +240,7 @@ export async function memberStatuses(
           joinedAt: Number(row.joined_at),
           credential: credentials.get(row.agent_id) ?? null,
           now,
+          kind: row.kind ?? null,
         },
         host || row.owner_id === viewerOperatorId,
         bucketOffset(secret, room.id, row.agent_id),
@@ -200,6 +248,13 @@ export async function memberStatuses(
     );
   return result;
 }
+
+/**
+ * How every statement that writes several room_members rows of one room locks them: in agent_id
+ * order, inside a CTE (a SELECT ending in MEMBER_LOCK_ORDER) before the UPDATE. Two writers that
+ * each take rows in their own order (a plain multi-row UPDATE has none) can deadlock.
+ */
+export const MEMBER_LOCK_ORDER = 'ORDER BY m.agent_id FOR UPDATE OF m';
 
 /**
  * Records room activity for the given member agents (throttled; a no-op for removed members)
@@ -211,6 +266,10 @@ export async function memberStatuses(
  * is still current: a history-to-full switch committing mid-read lowers `visible_from_seq` and
  * resets the cursor, and this UPDATE (which waits on that row lock and re-checks the row) then
  * leaves the reset cursor alone, so the newly opened messages still arrive as unread.
+ *
+ * Lock order: the rows are locked in agent_id order first (`MEMBER_LOCK_ORDER`), the same order as
+ * recordPost (overview.ts), so a read touching several of an owner's members and a post moving
+ * that owner's cursors never wait on each other in a cycle.
  */
 export async function touchMembers(
   q: Pick<Tx, 'query'>,
@@ -224,16 +283,22 @@ export async function touchMembers(
   const due = time - MEMBER_STATUS.touchThrottleMs;
   const ids = [...agentIds];
   const from = ids.map((id) => (seen.has(id) ? String(seen.get(id)) : null));
+  const changes = `(m.last_active_at IS NULL OR m.last_active_at <= $4
+             OR (m.last_read_seq < $5 AND m.visible_from_seq = r.seen))`;
   await q.query(
-    `UPDATE room_members m
+    `WITH locked AS (
+       SELECT m.agent_id AS id FROM room_members m
+         JOIN unnest($2::text[], $6::bigint[]) AS r(agent_id, seen) ON m.agent_id = r.agent_id
+        WHERE m.room_id=$1 AND m.removed_at IS NULL AND ${changes}
+        ${MEMBER_LOCK_ORDER})
+     UPDATE room_members m
         SET last_read_seq = CASE WHEN m.visible_from_seq = r.seen
                                  THEN GREATEST(m.last_read_seq, $5) ELSE m.last_read_seq END,
             last_active_at = CASE WHEN m.last_active_at IS NULL OR m.last_active_at <= $4
                                   THEN $3 ELSE m.last_active_at END
-       FROM unnest($2::text[], $6::bigint[]) AS r(agent_id, seen)
-      WHERE m.room_id=$1 AND m.agent_id = r.agent_id AND m.removed_at IS NULL
-        AND (m.last_active_at IS NULL OR m.last_active_at <= $4
-             OR (m.last_read_seq < $5 AND m.visible_from_seq = r.seen))`,
+       FROM locked l, unnest($2::text[], $6::bigint[]) AS r(agent_id, seen)
+      WHERE m.room_id=$1 AND m.agent_id = l.id AND m.agent_id = r.agent_id
+        AND m.removed_at IS NULL AND ${changes}`,
     [roomId, ids, time, due, readThrough, from],
   );
 }

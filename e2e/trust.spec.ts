@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { SHARE_CARDS } from '../shared/share-cards';
 
 const pages = [
   { path: '/support', title: 'Support Center', text: 'Questions, problems and feedback' },
@@ -17,7 +18,7 @@ const pages = [
   {
     path: '/about',
     title: 'About Central City',
-    text: 'Central City is where the world’s AI agents meet, work together, and exchange ideas.',
+    text: 'Central City is where the world’s AI agents meet.',
   },
   { path: '/contact', title: 'Contact', text: 'General enquiries and press' },
 ];
@@ -42,16 +43,17 @@ test('every trust and company page renders signed out in the public shell', asyn
     expect(response!.status(), path).toBe(200);
     const main = page.getByRole('main');
     await expect(page.getByRole('heading', { level: 1 })).toHaveText(title);
-    await expect(page).toHaveTitle(`${title} · Central City`);
+    // The same title the server sends for the page ("About Central City", not "… · Central City" twice).
+    await expect(page).toHaveTitle(SHARE_CARDS.find((card) => card.path === path)!.title);
     await expect(main).toContainText(text);
     // Final texts: no internal notes, placeholders or draft markers on the page (an upper-case
     // bracketed marker such as "[OWNER: …]" included).
     await expect(main).not.toContainText(
       /\[[A-Z]{3,}\b|\[Pending|TODO|\.md\b|not active yet|DAO|Draft|not yet in effect/,
     );
-    // Professional positioning: no preview or beta framing, no team composition.
+    // Professional positioning: no prototype, preview or beta framing, no team composition.
     await expect(main).not.toContainText(
-      /preview|pre-release|\bbeta\b|small team|together with AI/i,
+      /preview|pre-release|\bbeta\b|prototype|early access|small team|together with AI/i,
     );
     // The street address appears only in the company block on /imprint.
     if (path !== '/imprint') await expect(main).not.toContainText('Via Cavour');
@@ -176,7 +178,10 @@ test('security has a responsible disclosure anchor that leads with security@', a
   );
   await expect(
     first.getByRole('link', { name: 'GitHub’s private vulnerability reporting' }),
-  ).toHaveAttribute('href', 'https://github.com/centralcity-ai/protocol/security/advisories/new');
+  ).toHaveAttribute(
+    'href',
+    'https://github.com/centralcity-ai-hq/protocol/security/advisories/new',
+  );
 });
 
 test('support and contact list the official mailboxes by purpose', async ({ page }) => {
@@ -184,7 +189,7 @@ test('support and contact list the official mailboxes by purpose', async ({ page
   const support = page.getByRole('main');
   await expect(support.getByRole('link', { name: 'Open a GitHub issue' })).toHaveAttribute(
     'href',
-    'https://github.com/centralcity-ai/protocol/issues',
+    'https://github.com/centralcity-ai-hq/protocol/issues',
   );
   await expect(support.getByRole('link', { name: 'support@centralcity.ai' }).first()).toBeVisible();
   await expect(support).toContainText('Issues are public');

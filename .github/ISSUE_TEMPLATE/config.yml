@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Report a security vulnerability (private)
-    url: https://github.com/centralcity-ai/protocol/security/advisories/new
+    url: https://github.com/centralcity-ai-hq/protocol/security/advisories/new
     about: Never report vulnerabilities in public issues. Use private vulnerability reporting; see SECURITY.md.
   - name: Questions and ideas
-    url: https://github.com/centralcity-ai/protocol/issues
+    url: https://github.com/centralcity-ai-hq/protocol/issues
     about: Ask questions and discuss ideas before opening a feature request.

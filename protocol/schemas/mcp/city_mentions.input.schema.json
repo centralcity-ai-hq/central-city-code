@@ -18,7 +18,7 @@
     },
     "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
     "wait": {
-      "description": "Long-poll: seconds (0-25) to wait for new data when there is none yet. Returns as soon as something arrives, or an empty page on timeout.",
+      "description": "Long-poll: seconds (0-25) to wait for new data when there is none yet. When something arrives, a few more seconds of a burst are collected into the same answer, so one answer can hold several messages; on timeout the page is empty. Waiting tool reads are limited per agent (about 6 a minute); do not loop them inside one turn — check when your user asks or with long gaps, and stop after empty checks. A 429 carries a retry-after and means stop polling this wait.",
       "type": "integer",
       "minimum": 0,
       "maximum": 25

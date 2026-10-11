@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { PGlite } from '@electric-sql/pglite';
 import { createApp } from '../server/app.js';
 import {
+  AI_AGENTS_TOTAL_SCAN_SQL,
   AI_AGENTS_TOTAL_SQL,
   countAiAgentsTotal,
   createPublicStats,
@@ -12,10 +14,11 @@ import {
   sqlPublicStatsStore,
   parseExcludedOperators,
   PUBLIC_STATS_CACHE_CONTROL,
+  PUBLIC_STATS_EDGE_CACHE_CONTROL,
   PUBLIC_STATS_RATE,
   PUBLIC_STATS_TTL_MS,
 } from '../server/stats/public-stats.js';
-import { publicStatsMigration } from '../server/stats/schema.js';
+import { COUNTED_AGENT_IDS_SQL, publicStatsMigration } from '../server/stats/schema.js';
 import { ownerApi, type App } from './oauth-helpers.js';
 
 const jsonHeaders = { 'content-type': 'application/json', 'x-city-request': '1' };
@@ -33,6 +36,7 @@ async function table(t: { after: (fn: () => Promise<unknown>) => void }) {
   const db = await PGlite.create();
   t.after(() => db.close());
   await db.exec('CREATE TABLE workspaces (operator_id text PRIMARY KEY, data jsonb NOT NULL)');
+  await db.exec(COUNTED_AGENT_IDS_SQL);
   const put = (operatorId: string, agents: unknown[] | undefined) =>
     db.query('INSERT INTO workspaces(operator_id,data) VALUES($1,$2::jsonb)', [
       operatorId,
@@ -80,6 +84,135 @@ test('excluded operators are parsed strictly', () => {
   assert.deepEqual(parseExcludedOperators(' '), []);
   assert.deepEqual(parseExcludedOperators('a-1, b_2,a-1'), ['a-1', 'b_2']);
   assert.throws(() => parseExcludedOperators("x' OR 1=1"), /operator ids/);
+});
+
+/** The trigger-kept count and the definition's scan over every document, for the same data. */
+async function bothCounts(db: PGlite, excluded: string[] = []) {
+  const run = async (sql: string) =>
+    Number((await db.query<{ n: string | number }>(sql, [excluded])).rows[0]!.n);
+  return { kept: await run(AI_AGENTS_TOTAL_SQL), scan: await run(AI_AGENTS_TOTAL_SCAN_SQL) };
+}
+async function assertSame(db: PGlite, expected: number, excluded: string[] = []) {
+  assert.deepEqual(await bothCounts(db, excluded), { kept: expected, scan: expected });
+}
+
+test('migration 59: the kept ids follow every workspace write and equal the document scan', async (t) => {
+  const { db, put } = await table(t);
+  const set = (operatorId: string, agents: unknown) =>
+    db.query(
+      `UPDATE workspaces SET data = jsonb_set(data, '{agents}', $2::jsonb) WHERE operator_id=$1`,
+      [operatorId, JSON.stringify(agents)],
+    );
+  await put('o1', [agent('a1'), agent('a2'), agent('d1', { demoKey: 'Scout' })]);
+  await put('o2', [agent('b1')]);
+  await assertSame(db, 3);
+  // An agent revoked (still counted), one added, one removed from its document, a demo seed added.
+  await set('o1', [
+    agent('a1', { revokedAt: '2026-09-28T00:00:00.000Z' }),
+    agent('a3'),
+    agent('d1', { demoKey: 'Scout' }),
+    agent('d2', { demoKey: 'Relay' }),
+  ]);
+  await assertSame(db, 3);
+  // A demoKey set on a counted agent, and one that is JSON null (counted like an absent one).
+  await set('o1', [agent('a1'), agent('a3', { demoKey: 'Scout' }), agent('d1', { demoKey: null })]);
+  await assertSame(db, 3);
+  // A claim: the agent moves to another document in one transaction, its id preserved.
+  await db.transaction(async (tx) => {
+    await tx.query(
+      `UPDATE workspaces SET data = jsonb_set(data, '{agents}', '[]'::jsonb) WHERE operator_id='o2'`,
+    );
+    await tx.query(
+      `UPDATE workspaces SET data = jsonb_set(data, '{agents}', data->'agents' || $1::jsonb)
+        WHERE operator_id='o1'`,
+      [JSON.stringify([agent('b1')])],
+    );
+  });
+  await assertSame(db, 3);
+  // The same id in two documents, and twice in one document, counts once.
+  await put('o3', [agent('b1'), agent('b1'), agent('c1')]);
+  await assertSame(db, 4);
+  // Odd elements: no id, a null id, a numeric id (counted by its text), non-object elements.
+  await put('o4', [{ name: 'no id' }, agent('x', { id: null }), { id: 7 }, 'text', 42, null]);
+  await assertSame(db, 5);
+  // A document without agents, an empty array, and a write that leaves the agents unchanged.
+  await put('o5', undefined);
+  await put('o6', []);
+  await db.query(
+    `UPDATE workspaces SET data = jsonb_set(data, '{jobs}', '[1]'::jsonb) WHERE operator_id='o1'`,
+  );
+  await assertSame(db, 5);
+  // Excluded operators.
+  await assertSame(db, 2, ['o1', 'o4']);
+  await assertSame(db, 1, ['o1', 'o3']);
+  // A purged partition (its workspace row deleted) and a changed key.
+  await db.query(`DELETE FROM workspaces WHERE operator_id='o3'`);
+  await assertSame(db, 4);
+  await db.query(`UPDATE workspaces SET operator_id='o7' WHERE operator_id='o4'`);
+  await assertSame(db, 4);
+  await assertSame(db, 3, ['o7']);
+  // The kept rows are exactly the scan's (workspace, id) pairs.
+  const pairs = async (sql: string) =>
+    (await db.query<{ o: string; a: string }>(sql)).rows.map((row) => `${row.o}/${row.a}`).sort();
+  assert.deepEqual(
+    await pairs('SELECT operator_id AS o, agent_id AS a FROM counted_agent_ids'),
+    await pairs(`SELECT DISTINCT w.operator_id AS o, a.value->>'id' AS a FROM workspaces w
+      CROSS JOIN LATERAL jsonb_array_elements(COALESCE(w.data->'agents','[]'::jsonb)) AS a(value)
+      WHERE a.value->>'demoKey' IS NULL AND a.value->>'id' IS NOT NULL`),
+  );
+});
+
+test('migration 59: a workspace whose agents is not an array still saves and adds nothing', async (t) => {
+  const { db, put } = await table(t);
+  await put('o1', [agent('a1')]);
+  await db.query(`INSERT INTO workspaces VALUES('odd', '{"agents":{"id":"x"}}'::jsonb)`);
+  await db.query(`UPDATE workspaces SET data='{"agents":"text"}'::jsonb WHERE operator_id='odd'`);
+  assert.equal(await countAiAgentsTotal(db), 1);
+});
+
+test('migration 59 backfills existing workspaces: 30,000 agents, the scan total, a fast count', async (t) => {
+  const db = await PGlite.create();
+  t.after(() => db.close());
+  await db.exec('CREATE TABLE workspaces (operator_id text PRIMARY KEY, data jsonb NOT NULL)');
+  // Data from before the migration: 30,000 one-agent partitions with padded documents (like
+  // real ones), an owner with a demo seed, and an excluded canary.
+  await db.query(
+    `INSERT INTO workspaces(operator_id,data)
+      SELECT 'op'||g, jsonb_build_object('agents', jsonb_build_array(jsonb_build_object(
+        'id', 'agent-'||g, 'name', 'A'||g, 'createdAt', '2026-10-01T00:00:00.000Z')),
+        'events', jsonb_build_array(jsonb_build_object('message', repeat('x', 400))),
+        'jobs', '[]'::jsonb)
+      FROM generate_series(1, 30000) g`,
+  );
+  await db.query(`INSERT INTO workspaces VALUES('owner', $1::jsonb), ('canary', $2::jsonb)`, [
+    JSON.stringify({ agents: [agent('o-1'), agent('d-1', { demoKey: 'Scout' })] }),
+    JSON.stringify({ agents: [agent('c-1'), agent('c-2')] }),
+  ]);
+  await db.exec(COUNTED_AGENT_IDS_SQL);
+  await db.query('ANALYZE');
+  const excluded = ['canary'];
+  const time = async (sql: string) => {
+    const started = performance.now();
+    const n = Number((await db.query<{ n: string }>(sql, [excluded])).rows[0]!.n);
+    return { n, ms: performance.now() - started };
+  };
+  // Warm both once, then measure.
+  await time(AI_AGENTS_TOTAL_SQL);
+  await time(AI_AGENTS_TOTAL_SCAN_SQL);
+  const kept = await time(AI_AGENTS_TOTAL_SQL);
+  const scan = await time(AI_AGENTS_TOTAL_SCAN_SQL);
+  t.diagnostic(
+    `30,001 agents: kept ids ${Math.round(kept.ms)} ms, document scan ${Math.round(scan.ms)} ms`,
+  );
+  assert.equal(kept.n, 30_001);
+  assert.equal(scan.n, 30_001);
+  assert.equal(await countAiAgentsTotal(db, excluded), 30_001);
+  // The kept count reads no workspace document: faster than the scan, and well under a second.
+  assert.ok(kept.ms < scan.ms, `kept ${kept.ms} ms vs scan ${scan.ms} ms`);
+  assert.ok(kept.ms < 1_000, `took ${kept.ms} ms`);
+  // The migration SQL is idempotent: running it again changes nothing.
+  await db.exec(COUNTED_AGENT_IDS_SQL);
+  assert.equal((await time(AI_AGENTS_TOTAL_SQL)).n, 30_001);
 });
 
 /** A database with workspaces, the migration 28 table, and a counter of aggregate queries. */
@@ -260,6 +393,9 @@ test('GET /api/public/stats: unauthenticated, cacheable, only the number, and co
   const empty = await stats(app);
   assert.equal(empty.statusCode, 200, empty.body);
   assert.equal(empty.headers['cache-control'], PUBLIC_STATS_CACHE_CONTROL);
+  // Edge only: fresh 15 s, then served stale for up to a day while one request refreshes it.
+  assert.equal(empty.headers['vercel-cdn-cache-control'], PUBLIC_STATS_EDGE_CACHE_CONTROL);
+  assert.match(PUBLIC_STATS_EDGE_CACHE_CONTROL, /max-age=15, stale-while-revalidate=86400/);
   assert.equal(empty.headers['set-cookie'], undefined);
   assert.match(String(empty.headers['content-type']), /^application\/json/);
   assert.deepEqual(Object.keys(empty.json()).sort(), ['ai_agents_total', 'updated_at']);
@@ -351,7 +487,7 @@ test('GET /api/public/stats is rate limited per client address', async (t) => {
 
 test('a query string on /api/public/stats is redirected at the handler, never reaching the app', async () => {
   const { createHostedHandler, publicStatsRedirect, withoutRewriteParameter } =
-    await import('../api/index.js');
+    await import('../server/vercel-handler.js');
   // The Vercel rewrite parameter alone is not a client query: no redirect (no loop).
   for (const url of [
     '/api/public/stats',

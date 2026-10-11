@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { test, expect, type APIRequestContext } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import type { Snapshot } from '../shared/types.js';
+import { openAdvancedGroup, workspaceSwitcher } from './settings-nav';
 
 const password = 'Local-test-only-passphrase-2026';
 
@@ -16,6 +17,17 @@ async function aiWorkspace(request: APIRequestContext, name: string) {
     claim_token: string;
     claim_url: string;
   };
+}
+/** A view in the sidebar's "Workspace" navigation. */
+function workspaceNav(page: Page, name: string) {
+  return page
+    .getByRole('navigation', { name: 'Workspace' })
+    .getByRole('button', { name, exact: true });
+}
+/** Opens a view from the sidebar's "Advanced workspace" menu. */
+async function openAdvanced(page: Page, name: string) {
+  await (await openAdvancedGroup(page)).getByRole('button', { name, exact: true }).click();
+  await expect(page.getByRole('heading', { name, level: 1 })).toBeVisible();
 }
 async function tool(request: APIRequestContext, key: string, name: string, args: unknown) {
   const res = await request.post(`/api/assistant/tools/${name}`, {
@@ -64,19 +76,28 @@ test('a person claims an AI-owned workspace and approves a cross-owner request',
   });
   expect(new URL(lab.claim_url).hash).toBe(`#claim=${lab.claim_token}`);
 
-  // A person signs up and claims the AI workspace from its claim link.
+  // A person signs up and claims the AI workspace from its claim link. A fresh name per run:
+  // account names are unique on a server, and a repeated run would hit "unavailable".
+  const person = `Parity-Person-${randomUUID().slice(0, 8)}`;
   await page.goto('/#signin');
-  if (await page.getByRole('button', { name: 'Create an account', exact: true }).isVisible())
-    await page.getByRole('button', { name: 'Create an account', exact: true }).click();
-  await page.getByLabel('Account name').fill('Parity-Person');
+  // Sign-in mode, or registration on a fresh installation: wait for the form to settle first.
+  // An instant isVisible() snapshot taken before the form drew skipped the switch, and the
+  // click on "Create account" below then waited for a button that never came (the 45 s timeout).
+  const createOne = page.getByRole('button', { name: 'Create an account', exact: true });
+  const createAccount = page.getByRole('button', { name: 'Create account', exact: true });
+  await expect(createOne.or(createAccount)).toBeVisible();
+  if (await createOne.isVisible()) await createOne.click();
+  await expect(createAccount).toBeVisible();
+  await page.getByLabel('Account name').fill(person);
   await page.getByLabel('Password', { exact: true }).fill(password);
-  await page.getByRole('button', { name: 'Create account', exact: true }).click();
-  // A new account lands on the Overview.
-  await expect(page.getByRole('heading', { name: 'Everything, at a glance.' })).toBeVisible();
+  await createAccount.click();
+  // A new account lands on the workspace overview, the Network map.
+  await expect(page.getByRole('heading', { name: 'Network map', level: 1 })).toBeVisible();
+  // The open workspace follows the claim link at once and removes the secret from the address.
   await page.goto(`/#claim=${lab.claim_token}`);
-  await page.reload();
   const input = page.getByLabel('Claim agents your AI created');
   await expect(input).toHaveValue(lab.claim_token);
+  await expect(page).toHaveURL(/\/$/);
   // Before claiming, the person sees which AI keys keep their access.
   await page.getByRole('button', { name: 'Claim', exact: true }).click();
   await expect(page.getByText('These AIs keep their access after you claim it.')).toBeVisible();
@@ -85,14 +106,18 @@ test('a person claims an AI-owned workspace and approves a cross-owner request',
   await expect(page.getByText('AI workspace claimed. You now co-own it')).toBeVisible();
 
   // The AI workspace appears in the switcher; the person acts in it as co-owner.
-  const switcher = page.getByLabel('Switch workspace');
-  await switcher.selectOption({ label: 'Parity Lab (AI workspace)' });
+  await (await workspaceSwitcher(page)).selectOption({ label: 'Parity Lab (AI workspace)' });
   await expect(page.getByText('AI workspace · you co-own it')).toBeVisible();
-  await page.getByRole('button', { name: 'Agents', exact: true }).click();
+  // My agents carries the pending request count; the badge never changes the entry's name.
+  const agents = page
+    .getByRole('navigation', { name: 'Workspace' })
+    .getByRole('button', { name: 'My agents', exact: true });
+  await expect(agents).toHaveAccessibleDescription('1 pending connection request');
+  await agents.click();
   await expect(page.getByText('Scout').first()).toBeVisible();
 
   // The incoming request is clearly labelled as from another person; the person approves it.
-  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await openAdvanced(page, 'Agent permissions');
   const panel = page.getByRole('region', { name: 'Connections with other people' });
   await expect(panel.getByText('Bravo · Peer Lab')).toBeVisible();
   await expect(panel.getByText('Another person', { exact: true })).toBeVisible();
@@ -113,11 +138,16 @@ test('a person claims an AI-owned workspace and approves a cross-owner request',
   expect(state.operator.id).toBe(lab.workspace_id);
   expect(state.events.some((item) => item.type === 'connection.cross_approved')).toBe(true);
   // The external message is marked with the sending owner's label in Messages.
-  await switcher.selectOption({ label: 'Parity Lab (AI workspace)' });
-  await page.getByRole('button', { name: 'Messages', exact: true }).click();
+  await (await workspaceSwitcher(page)).selectOption({ label: 'Parity Lab (AI workspace)' });
+  await workspaceNav(page, 'Messages').click();
+  await page
+    .getByRole('navigation', { name: 'Conversations', exact: true })
+    .getByRole('button')
+    .first()
+    .click();
   await expect(page.getByText('External · Peer Lab').first()).toBeVisible();
 
   // The co-owner's own workspace is untouched and still selectable.
-  await switcher.selectOption({ label: 'Parity-Person (yours)' });
+  await (await workspaceSwitcher(page)).selectOption({ label: `${person} (yours)` });
   await expect(page.getByText('Private workspace', { exact: true })).toBeVisible();
 });

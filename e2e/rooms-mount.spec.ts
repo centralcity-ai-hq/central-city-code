@@ -46,14 +46,21 @@ test('rooms end to end in the app: create, invite, join from a second browser, p
   const host = await newAccount(browser, 'Host');
   await host.page.goto('/#signin');
   await signUpAt(host.page, host.name);
-  // A new account lands on the console Overview.
-  await expect(host.page.getByRole('heading', { name: 'Everything, at a glance.' })).toBeVisible();
+  // A new account lands on the Overview (the Network map in the workspace).
+  await expect(host.page.getByRole('heading', { name: 'Network map', level: 1 })).toBeVisible();
   expect(new URL(host.page.url()).pathname).toBe('/');
 
-  // In the console, "Rooms" is the first item of the sidebar.
+  // In the workspace, "Rooms" is the first item of the sidebar.
   const nav = host.page.getByRole('navigation', { name: 'Workspace' });
   await expect(nav.locator('.nav-item').first()).toHaveText('Rooms');
-  await nav.getByRole('link', { name: 'Rooms' }).click();
+  // Styled like the other items: no underline, the same colour as My agents.
+  const rooms = nav.getByRole('button', { name: 'Rooms', exact: true });
+  const agents = nav.getByRole('button', { name: 'My agents', exact: true });
+  expect(await rooms.evaluate((el) => getComputedStyle(el).textDecorationLine)).toBe('none');
+  expect(await rooms.evaluate((el) => getComputedStyle(el).color)).toBe(
+    await agents.evaluate((el) => getComputedStyle(el).color),
+  );
+  await rooms.click();
   await expect(host.page).toHaveURL(/\/rooms$/);
   await expect(host.page.getByRole('heading', { name: 'No rooms yet' })).toBeVisible();
   await shot(host.page, '01-rooms-empty');
@@ -62,7 +69,7 @@ test('rooms end to end in the app: create, invite, join from a second browser, p
   await host.page.getByRole('button', { name: 'New room' }).first().click();
   const dialog = host.page.getByRole('dialog', { name: 'New room' });
   await dialog.getByLabel('Room name').fill('Launch plan');
-  await dialog.getByLabel("Your agent's name (it hosts the room)").fill('Host agent');
+  await dialog.getByLabel("Your AI's name").fill('Host agent');
   await dialog.getByRole('button', { name: 'Create room' }).click();
   await expect(host.page).toHaveURL(/\/rooms\/[A-Za-z0-9_-]+$/);
   const roomUrl = host.page.url();
@@ -70,13 +77,13 @@ test('rooms end to end in the app: create, invite, join from a second browser, p
 
   // Invite: one /j link, copied to the clipboard.
   await host.page.getByRole('button', { name: 'Invite' }).first().click();
-  const sheet = host.page.getByRole('dialog', { name: 'Invite to this room' });
-  await expect(sheet.getByLabel('Invite link')).toHaveValue(/\/j\//);
-  await sheet.getByRole('button', { name: 'Copy invite' }).click();
+  const sheet = host.page.getByRole('dialog', { name: 'Invite a person' });
+  await expect(sheet.locator('.rm-code')).toBeVisible();
+  await sheet.getByRole('button', { name: 'Copy invite link' }).click();
   await expect(sheet.getByRole('button', { name: 'Copied' })).toBeVisible();
   const copied = await host.page.evaluate(() => navigator.clipboard.readText());
   expect(copied).toMatch(
-    /^Join my Central City room and stay in it; reply when you're mentioned: http:\/\/127\.0\.0\.1:\d+\/j\/[A-Za-z0-9_-]+$/,
+    /^Join my Central City room, read it, and reply when I ask you to check it: http:\/\/127\.0\.0\.1:\d+\/j\/[A-Za-z0-9_-]+$/,
   );
   const link = copied.slice(copied.lastIndexOf(' ') + 1);
   await shot(host.page, '03-invite-sheet');
@@ -113,10 +120,10 @@ test('rooms end to end in the app: create, invite, join from a second browser, p
   await expect(list(host.page).getByText('Hello from the guest AI', { exact: true })).toBeVisible();
   await shot(host.page, '07-host-sees-message');
 
-  // Back to the workspace.
+  // Back to the workspace: signed in, "/" opens Rooms.
   await host.page.goto('/');
-  await expect(host.page).toHaveURL(/\/$/);
-  await expect(nav.getByRole('link', { name: 'Rooms' })).toBeVisible();
+  await expect(host.page).toHaveURL(/\/rooms$/);
+  await expect(rooms).toBeVisible();
 
   expect(host.errors).toEqual([]);
   expect(guest.errors).toEqual([]);
@@ -130,16 +137,17 @@ test('signed-in "Invite your AI" opens the person\'s room, creating "My first ro
   const person = await newAccount(browser, 'Inviter');
   await person.page.goto('/#signin');
   await signUpAt(person.page, person.name);
-  // A new account lands on the console Overview.
+  // A new account lands on the workspace Overview.
   await expect(person.page.getByRole('navigation', { name: 'Workspace' })).toBeVisible();
 
-  // In the app: the sidebar's "Invite your AI".
+  // "Invite your AI" from a public page's header, signed in: /rooms#invite.
+  await person.page.goto('/downtown');
   await person.page.getByRole('link', { name: 'Invite your AI' }).click();
   // With no room yet, the person creates it with one click (never on page load).
   await person.page.getByRole('button', { name: 'Create my first room' }).click();
   await expect(person.page).toHaveURL(/\/rooms\/[A-Za-z0-9_-]+$/);
   const first = person.page.url();
-  await expect(person.page.getByRole('link', { name: 'My first room' })).toBeVisible();
+  await expect(person.page.getByRole('link', { name: 'My first room' }).first()).toBeVisible();
   await expect(person.page.getByRole('button', { name: 'Invite' }).first()).toBeVisible();
   await shot(person.page, '08-my-first-room');
 
@@ -149,7 +157,8 @@ test('signed-in "Invite your AI" opens the person\'s room, creating "My first ro
   await expect(invite).toHaveAttribute('href', '/rooms#invite');
   await invite.click();
   await expect(person.page).toHaveURL(first);
-  await expect(person.page.getByRole('link', { name: 'My first room' })).toHaveCount(1);
+  // Still one room (the workspace may list it twice: in Rooms and in its recent rooms).
+  expect((await (await person.page.request.get('/api/rooms')).json()).rooms).toHaveLength(1);
   expect(person.errors).toEqual([]);
   await person.context.close();
 });
@@ -169,10 +178,93 @@ test('signed out: room pages offer sign-in and "Invite your AI" goes to /invite'
   // An unsafe next is ignored: the new account stays on this site, on its Overview.
   await page.goto('/signin?next=https%3A%2F%2Fexample.com');
   await signUpAt(page, `Next-${crypto.randomUUID().slice(0, 8)}`);
-  await expect(page.getByRole('heading', { name: 'Everything, at a glance.' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Network map', level: 1 })).toBeVisible();
   expect(new URL(page.url()).origin).not.toBe('https://example.com');
   expect(new URL(page.url()).pathname).toBe('/');
 });
+
+for (const width of [390, 1440]) {
+  test(`signed-out /rooms at ${width} px: what a room is, sized to its content`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 1400 });
+    await page.goto('/rooms');
+    const main = page.getByRole('main');
+    await expect(
+      page.getByRole('banner').getByRole('link', { name: 'Central City home' }),
+    ).toBeVisible();
+    await expect(
+      main.getByText('Rooms are shared spaces where people and their AIs work together.'),
+    ).toBeVisible();
+    await expect(main.getByRole('button', { name: 'Sign in' })).toBeVisible();
+    // No tall empty band: the page ends a section's padding below the Sign in button.
+    const gap = await page.evaluate(() => {
+      const main = document.querySelector('main')!.getBoundingClientRect();
+      const last = document.querySelector('main > :last-child')!.getBoundingClientRect();
+      return main.bottom - last.bottom;
+    });
+    expect(gap).toBeLessThanOrEqual(120);
+  });
+}
+
+for (const width of [390, 1440]) {
+  test(`signed out, /r/<slug> without its invite at ${width} px: header, home and Sign in, the same for any slug`, async ({
+    browser,
+  }) => {
+    // A real room, made by another account through the API.
+    const owner = await browser.newContext();
+    const headers = { 'X-City-Request': '1' };
+    const registered = await owner.request.post('/api/auth/register', {
+      headers,
+      data: { name: `Host-${crypto.randomUUID().slice(0, 8)}`, password: PASSWORD },
+    });
+    expect(registered.status()).toBe(201);
+    const agent = await owner.request.post('/api/agents', {
+      headers,
+      data: { name: 'Host agent', capability: 'research', mode: 'hosted' },
+    });
+    expect(agent.status()).toBe(201);
+    const created = await owner.request.post('/api/rooms', {
+      headers,
+      data: {
+        agent_id: (await agent.json()).agent.id,
+        name: 'Launch plan',
+        idempotency_key: crypto.randomUUID(),
+      },
+    });
+    expect(created.status()).toBe(201);
+    const room = (await created.json()).room as { slug: string };
+    await owner.close();
+
+    const context = await browser.newContext({ viewport: { width, height: 900 } });
+    const page = await context.newPage();
+    const seen: string[] = [];
+    for (const slug of [room.slug, 'no-such-room-zz9']) {
+      await page.goto(`/r/${slug}`);
+      const main = page.getByRole('main');
+      await expect(
+        main.getByText('This invite link is incomplete; ask the host for a new link.'),
+      ).toBeVisible();
+      await expect(
+        page.getByRole('banner').getByRole('link', { name: 'Central City home' }),
+      ).toBeVisible();
+      await expect(main.getByRole('link', { name: 'Go home' })).toHaveAttribute('href', '/');
+      await expect(main.getByRole('button', { name: 'Sign in' })).toBeVisible();
+      await expect(page.getByRole('contentinfo')).toBeVisible();
+      // No room name or other hint: valid and invalid slugs read the same.
+      seen.push((await main.innerText()).trim());
+    }
+    expect(seen[0]).toBe(seen[1]);
+    expect(seen[0]).not.toContain('Launch plan');
+    // Sign in comes back to this address, where a member opens the room.
+    await page.getByRole('main').getByRole('button', { name: 'Sign in' }).click();
+    await expect(page).toHaveURL(/\/signin\?next=%2Fr%2Fno-such-room-zz9$/);
+    await page.goto('/r/no-such-room-zz9');
+    await page.getByRole('main').getByRole('link', { name: 'Go home' }).click();
+    await expect(page).toHaveURL(/\/$/);
+    await context.close();
+  });
+}
 
 test('the Connect page says what comes after connecting: paste an invite link', async ({
   page,

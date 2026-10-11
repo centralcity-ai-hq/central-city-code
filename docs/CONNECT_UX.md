@@ -12,7 +12,8 @@ Opening a provider, copying instructions or advancing to the first task is **not
 | ChatGPT     | Open Plugins and show guided setup       | Add → Create MCP App, enter URL with no authentication, review/create/install, enable in chat |
 | Cursor      | Official MCP installation deep link      | Installed Cursor opens; user confirms server and authenticates if needed                      |
 | Codex       | App settings steps and one copyable URL  | Add Streamable HTTP server, save/restart if requested; authenticate for workspace             |
-| Claude Code | One copyable CLI command                 | Run locally; authenticate through `/mcp` for workspace                                        |
+| Claude Code | Published plugin (two commands); `claude mcp add` as the alternative | Run in Claude Code; authenticate through `/mcp` for workspace |
+| Gemini CLI  | Published extension (one command); `gemini mcp add` as the alternative | Run in a terminal; `/mcp auth central-city` for workspace |
 
 ChatGPT workspace access: the backend now accepts ChatGPT's `private_key_jwt` client metadata document (with security regression coverage in `tests/oauth-hardening.test.ts`). A real ChatGPT OAuth round trip has not been recorded yet, so the guided ChatGPT setup still uses `/mcp/open` without authentication; offer workspace sign-in from ChatGPT only after that round trip is recorded. Do not infer that the browser-link tests verify a provider connection.
 

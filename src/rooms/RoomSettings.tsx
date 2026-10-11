@@ -1,8 +1,12 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
-import { ChevronDown, ChevronRight, Settings2, Users, X } from 'lucide-react';
+import { ChevronRight, Users } from 'lucide-react';
 import { ApiError } from '../api';
 import { withRoomDeadline, type Member, type Room, type RoomsClient } from './api';
 import { describe } from './useRoomThread';
+import { BulkMuteControls } from './BulkMute';
+import { TaskStagesSection } from './TaskStages';
+import { useDialogFocus } from './useDialogFocus';
+import { PanelHead } from './PanelV3';
 
 /** Server limits (docs/ROOM_MANAGEMENT.md). */
 const NAME_MAX = 80;
@@ -82,8 +86,8 @@ function settingsError(err: unknown): string {
   return describe(err);
 }
 
-/** Name and topic (host only). Save stays off until something changed. */
-function GeneralSection({
+/** The room name (host only), under More settings. Save stays off until the name changed. */
+function NameSection({
   client,
   room,
   onSaved,
@@ -94,19 +98,17 @@ function GeneralSection({
 }) {
   const id = useId();
   const [name, setName] = useState(room.name);
-  const [topic, setTopic] = useState(room.topic);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [nameError, setNameError] = useState('');
   const [toast, setToast] = useState('');
-  // The values the form started from: a newer name or topic from the server replaces an
-  // untouched field, never one the host is editing.
-  const base = useRef({ name: room.name, topic: room.topic });
+  // The value the form started from: a newer name from the server replaces an untouched field,
+  // never one the host is editing.
+  const base = useRef(room.name);
   useEffect(() => {
-    setName((value) => (value === base.current.name ? room.name : value));
-    setTopic((value) => (value === base.current.topic ? room.topic : value));
-    base.current = { name: room.name, topic: room.topic };
-  }, [room.name, room.topic]);
+    setName((value) => (value === base.current ? room.name : value));
+    base.current = room.name;
+  }, [room.name]);
   useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(''), 2500);
@@ -114,11 +116,10 @@ function GeneralSection({
   }, [toast]);
 
   const nameChanged = clean(name) !== room.name;
-  const topicChanged = clean(topic) !== room.topic;
   const closed = room.closed;
   async function save(event: FormEvent) {
     event.preventDefault();
-    if (!nameChanged && !topicChanged) return;
+    if (!nameChanged) return;
     if (!clean(name)) {
       setNameError('Give the room a name.');
       return;
@@ -127,16 +128,9 @@ function GeneralSection({
     setError('');
     setNameError('');
     try {
-      const result = await withRoomDeadline(
-        client.rename({
-          room_id: room.id,
-          ...(nameChanged ? { name: clean(name) } : {}),
-          ...(topicChanged ? { topic: clean(topic) } : {}),
-        }),
-      );
-      base.current = { name: result.room.name, topic: result.room.topic };
+      const result = await withRoomDeadline(client.rename({ room_id: room.id, name: clean(name) }));
+      base.current = result.room.name;
       setName(result.room.name);
-      setTopic(result.room.topic);
       setToast('Saved');
       onSaved();
     } catch (err) {
@@ -174,29 +168,13 @@ function GeneralSection({
             {nameError}
           </p>
         ) : null}
-        <label className="rm-field">
-          Topic or rules
-          <textarea
-            className="rm-input rm-textarea"
-            value={topic}
-            maxLength={TOPIC_MAX}
-            rows={3}
-            disabled={closed || busy}
-            placeholder="What this room is for"
-            onChange={(event) => setTopic(event.target.value)}
-          />
-        </label>
         {error ? (
           <p className="rm-inline-error" role="alert">
             {error}
           </p>
         ) : null}
         <div className="rm-settings-actions">
-          <button
-            type="submit"
-            className="rm-primary"
-            disabled={closed || busy || (!nameChanged && !topicChanged)}
-          >
+          <button type="submit" className="rm-primary" disabled={closed || busy || !nameChanged}>
             {busy ? 'Saving…' : 'Save'}
           </button>
           <span className="rm-toast" role="status">
@@ -298,8 +276,12 @@ function GuestBlocks({
   );
 }
 
-/** Close room and Delete room (host only), behind a collapsed "Danger zone". */
-function DangerZone({
+/**
+ * The room's irreversible actions (host only), always visible as quiet rows on the sheet:
+ * "End the room. Its history stays readable." with End room (a compact confirm) and "Delete the
+ * room for everyone" with Delete (the typed confirmation). A closed room keeps Delete only.
+ */
+function EndDeleteRows({
   client,
   room,
   onChanged,
@@ -310,8 +292,6 @@ function DangerZone({
   onChanged: () => void;
   onDeleted: () => void;
 }) {
-  const id = useId();
-  const [open, setOpen] = useState(false);
   const [step, setStep] = useState<'close' | 'delete' | null>(null);
   const [typed, setTyped] = useState('');
   const [busy, setBusy] = useState(false);
@@ -357,112 +337,96 @@ function DangerZone({
     }
   }
   return (
-    <section className="rm-settings-section rm-danger-zone" aria-labelledby={`${id}-danger`}>
-      <h3 id={`${id}-danger`}>
-        <button
-          type="button"
-          className="rm-danger-toggle"
-          aria-expanded={open}
-          aria-controls={`${id}-danger-body`}
-          onClick={() => setOpen((value) => !value)}
-        >
-          {open ? (
-            <ChevronDown size={16} aria-hidden="true" />
-          ) : (
-            <ChevronRight size={16} aria-hidden="true" />
-          )}
-          Danger zone
-        </button>
-      </h3>
-      {open ? (
-        <div className="rm-danger-body" id={`${id}-danger-body`} ref={zoneRef}>
-          {error ? (
-            <p className="rm-inline-error" role="alert">
-              {error}
-            </p>
-          ) : null}
-          {room.closed ? null : step === 'close' ? (
-            <ConfirmRow
-              question="Nobody can post after this. History stays readable."
-              action="Confirm close"
-              solid
-              busy={busy}
-              onConfirm={() => void closeRoom()}
-              onCancel={cancel}
-            />
-          ) : (
-            <div className="rm-danger-row">
-              <span className="rm-meta">End the room. Its history stays readable.</span>
-              <button
-                type="button"
-                className="rm-danger rm-danger-solid"
-                data-confirm="close"
-                disabled={step === 'delete'}
-                onClick={() => setStep('close')}
-              >
-                Close room
-              </button>
-            </div>
-          )}
-          {step === 'delete' ? (
-            <form
-              className="rm-delete-confirm"
-              aria-label="Delete this room"
-              onSubmit={(event) => void deleteRoom(event)}
-            >
-              <p className="rm-delete-note">
-                Deletes the room for everyone: messages, tasks and files are erased.
-              </p>
-              <label className="rm-field">
-                <span>
-                  Type <strong className="rm-delete-name">{room.name}</strong> to confirm
-                </span>
-                <input
-                  ref={typedRef}
-                  className="rm-input"
-                  value={typed}
-                  autoComplete="off"
-                  spellCheck={false}
-                  aria-label="Room name to confirm"
-                  onChange={(event) => setTyped(event.target.value)}
-                />
-              </label>
-              <span className="rm-confirm-actions">
-                <button
-                  type="submit"
-                  className="rm-danger rm-danger-solid"
-                  disabled={busy || typed !== room.name}
-                >
-                  {busy ? 'Deleting…' : 'Delete room'}
-                </button>
-                <button type="button" className="rm-secondary" onClick={cancel}>
-                  Cancel
-                </button>
-              </span>
-            </form>
-          ) : (
-            <div className="rm-danger-row">
-              <span className="rm-meta">Erase the room and everything in it.</span>
-              <button
-                type="button"
-                className="rm-danger rm-danger-solid"
-                data-confirm="delete"
-                disabled={step === 'close'}
-                onClick={() => setStep('delete')}
-              >
-                Delete room
-              </button>
-            </div>
-          )}
-        </div>
+    <div className="rm-settings-danger" ref={zoneRef}>
+      {error ? (
+        <p className="rm-inline-error" role="alert">
+          {error}
+        </p>
       ) : null}
-    </section>
+      {room.closed ? null : step === 'close' ? (
+        <ConfirmRow
+          question="Nobody can post after this. History stays readable."
+          action="Confirm close"
+          busy={busy}
+          onConfirm={() => void closeRoom()}
+          onCancel={cancel}
+        />
+      ) : (
+        <div className="rm-settings-row">
+          <span className="rm-meta">End the room. Its history stays readable.</span>
+          <button
+            type="button"
+            className="rm-quiet"
+            data-confirm="close"
+            disabled={step === 'delete'}
+            onClick={() => setStep('close')}
+          >
+            End room
+          </button>
+        </div>
+      )}
+      {step === 'delete' ? (
+        <form
+          className="rm-delete-confirm"
+          aria-label="Delete this room"
+          onSubmit={(event) => void deleteRoom(event)}
+        >
+          <p className="rm-delete-note">
+            Deletes the room for everyone: messages, tasks and files are erased.
+          </p>
+          <label className="rm-field">
+            <span>
+              Type <strong className="rm-delete-name">{room.name}</strong> to confirm
+            </span>
+            <input
+              ref={typedRef}
+              className="rm-input"
+              value={typed}
+              autoComplete="off"
+              spellCheck={false}
+              aria-label="Room name to confirm"
+              onChange={(event) => setTyped(event.target.value)}
+            />
+          </label>
+          <span className="rm-confirm-actions">
+            <button
+              type="submit"
+              className="rm-danger rm-danger-solid"
+              disabled={busy || typed !== room.name}
+            >
+              {busy ? 'Deleting…' : 'Delete room'}
+            </button>
+            <button type="button" className="rm-secondary" onClick={cancel}>
+              Cancel
+            </button>
+          </span>
+        </form>
+      ) : (
+        <div className="rm-settings-row">
+          <span className="rm-meta rm-settings-danger-text">Delete the room for everyone</span>
+          <button
+            type="button"
+            className="rm-quiet rm-settings-danger-quiet"
+            data-confirm="delete"
+            disabled={step === 'close'}
+            onClick={() => setStep('delete')}
+          >
+            Delete
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
 /**
- * Room settings: a right-side panel (a bottom sheet on phones). The host gets General and the
- * Danger zone; everyone gets Members.
+ * Room settings: a centred modal sheet (Workspace v3, docs/design/WORKSPACE_V3.md §4.6) with the
+ * dialog keyboard contract of useDialogFocus (Tab stays inside, Escape closes, focus goes back).
+ * The minimal sheet is the description ("What this room is for", saved by Done), the quiet End
+ * room and Delete rows (host), and a Cancel / Done footer. Everything else keeps working from
+ * the collapsed More settings: the room name (General), Task stages, Manage members, guest
+ * blocks and the bulk Mute controls (host). The props are unchanged, so the room view still
+ * renders it where it renders a panel.
  */
 export function RoomSettings({
   client,
@@ -486,41 +450,142 @@ export function RoomSettings({
 }) {
   const host = room.role === 'host';
   const count = members.length || room.member_count;
+  const titleId = useId();
+  const sheet = useRef<HTMLDivElement>(null);
+  // The description (the room's topic) is the sheet's one field: Done saves it when it changed.
+  const [topic, setTopic] = useState(room.topic);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const base = useRef(room.topic);
+  useEffect(() => {
+    setTopic((value) => (value === base.current ? room.topic : value));
+    base.current = room.topic;
+  }, [room.topic]);
+  const topicChanged = clean(topic) !== room.topic;
+  async function done() {
+    if (host && !room.closed && topicChanged) {
+      setSaving(true);
+      setError('');
+      try {
+        const result = await withRoomDeadline(
+          client.rename({ room_id: room.id, topic: clean(topic) }),
+        );
+        base.current = result.room.topic;
+        setTopic(result.room.topic);
+        onChanged();
+      } catch (err) {
+        setError(settingsError(err));
+        setSaving(false);
+        return;
+      }
+    }
+    onClose();
+  }
+  // Opened from the room's "More room actions" menu, whose item is gone once the sheet opens:
+  // focus goes back to that menu's button when the sheet closes.
+  useDialogFocus(sheet, onClose, {
+    returnFocusTo: () =>
+      document.querySelector<HTMLElement>('button[aria-label="More room actions"]'),
+  });
+  const membersSection = (
+    <section className="rm-settings-section" aria-label="Members">
+      <h3>Members</h3>
+      <button type="button" className="rm-settings-link" onClick={onManageMembers}>
+        <Users size={16} aria-hidden="true" />
+        Manage members
+        <span className="rm-count">{count}</span>
+      </button>
+      {host ? <GuestBlocks client={client} room={room} onChanged={onChanged} /> : null}
+    </section>
+  );
   return (
-    <aside className="rm-panel rm-settings" aria-label="Room settings">
-      <div className="rm-sheet-head">
-        <h2>
-          <Settings2 size={16} aria-hidden="true" />
-          Room settings
-        </h2>
-        <button type="button" className="rm-icon" aria-label="Close settings" onClick={onClose}>
-          <X size={18} aria-hidden="true" />
-        </button>
+    <div
+      className="rm-backdrop rm-v3-scrim"
+      onMouseDown={(event) => event.target === event.currentTarget && onClose()}
+    >
+      <div
+        ref={sheet}
+        className="rm-sheet rm-v3-sheet rm-settings"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+      >
+        <PanelHead closeLabel="Close settings" onClose={onClose}>
+          <h2 id={titleId}>Room settings</h2>
+        </PanelHead>
+        {!ready ? (
+          <p className="rm-meta" role="status">
+            Loading settings…
+          </p>
+        ) : (
+          <>
+            {room.closed && !host ? (
+              <p className="rm-meta">This room is closed. Its history stays readable.</p>
+            ) : null}
+            <label className="rm-field rm-settings-description">
+              <span>What this room is for</span>
+              <textarea
+                className="rm-input rm-textarea"
+                value={topic}
+                maxLength={TOPIC_MAX}
+                rows={3}
+                readOnly={!host || room.closed}
+                placeholder="What this room is for"
+                onChange={(event) => setTopic(event.target.value)}
+              />
+            </label>
+            {error ? (
+              <p className="rm-inline-error" role="alert">
+                {error}
+              </p>
+            ) : null}
+            {host ? (
+              <>
+                <EndDeleteRows
+                  client={client}
+                  room={room}
+                  onChanged={onChanged}
+                  onDeleted={onDeleted}
+                />
+                <details className="rm-disclosure rm-settings-more">
+                  <summary>
+                    <ChevronRight size={16} aria-hidden="true" />
+                    More settings
+                  </summary>
+                  <div className="rm-settings-more-body">
+                    <NameSection client={client} room={room} onSaved={onChanged} />
+                    <TaskStagesSection roomId={room.id} closed={room.closed} />
+                    {membersSection}
+                    {room.closed ? null : (
+                      <BulkMuteControls
+                        client={client}
+                        room={room}
+                        members={members}
+                        onChanged={onChanged}
+                      />
+                    )}
+                  </div>
+                </details>
+              </>
+            ) : (
+              membersSection
+            )}
+            <div className="rm-v3-sheet-actions">
+              <button type="button" className="rm-v3-btn rm-v3-btn-ghost" onClick={onClose}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="rm-v3-btn rm-v3-btn-primary"
+                disabled={saving}
+                onClick={() => void done()}
+              >
+                {saving ? 'Saving…' : 'Done'}
+              </button>
+            </div>
+          </>
+        )}
       </div>
-      {!ready ? (
-        <p className="rm-meta" role="status">
-          Loading settings…
-        </p>
-      ) : (
-        <>
-          {room.closed && !host ? (
-            <p className="rm-meta">This room is closed. Its history stays readable.</p>
-          ) : null}
-          {host ? <GeneralSection client={client} room={room} onSaved={onChanged} /> : null}
-          <section className="rm-settings-section" aria-label="Members">
-            <h3>Members</h3>
-            <button type="button" className="rm-settings-link" onClick={onManageMembers}>
-              <Users size={16} aria-hidden="true" />
-              Manage members
-              <span className="rm-count">{count}</span>
-            </button>
-            {host ? <GuestBlocks client={client} room={room} onChanged={onChanged} /> : null}
-          </section>
-          {host ? (
-            <DangerZone client={client} room={room} onChanged={onChanged} onDeleted={onDeleted} />
-          ) : null}
-        </>
-      )}
-    </aside>
+    </div>
   );
 }

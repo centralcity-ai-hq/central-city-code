@@ -17,6 +17,9 @@ import { describe } from './useRoomThread';
 capturePendingJoin();
 
 const client = createHttpRoomsClient();
+// `?embedded=1` mounts RoomsApp as an app shell would (e2e/rooms-embedded.spec.ts); read once,
+// so it holds as RoomsApp moves between room paths.
+const embedded = new URLSearchParams(location.search).get('embedded') === '1';
 
 function SignIn() {
   const [name, setName] = useState('');
@@ -98,6 +101,7 @@ function Harness() {
       workspaceId={session.operator?.id ?? 'signed-out'}
       accountName={session.operator?.name ?? ''}
       onSignIn={(next) => window.location.assign(`/signin?next=${encodeURIComponent(next)}`)}
+      embedded={embedded}
     />
   );
 }

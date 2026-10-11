@@ -109,6 +109,9 @@ export function storedKeyHash(windowMs: number, key: string): string {
  * under server/ is classified explicitly.
  */
 export const FAIL_CLOSED_PREFIXES: readonly string[] = [
+  // Newsletter subscribe attempts and the signed link POSTs (server/email/index.ts).
+  'newsletter',
+  'newsletter-link',
   // Anonymous creation and the anonymous MCP endpoint.
   'anon',
   'anon-create',
@@ -151,6 +154,8 @@ export const FAIL_CLOSED_PREFIXES: readonly string[] = [
   'room-join',
   // Deleting a room erases it for every member: never unbounded during an outage.
   'room-delete',
+  // The host's bulk "Mute all AIs" / "Unmute all AIs" touches every member of a room.
+  'room-bulk-mute',
   // Owner actions that reach other owners or the network.
   'xconn-req',
   'wake-webhook',
@@ -173,6 +178,9 @@ export const FAIL_CLOSED_PREFIXES: readonly string[] = [
   'responder-key',
   'responder-key-ip',
   'responder-settings',
+  // Base Pay P2c: an agent paying on its own, per grant or key. It moves the owner's money without
+  // the owner present, so it is never unbounded during an outage.
+  'agent-pay',
   // Reply budgets (S2b): they protect the owner's money, so they fail closed too.
   'responder-room',
   'responder-agent-room',
@@ -182,18 +190,40 @@ export const FAIL_CLOSED_PREFIXES: readonly string[] = [
 ];
 export const DEGRADED_PREFIXES: readonly string[] = [
   'ip',
+  'ip-auth',
+  'guest-api',
+  'owner-api',
+  'guest-mcp',
+  'ip-lookup',
   'runtime',
   'assistant',
   'workspace-key',
   'msg-send',
   'xsend-in',
   'xsend-pair',
+  // Private messages between room members, per pair (server/messaging/room-direct.ts).
+  'room-dm-pair',
+  // "Delete conversation" in Messages: hides a thread for its own owner only.
+  'msg-hide',
   'room-create',
   'room-post-owner',
   'room-post-agent',
   'room-post-all',
+  // AI self-reported status changes per member agent (ride on posts; member-says.ts).
+  'room-status',
+  // Searches inside a room (read-only, members only).
+  'room-search',
+  // Room pins (pin and unpin writes) and on-demand handoff briefs, per owner (members only).
+  'room-pin',
+  'room-brief',
+  // A person's own Needs-you dismissals and console read marks, per owner (members only).
+  'room-needs-you',
+  'room-read',
   'room-task-create',
   'room-task-claim',
+  // Peer review requests and answers per agent (each one mentions and wakes a member).
+  'room-task-review',
+  'room-task-comment',
   // Room repos: member reads of the connected repository (GitHub's own limits still apply).
   'room-repo-read',
   'room-repo-propose',
@@ -202,12 +232,22 @@ export const DEGRADED_PREFIXES: readonly string[] = [
   // Signed-in wake streams and long-polls (city_mentions wait=) must keep working in an outage.
   'wake-wait-owner',
   'wake-wait-ip',
+  // The per-agent (and per-connector-grant) shares of the long-poll budget.
+  'wake-wait-agent',
+  'wake-wait-grant',
   'wake-stream-owner',
   'wake-stream-ip',
   // Authenticated, read-only asks.
   'result-ask-owner',
   'result-ask-net',
   'result-ask-agent',
+  // Elric's private room catch-up per signed-in caller (each may cost a model call).
+  'elric-catch-up',
+  // Base Pay per signed-in person, each its own bucket: recipient lookups (read Base, store a
+  // lookup), incoming reads (may refresh payments from Base), payments (read Base, prepare).
+  'pay-lookup',
+  'pay-incoming',
+  'pay-create',
 ];
 /** Degraded buckets allow limit / this per instance while the shared limiter is unavailable. */
 export const DEGRADED_LIMIT_DIVISOR = 4;
@@ -467,4 +507,146 @@ export function clientAddressPrefixes(ip: string): {
     network: `${head}::/48`,
     region: `${groups.slice(0, 2).join(':')}::/32`,
   };
+}
+
+/** A bearer credential that names a principal: guest room credential, workspace key, OAuth access. */
+const PRINCIPAL_BEARER = /^Bearer ((crc|ccw|cca)_[A-Za-z0-9_-]{43})$/;
+/** How far above the per-principal request limit the per-address floor for credentialed traffic sits. */
+export const PRINCIPAL_ADDRESS_FACTOR = 10;
+
+/**
+ * Resolvers from a presented credential to a stable principal id. Sessions, workspace keys and
+ * OAuth grants share one bucket per owner (`owner-api:`), so minting more keys or grants does not
+ * multiply an owner's budget; each guest room credential is its own agent (`guest-api:`).
+ * Each returns null for an
+ * unknown, revoked or expired credential. A resolver left out means that credential kind is not
+ * accepted on this surface (it is then treated as no credential at all: per address).
+ */
+export interface PrincipalResolvers {
+  guest?: (token: string) => Promise<{ agent_id: string } | null>;
+  workspaceKey?: (token: string) => Promise<{ operatorId: string } | null>;
+  accessToken?: (token: string) => Promise<{ operatorId: string } | null>;
+  /** A session cookie value; resolves to the operator id. */
+  session?: (token: string) => Promise<string | null>;
+}
+
+/** A credential presented on a request: an opaque token and how to resolve it to a limiter key. */
+export interface PresentedPrincipal {
+  /** Cache key: kind plus the token (hashed before it is stored). */
+  token: string;
+  resolve: () => Promise<string | null>;
+}
+
+/**
+ * The credential a request presents, if any, in the shape `limitRequestRate` takes. A recognised
+ * bearer wins over a session cookie. Only the format is checked here; validity is resolved later,
+ * after the per-address floor is charged.
+ */
+export function presentedPrincipal(
+  authorization: string | undefined,
+  sessionCookie: string | undefined,
+  r: PrincipalResolvers,
+): PresentedPrincipal | null {
+  const bearer = PRINCIPAL_BEARER.exec(authorization ?? '');
+  if (bearer) {
+    const token = bearer[1]!;
+    const kind = bearer[2]!;
+    if (kind === 'crc' && r.guest) {
+      const guest = r.guest;
+      return {
+        token,
+        resolve: async () => {
+          const found = await guest(token);
+          return found ? `guest-api:${found.agent_id}` : null;
+        },
+      };
+    }
+    if (kind === 'ccw' && r.workspaceKey) {
+      const verify = r.workspaceKey;
+      return {
+        token,
+        resolve: async () => {
+          const found = await verify(token);
+          return found ? `owner-api:${found.operatorId}` : null;
+        },
+      };
+    }
+    if (kind === 'cca' && r.accessToken) {
+      const verify = r.accessToken;
+      return {
+        token,
+        resolve: async () => {
+          const found = await verify(token);
+          return found ? `owner-api:${found.operatorId}` : null;
+        },
+      };
+    }
+  }
+  if (sessionCookie && sessionCookie.length <= 128 && r.session) {
+    const verify = r.session;
+    return {
+      token: `session:${sessionCookie}`,
+      resolve: async () => {
+        const operator = await verify(sessionCookie);
+        return operator ? `owner-api:${operator}` : null;
+      },
+    };
+  }
+  return null;
+}
+
+/**
+ * Short-lived, bounded memo of credential -> principal key, so the per-request limit does not add
+ * a database round trip for every request of an active principal. Only valid credentials are
+ * remembered (an invalid one is resolved again, behind the address floor). A credential revoked
+ * within the TTL keeps its principal bucket for at most that long; the route still rejects it.
+ */
+export class PrincipalCache {
+  private readonly entries = new Map<string, { key: string; expires: number }>();
+  constructor(
+    private readonly clock: () => number = Date.now,
+    private readonly ttlMs = 60_000,
+    readonly maxEntries = 50_000,
+  ) {}
+  get size(): number {
+    return this.entries.size;
+  }
+  async resolve(presented: PresentedPrincipal): Promise<string | null> {
+    const id = createHash('sha256').update(presented.token).digest('base64url');
+    const time = this.clock();
+    const hit = this.entries.get(id);
+    if (hit && hit.expires > time) return hit.key;
+    if (hit) this.entries.delete(id);
+    const key = await presented.resolve();
+    if (key) {
+      if (this.entries.size >= this.maxEntries)
+        this.entries.delete(this.entries.keys().next().value!);
+      this.entries.set(id, { key, expires: time + this.ttlMs });
+    }
+    return key;
+  }
+}
+
+/**
+ * The general request limit. AI agents and assistants of thousands of unrelated people share the
+ * egress addresses of their cloud providers, so a request carrying a valid credential (session
+ * cookie, workspace key, OAuth access token, guest room credential) is limited per principal
+ * (`perMinute`), with the address kept as a floor `PRINCIPAL_ADDRESS_FACTOR` times higher
+ * (`ip-auth:`). The floor is charged before the credential is resolved, so lookups per address stay
+ * bounded; an invalid credential is charged to the plain per-address bucket as well, so garbage
+ * tokens buy nothing. Requests without a credential are limited per address (`ip:`), as before.
+ */
+export async function limitRequestRate(
+  limit: (key: string, max: number, windowMs: number) => Promise<void>,
+  ip: string,
+  presented: PresentedPrincipal | null,
+  perMinute: number,
+  cache?: PrincipalCache,
+): Promise<void> {
+  const address = clientAddressKey(ip);
+  if (!presented) return limit(`ip:${address}`, perMinute, 60_000);
+  await limit(`ip-auth:${address}`, perMinute * PRINCIPAL_ADDRESS_FACTOR, 60_000);
+  const principal = cache ? await cache.resolve(presented) : await presented.resolve();
+  if (principal) await limit(principal, perMinute, 60_000);
+  else await limit(`ip:${address}`, perMinute, 60_000);
 }

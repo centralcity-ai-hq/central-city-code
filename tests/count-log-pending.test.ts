@@ -1,9 +1,11 @@
+import { randomBytes } from 'node:crypto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from '../server/app.js';
 import { generateSigningKey } from '../server/manifest/keys.js';
 import { createCountLog, registerCountLogMigration } from '../server/count-log/index.js';
-import { LIVE_LOG_MINUTE } from '../server/count-log/pending.js';
+import { DAY_MS, LIVE_LOG_MINUTE } from '../server/count-log/pending.js';
+import { NEW_24H_CACHE_MS } from '../server/count-log/service.js';
 import { agentLeafHash, toHex } from '../shared/count-log/index.js';
 
 /**
@@ -38,7 +40,7 @@ async function agent(app: App, cookie: string, name: string) {
 }
 function nextCheckpointAt(now: number): number {
   const next = new Date(now);
-  next.setUTCHours(0, 10, 0, 0);
+  next.setUTCHours(10, 0, 0, 0);
   if (next.getTime() <= now) next.setUTCDate(next.getUTCDate() + 1);
   return next.getTime();
 }
@@ -75,6 +77,11 @@ test('a new agent appears pending at once: fingerprint, day and minute; nothing 
   assert.equal(
     res.headers['cache-control'],
     'public, max-age=2, s-maxage=2, stale-while-revalidate=5',
+  );
+  // Vercel's edge serves a stale head while it refreshes, so a visitor never waits on a cold start.
+  assert.equal(
+    res.headers['vercel-cdn-cache-control'],
+    'public, max-age=2, stale-while-revalidate=3600',
   );
   const body = res.json();
   assert.equal(body.entries.length, 1);
@@ -125,7 +132,7 @@ test('an agent gone before its checkpoint is shown as removed, never hidden', as
   const { app, log, feed } = await fixture(t);
   const alice = await owner(app, 'Drop Alice');
   await agent(app, alice.cookie, 'Drop Alpha');
-  // The agent disappears from the workspace before 00:10 (a purge).
+  // The agent disappears from the workspace before 10:00 UTC (a purge).
   await app.city.db.query(
     `UPDATE workspaces SET data = jsonb_set(data, '{agents}', '[]'::jsonb) WHERE operator_id=$1`,
     [alice.id],
@@ -152,7 +159,7 @@ test('newest first with a stable cursor; settled pages are cached for a day', as
   assert.equal(new Set(all).size, 5);
   assert.equal(third.next, null);
   // Still pending: a short cache. Confirmed entries may still be removed, so an older page is
-  // cached only until the next 00:10 checkpoint.
+  // cached only until the next 10:00 UTC checkpoint.
   assert.match(second.headers['cache-control'] as string, /max-age=2,/);
   await log.checkpoint();
   const confirmed = await feed(`?limit=2&before=${first.next}`);
@@ -304,4 +311,105 @@ test('the page cursor carries no time: a bare sequence number, looked up on the 
   // An unknown cursor is an empty page, never the newest page again; a time-shaped one is refused.
   assert.deepEqual((await feed('?before=999999')).json().entries, []);
   assert.equal((await feed('?before=20261001T1200Z.1.1')).statusCode, 400);
+});
+
+/** A synthetic pending row (the table is append-only: inserts only). */
+let synthetic = 0;
+async function pendingRow(
+  app: App,
+  row: { ms?: number; minute?: string; operator?: string },
+): Promise<void> {
+  synthetic += 1;
+  const minute = row.minute ?? `${new Date(row.ms!).toISOString().slice(0, 16)}Z`;
+  await app.city.db.query(
+    `INSERT INTO count_log_pending(agent_id, operator_id, salt, leaf_hash, created_day,
+       created_minute, recorded_at, created_ms)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [
+      `synthetic-${synthetic}`,
+      row.operator ?? 'synthetic-owner',
+      randomBytes(32),
+      randomBytes(32),
+      minute.slice(0, 10),
+      minute,
+      Date.now(),
+      row.ms ?? null,
+    ],
+  );
+}
+
+test('new in the last 24 h: exact, inclusive at exactly 24 h, older days and excluded owners left out', async (t) => {
+  const { app } = await fixture(t);
+  // 30 s past the minute, so a minute-only row of that minute starts before the window.
+  const now = Date.UTC(2026, 9, 2, 12, 0, 30);
+  const since = now - DAY_MS;
+  await pendingRow(app, { ms: since }); // exactly 24 h ago: in
+  await pendingRow(app, { ms: since - 1 }); // 1 ms too old: out
+  await pendingRow(app, { ms: now - 1_000 }); // in
+  await pendingRow(app, { ms: now - 2 * DAY_MS }); // another day: out
+  await pendingRow(app, { minute: '2026-10-01T12:01Z' }); // minute only, starts after since: in
+  await pendingRow(app, { minute: '2026-10-01T12:00Z' }); // minute only, starts before since: out
+  await pendingRow(app, { ms: now - 5_000, operator: 'synthetic-excluded' }); // excluded: out
+  const log = createCountLog({
+    db: app.city.db,
+    clock: () => now,
+    excludedOperators: ['synthetic-excluded'],
+  });
+  const head = await log.feed({});
+  assert.equal(head.new_24h, 3);
+  // Only the head page carries it; older pages are cached for longer.
+  assert.equal((await log.feed({ before: '1' })).new_24h, undefined);
+});
+
+test('new in the last 24 h counts agents counted now: withdrawn and never-counted ones are left out', async (t) => {
+  const { app, log, feed, nextDay } = await fixture(t);
+  const alice = await owner(app, 'Day Alice');
+  const withdrawn = await agent(app, alice.cookie, 'Day Withdrawn');
+  await agent(app, alice.cookie, 'Day Kept');
+  await log.checkpoint(); // confirms both
+  await agent(app, alice.cookie, 'Day Later');
+  const dropped = await agent(app, alice.cookie, 'Day Dropped');
+  await app.city.db.query(
+    `UPDATE workspaces SET data = jsonb_set(data, '{agents}', (
+       SELECT COALESCE(jsonb_agg(a), '[]'::jsonb) FROM jsonb_array_elements(data->'agents') a
+        WHERE NOT (a->>'id' = ANY($2::text[]))))
+      WHERE operator_id = $1`,
+    [alice.id, [withdrawn, dropped]],
+  );
+  nextDay();
+  const { checkpoint } = await log.checkpoint(); // withdraws one, never counts the dropped one
+  assert.equal(checkpoint.withdrawn, 1);
+  const body = (await feed()).json();
+  const statuses = (body.entries as Array<{ status: string }>).map((entry) => entry.status).sort();
+  assert.deepEqual(statuses, ['confirmed', 'confirmed', 'removed', 'removed']);
+  assert.equal(body.new_24h, 2);
+  assert.equal(body.total_now, 2);
+});
+
+test('new in the last 24 h: one COUNT per cache window, shared by concurrent requests', async (t) => {
+  const { app } = await fixture(t);
+  let now = Date.now();
+  let counts = 0;
+  const db = {
+    ...app.city.db,
+    query: (sql: string, params?: unknown[]) => {
+      if (sql.includes('LEFT JOIN count_log_leaves l ON l.agent_id = p.agent_id')) counts += 1;
+      return app.city.db.query(sql, params);
+    },
+  } as typeof app.city.db;
+  const log = createCountLog({ db, clock: () => now });
+  await pendingRow(app, { ms: now - 1_000 });
+  const pages = await Promise.all(Array.from({ length: 5 }, () => log.feed({})));
+  assert.deepEqual(
+    pages.map((page) => page.new_24h),
+    [1, 1, 1, 1, 1],
+  );
+  assert.equal(counts, 1);
+  await pendingRow(app, { ms: now - 500 });
+  now += NEW_24H_CACHE_MS - 1;
+  assert.equal((await log.feed({})).new_24h, 1); // still the cached count
+  assert.equal(counts, 1);
+  now += 1;
+  assert.equal((await log.feed({})).new_24h, 2); // a new window: counted again
+  assert.equal(counts, 2);
 });

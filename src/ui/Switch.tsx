@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type Ref } from 'react';
 import './switch.css';
 
 /**
@@ -12,6 +12,8 @@ export function Switch({
   busy = false,
   disabledReason,
   showLabel = true,
+  buttonRef,
+  describedBy,
 }: {
   checked: boolean;
   label: string;
@@ -21,9 +23,13 @@ export function Switch({
   disabledReason?: string | null;
   /** False: the label is for screen readers only (the context names it). */
   showLabel?: boolean;
+  /** The button itself (e.g. to give focus back to it). */
+  buttonRef?: Ref<HTMLButtonElement>;
+  /** The id of a short hint read after the switch (aria-describedby). */
+  describedBy?: string;
 }) {
   // While a change runs the switch stays focusable (a disabled button would drop keyboard
-  // focus); presses meanwhile are queued by useOptimisticSwitch.
+  // focus) but ignores presses (click, Space, Enter); the thumb dims and pulses meanwhile.
   const disabled = Boolean(disabledReason);
   return (
     <button
@@ -33,9 +39,13 @@ export function Switch({
       aria-checked={checked}
       aria-label={showLabel ? undefined : label}
       aria-busy={busy || undefined}
+      aria-describedby={describedBy}
+      ref={buttonRef}
       disabled={disabled}
       title={disabledReason ?? undefined}
-      onClick={() => onChange(!checked)}
+      onClick={() => {
+        if (!busy) onChange(!checked);
+      }}
     >
       {showLabel ? <span className="cc-switch-label">{label}</span> : null}
       <span className="cc-switch-track" aria-hidden="true">
@@ -50,11 +60,12 @@ export function Switch({
 }
 
 /**
- * An optimistic switch value: `set` shows the new value at once, runs `commit`, and rolls back
- * with an error toast message when it fails (no toast for an error marked `silent`). A press
- * while a change runs is not lost: the latest wanted value runs right after it (on, off, on
- * always ends on). The shown value follows `value` only when `value` itself changes and no
- * change is running, so a slow refresh never flips the switch back.
+ * A switch that shows only the confirmed value: `set` marks the switch busy (aria-busy) and runs
+ * `commit`; the shown value changes only once `commit` resolves, so the switch never says Off
+ * (or On) before the server does. A failure keeps the confirmed value and shows an error toast
+ * (no toast for an error marked `silent`). Presses while a change runs are ignored, so a second
+ * tap never quietly asks for the opposite value. The shown value follows `value` when `value`
+ * changes and no change is running.
  */
 export function useOptimisticSwitch(
   value: boolean,
@@ -65,7 +76,6 @@ export function useOptimisticSwitch(
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState('');
   const running = useRef(false);
-  const queued = useRef<boolean | null>(null);
   const latestCommit = useRef(commit);
   latestCommit.current = commit;
   useEffect(() => {
@@ -78,34 +88,21 @@ export function useOptimisticSwitch(
   }, [toast]);
   const set = useCallback(
     async (next: boolean) => {
-      setShown(next);
-      if (running.current) {
-        queued.current = next;
-        return;
-      }
+      if (running.current) return;
       running.current = true;
       setBusy(true);
       setToast('');
-      let target: boolean | null = next;
-      let settled = !next;
-      while (target !== null) {
-        const want: boolean = target;
-        queued.current = null;
-        try {
-          await latestCommit.current(want);
-          settled = want;
-        } catch (error) {
-          setShown(settled);
-          // A `silent` rejection hands over to another flow (a dialog) without an error.
-          if (!(error as { silent?: boolean } | null)?.silent) setToast(failure(want));
-          queued.current = null;
-          break;
-        }
-        // A press during the change: run it now unless it asks for what is already done.
-        target = queued.current !== null && queued.current !== settled ? queued.current : null;
+      try {
+        await latestCommit.current(next);
+        setShown(next);
+      } catch (error) {
+        setShown(!next);
+        // A `silent` rejection hands over to another flow (a dialog) without an error.
+        if (!(error as { silent?: boolean } | null)?.silent) setToast(failure(next));
+      } finally {
+        running.current = false;
+        setBusy(false);
       }
-      running.current = false;
-      setBusy(false);
     },
     [failure],
   );

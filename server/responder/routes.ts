@@ -34,6 +34,12 @@ export function registerResponderRoutes(
     await d.owner(request);
     return d.responder.models(modelsQuery.parse(request.query).provider);
   });
+  // Whether the agent can answer now, and how: the console's "<agent> can't answer yet".
+  app.get('/api/agents/:id/answering', async (request) => {
+    const operator = await d.owner(request);
+    const { id } = agentParams.parse(request.params);
+    return d.responder.answering(operator.id, id);
+  });
   app.get('/api/agents/:id/responder', async (request) => {
     const operator = await d.owner(request);
     const { id } = agentParams.parse(request.params);

@@ -1,47 +1,13 @@
 /*
- * Connect your AI (src/Connect.tsx): one address with a mode switch, one tab per app, plain
- * steps. Design tokens only (src/shell/tokens.css); dark comes from data-theme="dark".
+ * Connect your AI (src/Connect.tsx), the approved v4 design. First the parts every surface shares
+ * (the steps from connectPanels, also shown by My agents' Add an agent pane, the app icon tiles),
+ * then the public page at /connect (.cx8, on the site's v8 tokens). The signed-in page adds
+ * src/connect-app.css. Dark comes from html[data-theme='dark'].
  */
 
-.connect-page > * {
-  width: 100%;
-  max-width: var(--content-max);
-  margin-inline: auto;
-}
-
-.connect-head {
-  display: grid;
-  gap: var(--space-2);
-  padding: var(--space-7) 0 var(--space-6);
-}
-.connect-head h1 {
-  font: var(--type-title);
-  letter-spacing: -0.025em;
-  color: var(--text-primary);
-}
-.connect-head p {
-  margin: 0;
-  font: var(--type-body);
-  color: var(--text-secondary);
-}
-
-.connect-flow {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-7);
-  min-width: 0;
-}
-.connect-flow code {
+.connect-steps code,
+.connect-note code {
   font-family: var(--font-mono);
-}
-
-/* Small section labels: the address and the app rail. */
-.connect-label {
-  font: var(--type-meta);
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--text-muted);
 }
 
 .connect-note {
@@ -52,71 +18,6 @@
 .connect-note strong {
   color: var(--text);
   font-weight: 600;
-}
-
-/* The address card */
-.connect-endpoint {
-  display: grid;
-  gap: var(--space-4);
-  padding: var(--space-5);
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-l);
-}
-.connect-endpoint .connect-note {
-  margin: 0;
-}
-.connect-endpoint-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-}
-
-/* The mode switch: a radio group drawn as a segmented control. */
-.connect-mode {
-  display: inline-flex;
-  padding: 2px;
-  gap: 2px;
-  background: var(--bg-inset);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-s);
-}
-.connect-mode label {
-  position: relative;
-  display: flex;
-}
-.connect-mode input {
-  position: absolute;
-  inset: 0;
-  margin: 0;
-  opacity: 0;
-  cursor: pointer;
-}
-.connect-mode span {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 36px;
-  padding: 0 var(--space-3);
-  border-radius: var(--radius-sm);
-  font: var(--type-meta);
-  font-weight: 500;
-  color: var(--text-secondary);
-  text-align: center;
-  transition: background-color var(--dur-2) var(--ease-standard);
-}
-.connect-mode input:checked + span {
-  background: var(--bg-surface-elevated);
-  color: var(--text);
-  font-weight: 600;
-  box-shadow: var(--shadow-sm);
-}
-.connect-mode input:focus-visible + span {
-  outline: var(--focus-ring) solid var(--focus);
-  outline-offset: 1px;
 }
 
 /* A line or block to copy */
@@ -130,9 +31,6 @@
   background: var(--bg-surface-elevated);
   border: 1px solid var(--border);
   border-radius: var(--radius-m);
-}
-.connect-endpoint .connect-code {
-  margin-top: 0;
 }
 .connect-code > code {
   flex: 1;
@@ -164,87 +62,13 @@
 }
 .connect-copy-button {
   flex-shrink: 0;
-  min-width: 72px;
+  min-width: calc(72 * var(--ws-px));
   font-weight: 500;
 }
 .connect-copy-button[data-copied] {
   background: var(--status-live-bg);
   border-color: var(--status-live);
   color: var(--status-live);
-}
-
-/* The app rail and its panels */
-.connect-apps {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-3);
-  min-width: 0;
-}
-.connect-tabs {
-  display: flex;
-  overflow-x: auto;
-  border-bottom: 1px solid var(--border);
-  scrollbar-width: none;
-}
-.connect-tabs::-webkit-scrollbar {
-  display: none;
-}
-.connect-tabs [role='tab'] {
-  flex-shrink: 0;
-  min-height: var(--target);
-  padding: 0 var(--space-4);
-  margin-bottom: -1px;
-  background: none;
-  border: 0;
-  border-bottom: 2px solid transparent;
-  font: var(--type-ui);
-  color: var(--text-secondary);
-  cursor: pointer;
-  white-space: nowrap;
-}
-.connect-tabs [role='tab']:hover {
-  color: var(--text);
-}
-.connect-tabs [role='tab'][aria-selected='true'] {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
-  font-weight: 600;
-}
-.connect-tabs [role='tab']:focus-visible {
-  outline-offset: -2px;
-}
-
-.connect-panel {
-  margin-top: var(--space-4);
-  padding: var(--space-5) calc(var(--space-5) + var(--space-1));
-  background: var(--bg-surface-elevated);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-l);
-  box-shadow: var(--shadow-card);
-}
-.connect-panel[hidden] {
-  display: none;
-}
-.connect-panel-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-2) var(--space-4);
-  padding-bottom: var(--space-4);
-  margin-bottom: var(--space-5);
-  border-bottom: 1px solid var(--border-subtle);
-}
-.connect-panel-head h3 {
-  margin: 0;
-  font: var(--type-heading);
-  letter-spacing: 0;
-  text-transform: none;
-  color: var(--text);
-}
-.connect-panel-head span {
-  font: var(--type-meta);
-  color: var(--text-muted);
 }
 
 .connect-steps {
@@ -267,9 +91,6 @@
 }
 .connect-steps strong {
   font-weight: 600;
-}
-.connect-panel > .connect-note {
-  margin-top: var(--space-5);
 }
 
 .connect-actions {
@@ -311,82 +132,10 @@
   color: var(--text-secondary);
 }
 
-/* Next steps: quiet, below the tabs */
-.connect-next {
-  display: grid;
-  gap: var(--space-2);
-  padding: var(--space-5) calc(var(--space-5) + var(--space-1));
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-l);
-}
-.connect-next h2 {
-  font: var(--type-body);
-  font-weight: 600;
-  color: var(--text-primary);
-}
-.connect-next p {
-  margin: 0;
-  font: var(--type-ui);
-  font-weight: 400;
-  line-height: 1.6;
-  color: var(--text-secondary);
-}
-.connect-next p.connect-note {
-  font: var(--type-meta);
-}
-.connect-next .connect-actions {
-  margin-top: var(--space-3);
-}
-.connect-next .connect-note:last-child {
-  margin-top: var(--space-3);
-}
-.connect-next a:not(.button),
-.connect-text-button {
-  padding: 0;
-  background: none;
-  border: 0;
-  font: inherit;
-  color: var(--accent-text);
-  text-decoration: underline;
-  text-underline-offset: 3px;
-  cursor: pointer;
-}
-
 @media (max-width: 767px) {
-  .connect-head {
-    padding: var(--space-6) 0 var(--space-5);
-  }
-  .connect-flow {
-    gap: var(--space-6);
-  }
-  .connect-endpoint {
-    padding: var(--space-4);
-  }
-  .connect-mode {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    width: 100%;
-    padding: 2px;
-    gap: 2px;
-  }
-  .connect-mode span {
-    min-height: 32px;
-    padding: 0 var(--space-2);
-    font-size: 12px;
-    white-space: nowrap;
-  }
-  .connect-panel,
-  .connect-next {
-    padding: var(--space-4);
-  }
-  .connect-tabs [role='tab'] {
-    padding: 0 var(--space-3);
-    font-size: 13px;
-  }
   .connect-steps {
     padding-left: var(--space-4);
-    font-size: 13.5px;
+    font-size: calc(13.5 * var(--ws-type-px));
   }
   .connect-code:not(.block) {
     display: flex;
@@ -407,5 +156,603 @@
   .connect-code:not(.block) .connect-copy-button {
     align-self: center;
     flex-shrink: 0;
+  }
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Shared by both pages: the app icon tile and the steps panel's head */
+
+/* A white glyph (or brand mark) on the app's colour; the glyph is CSS content, never page text. */
+.cx-app-icon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  color: #ffffff;
+  font: 700 13px/1 var(--font-sans);
+}
+.cx-app-icon::before {
+  content: attr(data-glyph);
+}
+.cx-app-icon:not([data-glyph])::before {
+  content: none;
+}
+.cx-app-icon svg {
+  width: 16px;
+  height: 16px;
+  color: #ffffff;
+  fill: #ffffff;
+}
+/* The darkest tiles keep an edge on a dark page. */
+:root[data-theme='dark'] .cx-app-icon {
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 12%);
+}
+
+.cx-panel-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.cx-panel-head h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+.cx-pill {
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* The public page (/connect): a hero with the address card, then the app tiles and the steps */
+
+.cx8 {
+  /* Central City blue, filled with white text; as text on a dark page, the lighter link blue. */
+  --cx8-blue: #2457f5;
+  --cx8-blue-text: #2457f5;
+  --cx8-blue-soft: #eef2ff;
+  --cx8-selected: #f7f9ff;
+  --cx8-ink: var(--text-primary);
+  --cx8-ink-text: var(--bg-page);
+  --cx8-text: var(--text-primary);
+  --cx8-text-2: var(--text-secondary);
+  --cx8-line: rgb(15 23 42 / 8%);
+  --cx8-ring: 0 0 0 1px rgb(15 23 42 / 8%);
+  --cx8-sunken: #f4f5f7;
+  --cx8-surface: var(--bg-page);
+  --cx8-ok: #15803d;
+}
+:root[data-theme='dark'] .cx8 {
+  --cx8-blue-text: #98b0ff;
+  --cx8-blue-soft: rgb(36 87 245 / 22%);
+  --cx8-selected: rgb(36 87 245 / 10%);
+  --cx8-line: rgb(255 255 255 / 8%);
+  --cx8-ring: 0 0 0 1px rgb(255 255 255 / 10%);
+  --cx8-sunken: var(--bg-surface);
+  --cx8-ok: #5fd3a5;
+}
+.cx8 > * {
+  width: 100%;
+  max-width: var(--page-max);
+  margin-inline: auto;
+}
+.cx8 code {
+  font-family: var(--font-mono);
+}
+.cx8 :focus-visible {
+  outline: var(--focus-ring) solid var(--cx8-blue-text);
+  outline-offset: var(--focus-offset);
+}
+
+/* Hero: copy left, the address card right */
+.cx8-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+  gap: var(--space-7);
+  align-items: center;
+  padding: var(--space-8) 0 var(--space-6);
+}
+.cx8-kicker {
+  margin: 0 0 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--cx8-blue-text);
+}
+.cx8-headline {
+  margin: 0 0 16px;
+  font-size: clamp(34px, 4.4vw, 48px);
+  font-weight: 600;
+  line-height: 1.06;
+  letter-spacing: -0.035em;
+  color: var(--cx8-text);
+}
+.cx8-lede {
+  max-width: 34ch;
+  margin: 0 0 26px;
+  font-size: 18px;
+  line-height: 1.6;
+  color: var(--cx8-text-2);
+}
+.cx8-how {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.cx8-how li {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--cx8-text-2);
+}
+.cx8-how-n {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--cx8-blue-soft);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--cx8-blue-text);
+}
+
+/* The address card */
+.cx8-card {
+  min-width: 0;
+  padding: 22px;
+  border-radius: 18px;
+  background: var(--cx8-surface);
+  box-shadow:
+    0 1px 2px rgb(15 23 42 / 4%),
+    0 0 0 1px rgb(15 23 42 / 7%),
+    0 20px 40px rgb(15 23 42 / 6%);
+}
+:root[data-theme='dark'] .cx8-card {
+  background: var(--bg-surface-elevated);
+  box-shadow:
+    0 0 0 1px rgb(255 255 255 / 9%),
+    0 20px 40px rgb(0 0 0 / 40%);
+}
+.cx8-card-title {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--cx8-text-2);
+}
+.cx8-card .connect-code {
+  gap: 10px;
+  margin: 0;
+  padding: 12px 0 6px;
+  background: none;
+  border: 0;
+  border-radius: 0;
+}
+.cx8-card .connect-code > code {
+  padding: 12px 14px;
+  border-radius: 9px;
+  background: var(--cx8-sunken);
+  font-size: 15px;
+  line-height: 20px;
+}
+.cx8-card .connect-copy-button {
+  min-height: 44px;
+  padding: 0 18px;
+  border-radius: 10px;
+  background: var(--cx8-blue);
+  border-color: var(--cx8-blue);
+  color: #ffffff;
+  font-size: 14.5px;
+}
+.cx8-card .connect-copy-button:hover {
+  background: #1d47d1;
+  border-color: #1d47d1;
+  color: #ffffff;
+}
+.cx8-card .connect-copy-button[data-copied] {
+  background: var(--cx8-ok);
+  border-color: var(--cx8-ok);
+  color: #ffffff;
+}
+:root[data-theme='dark'] .cx8-card .connect-copy-button[data-copied] {
+  color: #09090b;
+}
+.cx8-card-note {
+  margin: 10px 0 0;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--cx8-text-2);
+}
+
+/* The mode switch: a radio group drawn as a segmented control (both pages). */
+.cx8-seg,
+.cx4-seg {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--cx8-sunken, var(--bg-inset));
+}
+.cx8-seg {
+  margin-top: 6px;
+}
+.cx8-seg label,
+.cx4-seg label {
+  position: relative;
+  display: flex;
+}
+.cx8-seg input,
+.cx4-seg input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.cx8-seg span,
+.cx4-seg span {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.2;
+  color: var(--cx8-text-2, var(--text-secondary));
+  white-space: nowrap;
+}
+.cx8-seg input:checked + span {
+  background: var(--cx8-surface);
+  color: var(--cx8-text);
+  font-weight: 500;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 8%);
+}
+:root[data-theme='dark'] .cx8-seg input:checked + span {
+  background: var(--bg-surface-active);
+}
+.cx8-seg input:focus-visible + span,
+.cx4-seg input:focus-visible + span {
+  outline: 2px solid var(--cx8-blue-text, var(--focus));
+  outline-offset: 1px;
+}
+
+/* Which AI do you use? */
+.cx8-pick {
+  padding: var(--space-2) 0 var(--space-6);
+}
+.cx8-pick > h2 {
+  margin: 0 0 6px;
+  font-size: 26px;
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+  color: var(--cx8-text);
+}
+.cx8-pick-lede {
+  margin: 0 0 22px;
+  font-size: 16px;
+  color: var(--cx8-text-2);
+}
+.cx8-tiles {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 12px;
+}
+.cx8-tile {
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+  align-content: start;
+  min-width: 0;
+  padding: 16px 14px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--cx8-surface);
+  box-shadow: var(--cx8-ring);
+  color: var(--cx8-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    box-shadow var(--dur-2) var(--ease-standard),
+    background-color var(--dur-2) var(--ease-standard);
+}
+.cx8-tile:hover {
+  background: var(--cx8-selected);
+}
+.cx8-tile[aria-selected='true'] {
+  background: var(--cx8-selected);
+  box-shadow: 0 0 0 2px var(--cx8-blue);
+}
+:root[data-theme='dark'] .cx8-tile[aria-selected='true'] {
+  box-shadow: 0 0 0 2px var(--cx8-blue-text);
+}
+.cx8-tile-name {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+.cx8-tile-kind {
+  font-size: 12.5px;
+  line-height: 1.3;
+  color: var(--cx8-text-2);
+}
+
+/* The chosen app: steps left, the side note right */
+.cx8-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  margin-top: 18px;
+  overflow: hidden;
+  border-radius: 16px;
+  background: var(--cx8-surface);
+  box-shadow: var(--cx8-ring);
+}
+.cx8-detail[hidden] {
+  display: none;
+}
+.cx8-detail-main {
+  min-width: 0;
+  padding: 26px 28px;
+}
+.cx8-detail-side {
+  padding: 26px 24px;
+  background: var(--cx8-sunken);
+}
+.cx8-detail-side h4 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--cx8-text);
+}
+.cx8-detail-side p {
+  margin: 0 0 14px;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--cx8-text-2);
+}
+.cx8-detail-side p:last-child {
+  margin-bottom: 0;
+}
+.cx8 .cx-panel-head h3 {
+  color: var(--cx8-text);
+}
+.cx8 .cx-pill {
+  background: var(--cx8-sunken);
+  color: var(--cx8-text-2);
+}
+
+/* Steps with numbered circles (both pages) */
+.cx8 .connect-steps,
+.cx4 .connect-steps {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 16px;
+  padding: 0;
+  list-style: none;
+  counter-reset: cx-step;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+.cx8 .connect-steps > li,
+.cx4 .connect-steps > li {
+  position: relative;
+  min-width: 0;
+  min-height: 24px;
+  padding-left: 34px;
+  counter-increment: cx-step;
+}
+.cx8 .connect-steps > li::before,
+.cx4 .connect-steps > li::before {
+  content: counter(cx-step);
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+}
+.cx8 .connect-steps > li::before {
+  background: var(--cx8-sunken);
+  color: var(--cx8-text-2);
+}
+:root[data-theme='dark'] .cx8 .connect-steps > li::before {
+  background: var(--bg-surface-active);
+}
+.cx8 .connect-steps,
+.cx8 .connect-steps strong {
+  color: var(--cx8-text);
+}
+.cx8-detail .connect-code {
+  background: var(--cx8-sunken);
+  border-color: transparent;
+}
+.cx8 .connect-note {
+  font-size: 13px;
+  line-height: 1.5;
+}
+.cx8 .connect-alt {
+  margin-top: 4px;
+}
+.cx8 .connect-alt > .connect-note {
+  margin-top: 0;
+}
+.cx8 .connect-actions {
+  gap: 8px;
+  margin-top: 16px;
+}
+.cx8 .connect-actions .button {
+  min-height: 44px;
+  border-radius: 10px;
+}
+.cx8 .connect-actions .button.primary {
+  background: var(--cx8-ink);
+  border-color: var(--cx8-ink);
+  color: var(--cx8-ink-text);
+}
+.cx8 .connect-actions .button.primary:hover {
+  opacity: 0.88;
+}
+.cx8 .connect-manual {
+  margin-top: 14px;
+  padding-top: 4px;
+  border-top: 1px solid var(--cx8-line);
+}
+.cx8 .connect-manual summary,
+.cx4 .connect-manual summary {
+  gap: 8px;
+  font-size: 13.5px;
+  font-weight: 500;
+}
+.cx8 .connect-manual summary {
+  color: var(--cx8-text-2);
+}
+.cx8 .connect-manual summary::before,
+.cx4 .connect-manual summary::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-top: 1.5px solid currentColor;
+  border-right: 1.5px solid currentColor;
+  transform: rotate(45deg);
+  transition: transform var(--dur-2) var(--ease-standard);
+}
+.cx8 .connect-manual[open] summary::before,
+.cx4 .connect-manual[open] summary::before {
+  transform: rotate(135deg);
+}
+
+/* The three facts under the steps */
+.cx8-trust {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 22px;
+  margin: 22px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13.5px;
+  color: var(--cx8-text-2);
+}
+.cx8-trust li::before {
+  content: '✓ ';
+  font-weight: 700;
+  color: var(--cx8-ok);
+}
+
+/* Next step: quiet, below the steps */
+.cx8-next {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-5) 0 0;
+  border-top: 1px solid var(--cx8-line);
+}
+.cx8-next h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--cx8-text);
+}
+.cx8-next p {
+  max-width: 72ch;
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--cx8-text-2);
+}
+.cx8-next .connect-actions {
+  margin-top: var(--space-2);
+}
+.cx8-next a:not(.button) {
+  color: var(--cx8-blue-text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+@media (max-width: 1099px) {
+  .cx8-tiles {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .cx8-detail {
+    grid-template-columns: minmax(0, 1fr) 280px;
+  }
+}
+@media (max-width: 899px) {
+  .cx8-hero {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-6);
+    padding: var(--space-7) 0 var(--space-5);
+  }
+  .cx8-lede {
+    max-width: 46ch;
+  }
+  .cx8-detail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 767px) {
+  .cx8-hero {
+    padding: var(--space-6) 0 var(--space-4);
+  }
+  .cx8-lede {
+    font-size: 16px;
+  }
+  .cx8-card {
+    padding: 16px;
+  }
+  .cx8-card .connect-code > code {
+    padding: 10px 12px;
+    font-size: 13.5px;
+  }
+  .cx8-seg {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    width: 100%;
+  }
+  .cx8-seg span {
+    justify-content: center;
+    min-height: 44px;
+  }
+  .cx8-tiles {
+    grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+    gap: 8px;
+  }
+  .cx8-tile {
+    gap: 8px;
+    padding: 12px;
+  }
+  .cx8-detail-main,
+  .cx8-detail-side {
+    padding: 18px 16px;
+  }
+  .cx8 .connect-actions .button {
+    flex: 1 1 100%;
   }
 }

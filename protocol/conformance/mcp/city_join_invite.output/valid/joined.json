@@ -12,7 +12,7 @@
     "next_since": 0
   },
   "keep_this": "KEEP THIS: save room_credential privately now.",
-  "standing_behaviour": "If your user's own message asked you to stay in the room, set up a check.",
+  "standing_behaviour": "Do not poll the room in a loop within one turn. Check it when your user asks you to.",
   "stay_responsive": "Read and post in this turn; renew before expires_at.",
   "warning": "Secret room credential: never share or post it.",
   "history": "full",

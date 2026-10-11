@@ -1,4 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
+import { openAdvancedGroup, openSettingsSection } from './settings-nav';
+import { openAddAgentDialog } from './my-agents-open';
 
 /*
  * No machine text on screens people see (docs/COPY_GLOSSARY.md: "no machine text in the UI").
@@ -51,6 +53,7 @@ test('public pages show no tool names, JSON or idempotency', async ({ page, brow
     '/signin',
     '/#connect',
     '/invite',
+    '/workflows',
     '/downtown',
     '/downtown/verify',
     '/docs',
@@ -104,27 +107,34 @@ test('the console, its dialogs and the rooms show no tool names, JSON or idempot
   });
   expect(job.status()).toBe(201);
 
+  // The workspace opens on Rooms; the overview (the Network map) is under Advanced workspace.
   await page.reload();
-  await expect(
-    page.getByRole('heading', { level: 1, name: 'Everything, at a glance.' }),
-  ).toBeVisible();
-  await expectPlain(page, 'Overview');
+  const advanced = async (name: string) => {
+    await (await openAdvancedGroup(page)).getByRole('button', { name, exact: true }).click();
+    await expect(page.getByRole('heading', { level: 1, name })).toBeVisible();
+  };
+  await advanced('Network map');
+  await expectPlain(page, 'Network map');
   const nav = page.getByRole('navigation', { name: 'Workspace' });
-  for (const view of [
-    'Connect your AI',
-    'Agents',
-    'Exchanges',
-    'Collaborations',
-    'Messages',
-    'Connections',
-    'AI connections',
-    'Activity',
-  ]) {
-    await nav.getByRole('button', { name: view, exact: true }).click();
+  const myAgents = nav.getByRole('button', { name: /^My agents/ });
+  // My agents' Exchanges button opens the ledger.
+  const exchanges = async () => {
+    await myAgents.click();
+    await page.getByRole('main').getByRole('button', { name: 'Exchanges', exact: true }).click();
+    await expect(page.getByRole('heading', { level: 1, name: 'Exchanges.' })).toBeVisible();
+  };
+  for (const view of ['Connect AI', 'My agents', 'Messages']) {
+    await nav.getByRole('button', { name: new RegExp(`^${view}`) }).click();
+    await expectPlain(page, view);
+  }
+  await exchanges();
+  await expectPlain(page, 'Exchanges');
+  for (const view of ['Research & review', 'Agent permissions']) {
+    await advanced(view);
     await expectPlain(page, view);
   }
   // The exchange, with the agent's result shown as readable fields.
-  await nav.getByRole('button', { name: 'Exchanges', exact: true }).click();
+  await exchanges();
   await expect(page.getByText('Result ready').first()).toBeVisible({ timeout: 20_000 });
   await page.locator('.exchange-row').first().click();
   const exchange = page.getByRole('dialog');
@@ -132,19 +142,37 @@ test('the console, its dialogs and the rooms show no tool names, JSON or idempot
   await expect(exchange.getByText('Raw data')).toBeVisible();
   await expectPlain(page, 'exchange dialog');
   await page.keyboard.press('Escape');
-  // An agent, the Add agent dialog and the export dialog.
-  await nav.getByRole('button', { name: 'Agents', exact: true }).click();
-  await page.locator('.agent-card').first().click();
-  await expectPlain(page, 'agent dialog');
+  // An agent's pane with its ⋯ menu, and the Add agent dialog.
+  await myAgents.click();
+  await page
+    .getByRole('main')
+    .getByRole('button', { name: /^More for / })
+    .first()
+    .click();
+  await expect(page.getByRole('main').getByRole('menu')).toBeVisible();
+  await expectPlain(page, 'agent pane');
   await page.keyboard.press('Escape');
-  await page.getByRole('button', { name: 'Add agent' }).first().click();
+  await page.getByRole('button', { name: 'Add an agent' }).first().click();
+  await expectPlain(page, 'Add an agent');
+  await page.keyboard.press('Escape');
+  await openAddAgentDialog(page);
   await expectPlain(page, 'Add agent dialog');
   await page.getByRole('button', { name: 'Connect your own' }).click();
   await expectPlain(page, 'Add agent dialog, your own');
   await page.keyboard.press('Escape');
-  await page.getByRole('button', { name: 'Export workspace' }).click();
-  await expectPlain(page, 'export dialog');
-  await page.keyboard.press('Escape');
+  // Account → Settings, Data & export (where export lives); the section rail leads to the others.
+  await openSettingsSection(page, 'Data & export');
+  await expect(page.getByRole('region', { name: 'Data & export', exact: true })).toBeVisible();
+  await expectPlain(page, 'Data & export');
+  const rail = page.getByRole('navigation', { name: 'Settings sections', exact: true });
+  for (const section of ['Connected apps', 'Activity log', 'Account']) {
+    await rail.getByRole('button', { name: section, exact: true }).click();
+    await expect(rail.getByRole('button', { name: section, exact: true })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    await expectPlain(page, section);
+  }
 
   // Rooms: a room with a message, its Invite sheet and the Members panel.
   const room = await (
@@ -165,8 +193,15 @@ test('the console, its dialogs and the rooms show no tool names, JSON or idempot
   await expect(page.getByRole('heading', { level: 1, name: 'Plain room' })).toBeVisible();
   await expectPlain(page, 'room');
   await page.getByRole('button', { name: 'Invite', exact: true }).first().click();
-  const sheet = page.getByRole('dialog', { name: 'Invite to this room' });
-  const link = await sheet.getByLabel('Invite link').inputValue();
+  const sheet = page.getByRole('dialog', { name: 'Invite a person' });
+  await expect(sheet).toBeVisible();
+  await expect(sheet.locator('.rm-code')).toBeVisible();
+  // The sheet holds the link only in the clipboard copy; the short code resolves to the /j
+  // link without a second mint (a fresh mint right after the sheet's own can hit the host's
+  // link rate limit).
+  const code = (await sheet.locator('.rm-code').textContent())!.trim();
+  const resolved = await (await page.request.get(`/j/${code}?format=json`)).json();
+  const link = resolved.join_url as string;
   await expectPlain(page, 'Invite sheet');
   await sheet.getByRole('button', { name: 'Close' }).click();
   await page.getByRole('button', { name: /^Members/ }).click();

@@ -129,10 +129,7 @@ test('anonymous MCP discovers invitation tools with explicit credential disclosu
   ]) {
     const tool = result.tools.find((x: any) => x.name === name);
     assert.ok(tool, name);
-    assert.equal(
-      tool.annotations.readOnlyHint,
-      name === 'city_room_read' || name === 'city_room_members',
-    );
+    assert.equal(tool.annotations.readOnlyHint, name === 'city_room_members');
   }
   assert.ok(!result.tools.some((x: any) => x.name === 'city_workspace'));
 });
@@ -163,7 +160,17 @@ test('anonymous MCP joins, posts idempotently and reads without a workspace cred
   assert.ok(second && !second.isError, JSON.stringify(second));
   assert.equal(second.structuredContent.posted, true);
   assert.equal(second.structuredContent.message.seq, seq);
-  const read = await call(f, 'city_room_read', { room_credential: guest.room_credential });
+  // Its own post is not unread for it (no wake on its own post); a lookup shows it exactly once.
+  const unread = await call(f, 'city_room_read', { room_credential: guest.room_credential });
+  assert.ok(unread && !unread.isError, JSON.stringify(unread));
+  assert.equal(
+    unread.structuredContent.messages.filter((m: any) => m.text === args.text).length,
+    0,
+  );
+  const read = await call(f, 'city_room_read', {
+    room_credential: guest.room_credential,
+    since: 0,
+  });
   assert.ok(read && !read.isError, JSON.stringify(read));
   assert.equal(read.structuredContent.messages.filter((m: any) => m.text === args.text).length, 1);
   const members = await call(f, 'city_room_members', { room_credential: guest.room_credential });
@@ -360,7 +367,10 @@ test('city_join_invite with idempotency_key replays the same guest and credentia
   // No new identity, credential, membership or pickup.
   assert.equal(await count(f, 'SELECT count(*) AS n FROM room_invite_credentials'), 1);
   assert.equal(await count(f, "SELECT count(*) AS n FROM operators WHERE kind='unclaimed'"), 1);
-  assert.equal(await count(f, "SELECT count(*) AS n FROM room_members WHERE role='member'"), 1);
+  assert.equal(
+    await count(f, "SELECT count(*) AS n FROM room_members WHERE role='member' AND kind='agent'"),
+    1,
+  );
   assert.equal(await count(f, 'SELECT count(*) AS n FROM room_invite_bootstrap'), pickups);
   // The replayed credential works.
   const read = await call(f, 'city_room_read', {
@@ -536,7 +546,8 @@ test('the join result carries a one-line KEEP THIS block with the expiry and nev
   assert.ok(!keep.includes(guest.room_credential.slice(4)));
   assert.ok(!guest.warning.includes(guest.room_credential));
   assert.match(guest.stay_responsive, /city_join_room/);
-  assert.match(guest.stay_responsive, /wait=25/);
+  assert.doesNotMatch(guest.stay_responsive, /wait=25/);
+  assert.match(guest.stay_responsive, /Do not poll in a loop/);
 });
 
 test('the /j JSON leads with the authenticated connector and adds stateless guidance', async (t) => {
@@ -590,7 +601,10 @@ test('a host rejoin link gives the same member a fresh credential and kills the 
   // Same member, no duplicate identity, credential row or slot.
   assert.equal(await count(f, 'SELECT count(*) AS n FROM room_invite_credentials'), 1);
   assert.equal(await count(f, "SELECT count(*) AS n FROM operators WHERE kind='unclaimed'"), 1);
-  assert.equal(await count(f, "SELECT count(*) AS n FROM room_members WHERE role='member'"), 1);
+  assert.equal(
+    await count(f, "SELECT count(*) AS n FROM room_members WHERE role='member' AND kind='agent'"),
+    1,
+  );
   // The old credential is dead, the new one works.
   const old = await call(f, 'city_room_read', { room_credential: guest.room_credential });
   assert.equal(errorCode(old), 'room_credential_denied');
@@ -758,14 +772,12 @@ test('city_room_renew extends the same member; the old credential fails immediat
   const f = await fixture(t),
     guest = await join(f);
   assert.match(guest.keep_this, /renew it with city_room_renew before then/);
-  assert.match(
-    guest.standing_behaviour,
-    /^If your user's own message asked you to stay in the room/,
-  );
-  assert.match(
-    guest.standing_behaviour,
-    /Otherwise, ask your user once whether you should keep checking/,
-  );
+  assert.match(guest.standing_behaviour, /^Do not poll the room in a loop within one turn\./);
+  assert.match(guest.standing_behaviour, /check with long gaps \(several minutes apart\)/);
+  assert.match(guest.standing_behaviour, /stop after 3 checks in a row with nothing new/);
+  assert.match(guest.standing_behaviour, /each check uses their AI usage/);
+  assert.match(guest.standing_behaviour, /renew with city_room_renew before expires_at/);
+  assert.doesNotMatch(guest.standing_behaviour, /once a minute|wait=25|keep checking/);
   f.advance(20 * 3_600_000);
   const renewed = await call(f, 'city_room_renew', { room_credential: guest.room_credential });
   assert.ok(renewed && !renewed.isError, JSON.stringify(renewed));
@@ -974,4 +986,48 @@ test('latest_messages holds the NEWEST ten, oldest first, and says how many earl
   const small = await join(g);
   assert.equal(small.latest_messages.earlier_messages, 0);
   assert.doesNotMatch(small.next_step, /earlier message/);
+});
+
+test('a stress-test host is bounded by CITY_STRESS_TEST_MAX_GUESTS, not the public per-host quota', async (t) => {
+  const f = await fixture(t, { inviteGuestsPerHost: 100 }),
+    guest = await join(f);
+  const { host_owner_id: host, room_id: room } = (
+    await f.app.city.db.query<{ host_owner_id: string; room_id: string }>(
+      'SELECT host_owner_id, room_id FROM room_invite_credentials WHERE agent_id=$1',
+      [guest.agent_id],
+    )
+  ).rows[0]!;
+  await f.app.city.db.query(
+    `INSERT INTO operators(id,name,name_key,password_hash,salt,kind)
+     SELECT 'stress-op-'||g, 'Room guest', 'stress-op-'||g, '!', '!', 'unclaimed' FROM generate_series(1,99) g`,
+  );
+  await f.app.city.db.query(
+    `INSERT INTO unclaimed_agent_expiry SELECT 'stress-agent-'||g, 'stress-op-'||g, $1 FROM generate_series(1,99) g`,
+    [f.now() + 86_400_000],
+  );
+  await f.app.city.db.query(
+    `INSERT INTO room_invite_credentials(token_hash,operator_id,agent_id,room_id,host_owner_id,created_at,expires_at,source_hash)
+     SELECT 'stress-token-'||g, 'stress-op-'||g, 'stress-agent-'||g, $1, $2, $3, $4, 'stress-source-'||g FROM generate_series(1,99) g`,
+    [room, host, f.now(), f.now() + 86_400_000],
+  );
+  assert.equal(errorCode(await joinWith(f, {})), 'invite_host_capacity', 'public cap applies');
+  const before = {
+    ops: process.env.CITY_STRESS_TEST_OPERATORS,
+    max: process.env.CITY_STRESS_TEST_MAX_GUESTS,
+  };
+  t.after(() => {
+    if (before.ops === undefined) delete process.env.CITY_STRESS_TEST_OPERATORS;
+    else process.env.CITY_STRESS_TEST_OPERATORS = before.ops;
+    if (before.max === undefined) delete process.env.CITY_STRESS_TEST_MAX_GUESTS;
+    else process.env.CITY_STRESS_TEST_MAX_GUESTS = before.max;
+  });
+  process.env.CITY_STRESS_TEST_OPERATORS = host;
+  process.env.CITY_STRESS_TEST_MAX_GUESTS = '101';
+  const admitted = await joinWith(f, {});
+  assert.ok(admitted && !admitted.isError, JSON.stringify(admitted));
+  assert.equal(
+    errorCode(await joinWith(f, {})),
+    'stress_test_capacity',
+    'the stress ceiling still binds',
+  );
 });

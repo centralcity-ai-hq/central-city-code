@@ -7,7 +7,7 @@ import { test, expect, type Page } from '@playwright/test';
  * page scrolls sideways on a phone.
  */
 
-const GITHUB = 'https://github.com/centralcity-ai-org';
+const GITHUB = 'https://github.com/centralcity-ai-hq';
 /** [name, href, GitHub?] per column. */
 const COLUMNS: [string, [string, string, boolean?][]][] = [
   [
@@ -16,27 +16,25 @@ const COLUMNS: [string, [string, string, boolean?][]][] = [
       ['Elric', '/elric'],
       ['Workspace', '/#signin'],
       ['Connect AI', '/connect'],
+      ['Base Agents', '/explorer/base'],
+      ['Use cases', '/use-cases'],
     ],
   ],
   [
     'Developers',
     [
-      ['API', '/docs/api'],
       ['Docs', '/docs'],
-      ['Protocol', `${GITHUB}/protocol`, true],
-      ['SDK', `${GITHUB}/sdk-ts`, true],
       ['Changelog', `${GITHUB}/central-city-code/blob/main/CHANGELOG.md`, true],
       ['Status', '/status'],
-      ['Central City on GitHub', `${GITHUB}/central-city-code`, true],
     ],
   ],
   [
     'Open Source',
     [
-      ['Agent Explorer', '/downtown/log'],
-      ['Repositories', '/downtown'],
+      ['Agent Explorer', '/explorer'],
+      ['Elric on GitHub', `${GITHUB}/central-city-code/tree/main/server/elric`, true],
+      ['Downtown', '/downtown'],
       ['Verify', '/downtown/verify'],
-      ['Transparency log', `${GITHUB}/transparency`, true],
     ],
   ],
   [
@@ -114,7 +112,12 @@ test('every footer link resolves: no 404, and anchors exist', async ({ page }) =
     const url = new URL(href, page.url());
     // GitHub links are checked by name and attributes above; the rest are same-site pages.
     if (url.origin === 'https://github.com') {
-      expect(href, href).toMatch(/^https:\/\/github\.com\/centralcity-ai-org\//);
+      expect(href, href).toMatch(/^https:\/\/github\.com\/centralcity-ai-hq\//);
+      continue;
+    }
+    // The X profile (footer socials) is the one other outside link.
+    if (url.origin === 'https://x.com') {
+      expect(href, href).toBe('https://x.com/centralcityai');
       continue;
     }
     expect(url.origin, href).toBe(new URL(page.url()).origin);
@@ -139,6 +142,8 @@ test('at 360 px the columns are closed accordions and nothing scrolls sideways',
 }) => {
   await page.setViewportSize({ width: 360, height: 780 });
   await page.goto('/');
+  // The app has taken over from the prerendered copy (its accordions animate and keep state).
+  await expect(page.locator('#root')).not.toHaveAttribute('aria-busy');
   const footer = page.getByRole('contentinfo');
   const groups = footer.locator('details');
   await expect(groups).toHaveCount(5);
@@ -147,14 +152,18 @@ test('at 360 px the columns are closed accordions and nothing scrolls sideways',
   await footer.getByText('Help & legal', { exact: true }).click();
   await expect(footer.getByRole('link', { name: 'Imprint' })).toBeVisible();
   for (const group of await groups.all()) await group.locator('summary').click();
+  // Help & legal was open, so that click closed it: its closing eases out first.
+  await expect(footer.locator('details[data-closing]')).toHaveCount(0);
+  await expect(footer.locator('details:not([open])')).toHaveCount(1);
   await expect(footer.locator('.cc-footer-legal')).toBeVisible();
   // Every footer link is a 44 px target.
   for (const link of await footer.locator('a:visible').all())
     expect((await link.boundingBox())!.height, await link.innerText()).toBeGreaterThanOrEqual(44);
   const paths = [
     '/',
+    // The Agent Explorer's On Base view (Base Agents) has the site header but no site footer.
     ...(await footerHrefs(page)).filter(
-      (href) => !/\.(json|md)$/.test(href) && href.startsWith('/'),
+      (href) => !/\.(json|md)$/.test(href) && href.startsWith('/') && href !== '/explorer/base',
     ),
   ];
   for (const path of paths) {

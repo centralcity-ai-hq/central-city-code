@@ -216,17 +216,31 @@ export async function loadInbound(
   tx: Pick<Tx, 'query'>,
   operatorId: string,
 ): Promise<InboundConnection[]> {
-  return (
-    await tx.query<{ from_agent_id: string; from_owner_id: string; to_agent_id: string }>(
-      `SELECT c.from_agent_id,c.from_owner_id,c.to_agent_id FROM cross_connections c
+  return inboundFromRows(
+    (
+      await tx.query<InboundRow>(
+        `SELECT c.from_agent_id,c.from_owner_id,c.to_agent_id ${INBOUND_FROM_SQL}`,
+        [operatorId],
+      )
+    ).rows,
+  );
+}
+
+type InboundRow = { from_agent_id: string; from_owner_id: string; to_agent_id: string };
+/** The FROM and WHERE of loadInbound (`$1` is the operator id of the workspace). */
+const INBOUND_FROM_SQL = `FROM cross_connections c
         JOIN workspaces w ON w.operator_id=c.from_owner_id
         WHERE c.to_owner_id=$1 AND c.status='approved'
         AND (w.data->>'paused')::boolean IS NOT TRUE
         AND EXISTS (SELECT 1 FROM jsonb_array_elements(w.data->'agents') a
-          WHERE a->>'id'=c.from_agent_id AND a->>'revokedAt' IS NULL AND a->>'pausedAt' IS NULL)`,
-      [operatorId],
-    )
-  ).rows.map((row) => ({
+          WHERE a->>'id'=c.from_agent_id AND a->>'revokedAt' IS NULL AND a->>'pausedAt' IS NULL)`;
+/** loadInbound's rows as one JSON array, for reading them in the same statement as the document. */
+export const INBOUND_JSON_SQL = `(SELECT COALESCE(json_agg(json_build_object('from_agent_id',
+  c.from_agent_id,'from_owner_id',c.from_owner_id,'to_agent_id',c.to_agent_id)),'[]'::json)
+  ${INBOUND_FROM_SQL})`;
+
+export function inboundFromRows(rows: InboundRow[]): InboundConnection[] {
+  return rows.map((row) => ({
     fromAgentId: row.from_agent_id,
     fromOperatorId: row.from_owner_id,
     toAgentId: row.to_agent_id,

@@ -1,0 +1,858 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Base Wallet mockup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+/* Operation Base Wallet, W0 (v4): the agent's Wallet inside My agents. Same shell, tokens and
+   Rooms' small pill as the live app. Motion only where it tells the truth about the money:
+   a balance you scrub through its Base history, a live block heartbeat, a limit dial, a key
+   revealed by holding, a QR that assembles itself. */
+:root{
+  --bg:#ffffff; --pane:#ffffff; --side:#fafafa; --surface:#ffffff; --sunken:#f5f5f6; --hover:rgba(0,0,0,.035);
+  --sel:rgba(0,0,0,.055); --line:rgba(0,0,0,.08); --hair:rgba(0,0,0,.06);
+  --text:#111113; --muted:#6e6e73; --faint:#a1a1a6;
+  --ink:#111113; --ink-text:#ffffff; --accent:#0a66ff; --ok:#1a7f37; --warn:#a15c00; --bad:#d70015;
+  --focus:rgba(10,102,255,.35); --qr-bg:#ffffff; --knob:#ffffff; --sheen:rgba(255,255,255,.55);
+  --sans:"Inter",ui-sans-serif,-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif;
+  --mono:"Geist Mono",ui-monospace,"SF Mono",Menlo,monospace;
+  --spring:cubic-bezier(.2,.9,.2,1);
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0b0b0c;--pane:#0b0b0c;--side:#111113;--surface:#161618;--sunken:#1c1c1f;--hover:rgba(255,255,255,.045);--sel:rgba(255,255,255,.07);--line:rgba(255,255,255,.09);--hair:rgba(255,255,255,.07);--text:#f5f5f7;--muted:#a1a1a6;--faint:#6e6e73;--ink:#f5f5f7;--ink-text:#0b0b0c;--accent:#4c8dff;--ok:#30d158;--warn:#ffb340;--bad:#ff6961;--focus:rgba(76,141,255,.45);--knob:#f5f5f7;--sheen:rgba(255,255,255,.35);color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#0b0b0c;--pane:#0b0b0c;--side:#111113;--surface:#161618;--sunken:#1c1c1f;--hover:rgba(255,255,255,.045);--sel:rgba(255,255,255,.07);--line:rgba(255,255,255,.09);--hair:rgba(255,255,255,.07);--text:#f5f5f7;--muted:#a1a1a6;--faint:#6e6e73;--ink:#f5f5f7;--ink-text:#0b0b0c;--accent:#4c8dff;--ok:#30d158;--warn:#ffb340;--bad:#ff6961;--focus:rgba(76,141,255,.45);--knob:#f5f5f7;--sheen:rgba(255,255,255,.35);color-scheme:dark}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 var(--sans);-webkit-font-smoothing:antialiased;letter-spacing:-.011em}
+button,input{font:inherit;color:inherit;letter-spacing:inherit}
+button{cursor:pointer}
+a{color:inherit}
+:focus-visible{outline:none;box-shadow:0 0 0 3px var(--focus);border-radius:10px}
+svg.i{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
+.num{font-variant-numeric:tabular-nums}
+.mono{font-family:var(--mono);font-size:12.5px;letter-spacing:0}
+.muted{color:var(--muted)}
+
+/* shell */
+.app{display:flex;height:100%}
+.side{width:216px;flex-shrink:0;background:var(--side);display:flex;flex-direction:column;padding:20px 10px;gap:1px}
+.brand{display:flex;align-items:center;gap:9px;padding:0 10px 18px;font-weight:600;font-size:14.5px}
+.brand i{width:18px;height:18px;border-radius:5px;background:var(--ink);display:block}
+.nav{display:flex;align-items:center;height:32px;padding:0 10px;border:0;background:none;border-radius:8px;font-weight:500;width:100%;text-align:left;color:var(--muted)}
+.nav.on{background:var(--sel);color:var(--text)}
+.acct{margin-top:auto;display:flex;align-items:center;gap:9px;padding:8px 10px;font-size:13px}
+.acct small{display:block;color:var(--muted);font-size:12px}
+.main{flex:1;min-width:0;display:flex;min-height:0}
+.listcol{width:288px;flex-shrink:0;border-right:1px solid var(--hair);display:flex;flex-direction:column;background:var(--bg)}
+.lhead{display:flex;align-items:baseline;gap:8px;padding:20px 20px 12px}
+.lhead h1{margin:0;font-size:19px;font-weight:600;letter-spacing:-.022em}
+.lhead small{font-size:12.5px;color:var(--muted)}
+.lbody{padding:0 8px}
+.rrow{display:flex;align-items:center;gap:11px;height:52px;padding:0 12px;border-radius:12px}
+.rrow.on{background:var(--sel)}
+.who{display:flex;flex-direction:column;min-width:0;line-height:1.3}
+.who b{font-weight:500}
+.who small{color:var(--muted);font-size:12.5px}
+.av{position:relative;width:32px;height:32px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;font-weight:600;font-size:13px;flex-shrink:0;background:var(--c);color:#fff}
+.av.sm{width:26px;height:26px;border-radius:50%;font-size:11.5px}
+.detail{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0;background:var(--pane)}
+.dtop{display:flex;align-items:center;justify-content:space-between;height:56px;padding:0 24px;gap:8px}
+.backbtn{display:inline-flex;align-items:center;gap:2px;border:0;background:none;color:var(--muted);font-weight:500;font-size:13.5px;padding:4px 6px 4px 0}
+.backbtn:hover{color:var(--text)}
+.netnote{font-size:12px;color:var(--faint);display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.netnote::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--warn);opacity:.85}
+.dscroll{flex:1;overflow-y:auto}
+.dwrap{max-width:468px;margin:0 auto;padding-block:20px 110px;padding-inline:24px;display:flex;flex-direction:column;gap:22px}
+
+/* type */
+.eyebrow{font-size:12px;color:var(--muted);font-weight:500;margin:0;letter-spacing:-.003em}
+h2.title{margin:0;font-size:23px;font-weight:600;letter-spacing:-.028em;line-height:1.2;text-wrap:balance}
+p.lead{margin:-12px 0 0;color:var(--muted);font-size:14px;line-height:1.55;max-width:46ch}
+.stack{display:flex;flex-direction:column;gap:10px}
+.hint{color:var(--faint);font-size:12px;margin:0;line-height:1.5}
+
+/* odometer: every digit is a column of 0-9 that rolls to its value */
+.odo{display:inline-flex;align-items:baseline;white-space:nowrap}
+.od{display:inline-block;height:1em;line-height:1em;overflow:hidden;vertical-align:baseline;position:relative}
+.od > span{display:flex;flex-direction:column;transition:transform .62s var(--spring)}
+.od > span i{font-style:normal;height:1em;line-height:1em;display:block;text-align:center}
+.oc{display:inline-block;line-height:1em}
+
+/* the number */
+.hero{display:flex;flex-direction:column;gap:4px}
+.amount{display:flex;align-items:baseline;gap:6px;margin-top:2px}
+.amount .big{font-size:38px;font-weight:600;letter-spacing:-.038em;line-height:1.05;font-variant-numeric:tabular-nums}
+.amount .unit{font-size:13px;font-weight:500;color:var(--muted);letter-spacing:0}
+.sub{display:flex;gap:4px 12px;flex-wrap:wrap;color:var(--muted);font-size:12px;align-items:center;min-height:18px}
+.read{color:var(--faint);display:inline-flex;align-items:center;gap:6px}
+.read .odo{font-size:12px;line-height:1}
+.beat{width:5px;height:5px;border-radius:50%;background:var(--ok);opacity:.35;transition:opacity .9s ease,transform .9s ease}
+.beat.on{opacity:1;transform:scale(1.35);transition:none}
+.scrubnote{color:var(--text);font-weight:500}
+
+/* history line: scrub with the pointer */
+.history{position:relative;height:52px;margin:14px 0 14px;touch-action:none;cursor:crosshair;user-select:none}
+.history svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.history .area{fill:url(#fade)}
+.history .line{fill:none;stroke:var(--ink);stroke-width:1.25;stroke-linejoin:round;stroke-linecap:round}
+.history .base{stroke:var(--hair);stroke-width:1}
+.history .ev{fill:var(--pane);stroke:var(--ink);stroke-width:1.1;transition:r .2s var(--spring)}
+.history .ev.hot{r:3.6}
+.history .cursor{stroke:var(--faint);stroke-width:1;stroke-dasharray:2 3;opacity:0;transition:opacity .2s}
+.history .dot{fill:var(--ink);opacity:0;transition:opacity .2s}
+.history.scrubbing .cursor,.history.scrubbing .dot{opacity:1}
+.history .ticks{display:flex;justify-content:space-between;position:absolute;left:0;right:0;bottom:-17px;font-size:10px;color:var(--faint);pointer-events:none;font-variant-numeric:tabular-nums;letter-spacing:.01em}
+
+/* pills: Rooms' small pill, 34 px (44 on phones) */
+.actions{display:flex;gap:8px;flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:34px;padding:0 16px;border-radius:999px;border:0;background:var(--ink);color:var(--ink-text);font-weight:600;font-size:13px;white-space:nowrap;transition:opacity .15s,transform .15s}
+.btn:hover{opacity:.86}
+.btn:active{transform:scale(.98)}
+.btn.ghost{background:var(--sunken);color:var(--text)}
+.btn.ghost:hover{opacity:1;background:var(--sel)}
+.btn.text{background:none;color:var(--muted);padding:0 6px}
+.btn.text:hover{color:var(--text)}
+.btn.text.danger{color:var(--bad)}
+.btn[disabled]{opacity:.32;cursor:not-allowed}
+.btn.wide{width:100%;height:44px;font-size:14px}
+
+/* lists: hairline rows, no boxes */
+.list{display:flex;flex-direction:column}
+.row{display:flex;align-items:center;gap:12px;min-height:46px;padding:9px 0;border:0;background:none;text-align:left;width:100%;border-top:1px solid var(--hair);transition:background .2s}
+.list .row:last-child{border-bottom:1px solid var(--hair)}
+.row.hot{background:linear-gradient(90deg,transparent,var(--hover) 15%,var(--hover) 85%,transparent)}
+button.row:hover .k b{color:var(--muted)}
+.row .k{flex:1;min-width:0;display:flex;flex-direction:column;line-height:1.35}
+.row .k b{font-weight:500;font-size:13.5px;transition:color .15s}
+.row .k span{color:var(--muted);font-size:12px;overflow-wrap:anywhere}
+.row .v{color:var(--muted);font-size:13px;white-space:nowrap;text-align:right}
+.row .v.strong{color:var(--text);font-weight:500}
+.row .amt{font-variant-numeric:tabular-nums;font-weight:500;font-size:13.5px;white-space:nowrap}
+.row .amt.in{color:var(--ok)}
+.chev{width:14px;height:14px;color:var(--faint)}
+.section{font-size:12px;font-weight:500;color:var(--muted);margin:4px 0 -14px}
+
+/* fields */
+.field-wrap{display:flex;flex-direction:column;gap:8px}
+.field-wrap label{font-size:13px;font-weight:500}
+.field-wrap small{color:var(--faint);font-size:12.5px;margin-top:-4px}
+.field{width:100%;height:44px;border-radius:12px;border:1px solid var(--line);background:var(--surface);padding:0 14px;font-size:15px;outline:none;transition:border-color .15s,box-shadow .15s}
+.field:focus{border-color:transparent;box-shadow:0 0 0 3px var(--focus)}
+.field.mono{font-family:var(--mono);font-size:13.5px}
+.field.err{border-color:var(--bad)}
+.inline{display:flex;gap:8px;align-items:center}
+.err-line{color:var(--bad);font-size:12.5px}
+.seg{display:inline-flex;background:var(--sunken);border-radius:999px;padding:3px;gap:2px}
+.seg button{border:0;background:none;height:28px;padding:0 14px;border-radius:999px;font-size:13px;font-weight:500;color:var(--muted);transition:background .2s,color .2s}
+.seg button.on{background:var(--surface);color:var(--text);box-shadow:0 1px 2px rgba(0,0,0,.08)}
+.facts{display:grid;grid-template-columns:auto 1fr;gap:10px 24px;margin:0;font-size:14px}
+.facts dt{color:var(--muted)}
+.facts dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
+.facts dd.strong{font-weight:600}
+
+/* deposit: a QR that assembles, then tilts toward the pointer */
+.qrstage{align-self:center;perspective:900px}
+.qrcard{position:relative;padding:16px;border-radius:22px;background:var(--qr-bg);box-shadow:0 0 0 1px var(--hair),0 18px 40px -18px rgba(0,0,0,.25);transform-style:preserve-3d;transition:transform .5s var(--spring);will-change:transform}
+.qrcard canvas{display:block;width:184px;height:184px}
+.qrcard .sheen{position:absolute;inset:0;border-radius:22px;pointer-events:none;background:radial-gradient(circle at var(--sx,50%) var(--sy,30%),var(--sheen),transparent 55%);mix-blend-mode:soft-light;opacity:0;transition:opacity .4s}
+.qrstage:hover .sheen{opacity:1}
+.address{display:flex;align-items:flex-start;gap:8px}
+.address .mono{flex:1;min-width:0;overflow-wrap:anywhere;font-size:14px;line-height:1.6;color:var(--text)}
+.cp{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border-radius:999px;border:0;background:var(--sunken);color:var(--text);font-size:12.5px;font-weight:500;flex-shrink:0}
+.caution{display:flex;gap:10px;align-items:flex-start;font-size:13px;color:var(--muted);line-height:1.5;margin:0}
+.caution svg{color:var(--warn);margin-top:2px}
+.caution b{color:var(--text);font-weight:500}
+
+/* backup key: hold to reveal, then it decodes */
+.key{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px 10px;padding:20px 4px 4px}
+.key span{display:flex;flex-direction:column;gap:2px;font-family:var(--mono);font-size:16px;letter-spacing:.04em}
+.key span em{font-style:normal;font-family:var(--sans);font-size:10.5px;color:var(--faint);letter-spacing:0}
+.key b{font-weight:400;transition:color .3s,filter .3s}
+.key.hidden b{color:var(--faint);filter:blur(3px)}
+.key b.noise{color:var(--faint)}
+.hold{position:relative;display:inline-flex;align-items:center;gap:10px;height:44px;padding:0 18px 0 8px;border-radius:999px;border:0;background:var(--sunken);font-weight:600;font-size:13.5px;user-select:none;-webkit-user-select:none;touch-action:none}
+.hold svg{width:28px;height:28px;transform:rotate(-90deg)}
+.hold .track{fill:none;stroke:var(--line);stroke-width:2.4}
+.hold .prog{fill:none;stroke:var(--ink);stroke-width:2.4;stroke-linecap:round}
+.hold.done{background:none;color:var(--muted);padding-left:0;cursor:default}
+.check{display:flex;gap:10px;align-items:flex-start;font-size:14px;line-height:1.45}
+.check input{width:18px;height:18px;margin:1px 0 0;accent-color:var(--ink);flex-shrink:0}
+.check.off{opacity:.4}
+.progress{display:flex;gap:6px}
+.progress i{width:28px;height:3px;border-radius:999px;background:var(--line);transition:background .4s}
+.progress i.on{background:var(--ink)}
+.points{display:flex;flex-direction:column;gap:18px;margin:0;padding:0;list-style:none}
+.points li{display:flex;flex-direction:column;gap:2px}
+.points b{font-weight:500}
+.points span{color:var(--muted);font-size:13.5px}
+
+/* limit dial */
+.dialwrap{align-self:center;position:relative;width:260px;height:260px;touch-action:none;user-select:none}
+.dialwrap svg{width:100%;height:100%;overflow:visible}
+.dial-track{fill:none;stroke:var(--sunken);stroke-width:10;stroke-linecap:round;transition:stroke .2s}
+.dialwrap svg:focus-visible{box-shadow:none}
+.dialwrap svg:focus-visible .dial-track{stroke:var(--focus)}
+.dial-arc{fill:none;stroke:var(--ink);stroke-width:10;stroke-linecap:round}
+.dial-used{fill:none;stroke:var(--faint);stroke-width:2;stroke-linecap:round}
+.dial-tick{stroke:var(--line);stroke-width:1.2}
+.dial-tick.major{stroke:var(--faint)}
+.knob{fill:var(--knob);stroke:var(--line);stroke-width:1;filter:drop-shadow(0 2px 6px rgba(0,0,0,.22));cursor:grab;transition:r .18s var(--spring)}
+.dialwrap.drag .knob{cursor:grabbing}
+.knob.pulse{r:15}
+.dial-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none;gap:2px}
+.dial-center .big{font-size:40px;font-weight:600;letter-spacing:-.04em;line-height:1;font-variant-numeric:tabular-nums}
+.dial-center small{color:var(--muted);font-size:13px}
+.dial-center .used{color:var(--faint);font-size:12px;margin-top:6px}
+.meter{height:3px;border-radius:999px;background:var(--sunken);overflow:hidden}
+.meter i{display:block;height:100%;background:var(--ink);border-radius:999px}
+.status{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}
+.status::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--ok)}
+
+/* mockup controls (not part of the design) */
+.mock{position:fixed;right:14px;bottom:14px;z-index:60;background:var(--surface);border-radius:14px;padding:8px 10px;box-shadow:0 10px 30px rgba(0,0,0,.12),0 0 0 1px var(--hair);font-size:12px;max-width:540px}
+.mock b{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:10.5px;letter-spacing:.06em;color:var(--faint);font-weight:600}
+.mock b button{border:0;background:none;color:var(--faint);font-size:15px;padding:0 2px}
+.mock.min .grid{display:none}
+.mock .grid{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.mock .grid button{border:0;background:var(--sunken);border-radius:999px;padding:3px 9px;font-size:11.5px;font-weight:500;color:var(--muted)}
+.mock .grid button.on{background:var(--ink);color:var(--ink-text)}
+@media (max-width:900px){
+  .side,.listcol{display:none}
+  .dtop{padding:0 16px}
+  .dwrap{padding-inline:16px;gap:24px}
+  .btn{height:44px;padding:0 18px}
+  .amount .big{font-size:34px}
+  h2.title{font-size:21px}
+  .key{gap:12px 6px}
+  .key span{font-size:15px}
+  .mock{left:10px;right:10px;max-width:none}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<div class="app">
+  <aside class="side" aria-label="Workspace">
+    <div class="brand"><i></i>Central City</div>
+    <button class="nav">Rooms</button>
+    <button class="nav">Messages</button>
+    <button class="nav">Elric</button>
+    <button class="nav on" aria-current="page">My agents</button>
+    <button class="nav">Connect AI</button>
+    <div class="acct"><span class="av sm" style="--c:#6e6e73">S</span><div><b>Sam Rivera</b><small>Private workspace</small></div></div>
+  </aside>
+  <main class="main">
+    <section class="listcol" aria-label="My agents">
+      <div class="lhead"><h1>My agents</h1><small>3</small></div>
+      <div class="lbody">
+        <div class="rrow on"><span class="av" style="--c:#0f766e">P</span><div class="who"><b>Pinako</b><small>25.00 USDC</small></div></div>
+        <div class="rrow"><span class="av" style="--c:#b45309">W</span><div class="who"><b>Winry</b><small>No wallet yet</small></div></div>
+        <div class="rrow"><span class="av" style="--c:#2563eb">A</span><div class="who"><b>Alphonse</b><small>4.10 USDC</small></div></div>
+      </div>
+    </section>
+    <section class="detail" aria-label="Agent">
+      <div class="dtop"><span id="back"></span><span class="netnote">Test network · no real money</span></div>
+      <div class="dscroll"><div class="dwrap" id="view"></div></div>
+    </section>
+  </main>
+</div>
+
+<div class="mock" id="mock" aria-label="Mockup states">
+  <b>BASE WALLET · W0 MOCKUP <button type="button" id="mockmin" aria-label="Fold the state list">–</button></b>
+  <div class="grid" id="states"></div>
+</div>
+
+<script>
+// Example values only: a test-network wallet, a synthetic address and synthetic transfers.
+const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const NAME = 'Pinako';
+const ADDR = '0x5A1c9e0B7d3F42a6C81e0D29b4A7f3E6c2D90B41';
+const TO = '0x9C2e4bD107a3F0E8c5A1D46B7E92F0a1C3B85D7E';
+const SHORT = (a) => a.slice(0, 6) + '…' + a.slice(-4);
+// The backup key is one long string, shown in 16 numbered groups of 4.
+// A made-up sample, built here so no key-like string sits in the source.
+const KEY = Array.from({ length: 64 }, (_, i) => '0123456789abcdef'[(i * 7 + 3 + (i >> 2) * 5) % 16]).join('');
+const GROUPS = KEY.match(/.{4}/g);
+// The line is the last 24 hours, always the same width: it starts at the balance
+// as it was 24 hours ago, read from Base, and moves at each transfer since.
+const WINDOW = 24 * 60;                 // minutes; t = minutes since the window opened
+const NOW_CLOCK = 17 * 60 + 42;         // now, 17:42 Berlin
+const START = 8;                        // the balance 24 hours ago (from earlier transfers)
+let block = 18402113;
+// Transfers of this address on Base in the last 24 hours (synthetic).
+const EVENTS = [
+  { t: 21 * 60 + 15 - NOW_CLOCK, d: -3, k: `Spent by ${NAME}`, s: 'Summary for “Launch notes”' },
+  { t: WINDOW - (NOW_CLOCK - (12 * 60 + 5)), d: 28.2, k: 'Received', s: `From ${SHORT('0x3B7f0A91c4E2D58B6a07F3C1e9D24B580A6E1F92')} · block 18,397,402` },
+  { t: WINDOW - (NOW_CLOCK - (14 * 60 + 31)), d: -2, k: `Spent by ${NAME}`, s: 'Data lookup' },
+  { t: WINDOW - (NOW_CLOCK - (15 * 60 + 10)), d: -5, k: 'Withdrawn', s: `To ${SHORT(TO)} · fee sponsored` },
+  { t: WINDOW - (NOW_CLOCK - (16 * 60 + 58)), d: -1.2, k: `Spent by ${NAME}`, s: 'Research task in “Q4 market”' },
+];
+const NOW_MIN = WINDOW;
+const balanceAt = (t) => EVENTS.reduce((sum, e) => (e.t <= t ? sum + e.d : sum), START);
+const fmt = (n) => (Math.round(n * 100) / 100).toFixed(2);
+/** A window minute as a clock time: "Yesterday 21:15" or "14:31". */
+const hhmm = (t) => {
+  const clock = NOW_CLOCK - (WINDOW - t);
+  const m = ((Math.round(clock) % WINDOW) + WINDOW) % WINDOW;
+  const time = `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  return clock < 0 ? `Yesterday ${time}` : time;
+};
+const group = (n) => n.toLocaleString('en-US');
+const ic = {
+  back: '<svg class="i" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>',
+  chev: '<svg class="i chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>',
+  copy: '<svg class="i" viewBox="0 0 24 24" style="width:14px;height:14px"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>',
+  warn: '<svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>',
+  ext: '<svg class="i" viewBox="0 0 24 24" style="width:13px;height:13px"><path d="M7 17L17 7M9 7h8v8"/></svg>',
+};
+const back = (label, to) => `<button class="backbtn" data-go="${to}">${ic.back}${label}</button>`;
+
+/* ---------- odometer ---------- */
+function odoMarkup(ch) {
+  return /\d/.test(ch)
+    ? `<span class="od"><span>${'0123456789'.split('').map((d) => `<i>${d}</i>`).join('')}</span></span>`
+    : `<span class="oc">${ch}</span>`;
+}
+/** Rolls `el` to `text`: each digit column slides to its value, right to left, a hair apart. */
+function odo(el, text, instant) {
+  const chars = [...text];
+  if (Number(el.dataset.len) !== chars.length) {
+    const old = el.dataset.text || '';
+    el.innerHTML = chars.map(odoMarkup).join('');
+    el.dataset.len = String(chars.length);
+    // Start from the old digits, right-aligned, so a change of length still rolls.
+    [...el.children].forEach((node, i) => {
+      const prev = old[old.length - chars.length + i];
+      if (!node.classList.contains('od')) return;
+      node.firstChild.style.transition = 'none';
+      node.firstChild.style.transform = `translateY(${-(/\d/.test(prev || '') ? Number(prev) : 0)}em)`;
+    });
+    void el.offsetWidth;
+  }
+  el.dataset.text = text;
+  const n = chars.length;
+  [...el.children].forEach((node, i) => {
+    const ch = chars[i];
+    if (!node.classList.contains('od')) { node.textContent = ch; return; }
+    const strip = node.firstChild;
+    strip.style.transition = instant || REDUCED ? 'none' : '';
+    strip.style.transitionDelay = instant ? '0ms' : `${(n - 1 - i) * 28}ms`;
+    strip.style.transform = `translateY(${-Number(ch)}em)`;
+  });
+}
+
+/* ---------- live block heartbeat ---------- */
+let beatTimer = 0;
+function startHeartbeat() {
+  clearInterval(beatTimer);
+  beatTimer = setInterval(() => {
+    block += 1;
+    document.querySelectorAll('[data-block]').forEach((el) => odo(el, group(block)));
+    document.querySelectorAll('.beat').forEach((b) => {
+      b.classList.add('on');
+      requestAnimationFrame(() => requestAnimationFrame(() => b.classList.remove('on')));
+    });
+  }, 2000);
+}
+const readLine = () =>
+  `<span class="read"><span class="beat"></span>Read from Base · block <span class="odo" data-block></span> · just now</span>`;
+function fillBlocks() {
+  document.querySelectorAll('[data-block]').forEach((el) => odo(el, group(block), true));
+}
+
+/* ---------- history line: scrub the balance through today ---------- */
+function mountHistory(box, bigEl, noteEl) {
+  const W = () => box.clientWidth, H = box.clientHeight || 52, pad = 4;
+  const max = Math.max(START, ...EVENTS.map((e) => balanceAt(e.t))) * 1.08;
+  const x = (t) => (t / NOW_MIN) * W();
+  const y = (v) => H - pad - (v / max) * (H - pad * 2);
+  // A step line with soft corners: the balance holds, then moves at a transfer.
+  function path() {
+    const w = W(), r = Math.min(7, w / 70);
+    let d = `M0 ${y(START)}`;
+    let v = START;
+    for (const e of EVENTS) {
+      const ex = x(e.t), nv = v + e.d;
+      d += ` L${Math.max(0, ex - r)} ${y(v)} C${ex} ${y(v)} ${ex} ${y(nv)} ${Math.min(w, ex + r)} ${y(nv)}`;
+      v = nv;
+    }
+    d += ` L${w} ${y(v)}`;
+    return d;
+  }
+  function draw() {
+    const d = path();
+    box.innerHTML = `
+      <svg aria-hidden="true">
+        <defs><linearGradient id="fade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="currentColor" stop-opacity=".09"/><stop offset="1" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs>
+        <line class="base" x1="0" x2="${W()}" y1="${y(0)}" y2="${y(0)}"/>
+        <path class="area" style="color:var(--ink)" d="${d} L${W()} ${H} L0 ${H} Z"/>
+        <path class="line" d="${d}" pathLength="1" style="stroke-dasharray:1;stroke-dashoffset:${REDUCED ? 0 : 1}"/>
+        ${EVENTS.map((e, i) => `<circle class="ev" data-i="${i}" cx="${x(e.t)}" cy="${y(balanceAt(e.t))}" r="2.4"/>`).join('')}
+        <line class="cursor" y1="0" y2="${H}"/>
+        <circle class="dot" r="3"/>
+      </svg>
+      <div class="ticks"><span>24h ago</span><span>12h</span><span>Now</span></div>`;
+    const line = box.querySelector('.line');
+    if (!REDUCED) requestAnimationFrame(() => {
+      line.style.transition = 'stroke-dashoffset 1.4s cubic-bezier(.6,.05,.2,1)';
+      line.style.strokeDashoffset = '0';
+    });
+  }
+  draw();
+  addEventListener('resize', draw);
+  let raf = 0, target = null;
+  function show(t) {
+    const cursor = box.querySelector('.cursor'), dot = box.querySelector('.dot');
+    const near = EVENTS.findIndex((e) => Math.abs(x(e.t) - x(t)) < 10);
+    const at = near >= 0 ? EVENTS[near].t : t;
+    const v = balanceAt(at);
+    cursor.setAttribute('x1', x(at)); cursor.setAttribute('x2', x(at));
+    dot.setAttribute('cx', x(at)); dot.setAttribute('cy', y(v));
+    box.querySelectorAll('.ev').forEach((c) => c.classList.toggle('hot', Number(c.dataset.i) === near));
+    document.querySelectorAll('[data-ev]').forEach((r) => r.classList.toggle('hot', Number(r.dataset.ev) === near));
+    odo(bigEl, fmt(v));
+    noteEl.innerHTML = near >= 0
+      ? `<span class="scrubnote">${hhmm(at)} · ${EVENTS[near].k} ${EVENTS[near].d > 0 ? '+' : '−'}${fmt(Math.abs(EVENTS[near].d))}</span>`
+      : `<span class="scrubnote">${hhmm(at)}</span><span class="read">Balance then, from Base transfers</span>`;
+  }
+  function rest() {
+    box.classList.remove('scrubbing');
+    box.querySelectorAll('.ev').forEach((c) => c.classList.remove('hot'));
+    document.querySelectorAll('[data-ev]').forEach((r) => r.classList.remove('hot'));
+    odo(bigEl, fmt(balanceAt(NOW_MIN)));
+    noteEl.innerHTML = `<span class="num">0.0012 ETH</span>${readLine()}`;
+    fillBlocks();
+  }
+  const at = (ev) => {
+    const r = box.getBoundingClientRect();
+    return Math.max(0, Math.min(NOW_MIN, ((ev.clientX - r.left) / r.width) * NOW_MIN));
+  };
+  box.addEventListener('pointermove', (ev) => {
+    box.classList.add('scrubbing');
+    target = at(ev);
+    if (!raf) raf = requestAnimationFrame(() => { raf = 0; show(target); });
+  });
+  box.addEventListener('pointerdown', (ev) => { box.setPointerCapture(ev.pointerId); box.classList.add('scrubbing'); show(at(ev)); });
+  box.addEventListener('pointerleave', rest);
+  box.addEventListener('pointerup', (ev) => { if (ev.pointerType !== 'mouse') rest(); });
+  rest();
+}
+
+/* ---------- QR that assembles, then tilts ---------- */
+function mountQR(stage) {
+  const holder = document.createElement('div');
+  let matrix;
+  try {
+    const q = new QRCode(holder, { text: 'ethereum:' + ADDR + '@84532', width: 64, height: 64, correctLevel: QRCode.CorrectLevel.M });
+    const m = q._oQRCode, n = m.getModuleCount();
+    matrix = Array.from({ length: n }, (_, r) => Array.from({ length: n }, (_, c) => m.isDark(r, c)));
+  } catch { matrix = null; }
+  const canvas = stage.querySelector('canvas');
+  const size = 184, dpr = Math.min(3, devicePixelRatio || 1);
+  canvas.width = size * dpr; canvas.height = size * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  if (!matrix) return;
+  const n = matrix.length, cell = size / n;
+  const fg = '#111113';
+  const mods = [];
+  matrix.forEach((row, r) => row.forEach((dark, c) => {
+    if (!dark) return;
+    const finder = (r < 7 && c < 7) || (r < 7 && c >= n - 7) || (r >= n - 7 && c < 7);
+    const ang = Math.random() * Math.PI * 2, dist = 60 + Math.random() * 140;
+    mods.push({
+      x: c * cell, y: r * cell, finder,
+      fx: c * cell + Math.cos(ang) * dist, fy: r * cell + Math.sin(ang) * dist,
+      delay: finder ? Math.random() * 120 : 160 + Math.hypot(r - n / 2, c - n / 2) * 18 + Math.random() * 220,
+    });
+  }));
+  const ease = (t) => 1 - Math.pow(1 - t, 4);
+  const start = performance.now(), dur = 700;
+  function frame(now) {
+    ctx.clearRect(0, 0, size, size);
+    ctx.fillStyle = fg;
+    let done = true;
+    for (const m of mods) {
+      let p = REDUCED ? 1 : (now - start - m.delay) / dur;
+      if (p < 1) done = false;
+      p = Math.max(0, Math.min(1, p));
+      if (p === 0) continue;
+      const e = ease(p);
+      const px = m.fx + (m.x - m.fx) * e, py = m.fy + (m.y - m.fy) * e;
+      // Settled modules touch (scanners need solid finder squares); in flight they are smaller.
+      const s = cell * (0.4 + 0.6 * e) + (p === 1 ? 0.6 : 0);
+      ctx.globalAlpha = Math.min(1, p * 2);
+      const rr = m.finder ? 0 : cell * 0.14 * (1 - e) + cell * 0.08;
+      ctx.beginPath();
+      if (ctx.roundRect && rr > 0) ctx.roundRect(px + (cell - s) / 2, py + (cell - s) / 2, s, s, rr);
+      else ctx.rect(px + (cell - s) / 2, py + (cell - s) / 2, s, s);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    if (!done) requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+  // Tilt toward the pointer, with a soft sheen where the light would fall.
+  const card = stage.querySelector('.qrcard'), sheen = stage.querySelector('.sheen');
+  stage.addEventListener('pointermove', (ev) => {
+    if (REDUCED) return;
+    const r = card.getBoundingClientRect();
+    const px = (ev.clientX - r.left) / r.width - 0.5, py = (ev.clientY - r.top) / r.height - 0.5;
+    card.style.transition = 'transform .08s linear';
+    card.style.transform = `rotateY(${px * 14}deg) rotateX(${-py * 14}deg) translateZ(0)`;
+    sheen.style.setProperty('--sx', `${(px + 0.5) * 100}%`);
+    sheen.style.setProperty('--sy', `${(py + 0.5) * 100}%`);
+  });
+  stage.addEventListener('pointerleave', () => { card.style.transition = ''; card.style.transform = ''; });
+}
+
+/* ---------- hold to reveal, then decode ---------- */
+function mountReveal() {
+  const btn = document.getElementById('hold'), keyEl = document.getElementById('key');
+  const prog = btn.querySelector('.prog'), C = 2 * Math.PI * 11;
+  prog.style.strokeDasharray = C; prog.style.strokeDashoffset = C;
+  let p = 0, holding = false, last = 0, revealed = false;
+  const HOLD = 1100;
+  function tick(now) {
+    const dt = last ? now - last : 16; last = now;
+    p = Math.max(0, Math.min(1, p + (holding ? dt / HOLD : -dt / 300)));
+    prog.style.strokeDashoffset = C * (1 - p);
+    if (p >= 1 && !revealed) { revealed = true; decode(); return; }
+    if (holding || p > 0) requestAnimationFrame(tick); else last = 0;
+  }
+  const down = (ev) => { if (revealed) return; ev.preventDefault(); holding = true; last = 0; requestAnimationFrame(tick); };
+  const up = () => { holding = false; };
+  btn.addEventListener('pointerdown', down);
+  btn.addEventListener('pointerup', up); btn.addEventListener('pointerleave', up); btn.addEventListener('pointercancel', up);
+  btn.addEventListener('keydown', (ev) => { if ((ev.key === ' ' || ev.key === 'Enter') && !ev.repeat) down(ev); });
+  btn.addEventListener('keyup', up);
+  function decode() {
+    btn.classList.add('done'); btn.innerHTML = 'Shown once · save it now';
+    keyEl.classList.remove('hidden');
+    const cells = [...keyEl.querySelectorAll('b')];
+    const hex = '0123456789abcdef';
+    const t0 = performance.now();
+    function step(now) {
+      let busy = false;
+      cells.forEach((cell, gi) => {
+        const real = GROUPS[gi];
+        let out = '';
+        for (let i = 0; i < 4; i++) {
+          const settle = (gi * 4 + i) * 16 + 220;
+          if (REDUCED || now - t0 >= settle) out += real[i];
+          else { busy = true; out += hex[(Math.random() * 16) | 0]; }
+        }
+        cell.textContent = out;
+        cell.classList.toggle('noise', out !== real);
+      });
+      if (busy) requestAnimationFrame(step);
+      else {
+        document.getElementById('copykey').disabled = false;
+        const box = document.getElementById('saved');
+        box.disabled = false; box.closest('.check').classList.remove('off');
+      }
+    }
+    requestAnimationFrame(step);
+  }
+}
+
+/* ---------- limit dial ---------- */
+function mountDial(wrap, used) {
+  const MAX = 50, STEP = 0.5, GAP = 24;           // degrees left open at the top
+  const R = 108, CX = 130, CY = 130, SPAN = 360 - GAP;
+  let value = 10;
+  const polar = (deg, r = R) => {
+    const a = ((deg - 90) * Math.PI) / 180;
+    return [CX + r * Math.cos(a), CY + r * Math.sin(a)];
+  };
+  const degOf = (v) => GAP / 2 + (v / MAX) * SPAN;
+  const arc = (from, to, r = R) => {
+    const [x1, y1] = polar(from, r), [x2, y2] = polar(to, r);
+    return `M${x1} ${y1} A${r} ${r} 0 ${to - from > 180 ? 1 : 0} 1 ${x2} ${y2}`;
+  };
+  const ticks = Array.from({ length: MAX + 1 }, (_, v) => {
+    const major = v % 10 === 0;
+    const [x1, y1] = polar(degOf(v), R + 14), [x2, y2] = polar(degOf(v), R + (major ? 22 : 18));
+    return `<line class="dial-tick${major ? ' major' : ''}" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`;
+  }).join('');
+  wrap.innerHTML = `
+    <svg viewBox="0 0 260 260" role="slider" tabindex="0" aria-label="${NAME}'s spending limit, USDC a day" aria-valuemin="0" aria-valuemax="${MAX}" aria-valuenow="${value}">
+      ${ticks}
+      <path class="dial-track" d="${arc(GAP / 2, 360 - GAP / 2)}"/>
+      <path class="dial-arc" d=""/>
+      <path class="dial-used" d=""/>
+      <circle class="knob" r="12"/>
+    </svg>
+    <div class="dial-center"><span class="big"><span class="odo" id="dialv"></span></span><small>USDC a day</small><span class="used" id="dialused"></span></div>`;
+  const svg = wrap.querySelector('svg'), arcEl = wrap.querySelector('.dial-arc'), usedEl = wrap.querySelector('.dial-used'), knob = wrap.querySelector('.knob');
+  const out = wrap.querySelector('#dialv'), usedNote = wrap.querySelector('#dialused');
+  let shown = value;
+  function paint(v, instant) {
+    const d = degOf(v);
+    arcEl.setAttribute('d', v > 0 ? arc(GAP / 2, d) : '');
+    usedEl.setAttribute('d', v > 0 ? arc(GAP / 2, degOf(Math.min(used, v)), R - 14) : '');
+    const [kx, ky] = polar(d);
+    knob.setAttribute('cx', kx); knob.setAttribute('cy', ky);
+    odo(out, fmt(v), instant);
+    usedNote.textContent = used > v ? `${fmt(used)} already used today` : `${fmt(used)} used · ${fmt(v - used)} left today`;
+    svg.setAttribute('aria-valuenow', String(v));
+    svg.setAttribute('aria-valuetext', `${fmt(v)} USDC a day`);
+  }
+  // Ease the drawn value toward the chosen one, so the arc glides between detents.
+  let anim = 0;
+  function glide() {
+    shown += (value - shown) * (REDUCED ? 1 : 0.28);
+    if (Math.abs(value - shown) < 0.01) shown = value;
+    const d = degOf(shown);
+    arcEl.setAttribute('d', shown > 0 ? arc(GAP / 2, d) : '');
+    const [kx, ky] = polar(d); knob.setAttribute('cx', kx); knob.setAttribute('cy', ky);
+    anim = shown !== value ? requestAnimationFrame(glide) : 0;
+  }
+  function set(v, fromDrag) {
+    const nv = Math.max(0, Math.min(MAX, Math.round(v / STEP) * STEP));
+    if (nv === value) return;
+    const crossedWhole = Math.floor(nv) !== Math.floor(value);
+    value = nv;
+    paint(value);
+    if (fromDrag) { cancelAnimationFrame(anim); shown = value; } else if (!anim) anim = requestAnimationFrame(glide);
+    if (crossedWhole && !REDUCED) { knob.classList.add('pulse'); setTimeout(() => knob.classList.remove('pulse'), 120); }
+  }
+  paint(value, true);
+  let prevDeg = degOf(value);
+  function fromPointer(ev) {
+    const r = svg.getBoundingClientRect();
+    const x = ((ev.clientX - r.left) / r.width) * 260 - CX, y = ((ev.clientY - r.top) / r.height) * 260 - CY;
+    let deg = (Math.atan2(y, x) * 180) / Math.PI + 90;
+    if (deg < 0) deg += 360;
+    // In the gap, or a jump across it: hold at the nearer end instead of wrapping around.
+    if (deg < GAP / 2 || deg > 360 - GAP / 2 || Math.abs(deg - prevDeg) > 180) deg = prevDeg > 180 ? 360 - GAP / 2 : GAP / 2;
+    prevDeg = deg;
+    set(((deg - GAP / 2) / SPAN) * MAX, true);
+  }
+  svg.addEventListener('pointerdown', (ev) => { svg.setPointerCapture(ev.pointerId); wrap.classList.add('drag'); prevDeg = degOf(value); fromPointer(ev); });
+  svg.addEventListener('pointermove', (ev) => { if (wrap.classList.contains('drag')) fromPointer(ev); });
+  const end = () => wrap.classList.remove('drag');
+  svg.addEventListener('pointerup', end); svg.addEventListener('pointercancel', end);
+  svg.addEventListener('keydown', (ev) => {
+    const k = { ArrowUp: STEP, ArrowRight: STEP, ArrowDown: -STEP, ArrowLeft: -STEP, PageUp: 5, PageDown: -5 }[ev.key];
+    if (k) { ev.preventDefault(); set(value + k); }
+    if (ev.key === 'Home') { ev.preventDefault(); set(0); }
+    if (ev.key === 'End') { ev.preventDefault(); set(MAX); }
+  });
+}
+
+/* ---------- screens ---------- */
+const activity = () => `
+  <div class="list">
+    ${EVENTS.map((e, i) => ({ e, i })).reverse().map(({ e, i }) => `
+      <div class="row" data-ev="${i}"><span class="k"><b>${e.k}</b><span>${e.s} · ${hhmm(e.t)}${e.d > 0 || e.k === 'Withdrawn' ? ' · <a href="#">Basescan</a>' : ''}</span></span><span class="amt num${e.d > 0 ? ' in' : ''}">${e.d > 0 ? '+' : '−'}${fmt(Math.abs(e.d))}</span></div>`).join('')}
+  </div>`;
+
+const S = {
+  pane: {
+    label: 'Agent', back: '',
+    html: () => `
+      <div class="stack" style="gap:4px"><p class="eyebrow">Hosted by Central City · Base ID 99268</p><h2 class="title">${NAME}</h2></div>
+      <div class="actions"><button class="btn">Message ${NAME}</button><button class="btn ghost">Pause</button></div>
+      <div class="list">
+        <button class="row" data-go="wallet"><span class="k"><b>Wallet</b></span><span class="v strong num">25.00 USDC</span>${ic.chev}</button>
+        <button class="row"><span class="k"><b>Base</b></span><span class="v">Final</span>${ic.chev}</button>
+        <button class="row"><span class="k"><b>Messages</b></span>${ic.chev}</button>
+        <button class="row"><span class="k"><b>Rooms</b></span><span class="v">2</span>${ic.chev}</button>
+        <button class="row"><span class="k"><b>Auto-reply</b></span><span class="v">On</span>${ic.chev}</button>
+      </div>
+      <p class="hint">An agent without a wallet shows “Set up” here instead of a balance.</p>`,
+  },
+  setup: {
+    label: 'Set up', back: back(NAME, 'pane'),
+    html: () => `
+      <div class="progress"><i class="on"></i><i></i><i></i></div>
+      <h2 class="title">Your wallet key</h2>
+      <p class="lead">One key for the wallets of all your agents. You set it up once.</p>
+      <ul class="points">
+        <li><b>Only you can take money out.</b><span>Moving money needs your wallet password. Central City can’t.</span></li>
+        <li><b>Your agents spend only inside your limits.</b><span>You set an amount per day, week or month, and can revoke it.</span></li>
+        <li><b>The key stays with you.</b><span>It’s made and locked in this browser. Central City keeps only the locked copy.</span></li>
+      </ul>
+      <div class="field-wrap"><label for="pw1">Wallet password</label><input class="field" id="pw1" type="password" value="correct horse 42" autocomplete="new-password"><small>At least 12 characters. Central City never sees it.</small></div>
+      <div class="field-wrap"><label for="pw2">Repeat the password</label><input class="field" id="pw2" type="password" value="correct horse 42" autocomplete="new-password"></div>
+      <button class="btn wide" data-go="backup">Continue</button>`,
+  },
+  backup: {
+    label: 'Backup key', back: back('Wallet key', 'setup'),
+    html: () => `
+      <div class="progress"><i class="on"></i><i class="on"></i><i></i></div>
+      <h2 class="title">Save your backup key</h2>
+      <p class="lead">It restores your wallets if you forget the password or lose this browser. It’s shown once.</p>
+      <div class="key hidden" id="key" aria-label="Backup key, 16 groups of 4 characters">${GROUPS.map((g, n) => `<span><em>${n + 1}</em><b>••••</b></span>`).join('')}</div>
+      <div class="actions"><button class="hold" id="hold" type="button"><svg viewBox="0 0 28 28"><circle class="track" cx="14" cy="14" r="11"/><circle class="prog" cx="14" cy="14" r="11"/></svg>Press and hold to show</button>
+        <button class="btn ghost" id="copykey" disabled>${ic.copy}Copy key</button></div>
+      <p class="caution">${ic.warn}<span><b>Keep it offline.</b> Anyone with this key can take the money. Central City will never ask for it.</span></p>
+      <label class="check off"><input type="checkbox" id="saved" disabled> I saved the backup key. I understand it can’t be shown again.</label>
+      <button class="btn wide" id="next" data-go="confirm" disabled>Continue</button>`,
+    after: () => {
+      mountReveal();
+      const box = document.getElementById('saved'), next = document.getElementById('next');
+      box.addEventListener('change', () => { next.disabled = !box.checked; });
+    },
+  },
+  confirm: {
+    label: 'Confirm key', back: back('Backup key', 'backup'),
+    html: () => `
+      <div class="progress"><i class="on"></i><i class="on"></i><i class="on"></i></div>
+      <h2 class="title">Check your backup key</h2>
+      <p class="lead">Type two groups from the key you saved. Wallets take money only after this.</p>
+      <div class="field-wrap"><label for="g5">Group 5</label><input class="field mono" id="g5" value="${GROUPS[4]}" maxlength="4" autocomplete="off"></div>
+      <div class="field-wrap"><label for="g14">Group 14</label><input class="field mono err" id="g14" value="c5d" maxlength="4" autocomplete="off"><span class="err-line">That isn’t group 14. Check the key you saved.</span></div>
+      <button class="btn wide" data-go="empty">Finish</button>`,
+  },
+  empty: {
+    label: 'Ready', back: back(NAME, 'pane'),
+    html: () => `
+      <div class="hero"><p class="eyebrow">${NAME}’s wallet</p>
+        <div class="amount"><span class="big"><span class="odo" id="big"></span></span><span class="unit">USDC</span></div>
+        <div class="sub">${readLine()}</div>
+        <p class="hint" style="margin-top:14px">No transfers in the last 24 hours.</p></div>
+      <div class="actions"><button class="btn" data-go="deposit">Add funds</button><button class="btn ghost" disabled>Withdraw</button></div>
+      <div class="list"><button class="row" data-go="limit"><span class="k"><b>Spending limit</b><span>Not set · ${NAME} can’t spend yet</span></span>${ic.chev}</button></div>
+      <p class="hint">Send USDC on Base to start. ETH is shown too and can be withdrawn; ${NAME} never spends it.</p>`,
+    after: () => { odo(document.getElementById('big'), '0.00', true); fillBlocks(); },
+  },
+  deposit: {
+    label: 'Add funds', back: back('Wallet', 'wallet'),
+    html: () => `
+      <h2 class="title">Add funds</h2>
+      <p class="lead">Send USDC to ${NAME}’s address on the Base network.</p>
+      <div class="qrstage" id="qrstage"><div class="qrcard"><canvas aria-label="QR code of the address" role="img"></canvas><span class="sheen"></span></div></div>
+      <div class="address"><span class="mono">${ADDR}</span><button class="cp" id="copyaddr">${ic.copy}Copy</button></div>
+      <p class="caution">${ic.warn}<span><b>Base network only.</b> USDC or ETH sent on any other network, such as Ethereum or Arbitrum, doesn’t arrive and can’t be recovered.</span></p>
+      <p class="hint">Test network: use Base Sepolia test USDC. Example address.</p>`,
+    after: () => mountQR(document.getElementById('qrstage')),
+  },
+  wallet: {
+    label: 'Wallet', back: back(NAME, 'pane'),
+    html: () => `
+      <div class="hero"><p class="eyebrow">${NAME}’s wallet</p>
+        <div class="amount"><span class="big"><span class="odo" id="big"></span></span><span class="unit">USDC</span></div>
+        <div class="sub" id="note"></div>
+        <div class="history" id="history" aria-label="The balance over the last 24 hours, from Base transfers. Move across it to see the balance at a time."></div></div>
+      <div class="actions"><button class="btn" data-go="deposit">Add funds</button><button class="btn ghost" data-go="withdraw">Withdraw</button></div>
+      <div class="list">
+        <button class="row" data-go="limit"><span class="k"><b>Spending limit</b><span class="num">3.20 of 10.00 USDC today · resets at 00:00 Berlin</span>
+          <span class="meter" style="margin-top:7px;max-width:220px"><i style="width:32%"></i></span></span>${ic.chev}</button>
+        <div class="row"><span class="k"><b>Address</b><span class="mono">${SHORT(ADDR)} · Base network only</span></span><button class="cp" data-go="deposit">${ic.copy}Copy</button></div>
+      </div>
+      <p class="section">Last 24 hours</p>
+      ${activity()}
+      <p class="hint">Amounts in USDC. The line and the list are read from Base transfers to and from this address.</p>`,
+    after: () => {
+      const big = document.getElementById('big');
+      odo(big, '0.00', true);
+      mountHistory(document.getElementById('history'), big, document.getElementById('note'));
+    },
+  },
+  withdraw: {
+    label: 'Withdraw', back: back('Wallet', 'wallet'),
+    html: () => `
+      <h2 class="title">Withdraw</h2>
+      <div class="seg" role="tablist"><button class="on" role="tab" aria-selected="true">USDC</button><button role="tab" aria-selected="false">ETH</button></div>
+      <div class="field-wrap"><label for="amt">Amount</label><div class="inline"><input class="field num" id="amt" value="5.00" inputmode="decimal"><button class="btn ghost" style="height:44px">Max</button></div><small class="num">25.00 USDC available</small></div>
+      <div class="field-wrap"><label for="to">To</label><input class="field mono" id="to" value="${TO}" autocomplete="off"><small>A wallet or exchange address on the Base network.</small></div>
+      <dl class="facts"><dt>Network fee</dt><dd>Paid by Central City</dd><dt>They receive</dt><dd class="strong">5.00 USDC</dd><dt>Network</dt><dd>Base</dd></dl>
+      <div class="field-wrap"><label for="pw">Wallet password</label><input class="field" id="pw" type="password" value="correct horse 42"><small>Signs the withdrawal in this browser.</small></div>
+      <button class="btn wide" data-go="sent">Withdraw 5.00 USDC</button>`,
+  },
+  sent: {
+    label: 'Sent', back: back('Wallet', 'wallet'),
+    html: () => `
+      <div class="stack" style="gap:6px"><span class="status">Sent</span><h2 class="title">5.00 USDC on its way</h2></div>
+      <p class="lead">To <span class="mono">${SHORT(TO)}</span> on Base. The full amount arrives; Central City paid the network fee.</p>
+      <dl class="facts"><dt>Status</dt><dd>Included in block 18,402,130</dd><dt>Final</dt><dd class="muted">When Base finalizes that block</dd><dt>Transaction</dt><dd><a href="#" class="mono">0x7e41…c09a ${ic.ext}</a></dd></dl>
+      <div class="actions"><button class="btn ghost" data-go="wallet">Done</button></div>`,
+  },
+  errors: {
+    label: 'Address errors', back: back('Wallet', 'wallet'),
+    html: () => `
+      <h2 class="title">Withdraw</h2>
+      <div class="field-wrap"><label>To</label><input class="field mono err" value="0x9C2e4bd107a3F0E8c5A1D46B7E92F0a1C3B85D7" autocomplete="off"><span class="err-line">This address is incomplete. A Base address is 0x and 40 characters.</span></div>
+      <div class="field-wrap"><label>To</label><input class="field mono err" value="bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq" autocomplete="off"><span class="err-line">That’s a Bitcoin address. This wallet sends only to Base addresses.</span></div>
+      <div class="field-wrap"><label>To</label><input class="field mono err" value="${ADDR}" autocomplete="off"><span class="err-line">That’s this wallet’s own address.</span></div>
+      <button class="btn wide" disabled>Withdraw 5.00 USDC</button>`,
+  },
+  limit: {
+    label: 'Spending limit', back: back('Wallet', 'wallet'),
+    html: () => `
+      <h2 class="title">Spending limit</h2>
+      <p class="lead">Turn the ring to set what ${NAME} may spend, in USDC. ${NAME} never spends ETH.</p>
+      <div class="dialwrap" id="dial"></div>
+      <div class="stack" style="align-items:center;gap:8px">
+        <span class="seg"><button class="on">a day</button><button>a week</button><button>a month</button></span>
+        <span class="hint">A day resets at 00:00 Berlin, a week on Monday 00:00, a month on the 1st at 00:00.</span>
+      </div>
+      <div class="field-wrap"><label for="lpw">Wallet password</label><input class="field" id="lpw" type="password" value="correct horse 42"><small>You sign this limit in your browser. ${NAME} can’t change it.</small></div>
+      <button class="btn wide">Save limit</button>
+      <div class="actions" style="justify-content:center"><button class="btn text danger">Revoke the limit</button></div>`,
+    after: () => mountDial(document.getElementById('dial'), 3.2),
+  },
+  stale: {
+    label: 'Base not answering', back: back(NAME, 'pane'),
+    html: () => `
+      <div class="hero"><p class="eyebrow">${NAME}’s wallet</p>
+        <div class="amount"><span class="big"><span class="odo" id="big"></span></span><span class="unit">USDC</span></div>
+        <div class="sub"><span class="num">0.0012 ETH</span><span class="read">Last read from Base · block 18,401,990 · 4 min ago</span></div></div>
+      <p class="caution">${ic.warn}<span><b>Base isn’t answering right now.</b> This is the last balance read. Withdrawals wait until Base answers.</span></p>
+      <div class="actions"><button class="btn" data-go="deposit">Add funds</button><button class="btn ghost" disabled>Withdraw</button></div>`,
+    after: () => odo(document.getElementById('big'), '25.00', true),
+  },
+  unlock: {
+    label: 'New browser', back: back(NAME, 'pane'),
+    html: () => `
+      <h2 class="title">Unlock your wallet key</h2>
+      <p class="lead">This browser hasn’t used your wallet key yet. Seeing balances never needs it; moving money does.</p>
+      <div class="field-wrap"><label for="upw">Wallet password</label><input class="field" id="upw" type="password" value="correct horse 42"></div>
+      <button class="btn wide">Unlock</button>
+      <div class="actions" style="justify-content:center"><button class="btn text">Restore with your backup key</button></div>`,
+  },
+};
+
+const order = Object.keys(S);
+let current = 'wallet';
+function render(name) {
+  current = name;
+  const st = S[name];
+  document.getElementById('back').innerHTML = st.back || '';
+  document.getElementById('view').innerHTML = st.html();
+  if (st.after) st.after();
+  document.querySelectorAll('#states button').forEach((b) => b.classList.toggle('on', b.dataset.s === name));
+  document.querySelector('.dscroll').scrollTop = 0;
+  try { history.replaceState(null, '', '#' + name); } catch {}
+}
+document.getElementById('states').innerHTML = order.map((k) => `<button type="button" data-s="${k}">${S[k].label}</button>`).join('');
+document.getElementById('states').addEventListener('click', (e) => { const b = e.target.closest('button[data-s]'); if (b) render(b.dataset.s); });
+document.addEventListener('click', (e) => {
+  const copy = e.target.closest('#copyaddr, #copykey');
+  if (copy && !copy.disabled) {
+    const text = copy.id === 'copyaddr' ? ADDR : KEY;
+    const label = copy.innerHTML;
+    const done = () => { copy.textContent = 'Copied'; setTimeout(() => { copy.innerHTML = label; }, 1200); };
+    try { navigator.clipboard.writeText(text).then(done, done); } catch { done(); }
+    return;
+  }
+  const seg = e.target.closest('.seg button');
+  if (seg) { seg.parentElement.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b === seg)); return; }
+  const go = e.target.closest('[data-go]');
+  if (go && !go.disabled) { e.preventDefault(); render(go.dataset.go); }
+});
+document.getElementById('mockmin').addEventListener('click', () => document.getElementById('mock').classList.toggle('min'));
+// On a phone the state list starts folded so it doesn't cover the screen.
+if (window.innerWidth < 900) document.getElementById('mock').classList.add('min');
+startHeartbeat();
+const start = (location.hash || '').slice(1);
+render(S[start] ? start : 'wallet');
+// A link straight to a state (#limit, #backup …) opens it.
+addEventListener('hashchange', () => {
+  const name = location.hash.slice(1);
+  if (S[name] && name !== current) render(name);
+});
+</script>

@@ -45,12 +45,21 @@ test('create, list, post, auto-title, rename, delete; the first chat is one of t
   const f = await elricFixture(t);
   const a = await owner(f, 'Conv owner');
   const first = (await f.call(a.cookie, 'GET', '/api/elric/chat')).json();
+  // An empty chat is not listed; its first message lists it.
+  assert.deepEqual(await list(f, a.cookie), []);
+  const hello = await f.call(a.cookie, 'POST', `/api/rooms/${first.room_id}/messages`, {
+    agent_id: first.person_member_id,
+    text: '@Elric hello',
+    idempotency_key: randomUUID(),
+  });
+  assert.ok(hello.statusCode < 300, hello.body);
   const made = await create(f, a.cookie);
   assert.equal(made.statusCode, 201, made.body);
   const conv = made.json();
   assert.equal(conv.title, NEW_CONVERSATION_TITLE);
   assert.equal(conv.read_only, false);
   assert.ok(conv.person_member_id);
+  assert.equal((await list(f, a.cookie)).length, 1, 'the new chat lists with its first message');
   // Both are listed; posting in the new one titles it.
   f.tick(1_000);
   const post = await f.call(a.cookie, 'POST', `/api/rooms/${conv.id}/messages`, {
@@ -190,7 +199,13 @@ test('new conversations are not held to the revoke + re-add churn limit; the cap
   assert.equal(over.statusCode, 409, over.body);
   assert.equal(over.json().code, 'too_many_conversations');
   // Deleting one frees a place.
-  const one = (await list(f, a.cookie))[0]!;
+  // (Empty chats are not listed; delete one by id.)
+  const one = (
+    await f.db.query<{ id: string }>(
+      'SELECT id FROM rooms WHERE elric_private AND host_owner_id=$1 LIMIT 1',
+      [a.operatorId],
+    )
+  ).rows[0]!;
   await f.call(a.cookie, 'DELETE', `/api/elric/conversations/${one.id}`);
   assert.equal((await create(f, a.cookie)).statusCode, 201);
 });
@@ -202,8 +217,15 @@ test('revoke closes every conversation (read-only); erasing the account removes 
   await create(f, a.cookie, { title: 'Two' });
   await f.call(a.cookie, 'POST', '/api/elric/revoke', {});
   await f.call(a.cookie, 'GET', '/api/elric/chat').catch(() => undefined);
-  const listed = await list(f, a.cookie);
-  assert.ok(listed.length >= 1);
+  const open = Number(
+    (
+      await f.db.query<{ n: number }>(
+        'SELECT count(*)::int AS n FROM rooms WHERE elric_private AND host_owner_id=$1',
+        [a.operatorId],
+      )
+    ).rows[0]!.n,
+  );
+  assert.ok(open >= 1);
   await eraseElricOwner(f.db, a.operatorId);
   const left = Number(
     (
@@ -214,4 +236,54 @@ test('revoke closes every conversation (read-only); erasing the account removes 
     ).rows[0]!.n,
   );
   assert.equal(left, 0);
+});
+
+test('a chat deleted from the room settings (DELETE /api/rooms/:room) is deleted like /elric does', async (t) => {
+  // Regression: a private chat lists among the console's rooms under its title ("hi"), and the
+  // room settings' Delete answered 409 room_private ("This changed while you were working").
+  const f = await elricFixture(t);
+  const a = await owner(f, 'Rooms delete owner');
+  const conv = (await create(f, a.cookie)).json();
+  const post = await f.call(a.cookie, 'POST', `/api/rooms/${conv.id}/messages`, {
+    agent_id: conv.person_member_id,
+    text: '@Elric hi',
+    idempotency_key: randomUUID(),
+  });
+  assert.ok(post.statusCode < 300, post.body);
+  await f.elric.drain();
+  const title = (await list(f, a.cookie)).find((c) => c.id === conv.id)!.title;
+  // Titled by now (the fallback from "hi", or the auto title).
+  assert.ok(title && title !== NEW_CONVERSATION_TITLE, title);
+  const rooms = (await f.call(a.cookie, 'GET', '/api/rooms')).json().rooms as Array<{
+    id: string;
+    name: string;
+  }>;
+  assert.equal(rooms.find((r) => r.id === conv.id)?.name, title, 'listed among the rooms');
+  const wrong = await f.call(a.cookie, 'DELETE', `/api/rooms/${conv.id}`, {
+    confirm_name: `${title}x`,
+  });
+  assert.equal(wrong.statusCode, 400, wrong.body);
+  assert.equal(wrong.json().code, 'confirm_name_mismatch');
+  const gone = await f.call(a.cookie, 'DELETE', `/api/rooms/${conv.id}`, { confirm_name: title });
+  assert.equal(gone.statusCode, 200, gone.body);
+  assert.deepEqual(gone.json(), { room_id: conv.id, deleted: true });
+  assert.ok(!(await list(f, a.cookie)).some((c) => c.id === conv.id));
+  for (const table of ['rooms', 'room_messages', 'room_members', 'elric_turns']) {
+    const column = table === 'rooms' ? 'id' : 'room_id';
+    const left = await f.db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM ${table} WHERE ${column}=$1`,
+      [conv.id],
+    );
+    assert.equal(Number(left.rows[0]!.n), 0, table);
+  }
+  // Every other host path stays locked.
+  const renamed = await f.call(
+    a.cookie,
+    'PATCH',
+    `/api/rooms/${(await list(f, a.cookie))[0]?.id ?? conv.id}`,
+    {
+      name: 'Shared now',
+    },
+  );
+  assert.ok(renamed.statusCode >= 400, renamed.body);
 });

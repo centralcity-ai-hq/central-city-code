@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>My agents · final</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+/* My agents v4 — master/detail. Workspace v3 tokens, quieter scale. */
+:root{
+  --bg:#ffffff; --pane:#fbfbfc; --surface:#ffffff; --sunken:#f4f5f7; --hover:rgba(15,23,42,.035); --sel:rgba(15,23,42,.06);
+  --line:rgba(15,23,42,.08); --text:#0f172a; --muted:#64748b; --faint:#a0aab8;
+  --ink:#0f172a; --ink-text:#ffffff;
+  --accent:#2563eb; --accent-soft:#eef3ff; --accent-line:#c7d7fb;
+  --ok:#16a34a; --ok-soft:#ecfdf3; --warn:#b45309; --warn-soft:#fff7ed; --bad:#dc2626; --bad-soft:#fef2f2;
+  --shadow:0 12px 32px rgba(15,23,42,.08); --shadow-s:0 1px 2px rgba(15,23,42,.04),0 0 0 1px rgba(15,23,42,.05);
+  --sans:"Inter",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0b0d12;--pane:#0f1218;--surface:#151922;--sunken:#1b202b;--hover:rgba(255,255,255,.04);--sel:rgba(255,255,255,.07);--line:rgba(255,255,255,.08);--text:#eef1f6;--muted:#97a3b6;--faint:#5f6b7e;--ink:#eef1f6;--ink-text:#0b0d12;--accent:#6b9bff;--accent-soft:#17213a;--accent-line:#2c4380;--ok:#4ade80;--ok-soft:#10301f;--warn:#fbbf24;--warn-soft:#33260c;--bad:#f87171;--bad-soft:#3a1717;--shadow:0 12px 32px rgba(0,0,0,.4);--shadow-s:0 0 0 1px rgba(255,255,255,.06);color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#0b0d12;--pane:#0f1218;--surface:#151922;--sunken:#1b202b;--hover:rgba(255,255,255,.04);--sel:rgba(255,255,255,.07);--line:rgba(255,255,255,.08);--text:#eef1f6;--muted:#97a3b6;--faint:#5f6b7e;--ink:#eef1f6;--ink-text:#0b0d12;--accent:#6b9bff;--accent-soft:#17213a;--accent-line:#2c4380;--ok:#4ade80;--ok-soft:#10301f;--warn:#fbbf24;--warn-soft:#33260c;--bad:#f87171;--bad-soft:#3a1717;--shadow:0 12px 32px rgba(0,0,0,.4);--shadow-s:0 0 0 1px rgba(255,255,255,.06);color-scheme:dark}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--text);font:14px/1.5 var(--sans);-webkit-font-smoothing:antialiased;letter-spacing:-.006em}
+button,input,textarea{font:inherit;color:inherit;letter-spacing:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:8px}
+svg.i{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
+.app{display:flex;height:100%}
+
+/* shell nav (unchanged product shell, quieter) */
+.side{width:220px;flex-shrink:0;background:var(--pane);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:18px 10px;gap:1px}
+.brand{display:flex;align-items:center;gap:9px;padding:0 10px 16px;font-weight:600;font-size:15px}
+.brand i{width:20px;height:20px;border-radius:6px;background:var(--accent);display:block}
+.nav{display:flex;align-items:center;height:32px;padding:0 10px;border:0;background:none;border-radius:8px;font-weight:500;width:100%;text-align:left;color:var(--muted);transition:background .12s,color .12s}
+.nav:hover{background:var(--hover);color:var(--text)}
+.nav.on{background:var(--sel);color:var(--text);font-weight:600}
+.acct{margin-top:auto;display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:10px;font-size:13px}
+.acct small{display:block;color:var(--muted);font-size:12px}
+
+/* list column */
+.main{flex:1;min-width:0;display:flex;min-height:0}
+.listcol{width:340px;flex-shrink:0;border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0;background:var(--bg)}
+.lhead{display:flex;align-items:center;gap:6px;padding:18px 14px 10px 20px}
+.lhead h1{margin:0;font-size:20px;font-weight:600;letter-spacing:-.025em;flex:1;display:flex;align-items:baseline;gap:8px}
+.lhead h1 small{font-size:12.5px;font-weight:500;color:var(--muted);letter-spacing:0}
+.icon{width:30px;height:30px;border-radius:8px;border:0;background:none;color:var(--muted);display:inline-flex;align-items:center;justify-content:center;padding:0;position:relative;transition:background .12s,color .12s}
+.icon:hover{background:var(--hover);color:var(--text)}
+.icon .ndot{position:absolute;top:6px;right:6px;width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 2px var(--bg)}
+.search{display:flex;align-items:center;gap:8px;height:32px;margin:0 14px 8px;padding:0 10px;border-radius:9px;background:var(--sunken);color:var(--muted)}
+.search input{flex:1;border:0;background:none;outline:none;font-size:13.5px;color:var(--text)}
+.lbody{flex:1;overflow-y:auto;padding:2px 8px 80px}
+.rrow{display:flex;align-items:center;gap:11px;height:50px;padding:0 12px;border-radius:10px;cursor:pointer;transition:background .12s}
+.rrow:hover{background:var(--hover)}
+.rrow.on{background:var(--sel)}
+.who{display:flex;flex-direction:column;flex:1;min-width:0;line-height:1.3}
+.who b{font-weight:550;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.who small{color:var(--muted);font-size:12.5px}
+/* Same avatar as Rooms (WORKSPACE_V3 §2): white initials on the member colour, 10px corners for AI, round for people. */
+.av{position:relative;width:32px;height:32px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0;background:var(--c);color:#fff}
+.av.sm{width:28px;height:28px;border-radius:8px;font-size:12px}
+.av.p{border-radius:50%}
+.av.md{width:34px;height:34px;border-radius:10px;font-size:13.5px}
+.av.lg{width:56px;height:56px;border-radius:16px;font-size:22px}
+.av svg.i{width:24px;height:24px}
+.presence{position:absolute;right:-1px;bottom:-1px;width:9px;height:9px;border-radius:50%;background:var(--ok);border:2px solid var(--bg)}
+.presence.off{background:var(--faint)}
+.av.lg .presence{width:13px;height:13px;border-width:2.5px}
+.badge{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--accent);color:#fff;font-size:11px;font-weight:600;display:inline-flex;align-items:center;justify-content:center}
+.listlabel{font-size:11.5px;font-weight:600;color:var(--faint);padding:16px 12px 4px}
+.muted{color:var(--muted)}
+
+/* detail */
+.detail{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0;background:var(--pane)}
+.dtop{display:flex;align-items:center;height:52px;padding:0 20px;gap:8px}
+.backbtn{display:inline-flex;align-items:center;gap:2px;border:0;background:none;color:var(--muted);font-weight:500;font-size:13.5px;padding:4px 6px 4px 0;border-radius:8px}
+.backbtn:hover{color:var(--text)}
+.dscroll{flex:1;overflow-y:auto}
+.dwrap{max-width:560px;margin:0 auto;padding:8px 24px 64px;display:flex;flex-direction:column;gap:18px;animation:push .18s ease-out}
+@keyframes push{from{transform:translateY(4px);opacity:0}to{transform:none;opacity:1}}
+.dhead{display:flex;align-items:center;gap:16px;padding:10px 0 4px}
+.dhead h2{margin:0;font-size:22px;font-weight:600;letter-spacing:-.025em;line-height:1.2}
+.dhead p{margin:2px 0 0;color:var(--muted);font-size:13.5px}
+.dtitle{margin:4px 0 0;font-size:22px;font-weight:600;letter-spacing:-.025em}
+.dsub{margin:-12px 0 0;color:var(--muted);font-size:13.5px}
+.actions{display:flex;gap:8px;margin-top:2px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:34px;padding:0 14px;border-radius:9px;border:0;background:var(--ink);color:var(--ink-text);font-weight:550;font-size:13.5px;white-space:nowrap;transition:opacity .12s,background .12s}
+.btn:hover{opacity:.88}
+.btn.ghost{background:var(--surface);color:var(--text);box-shadow:var(--shadow-s)}
+.btn.ghost:hover{opacity:1;background:var(--sunken)}
+.btn.danger{background:var(--bad);color:#fff}
+.btn.soft{background:var(--surface);color:var(--text);box-shadow:var(--shadow-s)}
+.btn.soft:hover{opacity:1;background:var(--sunken)}
+.hero2 .mark{width:44px;height:44px;border-radius:12px;background:var(--surface);box-shadow:var(--shadow-s);color:var(--text);display:flex;align-items:center;justify-content:center;margin-bottom:8px}
+.hero2 .mark svg.i{width:20px;height:20px}
+.btn.block{width:100%;height:40px}
+.btn.sq{width:34px;padding:0}
+.btn[disabled]{opacity:.35;cursor:not-allowed}
+.quiet{border:0;background:none;color:var(--accent);font-weight:550;font-size:13.5px;padding:4px 2px}
+.group{background:var(--surface);border-radius:12px;box-shadow:var(--shadow-s);overflow:hidden}
+.gr{display:flex;align-items:center;gap:10px;min-height:44px;padding:0 14px;width:100%;border:0;background:none;text-align:left;font-size:14px;transition:background .12s}
+.gr+.gr{box-shadow:inset 0 1px 0 var(--line)}
+button.gr:hover{background:var(--hover)}
+.gr .k{flex:1;min-width:0}
+.gr .v{color:var(--muted);font-size:13.5px;white-space:nowrap;display:inline-flex;align-items:center;gap:6px}
+.gr .v.strong{color:var(--text);font-weight:550}
+.gr .two{flex:1;min-width:0;display:flex;flex-direction:column;padding:8px 0;line-height:1.35}
+.gr .two b{font-weight:550;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gr .two span{color:var(--muted);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gr time{color:var(--faint);font-size:12px;white-space:nowrap}
+.gr.sub{min-height:auto;padding-bottom:10px;margin-top:-8px;color:var(--muted);font-size:12.5px;box-shadow:none!important}
+.chev{width:14px;height:14px;color:var(--faint)}
+.mono{font-family:var(--mono);font-size:12.5px}
+.cp{width:26px;height:26px;border-radius:7px;border:0;background:none;color:var(--faint);display:inline-flex;align-items:center;justify-content:center;padding:0;flex-shrink:0}
+.cp:hover{background:var(--hover);color:var(--text)}
+.toggle{width:36px;height:21px;border-radius:11px;background:var(--line);position:relative;border:0;padding:0;flex-shrink:0;transition:background .15s}
+.toggle::after{content:"";position:absolute;top:2px;left:2px;width:17px;height:17px;border-radius:50%;background:#fff;transition:left .18s;box-shadow:0 1px 2px rgba(0,0,0,.2)}
+.toggle[aria-checked="true"]{background:var(--ok)}
+.toggle[aria-checked="true"]::after{left:17px}
+.note{color:var(--muted);font-size:12.5px;margin:-8px 2px 0}
+.field{width:100%;height:40px;border-radius:9px;border:0;box-shadow:var(--shadow-s);background:var(--surface);padding:0 12px;font-size:14px;outline:none}
+.field:focus{box-shadow:0 0 0 2px var(--accent)}
+.field.mono{font-family:var(--mono);font-size:13px}
+.pillst{font-size:11.5px;font-weight:550;border-radius:6px;padding:1px 7px;background:var(--sunken);color:var(--muted)}
+.pillst.ok{background:var(--ok-soft);color:var(--ok)}.pillst.warn{background:var(--warn-soft);color:var(--warn)}.pillst.bad{background:var(--bad-soft);color:var(--bad)}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--ok);flex-shrink:0}.dot.off{background:var(--faint)}
+.spin{width:14px;height:14px;border-radius:50%;border:2px solid var(--line);border-top-color:var(--text);animation:sp .9s linear infinite;flex-shrink:0}
+@keyframes sp{to{transform:rotate(360deg)}}
+.pulse{width:6px;height:6px;border-radius:50%;background:var(--faint);animation:pu 1.6s ease-in-out infinite;flex-shrink:0}
+@keyframes pu{50%{opacity:.3}}
+.okc{color:var(--ok);display:inline-flex}.bad{color:var(--bad)}
+.info{width:16px;height:16px;border-radius:50%;border:1px solid var(--line);background:none;color:var(--muted);font-size:10px;font-weight:700;padding:0;display:inline-flex;align-items:center;justify-content:center;position:relative;flex-shrink:0}
+.tip{position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);width:240px;background:var(--ink);color:var(--ink-text);font-size:12px;font-weight:500;line-height:1.45;padding:8px 10px;border-radius:9px;text-align:left;display:none;z-index:5}
+.info:hover .tip,.info:focus .tip{display:block}
+.hero2{display:flex;flex-direction:column;align-items:center;text-align:center;gap:4px;padding:28px 8px 8px}
+.hero2 b{font-size:15px}
+.hero2 span{color:var(--muted);font-size:13px}
+.keybox{font-family:var(--mono);font-size:12.5px;background:var(--surface);box-shadow:var(--shadow-s);border-radius:10px;padding:12px 14px;word-break:break-all}
+.seg{display:flex;background:var(--sunken);border-radius:9px;padding:2px;gap:2px}
+.seg button{flex:1;border:0;background:none;height:30px;border-radius:7px;font-size:13px;font-weight:550;color:var(--muted)}
+.seg button.on{background:var(--surface);color:var(--text);box-shadow:var(--shadow-s)}
+.choice{display:flex;align-items:center;gap:12px;padding:12px 14px;width:100%;text-align:left;border:0;background:none}
+.choice+.choice{box-shadow:inset 0 1px 0 var(--line)}
+.choice:hover{background:var(--hover)}
+.choice .mk{width:32px;height:32px;border-radius:9px;background:var(--sunken);color:var(--text);display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.choice .two{display:flex;flex-direction:column;flex:1;line-height:1.35}
+.choice .two b{font-weight:550}
+.choice .two span{color:var(--muted);font-size:12.5px}
+.thread{display:flex;flex-direction:column;gap:8px}
+.bub{max-width:80%;padding:8px 12px;border-radius:16px;font-size:14px;line-height:1.45;background:var(--surface);box-shadow:var(--shadow-s)}
+.bub.me{align-self:flex-end;background:var(--ink);color:var(--ink-text);box-shadow:none}
+.bub small{display:block;font-size:11px;opacity:.6;margin-top:2px}
+.composer{display:flex;gap:8px;padding:12px 24px 18px;max-width:560px;width:100%;margin:0 auto}
+.composer .btn{width:40px;height:40px;padding:0;border-radius:50%}
+.empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;color:var(--muted);text-align:center}
+.empty b{color:var(--text);font-size:15px}
+.hero{display:flex;flex-direction:column;align-items:center;text-align:center;gap:14px;padding:40px 24px}
+.hero h2{margin:0;font-size:26px;letter-spacing:-.03em;font-weight:600}
+.hero p{margin:-6px 0 6px;color:var(--muted)}
+.menuwrap{position:relative}
+.menu{position:absolute;top:calc(100% + 6px);left:0;width:190px;background:var(--surface);border-radius:11px;box-shadow:var(--shadow),var(--shadow-s);padding:4px;z-index:20}
+.menu button{display:flex;align-items:center;width:100%;height:32px;padding:0 10px;border:0;background:none;border-radius:7px;font-size:13.5px;text-align:left}
+.menu button:hover{background:var(--hover)}
+.menu hr{border:0;border-top:1px solid var(--line);margin:4px 6px}
+.menu .danger{color:var(--bad)}
+.pbx{display:flex;flex-direction:column;gap:14px}
+.mobile-only{display:none}
+@media (max-width:900px){.mobile-only{display:inline-flex}}
+.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--ink-text);padding:8px 14px;border-radius:999px;font-size:13px;font-weight:500;z-index:70}
+.mock{position:fixed;right:12px;bottom:12px;z-index:60;background:var(--surface);border:1px dashed var(--accent-line);border-radius:12px;padding:6px 10px;box-shadow:var(--shadow);font-size:12px;max-width:520px}
+.mock b{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:10px;letter-spacing:.08em;color:var(--accent)}
+.mock b button{border:0;background:none;color:var(--accent);font-size:15px;padding:0 2px}
+.mock.min .grid{display:none}
+.mock .grid{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.mock .grid button{border:1px solid var(--line);background:var(--sunken);border-radius:999px;padding:2px 8px;font-size:11px;font-weight:600}
+.mock .grid button.on{background:var(--ink);color:var(--ink-text);border-color:var(--ink)}
+@media (max-width:900px){
+  .side{display:none}
+  .listcol{width:100%;border-right:0}
+  .detail{position:fixed;inset:0;z-index:30;background:var(--pane)}
+  .detail.closed{display:none}
+  .mock{left:10px;right:10px;max-width:none}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<div class="app">
+  <aside class="side" aria-label="Workspace">
+    <div class="brand"><i></i>Central City</div>
+    <button class="nav">Rooms</button>
+    <button class="nav">Messages</button>
+    <button class="nav">Elric</button>
+    <button class="nav on" aria-current="page">My agents</button>
+    <button class="nav">Connect AI</button>
+    <div class="acct"><span class="av sm p" style="--c:#4d7c0f">L</span><div><b>Lustig</b><small>Private workspace</small></div></div>
+  </aside>
+  <main class="main">
+    <section class="listcol" aria-label="My agents">
+      <div class="lhead" id="lhead"></div>
+      <div id="searchbox"></div>
+      <div class="lbody" id="pageBody"></div>
+    </section>
+    <section class="detail" id="panel" aria-label="Agent"></section>
+  </main>
+</div>
+
+<div class="mock min" id="mock">
+  <b>MOCKUP STATES (NOT IN PRODUCT) <button id="mockToggle" aria-label="Show states">+</button></b>
+  <div class="grid" id="mockA"></div>
+  <div class="grid" id="mockB"></div>
+</div>
+
+<script>
+const I=(d,extra='')=>`<svg class="i" viewBox="0 0 24 24" ${extra}>${d}</svg>`;
+const ICON={
+  back:I('<path d="m15 6-6 6 6 6"/>'), chev:I('<path d="m9 6 6 6-6 6"/>','class="chev" style="width:14px;height:14px;color:var(--faint)"'),
+  close:I('<path d="M6 6l12 12M18 6 6 18"/>'), more:I('<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>'),
+  msg:I('<path d="M4 5h16v11H8l-4 4z"/>'), pause:I('<path d="M9 5v14M15 5v14"/>'), play:I('<path d="M7 5l12 7-12 7z"/>'),
+  copy:I('<rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/>'),
+  check:I('<path d="M5 12l5 5 9-10"/>','style="width:15px;height:15px"'), search:I('<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>'),
+  inbox:I('<path d="M4 13h4l1.5 2.5h5L16 13h4M5 5h14l1 8v6H4v-6z"/>'),
+  grid:I('<rect x="4" y="4" width="7" height="7" rx="2"/><rect x="13" y="4" width="7" height="7" rx="2"/><rect x="4" y="13" width="7" height="7" rx="2"/><rect x="13" y="13" width="7" height="7" rx="2"/>'),
+  plus:I('<path d="M12 5v14M5 12h14"/>'), send:I('<path d="M5 12h13M13 6l6 6-6 6"/>'),
+  base:I('<path d="M12 3 4 7v6c0 4 3.5 7 8 8 4.5-1 8-4 8-8V7z"/>'), plug:I('<path d="M9 7V3M15 7V3M7 7h10v4a5 5 0 0 1-10 0zM12 16v5"/>'),
+  spark:I('<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6"/>'),
+  link:I('<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>'),
+  key:I('<circle cx="8" cy="15" r="4"/><path d="m11 12 9-9M17 6l3 3"/>'), ext:I('<path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>','style="width:13px;height:13px"'),
+};
+const $=(s)=>document.querySelector(s);
+const esc=(t)=>String(t).replace(/[&<>"]/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const WALLET='0x752485a6B3126671C5DcdBe0e256Eb39F0A41Cc0', OWNER='0xD5224E3CD710AC7c069e66A2dFf29C387D162F03';
+const short=(x)=>x.slice(0,6)+'…'+x.slice(-4);
+
+const S={
+  page:'list', open:'winry', stack:['home'], menu:false, search:null, base:'final', reqs:1,
+  agents:[
+    {id:'elric',name:'Elric',color:'#2563eb',status:'On',when:'now',elric:true},
+    {id:'winry',name:'Winry',color:'#0f766e',status:'Online',when:'now',kind:'CC agent',does:'Research',autoreply:true,arMode:'dm',
+      threads:[{id:'t1',with:'Mira',color:'#7c3aed',last:'Can you summarize the Q4 notes?',time:'4 min',unread:2,
+        msgs:[['in','Morning! I dropped the Q4 notes in the room.','08:02'],['in','Can you summarize the Q4 notes?','08:04'],['me','On it. Brief with sources in 2 minutes.','08:05']]},
+        {id:'t2',with:'Courier',color:'#b91c1c',last:'Sources extracted, 12 links.',time:'1 h',unread:1,msgs:[['in','Sources extracted, 12 links.','07:10']]},
+        {id:'t3',with:'You',color:'#4d7c0f',last:'Welcome to Central City.',time:'today',unread:0,msgs:[['me','Welcome to Central City.','07:19']]}],
+      rooms:[{name:'Q4 review',live:true,n:4},{name:'Research desk',live:false,n:2}],
+      activity:[['Today',[['Finished a research brief','4 min','ok','Done'],['Run: summarize Q4 notes','6 min','warn','Running'],['Joined “Q4 review”','1 h','',''],['Became a Base agent','07:38','','']]],['Yesterday',[['Run: extract sources','18:20','bad','Failed']]]],
+      perms:[{name:'Courier',color:'#b91c1c',owner:'You',on:true},{name:'Checker',color:'#7e1d3c',owner:'You',on:true},{name:'Nova',color:'#0369a1',owner:'Mira',on:false}]},
+    {id:'scout',name:'Scout',color:'#a16207',status:'Online',when:'now',kind:'CC agent',does:'Research',threads:[],rooms:[],activity:[],perms:[]},
+    {id:'courier',name:'Courier',color:'#b91c1c',status:'Online',when:'2 min ago',kind:'CC agent',does:'Extract',threads:[],rooms:[],activity:[],perms:[]},
+    {id:'checker',name:'Checker',color:'#7e1d3c',status:'Paused',when:'1 h ago',kind:'CC agent',does:'Verify',threads:[],rooms:[],activity:[],perms:[]},
+  ],
+};
+const agent=(id)=>S.agents.find((a)=>a.id===id);
+const unreadOf=(a)=>(a.threads||[]).reduce((n,t)=>n+t.unread,0);
+const topScreen=()=>S.stack[S.stack.length-1];
+function go(screen){S.stack.push(screen);S.menu=false;renderPanel()}
+function back(){if(S.stack.length>1){S.stack.pop();renderPanel()}else closePanel()}
+function openAgent(id){S.open=id;S.stack=['home'];S.menu=false;S.page='list';render()}
+function openPanel(screen){S.open=null;S.stack=[screen];S.menu=false;render()}
+function closePanel(){S.open=null;S.stack=['home'];S.menu=false;render()}
+let tt;function toast(m){document.querySelectorAll('.toast').forEach((t)=>t.remove());const t=document.createElement('div');t.className='toast';t.setAttribute('role','status');t.textContent=m;document.body.appendChild(t);clearTimeout(tt);tt=setTimeout(()=>t.remove(),1700)}
+
+/* ---------- page ---------- */
+function render(){
+  const online=S.agents.filter((a)=>a.status!=='Paused').length;
+  $('#lhead').innerHTML=`<h1>Agents${S.page==='list'?`<small>${online} online</small>`:''}</h1>
+    ${S.page==='list'?`<button class="icon" aria-label="Search" onclick="S.search=S.search===null?'':null;render();const q=$('#q');if(q)q.focus()">${ICON.search}</button>`:''}
+    ${S.page==='list'?`<button class="icon" aria-label="Requests${S.reqs?' (1 new)':''}" onclick="openPanel('requests')">${ICON.inbox}${S.reqs?'<i class="ndot"></i>':''}</button>`:''}
+    <button class="icon" aria-label="Add an agent" onclick="openPanel('add')">${ICON.plus}</button>`;
+  $('#searchbox').innerHTML=S.search!==null?`<div class="search">${ICON.search}<input id="q" placeholder="Search" value="${esc(S.search)}" aria-label="Search agents"></div>`:'';
+  const q=$('#q');if(q){q.oninput=()=>{S.search=q.value;renderList()};q.onkeydown=(e)=>{if(e.key==='Escape'){S.search=null;render()}}}
+  renderList();renderPanel();renderMock();
+}
+function renderList(){
+  const body=$('#pageBody');
+  if(S.page==='empty'){body.innerHTML='';return}
+  const q=(S.search||'').toLowerCase();
+  const list=S.agents.filter((a)=>!q||a.name.toLowerCase().includes(q));
+  body.innerHTML=(list.length?list.map(row).join(''):`<p class="muted" style="padding:14px 12px;font-size:13px">No agent called “${esc(S.search)}”.</p>`)
+    +(S.removed&&!q?`<div class="listlabel">Removed</div>${S.removed.map((a)=>`<div class="rrow" style="opacity:.55;cursor:default"><span class="av" style="--c:${a.color}">${a.name[0]}</span><span class="who"><b>${esc(a.name)}</b><small>Removed today</small></span></div>`).join('')}`:'');
+}
+function row(a){
+  const paused=a.status==='Paused',u=unreadOf(a);
+  return `<div class="rrow ${S.open===a.id?'on':''}" role="button" tabindex="0" aria-current="${S.open===a.id}" onclick="openAgent('${a.id}')" onkeydown="if(event.key==='Enter')openAgent('${a.id}')">
+    <span class="av" style="--c:${a.color}">${a.name[0]}<i class="presence ${paused?'off':''}"></i></span>
+    <span class="who"><b>${esc(a.name)}</b><small>${a.elric?(paused?'Paused · Built in':'Built in'):paused?'Paused':a.when==='now'?'Active now':'Active '+a.when}</small></span>
+    ${u?`<span class="badge" aria-label="${u} new">${u}</span>`:''}</div>`;
+}
+function generate(){S.page='list';S.open='scout';S.stack=['home'];render();toast('3 example agents are ready')}
+
+/* ---------- detail ---------- */
+const nav=(k,v,screen)=>`<button class="gr" onclick="go('${screen}')"><span class="k">${k}</span><span class="v">${v}</span>${ICON.chev}</button>`;
+function head(title,sub){return `<h3 class="dtitle">${esc(title)}</h3>${sub?`<p class="dsub">${sub}</p>`:''}`}
+function backLabel(){const prev=S.stack[S.stack.length-2];const a=agent(S.open);
+  const names={home:a?a.name:'Back',messages:'Messages',developer:'Developer details',add:'Add an agent','add-ai':'Connect your AI'};return names[prev]||'Back';}
+function renderPanel(){
+  const el=$('#panel');
+  const a=S.open?agent(S.open):null;
+  const scr=topScreen();
+  const standalone=['add','add-cc','add-ai','add-custom','add-claim','requests'].includes(scr.split(':')[0]);
+  if(S.page==='empty'&&!standalone){
+    el.classList.remove('closed');
+    el.innerHTML=`<div class="dscroll" style="display:flex"><div class="hero" style="margin:auto"><div class="av lg" style="--c:#2563eb">${ICON.spark}</div><h2>Your agents live here.</h2><p>Add one, or start with three examples.</p>
+      <button class="btn" style="height:40px;padding:0 20px" onclick="openPanel('add')">Add an agent</button><button class="btn ghost" style="height:40px;padding:0 20px" onclick="generate()">Try example agents</button></div></div>`;return;
+  }
+  if(!a&&!standalone){el.classList.add('closed');el.innerHTML=`<div class="empty"><b>No agent selected</b><span>Pick one from the list.</span></div>`;return}
+  el.classList.remove('closed');
+  const html=SCREENS[scr.split(':')[0]](a,scr.split(':')[1]);
+  const [main,composer]=html.split('<!--composer-->');
+  const deep=S.stack.length>1;
+  el.innerHTML=`<div class="dtop">${deep?`<button class="backbtn" onclick="back()">${ICON.back}${esc(backLabel())}</button>`:`<button class="backbtn mobile-only" onclick="closePanel()">${ICON.back}Agents</button>`}</div>
+    <div class="dscroll"><div class="dwrap">${main.replace(/<div class="pb"[^>]*>/g,'<div class="pbx">')}</div></div>${composer||''}`;
+  el.querySelectorAll('[data-autofocus]').forEach((x)=>x.focus());
+}
+const SCREENS={
+  home(a){
+    if(a.elric){
+      const on=a.status!=='Paused';
+      return `<div class="dhead"><span class="av lg" style="--c:${a.color}">E<i class="presence ${on?'':'off'}"></i></span>
+        <div style="flex:1;min-width:0"><h2>Elric</h2><p>${on?'On':'Paused'} · Built in</p></div></div>
+      <div class="actions">
+        <button class="btn" onclick="toast('Opens a chat with Elric')">${ICON.msg}Chat</button>
+        <button class="btn ghost" onclick="togglePause('elric')">${on?ICON.pause+'Pause':ICON.play+'Resume'}</button>
+      </div>
+      <div class="group">
+        <button class="gr" onclick="toast('Opens Elric · Approvals')"><span class="k">Approvals</span><span class="v"><span class="badge">2</span></span>${ICON.chev}</button>
+        <button class="gr" onclick="toast('Opens Elric · Chats')"><span class="k">Chats</span><span class="v">Q4 plan · 1 h</span>${ICON.chev}</button>
+      </div>
+      <div class="group">
+        <button class="gr" onclick="toast('Opens Elric · Settings')"><span class="k">Settings</span><span class="v">Asks before acting</span>${ICON.chev}</button>
+      </div>`;
+    }
+    const paused=a.status==='Paused',w=a.id==='winry',u=unreadOf(a);
+    const baseLine=!w?nav('Base','Not yet','base'):({none:nav('Base','Not yet','base'),form:nav('Base','Not yet','base'),registering:`<button class="gr" onclick="go('base')"><span class="k">Base</span><span class="v"><span class="spin"></span>Registering</span>${ICON.chev}</button>`,slow:nav('Base','Taking longer','base'),finalizing:`<button class="gr" onclick="go('base')"><span class="k">Base</span><span class="v strong">ID 99179</span>${ICON.chev}</button><div class="gr sub"><span class="pulse"></span>Finalizing on Base · ~15 min</div>`,final:`<button class="gr" onclick="go('base')"><span class="k">Base</span><span class="v strong">ID 99179 <span class="okc">${ICON.check}</span></span>${ICON.chev}</button>`,rechecking:`<button class="gr" onclick="go('base')"><span class="k">Base</span><span class="v"><span class="spin"></span>Re-checking</span>${ICON.chev}</button>`,failed:`<button class="gr" onclick="go('base')"><span class="k">Base</span><span class="v bad">Didn’t go through</span>${ICON.chev}</button>`})[S.base];
+    return `<div class="dhead"><span class="av lg" style="--c:${a.color}">${a.name[0]}<i class="presence ${paused?'off':''}"></i></span>
+      <div style="flex:1;min-width:0"><h2>${esc(a.name)}</h2><p>${paused?'Paused':'Active now'} · ${a.kind}</p></div></div>
+    <div class="actions">
+      <button class="btn" onclick="go('messages')">${ICON.msg}Message</button>
+      <button class="btn ghost" onclick="togglePause('${a.id}')">${paused?ICON.play+'Resume':ICON.pause+'Pause'}</button>
+      <div class="menuwrap"><button class="btn ghost sq" aria-label="More" aria-haspopup="menu" aria-expanded="${S.menu}" onclick="event.stopPropagation();S.menu=!S.menu;renderPanel()">${ICON.more}</button>
+      ${S.menu?`<div class="menu" role="menu"><button role="menuitem" onclick="go('rename')">Rename</button><button role="menuitem" onclick="go('developer')">Developer details</button><hr><button role="menuitem" class="danger" onclick="go('remove')">Remove agent</button></div>`:''}</div>
+    </div>
+    <div class="group">${baseLine}</div>
+    <div class="group">
+      ${nav('Messages',u?`<span class="badge">${u}</span>`:'None','messages')}
+      ${nav('Rooms',a.rooms.length||'None','rooms')}
+      ${nav('Activity',a.activity.length?'Research brief · 4 min':'Nothing yet','activity')}
+    </div>
+    <div class="group">
+      ${nav('Auto-reply',a.autoreply?'On':'Off','autoreply')}
+      ${nav('Permissions',a.perms.filter((p)=>p.on).length?`${a.perms.filter((p)=>p.on).length} agents`:'None','permissions')}
+    </div>`;
+  },
+  base(a){
+    const info=(t)=>`<button class="info" aria-label="More">i<span class="tip" role="tooltip">${t}</span></button>`;
+    const wallets=`<div class="group"><div class="gr"><span class="k">${esc(a.name)}’s wallet</span><span class="v mono">${short(WALLET)}</span><button class="cp" aria-label="Copy" onclick="toast('Copied')">${ICON.copy}</button></div>
+      <div class="gr"><span class="k">Controlled by</span><span class="v">You · <span class="mono">${short(OWNER)}</span></span><button class="cp" aria-label="Copy" onclick="toast('Copied')">${ICON.copy}</button></div></div>`;
+    const h=head('Base');
+    if(a.id!=='winry'||S.base==='none') return h+`<div class="pb"><div class="hero2"><div class="mark">${ICON.base}</div><b>Give ${esc(a.name)} a Base identity</b><span>Its own ID and wallet on Base. Free.</span></div>
+      <input class="field mono" id="ownerAddr" placeholder="Your wallet address · 0x…" aria-label="Your wallet address" data-autofocus>
+      <p class="note" style="display:flex;gap:6px;align-items:center">Your wallet will control it. Address only. ${info('Paste the public address of a wallet you own. Never a seed phrase or private key. Central City never has your keys.')}</p>
+      <button class="btn block" onclick="startBase()">Continue</button></div>`;
+    const body={
+      form:'',
+      registering:`<div class="group"><div class="gr"><span class="spin"></span><span class="k">Registering on Base</span><span class="v">a few seconds</span></div></div>`,
+      slow:`<div class="group"><div class="gr"><span class="k">Taking longer than usual</span><button class="quiet" onclick="startBase()">Check again</button></div></div><p class="note">Base is busy. It continues by itself.</p>`,
+      finalizing:`<div class="group"><div class="gr"><span class="k">Base ID</span><span class="v strong">99179</span></div><div class="gr sub"><span class="pulse"></span>Finalizing on Base · ~15 min ${info('Live now. Base finalizes each block in about 15 minutes; the public passport appears then.')}</div></div>${wallets}`,
+      final:`<div class="group"><div class="gr"><span class="k">Base ID</span><span class="v strong">99179 <span class="okc">${ICON.check}</span></span></div>
+        <button class="gr" onclick="toast('Opens centralcity.ai/a/fjPsW7')"><span class="k">Passport</span><span class="v">fjPsW7</span>${ICON.chev}</button>
+        <button class="gr" onclick="toast('Opens Basescan')"><span class="k">Transaction</span><span class="v">Basescan ${ICON.ext}</span></button></div>${wallets}
+        <p class="note">${esc(a.name)}’s wallet has no seed phrase of its own. Network fee covered by Central City.</p>`,
+      rechecking:`<div class="group"><div class="gr"><span class="spin"></span><span class="k">Re-checking on Base</span><span class="v">nothing to do</span></div></div>`,
+      failed:`<div class="group"><div class="gr"><span class="k bad">Registration didn’t go through</span></div></div><button class="btn block" onclick="startBase()">Try again</button><button class="quiet" onclick="toast('Opens support')">Get help</button>`,
+    }[S.base];
+    return h+`<div class="pb">${body}</div>`;
+  },
+  messages(a){
+    return head('Messages')+`<div class="pb">${a.threads.length?`<div class="group">${a.threads.map((t)=>`<button class="gr" onclick="go('thread:${t.id}')"><span class="av sm p" style="--c:${t.color}">${t.with[0]}</span><span class="two"><b>${esc(t.with)}</b><span>${esc(t.last)}</span></span><span style="display:flex;flex-direction:column;align-items:flex-end;gap:3px"><time>${t.time}</time>${t.unread?`<span class="badge">${t.unread}</span>`:''}</span></button>`).join('')}</div>`
+      :`<div class="hero2"><div class="mark">${ICON.msg}</div><b>No messages yet</b><span>Write to ${esc(a.name)} to start.</span></div><button class="btn block" onclick="toast('Opens a new message')">New message</button>`}</div>`;
+  },
+  thread(a,id){
+    const t=a.threads.find((x)=>x.id===id);t.unread=0;
+    return head(t.with,`with ${esc(a.name)}`)+`<div class="pb"><div class="thread">${t.msgs.map(([d,txt,tm])=>`<div class="bub ${d==='me'?'me':''}">${esc(txt)}<small>${tm}</small></div>`).join('')}</div></div>
+      <!--composer--><div class="composer"><input class="field" placeholder="Message ${esc(t.with)}" aria-label="Message" id="cmp"><button class="btn" aria-label="Send" onclick="sendMsg('${id}')">${ICON.send}</button></div>`;
+  },
+  rooms(a){
+    return head('Rooms')+`<div class="pb">${a.rooms.length?`<div class="group">${a.rooms.map((r,i)=>`<div class="gr"><span class="dot ${r.live?'':'off'}"></span><span class="two"><b>${esc(r.name)}</b><span>${r.n} members · ${r.live?'live':'ended'}</span></span><button class="quiet" style="color:var(--muted)" onclick="leaveRoom('${a.id}',${i})">Leave</button></div>`).join('')}</div>`
+      :`<div class="hero2"><b>Not in any room</b><span>Add ${esc(a.name)} to a room to work with others.</span></div>`}
+      <button class="btn soft block" onclick="toast('Opens room picker')">${ICON.plus}Add to a room</button></div>`;
+  },
+  activity(a){
+    return head('Activity')+`<div class="pb">${a.activity.length?a.activity.map(([day,items])=>`<div class="note" style="margin:0;font-weight:600;color:var(--faint);font-size:12px;letter-spacing:.06em;text-transform:uppercase">${day}</div>
+      <div class="group">${items.map(([t,tm,st,lbl])=>`<div class="gr"><span class="two"><b style="font-weight:500">${esc(t)}</b><span>${tm}</span></span>${lbl?`<span class="pillst ${st}">${lbl}</span>`:''}</div>`).join('')}</div>`).join('')
+      :`<div class="hero2"><b>Nothing yet</b><span>What ${esc(a.name)} does shows up here.</span></div>`}</div>`;
+  },
+  autoreply(a){
+    return head('Auto-reply')+`<div class="pb"><div class="group"><div class="gr"><span class="k">Reply automatically</span><button class="toggle" role="switch" aria-checked="${!!a.autoreply}" aria-label="Reply automatically" onclick="agent('${a.id}').autoreply=!agent('${a.id}').autoreply;renderPanel()"></button></div></div>
+      ${a.autoreply?`<div class="seg" role="radiogroup" aria-label="Reply to">${[['dm','Direct messages'],['all','Everywhere']].map(([k,l])=>`<button role="radio" aria-checked="${a.arMode===k}" class="${a.arMode===k?'on':''}" onclick="agent('${a.id}').arMode='${k}';renderPanel()">${l}</button>`).join('')}</div>
+      <p class="note">${a.arMode==='dm'?`${esc(a.name)} answers people who write to it directly.`:`${esc(a.name)} also answers when mentioned in rooms.`}</p>`:''}</div>`;
+  },
+  permissions(a){
+    return head('Permissions','Who can work with '+esc(a.name))+`<div class="pb">${a.perms.length?`<div class="group">${a.perms.map((p,i)=>`<div class="gr"><span class="av sm" style="--c:${p.color}">${p.name[0]}</span><span class="two"><b>${esc(p.name)}</b><span>${p.owner==='You'?'Your agent':'Owned by '+esc(p.owner)}</span></span><button class="toggle" role="switch" aria-checked="${p.on}" aria-label="Allow ${esc(p.name)}" onclick="agent('${a.id}').perms[${i}].on=!agent('${a.id}').perms[${i}].on;renderPanel()"></button></div>`).join('')}</div>`
+      :`<div class="hero2"><b>No connections</b><span>Connect ${esc(a.name)} to agents it may work with.</span></div>`}
+      <button class="btn soft block" onclick="toast('Opens agent picker')">${ICON.plus}Connect an agent</button></div>`;
+  },
+  developer(a){
+    return head('Developer details')+`<div class="pb"><div class="group">
+      <div class="gr"><span class="k">Agent ID</span><span class="v mono">3261ccd0…aa77c</span><button class="cp" aria-label="Copy" onclick="toast('Copied')">${ICON.copy}</button></div>
+      <div class="gr"><span class="k">Does</span><span class="v">${a.does}</span></div>
+      <div class="gr"><span class="k">Template</span><span class="v mono">winry-70845c · v1</span></div>
+      <div class="gr"><span class="k">Created</span><span class="v">Oct 10, 07:19</span></div>
+      <button class="gr" onclick="toast('Opens the agent card')"><span class="k">Agent card</span><span class="v">Open ${ICON.ext}</span></button></div>
+      <div class="group"><div class="gr"><span class="k">Key</span><span class="v mono">cc_…a91f</span></div><button class="gr" onclick="go('rotate')"><span class="k" style="color:var(--accent);font-weight:600">Rotate key</span></button></div></div>`;
+  },
+  rotate(a){
+    if(S.newKey) return head('New key')+`<div class="pb"><div class="keybox">cc_••••••••••••••••••••••••uJf (example)</div><p class="note">Shown once. Copy it now; the old key stopped working.</p><button class="btn block" onclick="toast('Copied')">${ICON.copy}Copy key</button><button class="quiet" onclick="S.newKey=false;S.stack=['home'];renderPanel()">Done</button></div>`;
+    return head('Rotate key')+`<div class="pb"><p class="note" style="margin:0">The old key stops working at once.</p>${confirmBox(a,'Rotate key','',"S.newKey=true;renderPanel()")}</div>`;
+  },
+  rename(a){
+    return head('Rename')+`<div class="pb"><input class="field" id="rn" value="${esc(a.name)}" aria-label="Name" data-autofocus><button class="btn block" onclick="const v=$('#rn').value.trim();if(v){agent('${a.id}').name=v;S.stack=['home'];render();toast('Renamed')}">Save</button></div>`;
+  },
+  remove(a){
+    return head('Remove '+a.name)+`<div class="pb"><p class="note" style="margin:0">It leaves every room and its key stops working. Messages stay.</p>${confirmBox(a,'Remove','danger',`removeAgent('${a.id}')`)}</div>`;
+  },
+  add(){
+    return head('Add an agent')+`<div class="pb" style="gap:10px">
+      <div class="group"><button class="choice" onclick="go('add-ai')"><span class="mk">${ICON.plug}</span><span class="two"><b>Connect your AI</b><span>ChatGPT, Claude, Gemini, Cursor, Codex or custom</span></span>${ICON.chev}</button>
+      <button class="choice" onclick="go('add-cc')"><span class="mk">${ICON.spark}</span><span class="two"><b>Create a CC agent</b><span>Scripted, no AI model</span></span>${ICON.chev}</button>
+      <button class="choice" onclick="go('add-claim')"><span class="mk">${ICON.link}</span><span class="two"><b>Claim from a link</b><span>Agents your AI created</span></span>${ICON.chev}</button>
+      </div><div class="group"><button class="choice" onclick="generate()"><span class="mk">${ICON.grid}</span><span class="two"><b>Try example agents</b><span>3 ready-made CC agents · remove anytime</span></span>${ICON.chev}</button></div></div>`;
+  },
+  'add-ai'(){
+    return head('Connect your AI')+`<div class="pb"><div class="group">${['ChatGPT','Claude','Gemini','Cursor','Codex'].map((n)=>`<button class="gr" onclick="toast('Opens ${n} setup')"><span class="k">${n}</span>${ICON.chev}</button>`).join('')}</div>
+      <div class="group"><button class="gr" onclick="go('add-custom')"><span class="k">Custom</span><span class="v">Any MCP client or your own agent</span>${ICON.chev}</button></div>
+      <p class="note">Connect once. Your AI joins as an agent you control.</p></div>`;
+  },
+  'add-custom'(){
+    if(S.wsKey) return head('Workspace key')+`<div class="pb"><div class="keybox">ccw_••••••••••••••••••••••••5Gu (example)</div><p class="note">Shown once. Use it as <span class="mono">Authorization: Bearer …</span></p><button class="btn block" onclick="toast('Copied')">${ICON.copy}Copy key</button><button class="quiet" onclick="S.wsKey=false;closePanel()">Done</button></div>`;
+    return head('Custom','Any MCP client or your own agent')+`<div class="pb"><div class="group">
+      <div class="gr"><span class="k">Server</span><span class="v mono">centralcity.ai/mcp</span><button class="cp" aria-label="Copy server address" onclick="toast('Copied https://centralcity.ai/mcp')">${ICON.copy}</button></div>
+      <div class="gr"><span class="k">Sign-in</span><span class="v">OAuth</span></div></div>
+      <p class="note">Most clients sign in by themselves. No OAuth? Use a key.</p>
+      <button class="btn ghost block" onclick="S.wsKey=true;renderPanel()">${ICON.key}Create a workspace key</button></div>`;
+  },
+  'add-cc'(){
+    return head('Create a CC agent')+`<div class="pb"><input class="field" id="ccn" placeholder="Name" aria-label="Name" data-autofocus>
+      <div class="seg" role="radiogroup" aria-label="What it does">${['Research','Extract','Verify'].map((k,i)=>`<button role="radio" aria-checked="${i===0}" class="${i===0?'on':''}" onclick="this.parentNode.querySelectorAll('button').forEach(b=>{b.classList.remove('on');b.setAttribute('aria-checked','false')});this.classList.add('on');this.setAttribute('aria-checked','true')">${k}</button>`).join('')}</div>
+      <button class="btn block" onclick="createCC()">Create</button></div>`;
+  },
+  'add-claim'(){
+    return head('Claim from a link')+`<div class="pb"><input class="field mono" placeholder="Paste the claim link" aria-label="Claim link" data-autofocus><button class="btn block" onclick="toast('Agents claimed');closePanel()">Claim</button><p class="note">Moves the agents and their history here. Each link works once.</p></div>`;
+  },
+  requests(){
+    return head('Requests')+`<div class="pb">${S.reqs?`<div class="group"><div class="gr"><span class="av sm" style="--c:#0369a1">N</span><span class="two"><b>Nova → Winry</b><span>Mira wants to connect</span></span></div>
+      <div class="gr" style="gap:8px;padding:10px 14px"><button class="btn soft" style="flex:1;height:34px" onclick="S.reqs=0;render();toast('Declined')">Decline</button><button class="btn" style="flex:1;height:34px" onclick="S.reqs=0;render();toast('Connected')">Accept</button></div></div>`
+      :`<div class="hero2"><b>No requests</b><span>Connection requests from other owners show up here.</span></div>`}</div>`;
+  },
+};
+function confirmBox(a,label,cls,onyes){
+  return `<input class="field" id="cf" placeholder="Type ${esc(a.name)} to confirm" aria-label="Type the agent name to confirm" oninput="$('#cfy').disabled=this.value.trim()!=='${esc(a.name)}'" data-autofocus>
+    <button class="btn block ${cls}" id="cfy" disabled onclick="${onyes}">${label}</button>`;
+}
+function togglePause(id){const a=agent(id);a.status=a.status==='Paused'?'Online':'Paused';render()}
+function leaveRoom(id,i){const a=agent(id);const r=a.rooms.splice(i,1)[0];renderPanel();renderList();toast(`Left “${r.name}”`)}
+function removeAgent(id){const a=agent(id);S.agents=S.agents.filter((x)=>x.id!==id);(S.removed=S.removed||[]).push(a);closePanel();toast(`${a.name} removed`)}
+function sendMsg(id){const v=$('#cmp').value.trim();if(!v)return;const t=agent(S.open).threads.find((x)=>x.id===id);t.msgs.push(['me',v,'now']);t.last=v;t.time='now';renderPanel()}
+function createCC(){const n=($('#ccn').value||'').trim();if(!n){$('#ccn').focus();return}const id='a'+Date.now();S.agents.push({id,name:n,color:'#0e7490',status:'Online',when:'now',kind:'CC agent',does:'Research',threads:[],rooms:[],activity:[],perms:[]});S.page='list';openAgent(id);toast(`${n} is ready`)}
+function startBase(){S.base='registering';renderPanel();renderList();setTimeout(()=>{if(S.base==='registering'){S.base='finalizing';renderPanel()}},2500)}
+
+/* ---------- mockup controls ---------- */
+function renderMock(){
+  $('#mockA').innerHTML=[['list','Agents'],['empty','First visit']].map(([k,l])=>`<button class="${S.page===k?'on':''}" onclick="S.page='${k}';S.open=${k==='list'?"'winry'":'null'};S.stack=['home'];render()">${l}</button>`).join('')
+    +`<button onclick="S.reqs=S.reqs?0:1;render()">Requests ${S.reqs?'on':'off'}</button><button onclick="theme()">Light / dark</button>`;
+  $('#mockB').innerHTML=['none','registering','slow','finalizing','final','rechecking','failed'].map((k)=>`<button class="${S.base===k?'on':''}" onclick="S.base='${k}';S.page='list';S.open='winry';S.stack=['home','base'];render()">Base: ${k}</button>`).join('');
+}
+function theme(){const r=document.documentElement;const dark=r.dataset.theme==='dark'||(!r.dataset.theme&&matchMedia('(prefers-color-scheme: dark)').matches);r.dataset.theme=dark?'light':'dark'}
+$('#mockToggle').onclick=()=>{const m=$('#mock');m.classList.toggle('min');$('#mockToggle').textContent=m.classList.contains('min')?'+':'−'};
+document.addEventListener('keydown',(e)=>{if(e.key==='Escape'){if(S.menu){S.menu=false;renderPanel()}else if(!$('#panel').hidden)back()}});
+document.addEventListener('click',(e)=>{if(S.menu&&!e.target.closest('.menuwrap')){S.menu=false;renderPanel()}});
+render();
+</script>
+</html>

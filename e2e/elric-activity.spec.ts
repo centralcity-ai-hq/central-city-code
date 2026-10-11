@@ -124,9 +124,25 @@ async function signIn(page: Page) {
   expect(created.status()).toBe(201);
 }
 
-async function openElric(page: Page) {
+/**
+ * The workspace's Elric entry opens the chat (/elric); its Manage Elric sheet links to this page
+ * in the console (Activity, /#elric). The chat's own routes are not mocked here, so the chat shows
+ * its load error, and the top bar with Manage Elric stays.
+ */
+async function openElric(page: Page, width = 1440) {
   await page.goto('/');
-  await page.getByRole('button', { name: 'Elric', exact: true }).first().click();
+  // On a phone the workspace navigation is a drawer.
+  if (width < 900) await page.getByRole('button', { name: 'Open navigation' }).click();
+  await page
+    .getByRole('navigation', { name: 'Workspace' })
+    .getByRole('button', { name: 'Elric', exact: true })
+    .click();
+  await expect(page).toHaveURL(/\/elric$/);
+  await page.locator('.elx-header').getByRole('button', { name: 'Manage Elric' }).click();
+  await page
+    .getByRole('dialog', { name: 'Manage Elric' })
+    .getByRole('link', { name: 'Activity' })
+    .click();
   await expect(page.getByRole('heading', { name: 'Elric', exact: true })).toBeVisible();
 }
 
@@ -234,14 +250,10 @@ for (const [width, height] of [
       await page.emulateMedia({ colorScheme: theme });
       await mockElric(page);
       await signIn(page);
-      await page.goto('/');
+      await openElric(page, width);
       await page.evaluate((value) => {
         document.documentElement.dataset.theme = value;
       }, theme);
-      // On a phone the console menu holds the entry.
-      // On a phone the console navigation is a drawer.
-      if (width < 900) await page.getByRole('button', { name: 'Open navigation' }).click();
-      await page.getByRole('button', { name: 'Elric', exact: true }).first().click();
       await expect(page.getByTestId('elric-turn')).toHaveCount(3);
       const overflow = await page.evaluate(
         () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
@@ -298,9 +310,10 @@ test('usage meters: under 80% normal, from 80% amber, at the limit red', async (
     .evaluateAll((meters) =>
       meters.map((meter) => getComputedStyle(meter.firstElementChild!).backgroundColor),
     );
-  const tokens = await page.evaluate(() => {
+  // Read in the meters' own scope: the workspace sets its tokens on .app-shell.
+  const tokens = await today.evaluate((scope) => {
     const probe = document.createElement('span');
-    document.body.append(probe);
+    scope.append(probe);
     const read = (name: string) => {
       probe.style.backgroundColor = `var(${name})`;
       return getComputedStyle(probe).backgroundColor;

@@ -48,6 +48,11 @@ export function registerRoomRepoRoutes(app: FastifyInstance, d: RepoRouteDepende
     z.record(z.string(), z.unknown()).parse(request.body ?? {});
 
   app.get('/api/rooms/:room/repo', async (request) => {
+    // Off on this server: a plain answer the room can read, not a 404 the browser logs as an error.
+    if (!roomReposEnabled(process.env)) {
+      await d.owner(request);
+      return { available: false };
+    }
     const p = await principal(request);
     const { room } = params.parse(request.params);
     return d.repos.repo(p, { room_id: room });

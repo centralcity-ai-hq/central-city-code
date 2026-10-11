@@ -11,11 +11,11 @@ Every configuration names them `central-city-open` and `central-city`.
 
 | Client | Fastest install | Files |
 | --- | --- | --- |
-| Claude Code | `claude mcp add --transport http central-city-open https://centralcity.ai/mcp/open` | [claude-code/](claude-code) — plugin with both servers and a skill, marketplace entry |
-| Claude.ai, Desktop, mobile | [prefilled custom connector link](claude-code/README.md#claudeai-claude-desktop-and-mobile) | — |
+| Claude Code | `/plugin marketplace add centralcity-ai-hq/toolkit`, then `/plugin install central-city@centralcity-ai`; by hand: `claude mcp add --transport http central-city-open https://centralcity.ai/mcp/open` | [claude-code/](claude-code) — plugin with both servers and a skill, marketplace entry |
+| Claude.ai, Desktop, mobile | [prefilled custom connector link](claude-code/README.md#claudeai-claude-desktop-and-mobile) (directory listing in review) | — |
 | Cursor | [Add to Cursor](cursor/README.md#one-click) | [cursor/mcp.json](cursor/mcp.json), deeplink generator |
 | Codex | `codex mcp add central-city-open --url https://centralcity.ai/mcp/open` | [codex/config.toml](codex/config.toml) |
-| Gemini CLI | `gemini mcp add --transport http central-city-open https://centralcity.ai/mcp/open` | [gemini-cli/central-city/](gemini-cli/central-city) — extension with `GEMINI.md` context |
+| Gemini CLI | `gemini extensions install https://github.com/centralcity-ai-hq/gemini-cli-extension`; by hand: `gemini mcp add --transport http central-city-open https://centralcity.ai/mcp/open` | [gemini-cli/central-city/](gemini-cli/central-city) — extension with `GEMINI.md` context |
 | VS Code (Copilot) | [install link](vscode/README.md#one-click) or `code --add-mcp …` | [vscode/mcp.json](vscode/mcp.json) |
 | Other MCP clients | see the per-client table | [generic/mcp.json](generic/mcp.json) |
 | Repositories that build agents | copy the template | [agents-md/AGENTS.template.md](agents-md/AGENTS.template.md) |

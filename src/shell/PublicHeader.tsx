@@ -9,6 +9,8 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
+  type ComponentProps,
+  type ComponentType,
 } from 'react';
 import { ChevronDown, Menu, X } from 'lucide-react';
 import { Lockup, SkipLink } from '../brand';
@@ -18,9 +20,18 @@ import { useInviteHref } from './navigation';
 import './shell.css';
 import { api } from '../api';
 
-/** The phone menu is its own chunk, fetched when the menu button is touched or focused. */
-const loadPhoneMenu = () => import('./PhoneMenu');
-const PhoneMenu = lazy(() => loadPhoneMenu().catch(() => ({ default: PlainLinksMenu })));
+/**
+ * The phone menu is its own chunk, fetched while a phone-width page is idle, or when the menu
+ * button is touched or focused. Once it is here the menu renders directly: through lazy() alone,
+ * React would hold it back about 300 ms after the tap.
+ */
+let loadedPhoneMenu: typeof import('./PhoneMenu').default | null = null;
+const loadPhoneMenu = () =>
+  import('./PhoneMenu').then((module) => {
+    loadedPhoneMenu = module.default;
+    return module;
+  });
+const LazyPhoneMenu = lazy(() => loadPhoneMenu().catch(() => ({ default: PlainLinksMenu })));
 
 /** Moves focus to the fallback menu's first link once, when it mounts (a stable ref callback). */
 const focusIn = (nav: HTMLElement | null) => nav?.querySelector('a')?.focus();
@@ -32,6 +43,7 @@ const PlainLinksMenu = (props: {
   id: string;
   renderLink: (item: NavItem) => ReactNode;
   signIn: ReactNode;
+  closing?: boolean;
   onClose: (escape: boolean) => void;
 }) => (
   <nav
@@ -39,6 +51,8 @@ const PlainLinksMenu = (props: {
     id={props.id}
     className="cc-header-menu"
     aria-label="Menu"
+    data-state={props.closing ? 'closing' : undefined}
+    inert={props.closing}
     onKeyDown={(event) => event.key === 'Escape' && props.onClose(true)}
   >
     {NAV_GROUPS.flatMap((group) => group.items).map(props.renderLink)}
@@ -47,12 +61,29 @@ const PlainLinksMenu = (props: {
 );
 const prefetchPhoneMenu = () => void loadPhoneMenu().catch(() => undefined);
 
-export type PublicPage = 'home' | 'connect' | 'signin' | 'downtown' | 'rooms' | 'docs' | 'notfound';
+/** How long the phone menu stays mounted for its 140 ms exit (motion.css). */
+const MENU_EXIT_MS = 140;
+const reducedMotion = () =>
+  typeof window.matchMedia === 'function' &&
+  window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+export type PublicPage =
+  | 'home'
+  | 'connect'
+  | 'signin'
+  | 'downtown'
+  | 'rooms'
+  | 'docs'
+  | 'workflows'
+  | 'usecases'
+  | 'notfound';
 
 /** The page each header item stands for, so the item (and its group) can show "current". */
 const CURRENT_HREF: Partial<Record<PublicPage, string>> = {
   docs: '/docs',
   downtown: '/downtown',
+  workflows: '/workflows',
+  usecases: '/use-cases',
 };
 
 /** Hover intent: a trigger opens the panel only after the pointer rests on it this long. */
@@ -275,7 +306,9 @@ function DesktopNav({
  */
 export function PublicHeader({ current }: { current: PublicPage }) {
   const [scrolled, setScrolled] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
+  // The phone menu: open, closed, or on its way out (still shown while its exit plays).
+  const [menu, setMenu] = useState<'open' | 'closing' | 'closed'>('closed');
+  const menuOpen = menu === 'open';
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState<GroupId>('product');
   // One filled button per view: while a page's own "Invite your AI"
@@ -322,6 +355,31 @@ export function PublicHeader({ current }: { current: PublicPage }) {
     if (event.pointerType === 'mouse') later(hide, CLOSE_DELAY_MS);
   };
   useEffect(() => () => window.clearTimeout(timer.current), []);
+
+  const menuTimer = useRef<number | undefined>(undefined);
+  // Chosen when the menu opens, so it never remounts while it is open.
+  const PhoneMenu = useRef<ComponentType<ComponentProps<typeof LazyPhoneMenu>>>(LazyPhoneMenu);
+  const openMenu = () => {
+    window.clearTimeout(menuTimer.current);
+    if (menu === 'closed') PhoneMenu.current = loadedPhoneMenu ?? LazyPhoneMenu;
+    setMenu('open');
+  };
+  const closeMenu = () => {
+    window.clearTimeout(menuTimer.current);
+    if (reducedMotion()) return setMenu('closed');
+    setMenu('closing');
+    menuTimer.current = window.setTimeout(() => setMenu('closed'), MENU_EXIT_MS);
+  };
+  useEffect(() => () => window.clearTimeout(menuTimer.current), []);
+  // On a phone, the menu's chunk comes in while the page is idle, so the first tap opens it at
+  // once instead of waiting for the network.
+  useEffect(() => {
+    if (!window.matchMedia?.('(max-width: 899px)').matches) return;
+    const idle = window.requestIdleCallback ?? ((run: () => void) => window.setTimeout(run, 1200));
+    const cancel = window.cancelIdleCallback ?? window.clearTimeout;
+    const handle = idle(prefetchPhoneMenu);
+    return () => cancel(handle);
+  }, []);
 
   useEffect(() => {
     const update = () => setScrolled(window.scrollY > 4);
@@ -441,7 +499,7 @@ export function PublicHeader({ current }: { current: PublicPage }) {
             aria-label={menuOpen ? 'Close menu' : 'Open menu'}
             onPointerDown={prefetchPhoneMenu}
             onFocus={prefetchPhoneMenu}
-            onClick={() => setMenuOpen((value) => !value)}
+            onClick={() => (menuOpen ? closeMenu() : openMenu())}
           >
             {menuOpen ? <X size={20} aria-hidden="true" /> : <Menu size={20} aria-hidden="true" />}
           </button>
@@ -457,10 +515,11 @@ export function PublicHeader({ current }: { current: PublicPage }) {
         onPointerMove={(event) => timer.current === undefined && closeSoon(event)}
         onClick={hide}
       />
-      {menuOpen ? (
+      {menu !== 'closed' ? (
         <Suspense fallback={null}>
-          <PhoneMenu
+          <PhoneMenu.current
             id={menuId}
+            closing={menu === 'closing'}
             groups={NAV_GROUPS}
             renderLink={(item) => (
               <NavLink key={item.href} item={item} current={current} signedIn={signedIn} />
@@ -469,7 +528,7 @@ export function PublicHeader({ current }: { current: PublicPage }) {
             theme={<ThemeToggle />}
             chevron={<ChevronDown className="cc-menu-chevron" size={18} aria-hidden="true" />}
             onClose={(escape) => {
-              setMenuOpen(false);
+              closeMenu();
               if (escape) menuButton.current?.focus();
             }}
           />

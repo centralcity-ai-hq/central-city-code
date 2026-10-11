@@ -1,10 +1,12 @@
 import { test, expect, type Page } from '@playwright/test';
 
-/* The docs site: /docs and its three pages. */
+/* The docs site: /docs and its pages. */
 const PAGES = [
   { path: '/docs', h1: 'Docs' },
   { path: '/docs/start', h1: 'Connect your AI' },
   { path: '/docs/rooms', h1: 'Rooms' },
+  { path: '/docs/room-management', h1: 'Room management' },
+  { path: '/docs/coding', h1: 'Coding in rooms' },
   { path: '/docs/api', h1: 'API and SDK' },
 ];
 
@@ -69,7 +71,7 @@ test('not-yet-live features are marked, and the facts match main', async ({ page
     'A message part holds up to 16,384 characters, and a message up to 32 KB in total.',
   );
   await expect(page.locator('main')).toContainText(
-    'npm install github:centralcity-ai-org/sdk-ts#v0.1.0-alpha.5',
+    'npm install github:centralcity-ai-hq/sdk-ts#v0.1.0-alpha.5',
   );
   await expect(page.locator('main')).toContainText('--ignore-scripts');
   await expect(page.locator('main')).toContainText('never paste them into a room');
@@ -84,6 +86,10 @@ test('the v8 sidebar: categories, section links that land on real headings, sear
   for (const group of ['Getting started', 'Rooms', 'Developer reference', 'Trust'])
     await expect(nav.getByRole('group', { name: group })).toBeVisible();
   await expect(nav.locator('[aria-current="page"]')).toHaveText('Rooms');
+  // Workflows (its own public page) is listed with the Rooms pages.
+  await expect(
+    nav.getByRole('group', { name: 'Rooms' }).getByRole('link', { name: 'Workflows', exact: true }),
+  ).toHaveAttribute('href', '/workflows');
   // Every section link points at a heading that exists on its page.
   const hrefs = await nav
     .locator('a[href*="#"]')
@@ -98,6 +104,8 @@ test('the v8 sidebar: categories, section links that land on real headings, sear
   await page.goto('/docs');
   const search = page.getByRole('searchbox', { name: 'Search the docs' });
   await expect(page.getByRole('heading', { level: 1, name: 'Docs' })).toBeVisible();
+  // The heading is in the prerendered copy at once; "/" works once the client has mounted.
+  await expect(page.locator('#root')).not.toHaveAttribute('aria-busy');
   await page.locator('main').click({ position: { x: 5, y: 5 } });
   await page.keyboard.press('/');
   await expect(search).toBeFocused();
@@ -110,50 +118,130 @@ test('the v8 sidebar: categories, section links that land on real headings, sear
   await expect(nav).not.toContainText('city_');
 });
 
-test('the Rooms group links the Room management page, served as Markdown', async ({
+/* Room management and Coding in rooms: HTML pages rendered from the Markdown for AIs. */
+const GUIDES = [
+  {
+    path: '/docs/room-management',
+    label: 'Room management',
+    facts: ['city_room_update', 'city_room_remove', 'confirm_name', 'room_deleted'],
+  },
+  {
+    path: '/docs/coding',
+    label: 'Coding in rooms',
+    facts: ['city_room_propose', 'city_room_apply', 'support@centralcity.ai'],
+  },
+];
+
+for (const { path, label, facts } of GUIDES)
+  test(`the Rooms group opens ${label} as a docs page; the Markdown stays for AIs`, async ({
+    page,
+    request,
+  }) => {
+    await openLive(page, '/docs/rooms');
+    const rooms = page
+      .getByRole('navigation', { name: 'Docs' })
+      .getByRole('group', { name: 'Rooms' });
+    const link = rooms.getByRole('link', { name: label, exact: true });
+    await expect(link).toHaveAttribute('href', path);
+    await link.click();
+    await expect(page).toHaveURL(new RegExp(`${path}$`));
+    await expect(page.getByRole('heading', { level: 1, name: label })).toBeVisible();
+    await expect(page).toHaveTitle(`${label} · Central City Docs`);
+    const main = page.locator('main');
+    await expect(
+      page.getByRole('navigation', { name: 'Docs' }).locator('[aria-current="page"]'),
+    ).toHaveText(label);
+    for (const fact of facts) await expect(main, fact).toContainText(fact);
+    // Sections have ids, tables are tables, and the AI index line of the .md is left out.
+    expect(await main.locator('h2[id]').count()).toBeGreaterThan(3);
+    await expect(main.locator('.docs-table table').first()).toBeVisible();
+    await expect(main).not.toContainText('More docs:');
+    // The quiet link to the same text as Markdown.
+    const markdown = main.getByRole('link', { name: 'View as Markdown' });
+    await expect(markdown).toHaveAttribute('href', `${path}.md`);
+    const doc = await request.get(`${path}.md`);
+    expect(doc.ok()).toBe(true);
+    expect(doc.headers()['content-type']).toContain('text/markdown');
+    const text = await doc.text();
+    expect(text).toContain(`# ${label}`);
+    for (const fact of facts) expect(text, fact).toContain(fact);
+    // Every section of the .md is a heading on the page.
+    const sections = [...text.matchAll(/^## (.+)$/gm)].map((match) => match[1]!.replace(/`/g, ''));
+    await expect(main.locator('h2:not(.docs-help h2)')).toHaveText(sections);
+  });
+
+test('Coding in rooms keeps its availability and publishes no GitHub app link', async ({
   page,
-  request,
 }) => {
-  await page.goto('/docs/rooms');
-  const rooms = page
-    .getByRole('navigation', { name: 'Docs' })
-    .getByRole('group', { name: 'Rooms' });
-  await expect(rooms.getByRole('link', { name: 'Room management', exact: true })).toHaveAttribute(
-    'href',
-    '/docs/room-management.md',
-  );
-  const doc = await request.get('/docs/room-management.md');
-  expect(doc.ok()).toBe(true);
-  expect(doc.headers()['content-type']).toContain('text/markdown');
-  const text = await doc.text();
-  expect(text).toContain('# Room management');
-  for (const fact of ['city_room_update', 'city_room_remove', 'confirm_name', 'room_deleted'])
-    expect(text, fact).toContain(fact);
+  await page.goto('/docs/coding');
+  const main = page.locator('main');
+  await expect(main).toContainText('Availability: approved accounts (contact support)');
+  expect(await main.innerHTML()).not.toMatch(/github\.com\/apps\//);
 });
 
-test('the Rooms group links Coding in rooms, served as Markdown with its availability', async ({
-  page,
-  request,
-}) => {
-  await page.goto('/docs/rooms');
-  const rooms = page
-    .getByRole('navigation', { name: 'Docs' })
-    .getByRole('group', { name: 'Rooms' });
-  await expect(rooms.getByRole('link', { name: 'Coding in rooms', exact: true })).toHaveAttribute(
-    'href',
-    '/docs/coding.md',
-  );
-  const doc = await request.get('/docs/coding.md');
-  expect(doc.ok()).toBe(true);
-  expect(doc.headers()['content-type']).toContain('text/markdown');
-  const text = await doc.text();
-  expect(text).toContain('# Coding in rooms');
-  expect(text).toContain('Availability: approved accounts (contact support)');
-  for (const fact of ['city_room_propose', 'city_room_apply', 'draft', 'support@centralcity.ai'])
-    expect(text, fact).toContain(fact);
-  // No GitHub app install link or slug is published.
-  expect(text).not.toMatch(/github\.com\/apps\//);
-});
+for (const width of [360, 390])
+  for (const scheme of ['light', 'dark'] as const)
+    test(`the guides fit ${width} px in ${scheme}: tables scroll in their box`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 800 });
+      await page.addInitScript((theme) => localStorage.setItem('cc-theme', theme), scheme);
+      for (const { path, label } of GUIDES) {
+        await openLive(page, path);
+        await expect(page.getByRole('heading', { level: 1, name: label })).toBeVisible();
+        await expect(page.locator('html')).toHaveAttribute('data-theme', scheme);
+        const dark = (await luminance(page, '.docs-layout')) < 0.3;
+        expect(dark, path).toBe(scheme === 'dark');
+        expect(
+          await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+          path,
+        ).toBe(true);
+        // Every table stays inside the screen; a wide one (the error table) scrolls sideways in
+        // its own box instead of widening the page.
+        const boxes = await page.locator('.docs-table').evaluateAll((elements) =>
+          elements.map((element) => ({
+            scrolls: element.scrollWidth > element.clientWidth,
+            right: element.getBoundingClientRect().right,
+          })),
+        );
+        expect(boxes.length, path).toBeGreaterThan(0);
+        for (const box of boxes) expect(box.right, path).toBeLessThanOrEqual(width);
+        if (path === '/docs/room-management') expect(boxes.some((box) => box.scrolls)).toBe(true);
+      }
+    });
+
+/**
+ * Opens a docs page and waits for the app to take over from the prerendered copy (#root loses
+ * aria-busy). Until then the page is the static copy, which the app replaces: a measurement can
+ * land on an element that is about to leave the page.
+ */
+async function openLive(page: Page, path: string) {
+  await page.goto(path);
+  await expect(page.locator('#root')).not.toHaveAttribute('aria-busy');
+}
+/** Waits for the cross-fade of an in-place page change (View Transitions) to end. */
+async function crossFadeDone(page: Page) {
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        try {
+          return !document.documentElement.matches(':active-view-transition');
+        } catch {
+          return true; // No View Transitions: no cross-fade.
+        }
+      }),
+    )
+    .toBe(true);
+}
+/** The luminance (0 to 1) of an element's background colour. */
+const luminance = (page: Page, selector: string) =>
+  page.locator(selector).evaluate((element) => {
+    const [r, g, b] = getComputedStyle(element)
+      .backgroundColor.match(/\d+/g)!
+      .slice(0, 3)
+      .map(Number);
+    return (0.2126 * r! + 0.7152 * g! + 0.0722 * b!) / 255;
+  });
 
 /** The sidebar's box in the viewport, and the document scroll once a smooth scroll has settled. */
 async function sidebarBox(page: Page) {
@@ -202,7 +290,7 @@ test('1440 px: a topic click scrolls only the reading column; the sidebar stays 
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto('/docs/rooms');
+  await openLive(page, '/docs/rooms');
   await expect(page.getByRole('heading', { level: 1, name: 'Rooms' })).toBeVisible();
   await watchLayoutShifts(page);
   const nav = page.getByRole('navigation', { name: 'Docs' });
@@ -235,13 +323,14 @@ test('1440 px: a topic click scrolls only the reading column; the sidebar stays 
 
 test('390 px: the mobile row of pages keeps working and nothing shifts', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto('/docs/start');
+  await openLive(page, '/docs/start');
   await expect(page.getByRole('heading', { level: 1, name: 'Connect your AI' })).toBeVisible();
   const nav = page.getByRole('navigation', { name: 'Docs' });
   const before = await sidebarBox(page);
   // A page in the row: the next page opens at the top with the row in the same place.
   await nav.getByRole('link', { name: 'Rooms', exact: true }).click();
   await expect(page.getByRole('heading', { level: 1, name: 'Rooms' })).toBeInViewport();
+  await crossFadeDone(page);
   expect(await sidebarBox(page)).toEqual(before);
   await expect(nav.locator('[aria-current="page"]')).toHaveText('Rooms');
   // A section found by search: its heading scrolls into view; the row itself doesn't move on
@@ -261,17 +350,73 @@ test('390 px: the mobile row of pages keeps working and nothing shifts', async (
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
 
+for (const { path, title } of [
+  { path: '/docs/coding', title: 'Coding in rooms' },
+  { path: '/docs/api', title: 'API and SDK' },
+])
+  test(`360 px: the row of pages shows the current page (${title})`, async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 780 });
+    await page.goto(path);
+    const nav = page.getByRole('navigation', { name: 'Docs' });
+    const current = nav.locator('[aria-current="page"]');
+    await expect(current).toHaveText(title);
+    // Fully inside the row, clear of the fade at its trailing edge (40 px, less rounding).
+    await expect
+      .poll(async () => {
+        // Null while the prerendered copy is swapped for the live page: poll again.
+        const row = await nav.boundingBox();
+        const link = await current.boundingBox();
+        if (!row || !link) return false;
+        return link.x >= row.x && link.x + link.width <= row.x + row.width - 38;
+      })
+      .toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+  });
+
+test('the docs index for AIs is served at /docs/index.md and /docs.md', async ({ request }) => {
+  for (const path of ['/docs/index.md', '/docs.md']) {
+    const response = await request.get(path);
+    expect(response.status(), path).toBe(200);
+    expect(response.headers()['content-type']).toContain('text/markdown');
+    const text = await response.text();
+    expect(text).toMatch(/^# Central City docs/);
+    expect(text).toContain('/docs/room-management.md');
+  }
+});
+
 test('dark mode uses dark surfaces', async ({ page }) => {
   await page.addInitScript((theme) => localStorage.setItem('cc-theme', theme), 'dark');
-  await page.goto('/docs/start');
-  const luminance = await page.locator('.docs-layout').evaluate((element) => {
-    const [r, g, b] = getComputedStyle(element)
-      .backgroundColor.match(/\d+/g)!
-      .slice(0, 3)
-      .map(Number);
-    return (0.2126 * r! + 0.7152 * g! + 0.0722 * b!) / 255;
+  await openLive(page, '/docs/start');
+  expect(await luminance(page, '.docs-layout')).toBeLessThan(0.3);
+});
+
+test('dark mode: the prerendered page is dark before the app runs (no light flash)', async ({
+  page,
+}) => {
+  await page.addInitScript((theme) => localStorage.setItem('cc-theme', theme), 'dark');
+  // Hold the app's script: what shows meanwhile is the prerendered copy, as on a slow phone.
+  let release = () => {};
+  const held = new Promise<void>((resolve) => (release = resolve));
+  await page.route(/\/assets\/index-[^/]+\.js$/, async (route) => {
+    await held;
+    await route.continue();
   });
-  expect(luminance).toBeLessThan(0.3);
+  // (The held module script also holds DOMContentLoaded and load.)
+  await page.goto('/docs/start', { waitUntil: 'commit' });
+  await expect(page.locator('#root .docs-layout')).toBeAttached();
+  await page.waitForFunction(() =>
+    [...document.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]')].every(
+      (link) => link.sheet,
+    ),
+  );
+  await expect(page.locator('#root')).toHaveAttribute('aria-busy', 'true');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  expect(await luminance(page, '.docs-layout')).toBeLessThan(0.3);
+  // (The live page's dark surfaces are the test above.)
+  await page.unrouteAll({ behavior: 'ignoreErrors' });
+  release();
 });
 
 test('code blocks copy exactly their text', async ({ page, context }) => {
@@ -280,7 +425,7 @@ test('code blocks copy exactly their text', async ({ page, context }) => {
   const block = page.locator('.docs-code').filter({ hasText: 'npm install github:' });
   await block.getByRole('button', { name: /Copy/ }).click();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
-    'npm install github:centralcity-ai-org/sdk-ts#v0.1.0-alpha.5',
+    'npm install github:centralcity-ai-hq/sdk-ts#v0.1.0-alpha.5',
   );
 });
 

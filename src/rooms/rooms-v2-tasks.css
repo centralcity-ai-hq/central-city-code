@@ -1,0 +1,463 @@
+/*
+ * Smart Rooms v2 (preview): the Tasks sheet (TasksPanel.tsx + TasksV2.tsx).
+ * Every rule is scoped to .rm-app[data-rooms='v2'], so with the rooms_v2 flag off nothing here
+ * matches. Tokens come from rooms-v2.css. Colours: blue accent and neutral greys; green only for
+ * Done; no orange.
+ */
+
+/* Sheet-local tokens from the component spec (SPEC 1.1) that rooms-v2.css does not define. */
+.rm-app[data-rooms='v2'] .rm-v2-tasks {
+  --rv2-done: #137a56;
+  --rv2-done-bg: #e9f6ef;
+  --rv2-done-border: rgba(19, 122, 86, 0.24);
+  --rv2-pending-border: rgba(37, 99, 235, 0.28);
+  --rv2-ai-badge-bg: rgba(99, 102, 241, 0.08);
+  --rv2-ai-badge-text: #4f46e5;
+  --rv2-ai-badge-border: rgba(99, 102, 241, 0.28);
+  gap: var(--space-3);
+  background: var(--canvas);
+}
+:root[data-theme='dark'] .rm-app[data-rooms='v2'] .rm-v2-tasks {
+  --rv2-done: #5fd3a5;
+  --rv2-done-bg: rgba(95, 211, 165, 0.16);
+  --rv2-done-border: rgba(95, 211, 165, 0.32);
+  --rv2-pending-border: rgba(96, 165, 250, 0.32);
+  --rv2-ai-badge-bg: rgba(129, 140, 248, 0.14);
+  --rv2-ai-badge-text: #a5b4fc;
+  --rv2-ai-badge-border: rgba(129, 140, 248, 0.32);
+}
+
+/* Head: title and subtitle, a small "+ New task", the close button. */
+.rm-app[data-rooms='v2'] .rm-v2-tasks-head {
+  align-items: flex-start;
+  gap: var(--space-2);
+  background: var(--surface);
+  border-bottom-color: var(--border-subtle);
+}
+.rm-app[data-rooms='v2'] .rm-v2-titles,
+.rm-app[data-rooms='v2'] .rm-v2-detail-titles {
+  display: grid;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-top: var(--space-1);
+}
+.rm-app[data-rooms='v2'] .rm-v2-tasks-head h2 {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(6 * var(--ws-px));
+  font: 600 calc(18 * var(--ws-type-px)) / calc(24 * var(--ws-type-px)) var(--font-sans);
+  color: var(--text);
+}
+.rm-app[data-rooms='v2'] .rm-v2-subtitle {
+  margin: 0;
+  color: var(--text-muted);
+  font: var(--rv2-type-caption);
+}
+.rm-app[data-rooms='v2'] .rm-v2-new {
+  position: relative;
+  flex: none;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: calc(4 * var(--ws-px));
+  min-height: calc(26 * var(--ws-px));
+  padding: 0 calc(10 * var(--ws-px));
+  border: 0;
+  border-radius: var(--radius-full);
+  font: 600 11px/14px var(--font-sans);
+}
+/* The visible button is small; the hit area stays 44 px tall. */
+.rm-app[data-rooms='v2'] .rm-v2-new::after {
+  content: '';
+  position: absolute;
+  inset: calc(-9 * var(--ws-px)) 0;
+}
+.rm-app[data-rooms='v2'] .rm-v2-tasks-head .rm-icon {
+  flex: none;
+  border-radius: var(--radius-full);
+}
+
+/*
+ * Filter row (SPEC 2.6): one line that scrolls sideways, fading at an edge where chips continue
+ * past it (data-fade, set by TaskFilterRow). On phones it wraps onto two rows instead, so every
+ * chip is visible and one tap away.
+ */
+.rm-app[data-rooms='v2'] .rm-v2-filters {
+  display: flex;
+  flex: none;
+  flex-wrap: nowrap;
+  gap: calc(6 * var(--ws-px));
+  min-width: 0;
+  max-width: 100%;
+  padding: calc(4 * var(--ws-px)) calc(16 * var(--ws-px)) calc(10 * var(--ws-px)) 2px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+.rm-app[data-rooms='v2'] .rm-v2-filters::-webkit-scrollbar {
+  display: none;
+}
+.rm-app[data-rooms='v2'] .rm-v2-filters[data-fade='end'] {
+  mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent 100%);
+}
+.rm-app[data-rooms='v2'] .rm-v2-filters[data-fade='start'] {
+  mask-image: linear-gradient(to left, #000 calc(100% - 40px), transparent 100%);
+}
+.rm-app[data-rooms='v2'] .rm-v2-filters[data-fade='both'] {
+  mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 40px,
+    #000 calc(100% - 40px),
+    transparent 100%
+  );
+}
+.rm-app[data-rooms='v2'] .rm-v2-filter {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: calc(28 * var(--ws-px));
+  padding: calc(4 * var(--ws-px)) calc(10 * var(--ws-px));
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font: 500 12px/16px var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.rm-app[data-rooms='v2'] .rm-v2-filter:hover {
+  border-color: var(--border);
+  background: var(--bg-surface-hover);
+}
+.rm-app[data-rooms='v2'] .rm-v2-filter[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+.rm-app[data-rooms='v2'] .rm-v2-filter:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+@media (max-width: 599px) {
+  .rm-app[data-rooms='v2'] .rm-v2-filters {
+    flex-wrap: wrap;
+    overflow-x: visible;
+    padding: calc(4 * var(--ws-px)) 2px calc(10 * var(--ws-px));
+    mask-image: none;
+  }
+}
+
+/* Compact cards (SPEC 2.6): about a quarter shorter than v1, about seven on a 390 px phone. */
+.rm-app[data-rooms='v2'] .rm-v2-task-list {
+  display: grid;
+  flex: none;
+  gap: calc(6 * var(--ws-px));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.rm-app[data-rooms='v2'] .rm-v2-task {
+  min-width: 0;
+}
+.rm-app[data-rooms='v2'] .rm-v2-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  min-width: 0;
+  min-height: calc(52 * var(--ws-px));
+  padding: calc(6 * var(--ws-px)) calc(10 * var(--ws-px));
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-s);
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    transform 150ms ease;
+}
+.rm-app[data-rooms='v2'] .rm-v2-card:hover {
+  border-color: var(--border);
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
+}
+.rm-app[data-rooms='v2'] .rm-v2-card:active {
+  transform: scale(0.99);
+}
+.rm-app[data-rooms='v2'] .rm-v2-card:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.rm-app[data-rooms='v2'] .rm-v2-card-top,
+.rm-app[data-rooms='v2'] .rm-v2-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.rm-app[data-rooms='v2'] .rm-v2-card-foot {
+  min-height: calc(18 * var(--ws-px));
+}
+.rm-app[data-rooms='v2'] .rm-v2-number {
+  color: var(--accent-text);
+  font: 700 12px/16px var(--font-sans);
+  font-variant-numeric: tabular-nums;
+}
+.rm-app[data-rooms='v2'] .rm-v2-card-title {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  margin: 0;
+  color: var(--text);
+  font: 600 max(12px, calc(13 * var(--ws-type-px)))/1.25 var(--font-sans);
+  overflow-wrap: anywhere;
+}
+.rm-app[data-rooms='v2'] .rm-v2-comments {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: calc(4 * var(--ws-px));
+  color: var(--text-muted);
+  font: 400 12px/16px var(--font-sans);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The one status pill (SPEC 2.6): Open grey, Claimed blue, In review blue, Done green. */
+.rm-app[data-rooms='v2'] .rm-v2-pill {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 3px;
+  max-width: 100%;
+  min-height: calc(20 * var(--ws-px));
+  padding: 0 calc(8 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--bg-surface-active);
+  color: var(--text-secondary);
+  font: 600 11px/16px var(--font-sans);
+  white-space: nowrap;
+}
+.rm-app[data-rooms='v2'] .rm-v2-pill[data-tone='accent'] {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+.rm-app[data-rooms='v2'] .rm-v2-pill[data-tone='strong'] {
+  border-color: var(--rv2-pending-border);
+  background: var(--status-pending-bg);
+  color: var(--status-pending);
+}
+.rm-app[data-rooms='v2'] .rm-v2-pill[data-tone='done'] {
+  border-color: var(--rv2-done-border);
+  background: var(--rv2-done-bg);
+  color: var(--rv2-done);
+}
+.rm-app[data-rooms='v2'] .rm-v2-pill[data-tone='muted'] {
+  border-style: dashed;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+/* Claimer: 18 px avatar initial, name, and the AI badge for AI claimers. */
+.rm-app[data-rooms='v2'] .rm-v2-claimer {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(6 * var(--ws-px));
+  min-width: 0;
+  color: var(--text-secondary);
+  font: 400 12px/18px var(--font-sans);
+}
+.rm-app[data-rooms='v2'] .rm-v2-claimer-name {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rm-app[data-rooms='v2'] .rm-v2-claimer .rm-badge-elric {
+  flex: none;
+  padding: 1px calc(6 * var(--ws-px));
+  border-color: var(--rv2-ai-badge-border);
+  border-radius: var(--radius-full);
+  background: var(--rv2-ai-badge-bg);
+  color: var(--rv2-ai-badge-text);
+  font: 600 10px/12px var(--font-sans);
+}
+.rm-app[data-rooms='v2'] .rm-v2-avatar {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: calc(18 * var(--ws-px));
+  height: calc(18 * var(--ws-px));
+  border-radius: var(--radius-full);
+  background: #2563eb;
+  color: #ffffff;
+  font: 700 10px/1 var(--font-sans);
+}
+.rm-app[data-rooms='v2'] .rm-v2-avatar[data-kind='ai'] {
+  background: #475569;
+}
+:root[data-theme='dark'] .rm-app[data-rooms='v2'] .rm-v2-avatar[data-kind='ai'] {
+  background: #334155;
+}
+.rm-app[data-rooms='v2'] .rm-v2-unclaimed {
+  color: var(--text-muted);
+  font: 400 12px/18px var(--font-sans);
+}
+
+/* Empty filter and loading skeleton (SPEC 2.6 states). */
+.rm-app[data-rooms='v2'] .rm-v2-empty {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-2);
+  padding: calc(32 * var(--ws-px)) calc(16 * var(--ws-px));
+  color: var(--text-muted);
+  font: 400 max(12px, calc(13 * var(--ws-type-px))) / calc(18 * var(--ws-type-px)) var(--font-sans);
+  text-align: center;
+}
+.rm-app[data-rooms='v2'] .rm-v2-empty p {
+  margin: 0;
+}
+.rm-app[data-rooms='v2'] .rm-v2-skeletons {
+  display: grid;
+  gap: calc(6 * var(--ws-px));
+}
+.rm-app[data-rooms='v2'] .rm-v2-skeleton {
+  display: grid;
+  gap: calc(6 * var(--ws-px));
+  padding: calc(8 * var(--ws-px)) calc(10 * var(--ws-px));
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-s);
+  background: var(--surface);
+}
+.rm-app[data-rooms='v2'] .rm-v2-skeleton span {
+  height: calc(10 * var(--ws-px));
+  border-radius: var(--radius-full);
+  background: linear-gradient(
+    90deg,
+    var(--bg-surface-active) 0%,
+    var(--bg-surface-hover) 50%,
+    var(--bg-surface-active) 100%
+  );
+  background-size: 200% 100%;
+  animation: rm-v2-shimmer 1.4s ease-in-out infinite;
+}
+.rm-app[data-rooms='v2'] .rm-v2-skeleton span:nth-child(1) {
+  width: calc(28 * var(--ws-px));
+}
+.rm-app[data-rooms='v2'] .rm-v2-skeleton span:nth-child(2) {
+  width: 70%;
+  height: calc(12 * var(--ws-px));
+}
+.rm-app[data-rooms='v2'] .rm-v2-skeleton span:nth-child(3) {
+  width: 40%;
+}
+@keyframes rm-v2-shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rm-app[data-rooms='v2'] .rm-v2-skeleton span {
+    animation: none;
+  }
+  .rm-app[data-rooms='v2'] .rm-v2-card {
+    transition: none;
+  }
+  .rm-app[data-rooms='v2'] .rm-v2-card:hover,
+  .rm-app[data-rooms='v2'] .rm-v2-card:active {
+    transform: none;
+  }
+}
+
+/* Detail view: back link, "T12: title", one pill and the claimer, then the task itself. */
+.rm-app[data-rooms='v2'] .rm-v2-back {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: calc(4 * var(--ws-px));
+  min-height: calc(28 * var(--ws-px));
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-text);
+  font: 500 max(12px, calc(13 * var(--ws-type-px))) / calc(18 * var(--ws-type-px)) var(--font-sans);
+  cursor: pointer;
+}
+.rm-app[data-rooms='v2'] .rm-v2-back:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.rm-app[data-rooms='v2'] .rm-v2-tasks-head .rm-v2-detail-title {
+  display: block;
+  font: 600 calc(17 * var(--ws-type-px)) / calc(23 * var(--ws-type-px)) var(--font-sans);
+  overflow-wrap: anywhere;
+}
+.rm-app[data-rooms='v2'] .rm-v2-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.rm-app[data-rooms='v2'] .rm-v2-tasks .rm-task {
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-l);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+.rm-app[data-rooms='v2'] .rm-v2-tasks .rm-task-body {
+  color: var(--text);
+  font: var(--type-body);
+}
+.rm-app[data-rooms='v2'] .rm-v2-tasks .rm-task .rm-primary,
+.rm-app[data-rooms='v2'] .rm-v2-tasks .rm-task .rm-quiet,
+.rm-app[data-rooms='v2'] .rm-v2-tasks .rm-task .rm-danger,
+.rm-app[data-rooms='v2'] .rm-v2-tasks .rm-task-form .rm-primary,
+.rm-app[data-rooms='v2'] .rm-v2-tasks .rm-task-form .rm-quiet {
+  border-radius: var(--radius-full);
+}
+.rm-app[data-rooms='v2'] .rm-v2-tasks .rm-comments {
+  border-top-color: var(--border-subtle);
+}
+.rm-app[data-rooms='v2'] .rm-v2-tasks .rm-task-comment-count {
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+.rm-app[data-rooms='v2'] .rm-v2-tasks .rm-task-form {
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-l);
+  background: var(--surface);
+}
+.rm-app[data-rooms='v2'] .rm-v2-tasks .rm-input {
+  border-radius: var(--radius-m);
+}
+/* The task's own actions (Ask for review, Cancel task, Comments) read as outlined pills. */
+.rm-app[data-rooms='v2'] .rm-v2-tasks .rm-task > .rm-quiet,
+.rm-app[data-rooms='v2'] .rm-v2-tasks .rm-task-actions .rm-quiet {
+  justify-self: start;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
+}
+.rm-app[data-rooms='v2'] .rm-v2-tasks .rm-task > .rm-quiet:hover,
+.rm-app[data-rooms='v2'] .rm-v2-tasks .rm-task-actions .rm-quiet:hover {
+  background: var(--bg-surface-hover);
+}

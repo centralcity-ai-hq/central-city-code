@@ -79,7 +79,7 @@ test('flag off: routes are not registered and the room hook is a no-op', async (
   assert.equal((await db.query('SELECT 1 FROM elric_notices')).rows.length, 0);
 });
 
-test('a third-party grant (agents:control) may pause Elric but never resume, revoke or rename it', async (t) => {
+test('Elric is managed: console revoke/rotate and city_control answer 409 elric_managed', async (t) => {
   const f = await elricFixture(t);
   const s = await f.scene();
   const granted = await f.call(s.owner.cookie, 'POST', '/api/assistant-access', {
@@ -100,19 +100,51 @@ test('a third-party grant (agents:control) may pause Elric but never resume, rev
       },
       payload: JSON.stringify(body),
     });
-  // The owner paused Elric; a grant cannot resume it (neither the workspace agent nor Elric).
+  const managed = (response: { statusCode: number; body: string; json(): unknown }) => {
+    assert.equal(response.statusCode, 409, response.body);
+    const body = response.json() as { code?: string; error?: string };
+    assert.equal(body.code, 'elric_managed', response.body);
+    assert.equal(
+      body.error,
+      'Elric is managed by Central City. Turn it off in Elric settings instead.',
+    );
+  };
+  // Console per-agent destructive routes.
+  managed(await f.call(s.owner.cookie, 'POST', `/api/agents/${s.elricId}/revoke`, {}));
+  managed(await f.call(s.owner.cookie, 'POST', `/api/agents/${s.elricId}/rotate-credential`, {}));
+  managed(await f.call(s.owner.cookie, 'POST', `/api/agents/${s.elricId}/pause`, {}));
+  managed(await f.call(s.owner.cookie, 'POST', `/api/agents/${s.elricId}/resume`, {}));
+  // city_control: every action, including pause.
+  for (const action of ['pause', 'resume', 'revoke'])
+    managed(await tool('city_control', { agent_id: s.elricId, action }));
   await f.elric.pause(s.owner.operatorId);
-  const resume = await tool('city_control', { agent_id: s.elricId, action: 'resume' });
-  assert.equal(resume.statusCode, 403, resume.body);
+  managed(await tool('city_control', { agent_id: s.elricId, action: 'resume' }));
   await f.elric.resume(s.owner.operatorId);
-  // Revoke: refused (only the owner's console).
-  const revoke = await tool('city_control', { agent_id: s.elricId, action: 'revoke' });
-  assert.equal(revoke.statusCode, 403, revoke.body);
-  // Pause is the safe direction: allowed, and it stops Elric (the workspace agent is paused).
-  const pause = await tool('city_control', { agent_id: s.elricId, action: 'pause' });
-  assert.equal(pause.statusCode, 200, pause.body);
-  const again = await tool('city_control', { agent_id: s.elricId, action: 'resume' });
-  assert.equal(again.statusCode, 403, 'a grant cannot undo its own pause either');
+  // Normal agents still work through the same routes and tool.
+  const normal = async (mode: string) => {
+    const created = await f.call(s.owner.cookie, 'POST', '/api/agents', {
+      name: `Normal ${mode}`,
+      capability: 'research',
+      mode,
+    });
+    assert.equal(created.statusCode, 201, created.body);
+    return created.json().agent.id as string;
+  };
+  const external = await normal('external');
+  const rotated = await f.call(
+    s.owner.cookie,
+    'POST',
+    `/api/agents/${external}/rotate-credential`,
+    {},
+  );
+  assert.equal(rotated.statusCode, 200, rotated.body);
+  const paused = await tool('city_control', { agent_id: external, action: 'pause' });
+  assert.equal(paused.statusCode, 200, paused.body);
+  const revoked = await f.call(s.owner.cookie, 'POST', `/api/agents/${external}/revoke`, {});
+  assert.equal(revoked.statusCode, 200, revoked.body);
+  const hosted = await normal('hosted');
+  const controlled = await tool('city_control', { agent_id: hosted, action: 'revoke' });
+  assert.equal(controlled.statusCode, 200, controlled.body);
   // Rename or re-scope through a manifest: Elric was not created from a manifest, and the name
   // is reserved, so neither an update nor a look-alike create goes through.
   for (const name of ['Elric', 'elric']) {
@@ -221,4 +253,23 @@ test('the accountless invite join cannot take the reserved name (any look-alike)
     true,
   );
   assert.equal(fine.statusCode, 200, fine.body);
+});
+
+test("Elric's own off switch still pauses and revokes it after the managed refusals", async (t) => {
+  const f = await elricFixture(t);
+  const s = await f.scene();
+  const refused = await f.call(s.owner.cookie, 'POST', `/api/agents/${s.elricId}/revoke`, {});
+  assert.equal(refused.statusCode, 409, refused.body);
+  const status = async () =>
+    (
+      await f.db.query<{ status: string }>('SELECT status FROM elric_agents WHERE agent_id=$1', [
+        s.elricId,
+      ])
+    ).rows[0]!.status;
+  const paused = await f.call(s.owner.cookie, 'POST', '/api/elric/pause', {});
+  assert.equal(paused.statusCode, 200, paused.body);
+  assert.equal(await status(), 'paused');
+  const revoked = await f.call(s.owner.cookie, 'POST', '/api/elric/revoke', {});
+  assert.equal(revoked.statusCode, 200, revoked.body);
+  assert.equal(await status(), 'revoked');
 });

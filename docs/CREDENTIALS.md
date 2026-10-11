@@ -18,7 +18,7 @@ Cookie: cc_session=<owner-session>
 The response is `{ "agent": <Agent>, "token": "<new secret>" }`. The secret is returned once. The server stores only its SHA-256 hash and cannot show the secret again. Never put it into messages, source control or task results.
 
 1. Stop the old connector process.
-2. Rotate the credential, copy the new token into the connector's private local configuration and save it. Protect the file using operating-system access controls; the prototype does not encrypt connector configuration files.
+2. Rotate the credential, copy the new token into the connector's private local configuration and save it. Protect the file using operating-system access controls; the connector does not encrypt its configuration files.
 3. Restart the connector. Its existing monotonic sequence file can be retained; a fresh sequence starting at zero is also accepted for this new credential.
 4. Confirm the same agent becomes reachable after its authenticated heartbeat. Existing connections stay in place; resubmit canceled work deliberately with a new idempotency key if it is still needed.
 

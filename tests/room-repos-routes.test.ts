@@ -329,7 +329,10 @@ test('only a signed-in console session reaches the routes; the flag hides them',
       (error: { errorCode?: string }) => error.errorCode === 'console_only',
     );
   withFlag(t, undefined);
-  assert.equal((await send(f, f.a, 'GET', '')).statusCode, 404);
+  // Off: reading answers a plain 'not available' (no 404 for the room to log); writes stay 404.
+  const off = await send(f, f.a, 'GET', '');
+  assert.equal(off.statusCode, 200);
+  assert.deepEqual(JSON.parse(off.body), { available: false });
   assert.equal(
     (await send(f, f.a, 'POST', '/preview', { repo: 'example-org/sandbox' })).statusCode,
     404,

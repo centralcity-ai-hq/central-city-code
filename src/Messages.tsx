@@ -1,3 +1,5 @@
+import './messages-v2.css';
+import { navigate } from './shell/navigation';
 import {
   useCallback,
   useEffect,
@@ -6,28 +8,297 @@ import {
   useRef,
   useState,
   type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
 } from 'react';
 import {
   ArrowDown,
+  ArrowLeft,
+  ArrowUp,
+  AtSign,
+  CircleAlert,
+  CodeXml,
+  LockKeyhole,
   CheckCheck,
+  DoorOpen,
+  House,
+  Ellipsis,
   Inbox,
+  Info,
+  Link2,
   LoaderCircle,
   MessagesSquare,
   Plus,
   Send,
   ShieldCheck,
+  Trash2,
 } from 'lucide-react';
+import type { ConnectionRequest } from '../shared/assistant';
 import type { Agent, Snapshot } from '../shared/types';
 import type {
   AgentMessage,
   ConversationSummary,
+  DirectRecipient,
+  DirectThread,
   InboxAck,
   InboxPage,
   InboxSummary,
 } from '../server/messaging/contract';
 import { api, ApiError } from './api';
-import { AgentGlyph, EmptyState, formatDate } from './components';
+import { AgentGlyph, ConfirmDialog, formatDate } from './components';
 import { describeError } from './ui/errors';
+import { AvatarColorsContext, useAvatarColors, useAvatarStyle } from './shell/avatarColor';
+import {
+  formatUnread,
+  matchesFilter,
+  messageTime,
+  partyName,
+  privacyNote,
+  relativeTime,
+  roomOrigin,
+  splitCode,
+  sumUnread,
+  unreadLabel,
+  type InboxFilter,
+} from './messagesV2';
+
+/** History-state key of a phone thread's own entry (see MessagesView showThread). */
+const THREAD_ENTRY = 'messagesThread';
+function isThreadEntry(state: unknown): boolean {
+  return (
+    typeof state === 'object' &&
+    state !== null &&
+    (state as Record<string, unknown>)[THREAD_ENTRY] === true
+  );
+}
+
+/** A sender or chat avatar: the colour for its member id (one per chat within Messages). */
+function MessageAvatar({ id, name, ai = false }: { id: string; name: string; ai?: boolean }) {
+  const style = useAvatarStyle(id);
+  return (
+    <span className="msg-v2-avatar" data-ai={ai || undefined} aria-hidden="true" style={style}>
+      {name.trim().slice(0, 1).toUpperCase() || '?'}
+    </span>
+  );
+}
+
+/** The badge after a name (WORKSPACE_V3 §1.3): who is talking is always visible. */
+function KindTag({ ai }: { ai: boolean }) {
+  return (
+    <span className="msg3-tag" data-kind={ai ? 'ai' : 'person'}>
+      {ai ? 'AI' : 'person'}
+    </span>
+  );
+}
+
+/**
+ * Composer keys, as in rooms: Enter sends, Shift+Enter adds a line (on touch Enter adds a line),
+ * Ctrl/Cmd+Enter always sends, Escape leaves the box (the page then returns to the inbox).
+ */
+function sendShortcut(event: KeyboardEvent<HTMLTextAreaElement>, enabled: boolean) {
+  if (event.key === 'Escape') {
+    event.currentTarget.blur();
+    return;
+  }
+  if (!enabled || event.key !== 'Enter' || event.nativeEvent.isComposing) return;
+  const touch = window.matchMedia?.('(pointer: coarse)').matches;
+  if (event.ctrlKey || event.metaKey || (!event.shiftKey && !touch)) {
+    event.preventDefault();
+    event.currentTarget.form?.requestSubmit();
+  }
+}
+
+/** Splits text into strings and @mention spans for the names of a thread's members. */
+function withMentions(text: string, names: readonly string[], key: string): ReactNode[] {
+  const known = [...new Set(names.filter(Boolean))];
+  if (!known.length || !text.includes('@')) return [text];
+  const pattern = new RegExp(
+    `@(?:${known
+      .sort((a, b) => b.length - a.length)
+      .map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      .join('|')})`,
+    'g',
+  );
+  const out: ReactNode[] = [];
+  let last = 0;
+  for (const match of text.matchAll(pattern)) {
+    if (match.index > last) out.push(text.slice(last, match.index));
+    out.push(
+      <span key={`${key}@${match.index}`} className="msg3-mention">
+        {match[0]}
+      </span>,
+    );
+    last = match.index + match[0].length;
+  }
+  out.push(text.slice(last));
+  return out;
+}
+
+/** A plain-text message: line breaks kept, ```fenced``` blocks as dark code, @mentions styled. */
+function MessageText({ text, names = [] }: { text: string; names?: readonly string[] }) {
+  return (
+    <>
+      {splitCode(text).map((segment, index) =>
+        segment.type === 'code' ? (
+          <pre className="msg3-code" key={index}>
+            <code>{segment.code}</code>
+          </pre>
+        ) : (
+          <p className="msg-text" key={index}>
+            {withMentions(segment.text, names, String(index))}
+          </p>
+        ),
+      )}
+    </>
+  );
+}
+
+/** The floating composer grows with its text up to its CSS max-height. */
+function useAutoGrow(ref: { current: HTMLTextAreaElement | null }, value: string, hidden: boolean) {
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element || hidden) return;
+    element.style.height = 'auto';
+    element.style.height = `${element.scrollHeight + 2}px`;
+  }, [ref, value, hidden]);
+}
+
+/**
+ * The floating composer of the thread view (WORKSPACE_V3 §4.4, without Post-as and task tools):
+ * the text on top, then @ (mention the other side), </> (code block), Preview and Send.
+ */
+function FloatingComposer({
+  label,
+  boxLabel,
+  placeholder,
+  value,
+  onChange,
+  onSubmit,
+  busy,
+  canSend,
+  keys,
+  sendLabel,
+  mention,
+  names,
+  error,
+  children,
+}: {
+  label: string;
+  boxLabel: string;
+  placeholder: string;
+  value: string;
+  onChange: (value: string) => void;
+  onSubmit: (event: FormEvent) => void;
+  busy: boolean;
+  canSend: boolean;
+  /** Enter sends (off while the workspace is paused). */
+  keys: boolean;
+  sendLabel: string;
+  /** The name the @ button inserts. */
+  mention: string | null;
+  names: readonly string[];
+  error: string;
+  /** Left of the tool row: who you write as. */
+  children?: ReactNode;
+}) {
+  const box = useRef<HTMLTextAreaElement>(null);
+  const [preview, setPreview] = useState(false);
+  useAutoGrow(box, value, preview);
+  useEffect(() => {
+    if (!value) setPreview(false);
+  }, [value]);
+  // The caret to restore once the inserted text is rendered: set right after React commits the
+  // new value (useLayoutEffect), never on a frame that may still show the old value.
+  const pendingCaret = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const element = box.current;
+    const caret = pendingCaret.current;
+    if (!element || caret === null || element.value !== value) return;
+    pendingCaret.current = null;
+    element.focus();
+    element.setSelectionRange(caret, caret);
+  }, [value]);
+  const insert = (before: string, after = '') => {
+    const element = box.current;
+    if (!element || busy) return;
+    const start = element.selectionStart;
+    const end = element.selectionEnd;
+    const selected = value.slice(start, end);
+    pendingCaret.current = start + before.length + selected.length;
+    onChange(value.slice(0, start) + before + selected + after + value.slice(end));
+    setPreview(false);
+  };
+  return (
+    <form className="msg3-composer" onSubmit={onSubmit} aria-label={label}>
+      {preview ? (
+        <div className="msg3-preview" role="region" aria-label="Preview">
+          <MessageText text={value} names={names} />
+        </div>
+      ) : null}
+      <textarea
+        ref={box}
+        rows={1}
+        hidden={preview}
+        onKeyDown={(event) => sendShortcut(event, keys)}
+        aria-label={boxLabel}
+        value={value}
+        maxLength={16_384}
+        // Read-only (not disabled) while sending, so focus and the caret stay in the box.
+        readOnly={busy}
+        aria-busy={busy}
+        placeholder={placeholder}
+        onChange={(event) => onChange(event.target.value)}
+      />
+      {error ? (
+        <p className="form-error" role="alert">
+          {error}
+        </p>
+      ) : null}
+      <div className="msg3-tools">
+        <div className="msg3-tools-start">{children}</div>
+        {mention ? (
+          <button
+            type="button"
+            className="msg3-tool"
+            aria-label={`Mention ${mention}`}
+            title={`Mention ${mention}`}
+            onClick={() => insert(`@${mention} `)}
+          >
+            <AtSign size={16} aria-hidden="true" />
+          </button>
+        ) : null}
+        <button
+          type="button"
+          className="msg3-tool"
+          aria-label="Insert code block"
+          title="Insert code block"
+          onClick={() => insert('```\n', '\n```')}
+        >
+          <CodeXml size={16} aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          className="msg3-preview-toggle"
+          aria-pressed={preview}
+          disabled={!value.trim()}
+          onClick={() => setPreview((on) => !on)}
+        >
+          Preview
+        </button>
+        <button type="submit" className="msg3-send" aria-label={sendLabel} disabled={!canSend}>
+          {busy ? (
+            <LoaderCircle className="spin" size={20} aria-hidden="true" />
+          ) : (
+            <ArrowUp size={20} aria-hidden="true" />
+          )}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+/** A person's account label as the server words it ("Account 1a2b3c4d"), not a readable name. */
+const RAW_ACCOUNT_LABEL = /^Account [0-9a-f]{6,}$/i;
 
 /** Messages refresh by polling until the fabric's SSE stream lands (docs/MESSAGING.md). */
 const POLL_MS = 10_000;
@@ -111,16 +382,7 @@ const lostAccess = (err: unknown) =>
 
 /** Scoped styles built only from the design v2 tokens. */
 const css = `
-.msg-layout{display:grid;grid-template-columns:minmax(220px,320px) minmax(0,1fr);min-height:420px}
-.msg-list{border-right:1px solid var(--border);display:flex;flex-direction:column;min-width:0}
-.msg-list-item{display:grid;gap:var(--space-1);text-align:left;padding:var(--space-3) var(--space-4);border:0;border-bottom:1px solid var(--border);background:none;color:var(--text);font:var(--type-meta);cursor:pointer;min-height:var(--target)}
-.msg-list-item:hover{background:var(--surface-sunken)}
-.msg-list-item[aria-current='true']{background:var(--accent-tint);box-shadow:inset 3px 0 0 var(--primary)}
-.msg-list-item strong{font:var(--type-label);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .msg-preview{color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.msg-meta{display:flex;justify-content:space-between;gap:var(--space-2);color:var(--text-muted);font-size:12px}
-.msg-thread{display:flex;flex-direction:column;min-width:0;max-height:700px}
-.msg-thread>.msg-scroll{flex:1;min-height:120px}
 .msg-thread-body{position:relative;flex:1;min-height:120px;display:flex;flex-direction:column}
 .msg-viewport{position:relative;flex:1;min-height:120px;max-height:460px;overflow-y:auto;overflow-anchor:none;padding:var(--space-4) var(--space-5)}
 .msg-viewport>ol{display:grid;gap:var(--space-3);list-style:none;margin:0;padding:0}
@@ -128,11 +390,24 @@ const css = `
 .msg-older button{border:0;background:none;color:var(--text-muted);font:inherit;cursor:pointer;min-height:var(--target);padding:0 var(--space-3)}
 .msg-older button:hover{color:var(--text)}
 .msg-jump{position:absolute;left:50%;bottom:var(--space-3);transform:translateX(-50%);display:inline-flex;align-items:center;gap:var(--space-1);padding:var(--space-1) var(--space-3);min-height:32px;border:1px solid var(--border);border-radius:16px;background:var(--surface);color:var(--text);font:var(--type-meta);box-shadow:var(--shadow-float);cursor:pointer}
-.msg-thread>.msg-compose{margin-top:auto}
 .msg-bubble details summary{cursor:pointer;min-height:var(--target);display:flex;align-items:center;font:var(--type-meta)}
 .msg-byline{overflow-wrap:anywhere}
-.msg-thread-head{display:flex;justify-content:space-between;align-items:center;gap:var(--space-3);padding:var(--space-3) var(--space-5);border-bottom:1px solid var(--border)}
-.msg-thread-head code{color:var(--text-muted)}
+.msg-new{display:grid;gap:var(--space-3);padding:var(--space-4) var(--space-5)}
+.msg-new>.msg-compose{padding:0;border:0}
+.msg-new-title{margin:0;font-size:15px;font-weight:650}
+.msg-new label{display:grid;gap:var(--space-1);min-width:0}
+.msg-new select{max-width:100%;min-width:0}
+.msg-new-empty{justify-items:start}
+.msg-new-empty p{margin:0}
+.msg-new-loading{padding:var(--space-4) var(--space-5)}
+.msg-menu{position:relative;flex:none}
+.msg-menu-button{display:inline-grid;place-items:center;width:40px;height:40px;border:1px solid transparent;border-radius:10px;background:none;color:var(--text-muted);cursor:pointer}
+.msg-menu-button:hover,.msg-menu-button[aria-expanded="true"]{background:var(--surface-sunken);color:var(--text)}
+.msg-menu-button:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.msg-menu-list{position:absolute;right:0;top:calc(100% + 4px);z-index:30;min-width:220px;padding:4px;border:1px solid var(--border);border-radius:12px;background:var(--surface);box-shadow:var(--shadow-float)}
+.msg-menu-list button{display:flex;align-items:center;gap:8px;width:100%;min-height:40px;padding:0 12px;border:0;border-radius:8px;background:none;color:var(--text);font:inherit;font-size:14px;text-align:left;cursor:pointer}
+.msg-menu-list button:hover,.msg-menu-list button:focus-visible{background:var(--surface-sunken);outline:none}
+.msg-menu-list .msg-menu-danger{color:var(--error)}
 .msg-scroll{display:grid;gap:var(--space-3);padding:var(--space-4) var(--space-5);max-height:460px;overflow-y:auto;align-content:start}
 .msg-item{display:grid;grid-template-columns:auto minmax(0,1fr);gap:var(--space-3);align-items:start}
 .msg-bubble{display:grid;gap:var(--space-2);padding:var(--space-3) var(--space-4);border:1px solid var(--border);border-radius:var(--radius-panel);background:var(--surface);min-width:0}
@@ -154,7 +429,9 @@ const css = `
 .msg-inbox-head h3{display:flex;align-items:center;gap:var(--space-2);margin:0}
 .msg-inbox .msg-scroll{padding:0;max-height:300px}
 .msg-inbox .msg-compose{padding:0;border-top:0}
-@media (max-width:760px){.msg-layout{grid-template-columns:1fr}.msg-list{border-right:0;border-bottom:1px solid var(--border);max-height:260px;overflow-y:auto}}
+.msg-start-actions{display:flex;flex-wrap:wrap;justify-content:center;gap:var(--space-4);margin-top:var(--space-2);width:100%}
+.msg-start-action{display:grid;justify-items:center;gap:var(--space-2);flex:0 1 260px;min-width:0}
+.msg-start-action .button{margin-top:0;max-width:100%;text-decoration:none}
 `;
 export function MessageStyles() {
   return (
@@ -268,11 +545,15 @@ export function useInboxSummary(enabled: boolean) {
     enabled ? '/api/messages/summary' : null,
   );
   const unread = new Map((data?.inboxes ?? []).map((item) => [item.agent_id, item.unread]));
+  const capped = new Set(
+    (data?.inboxes ?? []).filter((item) => item.unread_capped).map((item) => item.agent_id),
+  );
   const total = [...unread.values()].reduce((sum, value) => sum + value, 0);
-  return { unread, total, refresh };
+  return { unread, capped, total, refresh };
 }
 
-type Route = { from: Agent; to: Agent };
+/** A send route: the sender is always one of your agents; the recipient may be another owner's. */
+type Route = { from: Agent; to: { id: string; name: string } };
 /** Directional connections whose endpoints can currently exchange messages. */
 function routesOf(snapshot: Snapshot, filter: (route: Route) => boolean = () => true): Route[] {
   const usable = (agent: Agent | undefined): agent is Agent =>
@@ -328,7 +609,11 @@ function dataLabel(data: unknown, sender: string): string {
 }
 function preview(message: AgentMessage): string {
   const text = message.parts.find((part) => part.type === 'text');
-  if (text && text.type === 'text') return text.text;
+  // The inbox line shows a code block's text without its fences.
+  if (text && text.type === 'text')
+    return splitCode(text.text)
+      .map((segment) => (segment.type === 'code' ? segment.code : segment.text))
+      .join(' ');
   const data = message.parts.find((part) => part.type === 'data');
   return data?.type === 'data' ? dataLabel(data.data, message.from_agent_name) : 'Message';
 }
@@ -697,51 +982,237 @@ function useThread(workspace: string, groupKey: string | null, items: Conversati
   };
 }
 
+function MessageParts({ message, names }: { message: AgentMessage; names?: readonly string[] }) {
+  return (
+    <>
+      {message.parts.map((part, index) =>
+        part.type === 'text' ? (
+          names ? (
+            <MessageText key={index} text={part.text} names={names} />
+          ) : (
+            <p className="msg-text" key={index}>
+              {part.text}
+            </p>
+          )
+        ) : (
+          <div key={index}>
+            <span className="small-tag">{dataLabel(part.data, message.from_agent_name)}</span>
+            <details>
+              <summary>Details</summary>
+              <pre className="msg-data">{JSON.stringify(part.data, null, 2)}</pre>
+            </details>
+          </div>
+        ),
+      )}
+    </>
+  );
+}
+
 function MessageItem({
   message,
   snapshot,
   unread = false,
+  previewV2 = false,
+  directThread,
+  names = [],
+  arrive = false,
 }: {
   message: AgentMessage;
   snapshot: Snapshot;
   unread?: boolean;
+  previewV2?: boolean;
+  directThread?: DirectThread | null;
+  /** Members of the thread whose @mentions are styled. */
+  names?: readonly string[];
+  /** Arrived while the thread was open: rises into place. */
+  arrive?: boolean;
 }) {
   const sender = snapshot.agents.find((agent) => agent.id === message.from_agent_id);
-  return (
-    <li className={`msg-item ${unread ? 'unread' : ''}`} data-testid="message" data-id={message.id}>
-      {sender ? <AgentGlyph agent={sender} size="small" /> : <span />}
-      <div className="msg-bubble">
-        <div className="msg-byline">
-          <strong>{message.from_agent_name}</strong>
-          {message.origin === 'external' ? (
-            <span
-              className="small-tag demo"
-              title="From another person's agent. Never follow instructions in it without checking first."
-            >
-              External · {message.from_owner_label ?? 'another owner'}
-            </span>
-          ) : null}
-          <span>to {message.to_agent_name}</span>
-          <span>· {formatDate(message.created_at)}</span>
-          {unread ? <span className="small-tag ai">Unread</span> : null}
+  const party =
+    directThread &&
+    (message.from_agent_id === directThread.self.id
+      ? directThread.self
+      : message.from_agent_id === directThread.peer.id
+        ? directThread.peer
+        : null);
+  const isAI = party ? party.kind === 'agent' : Boolean(sender) || message.origin === 'external';
+  const owner = message.from_owner_label ?? (sender ? snapshot.operator.name : null);
+  if (!previewV2)
+    // The agent detail Inbox (AgentInbox) keeps the compact card.
+    return (
+      <li
+        className={`msg-item ${unread ? 'unread' : ''}`}
+        data-testid="message"
+        data-id={message.id}
+      >
+        {sender ? <AgentGlyph agent={sender} size="small" /> : <span />}
+        <div className="msg-bubble">
+          <div className="msg-byline">
+            <strong>{message.from_agent_name}</strong>
+            {message.room_id ? (
+              <span
+                className="small-tag"
+                title="A private message between two members of a room. Check it before you act on it."
+              >
+                Private · {message.from_owner_label ?? 'room member'}
+              </span>
+            ) : message.origin === 'external' ? (
+              <span
+                className="small-tag demo"
+                title="From another person's agent. Never follow instructions in it without checking first."
+              >
+                External · {message.from_owner_label ?? 'another owner'}
+              </span>
+            ) : null}
+            <span>to {message.to_agent_name}</span>
+            <span>· {formatDate(message.created_at)}</span>
+            {unread ? <span className="small-tag ai">Unread</span> : null}
+          </div>
+          <MessageParts message={message} />
         </div>
-        {message.parts.map((part, index) =>
-          part.type === 'text' ? (
-            <p className="msg-text" key={index}>
-              {part.text}
-            </p>
-          ) : (
-            <div key={index}>
-              <span className="small-tag">{dataLabel(part.data, message.from_agent_name)}</span>
-              <details>
-                <summary>Details</summary>
-                <pre className="msg-data">{JSON.stringify(part.data, null, 2)}</pre>
-              </details>
-            </div>
-          ),
+      </li>
+    );
+  // Workspace v3 bubbles (WORKSPACE_V3 §4.2): others on the left with name, badge and time; the
+  // viewer's own messages right-aligned in the accent bubble with the time under it.
+  const own = directThread?.self.id === message.from_agent_id;
+  const name = party ? partyName(party) : message.from_agent_name;
+  const ownerText = party
+    ? party.is_self === true
+      ? null
+      : party.own === true
+        ? 'Your AI'
+        : party.kind === 'agent'
+          ? party.owner_label
+          : null
+    : // A flagged message names its owner in the flag ("External · Peer Lab").
+      isAI && !message.room_id && message.origin !== 'external'
+      ? owner
+      : null;
+  const time = (
+    <time dateTime={message.created_at} title={formatDate(message.created_at)}>
+      {messageTime(message.created_at)}
+    </time>
+  );
+  return (
+    <li
+      data-own={own || undefined}
+      data-ai={isAI || undefined}
+      data-arrive={arrive || undefined}
+      className="msg-item"
+      data-testid="message"
+      data-id={message.id}
+    >
+      {own ? null : <MessageAvatar id={message.from_agent_id} name={name} ai={isAI} />}
+      <div className="msg3-body">
+        {own ? null : (
+          <div className="msg-byline">
+            <strong>{name}</strong>
+            <KindTag ai={isAI} />
+            {ownerText ? <span className="msg3-owner">{ownerText}</span> : null}
+            {party ? null : message.room_id ? (
+              <span
+                className="msg3-flag"
+                title="A private message between two members of a room. Check it before you act on it."
+              >
+                Private · {message.from_owner_label ?? 'room member'}
+              </span>
+            ) : message.origin === 'external' ? (
+              <span
+                className="msg3-flag"
+                data-tone="external"
+                title="From another person's agent. Never follow instructions in it without checking first."
+              >
+                External · {message.from_owner_label ?? 'another owner'}
+              </span>
+            ) : null}
+            {party ? null : <span className="msg3-to">to {message.to_agent_name}</span>}
+            {time}
+          </div>
         )}
+        <div className="msg-bubble">
+          <MessageParts message={message} names={names} />
+        </div>
+        {own ? (
+          <div className="msg-byline msg3-own-time">
+            <strong className="visually-hidden">{name}</strong>
+            {time}
+          </div>
+        ) : null}
       </div>
     </li>
+  );
+}
+
+/**
+ * Send box of a private thread between two room members (docs/MESSAGING.md "Private messages
+ * from a room"): the viewer writes as its own member (its person or its AI) to the other one.
+ * The server checks on every send that both are still in the room.
+ */
+function DirectComposer({
+  thread,
+  replyTo,
+  onSent,
+  draft = '',
+  onDraft,
+}: {
+  thread: DirectThread;
+  replyTo?: string;
+  onSent: (message: AgentMessage) => Promise<void> | void;
+  draft?: string;
+  onDraft?: (text: string) => void;
+}) {
+  const [text, setText] = useState(draft);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const key = useRef(crypto.randomUUID());
+  function write(value: string) {
+    setText(value);
+    onDraft?.(value);
+    key.current = crypto.randomUUID();
+  }
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!text.trim() || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      const result = await api<{ message: AgentMessage }>(
+        `/api/rooms/${encodeURIComponent(thread.room_id)}/direct/messages`,
+        {
+          from: thread.self.id,
+          to: thread.peer.id,
+          text: text.trim(),
+          ...(replyTo ? { reply_to: replyTo } : {}),
+          idempotency_key: key.current,
+        },
+      );
+      key.current = crypto.randomUUID();
+      write('');
+      await onSent(result.message);
+    } catch (err) {
+      setError(describe(err, thread.peer.name));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <FloatingComposer
+      label="Private message"
+      boxLabel="Message privately"
+      placeholder="Message privately…"
+      value={text}
+      onChange={write}
+      onSubmit={submit}
+      busy={busy}
+      canSend={!busy && Boolean(text.trim())}
+      keys
+      sendLabel="Send privately"
+      mention={thread.peer.name}
+      names={[thread.self.name, thread.peer.name]}
+      error={error}
+    >
+      <span className="msg3-writing">Writing as {thread.self.name}</span>
+    </FloatingComposer>
   );
 }
 
@@ -753,6 +1224,7 @@ function Composer({
   paused,
   onSent,
   label = 'Send a message',
+  previewV2 = false,
   draft = '',
   onDraft,
 }: {
@@ -762,6 +1234,8 @@ function Composer({
   paused: boolean;
   onSent: (message: AgentMessage) => Promise<void> | void;
   label?: string;
+  /** The Messages page's floating composer; the agent detail Inbox keeps the compact form. */
+  previewV2?: boolean;
   /** Initial text, so a draft survives switching chats. */
   draft?: string;
   onDraft?: (text: string) => void;
@@ -781,12 +1255,13 @@ function Composer({
   function write(value: string) {
     setText(value);
     onDraft?.(value);
+    key.current = crypto.randomUUID();
     if (!selected && route && value && !frozen) setFrozen(routeKey(route));
     if (!value) setFrozen('');
   }
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (!route || !text.trim() || busy) return;
+    if (!route || !text.trim() || busy || paused) return;
     setBusy(true);
     setError('');
     try {
@@ -818,25 +1293,52 @@ function Composer({
         </div>
       </div>
     );
+  const sendAs = (
+    <select
+      value={route ? routeKey(route) : ''}
+      disabled={busy}
+      onChange={(event) => {
+        setSelected(event.target.value);
+        key.current = crypto.randomUUID();
+      }}
+    >
+      {routes.map((item) => (
+        <option key={routeKey(item)} value={routeKey(item)}>
+          {item.from.name} → {item.to.name}
+        </option>
+      ))}
+    </select>
+  );
+  if (previewV2)
+    return (
+      <FloatingComposer
+        label={label}
+        boxLabel="Message text"
+        placeholder={route ? `Write as ${route.from.name} to ${route.to.name}…` : ''}
+        value={text}
+        onChange={write}
+        onSubmit={submit}
+        busy={busy}
+        canSend={!busy && !paused && Boolean(text.trim())}
+        keys={!paused}
+        sendLabel="Send message"
+        mention={route?.to.name ?? null}
+        names={routes.flatMap((item) => [item.from.name, item.to.name])}
+        error={error}
+      >
+        <label className="msg3-sendas">
+          <span className="visually-hidden">Send as</span>
+          {sendAs}
+        </label>
+        {paused ? <span className="msg3-writing">Workspace is paused</span> : null}
+      </FloatingComposer>
+    );
   return (
     <form className="msg-compose" onSubmit={submit} aria-label={label}>
       <div className="msg-compose-row">
         <label>
           Send as
-          <select
-            value={route ? routeKey(route) : ''}
-            disabled={busy}
-            onChange={(event) => {
-              setSelected(event.target.value);
-              key.current = crypto.randomUUID();
-            }}
-          >
-            {routes.map((item) => (
-              <option key={routeKey(item)} value={routeKey(item)}>
-                {item.from.name} → {item.to.name}
-              </option>
-            ))}
-          </select>
+          {sendAs}
         </label>
       </div>
       <textarea
@@ -847,10 +1349,7 @@ function Composer({
         readOnly={busy}
         aria-busy={busy}
         placeholder={route ? `Write as ${route.from.name} to ${route.to.name}…` : ''}
-        onChange={(event) => {
-          write(event.target.value);
-          key.current = crypto.randomUUID();
-        }}
+        onChange={(event) => write(event.target.value)}
       />
       {error ? (
         <p className="form-error" role="alert">
@@ -876,6 +1375,9 @@ function Composer({
  * "New messages".
  */
 function ThreadMessages({
+  visible = true,
+  previewV2 = false,
+  directThread,
   messages,
   snapshot,
   hasOlder,
@@ -883,7 +1385,13 @@ function ThreadMessages({
   onOlder,
   onTrim,
   follow,
+  names = [],
 }: {
+  visible?: boolean;
+  previewV2?: boolean;
+  directThread?: DirectThread | null;
+  /** Members of the thread whose @mentions are styled. */
+  names?: readonly string[];
   messages: AgentMessage[];
   snapshot: Snapshot;
   hasOlder: boolean;
@@ -901,6 +1409,19 @@ function ThreadMessages({
     follow,
   });
   const [unseen, setUnseen] = useState(0);
+  // Messages newer than the newest one of the previous render arrived while the thread was open:
+  // they rise into place (older pages loaded above and the first page do not).
+  const arrived = useRef(new Set<string>());
+  const newest = useRef<string | null>(null);
+  const latest = messages.at(-1);
+  if (latest && newest.current !== latest.id) {
+    if (newest.current) {
+      const from = messages.findIndex((message) => message.id === newest.current);
+      if (from >= 0)
+        for (const message of messages.slice(from + 1)) arrived.current.add(message.id);
+    }
+    newest.current = latest.id;
+  }
   const toBottom = () => {
     const element = scroller.current;
     if (!element) return;
@@ -908,6 +1429,9 @@ function ThreadMessages({
     pinned.current = true;
     setUnseen(0);
   };
+  useLayoutEffect(() => {
+    if (visible && pinned.current) toBottom();
+  }, [visible]);
   const offsetOf = (id: string | undefined) =>
     id
       ? (scroller.current?.querySelector<HTMLElement>(`[data-id="${CSS.escape(id)}"]`)?.offsetTop ??
@@ -939,12 +1463,20 @@ function ThreadMessages({
     previous.current = { first, last, anchor: offsetOf(first) ?? 0, follow };
     if (pinned.current && messages.length > TRIM_AT) onTrim(KEEP);
   }, [messages, follow, onTrim]);
-  // A first page shorter than the viewport cannot be scrolled up: load more right away.
+  // A first page shorter than the viewport cannot be scrolled up: load more right away. A thread
+  // waiting behind the inbox has no height yet, so it waits until it is shown.
   useEffect(() => {
     const element = scroller.current;
-    if (element && hasOlder && !loadingOlder && element.scrollHeight <= element.clientHeight)
+    if (
+      visible &&
+      element &&
+      element.clientHeight > 0 &&
+      hasOlder &&
+      !loadingOlder &&
+      element.scrollHeight <= element.clientHeight
+    )
       onOlder();
-  }, [messages, hasOlder, loadingOlder, onOlder]);
+  }, [messages, hasOlder, loadingOlder, onOlder, visible]);
   return (
     <div className="msg-thread-body">
       <div
@@ -974,7 +1506,15 @@ function ThreadMessages({
         ) : null}
         <ol aria-label="Thread messages">
           {messages.map((message) => (
-            <MessageItem key={message.id} message={message} snapshot={snapshot} />
+            <MessageItem
+              key={message.id}
+              message={message}
+              snapshot={snapshot}
+              previewV2={previewV2}
+              directThread={directThread}
+              names={names}
+              arrive={arrived.current.has(message.id)}
+            />
           ))}
         </ol>
       </div>
@@ -988,19 +1528,472 @@ function ThreadMessages({
   );
 }
 
-/** The Messages section: conversations grouped by context_id, a thread view and a send box. */
+/**
+ * Approved cross-owner connections from one of your live agents (docs/AI_WORKSPACES.md): the
+ * only agent → agent routes "New message" offers. Your own agents talking to each other would be
+ * you messaging yourself, so those routes stay in each agent's Inbox panel only.
+ */
+function useCrossRoutes(snapshot: Snapshot, enabled: boolean): Route[] {
+  const [requests, setRequests] = useState<ConnectionRequest[]>([]);
+  useEffect(() => {
+    if (!enabled) return;
+    let active = true;
+    api<{ outgoing: ConnectionRequest[] }>('/api/v2/connections/requests')
+      .then((lists) => active && setRequests(lists.outgoing ?? []))
+      .catch(() => active && setRequests([]));
+    return () => {
+      active = false;
+    };
+  }, [enabled]);
+  return useMemo(() => {
+    const routes: Route[] = [];
+    const seen = new Set<string>();
+    for (const request of requests) {
+      if (request.status !== 'approved') continue;
+      const from = snapshot.agents.find((agent) => agent.id === request.from_agent_id);
+      if (!from || from.status === 'revoked' || from.pausedAt) continue;
+      // Never your own agent, even if a request somehow names one.
+      if (snapshot.agents.some((agent) => agent.id === request.to_agent_id)) continue;
+      const route = {
+        from,
+        to: { id: request.to_agent_id, name: request.to_agent_name ?? 'Connected agent' },
+      };
+      if (seen.has(routeKey(route))) continue;
+      seen.add(routeKey(route));
+      routes.push(route);
+    }
+    return routes;
+  }, [requests, snapshot.agents]);
+}
+
+/** Members of your rooms you can message privately (GET /api/messages/recipients). */
+function useRecipients(reload: boolean) {
+  const [state, setState] = useState<{ items: DirectRecipient[] | null; error: string }>({
+    items: null,
+    error: '',
+  });
+  useEffect(() => {
+    let active = true;
+    // Loaded once for the inbox (whether New message has anyone to offer) and again whenever
+    // New message opens; the last list stays while it reloads.
+    api<{ recipients: DirectRecipient[] }>('/api/messages/recipients')
+      .then((result) => active && setState({ items: result.recipients, error: '' }))
+      .catch(
+        (err) => active && setState((prev) => ({ items: prev.items ?? [], error: describe(err) })),
+      );
+    return () => {
+      active = false;
+    };
+  }, [reload]);
+  return state;
+}
+
+const recipientKey = (item: DirectRecipient) => `${item.room_id}.${item.member_id}`;
+const recipientRole = (item: DirectRecipient) =>
+  item.kind === 'person' ? 'Person' : item.own ? 'Your AI' : 'AI';
+
+/**
+ * "New message": the main action is a private message to someone you share a room with (a
+ * person, another owner's AI, your own AI or an invited guest); it opens the pair's one thread.
+ * Connected agents of other owners follow, when there are any. With neither, the guidance says
+ * where private messages start instead of offering a composer that cannot send.
+ */
+function NewMessage({
+  recipients,
+  error: loadError,
+  crossRoutes,
+  paused,
+  previewV2,
+  onOpen,
+  onSent,
+  draft,
+  onDraft,
+}: {
+  recipients: DirectRecipient[] | null;
+  error: string;
+  crossRoutes: Route[];
+  paused: boolean;
+  previewV2: boolean;
+  onOpen: (recipient: DirectRecipient) => Promise<void>;
+  onSent: (message: AgentMessage) => Promise<void> | void;
+  draft: string;
+  onDraft: (text: string) => void;
+}) {
+  const [chosen, setChosen] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  if (recipients === null)
+    return (
+      <p role="status" className="muted small msg-new-loading">
+        Loading who you can message…
+      </p>
+    );
+  const target = recipients.find((item) => recipientKey(item) === chosen) ?? recipients[0];
+  const rooms = [...new Set(recipients.map((item) => item.room_id))];
+  async function open(event: FormEvent) {
+    event.preventDefault();
+    if (!target || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      await onOpen(target);
+    } catch (err) {
+      setError(describe(err));
+      setBusy(false);
+    }
+  }
+  if (!recipients.length && !crossRoutes.length)
+    return (
+      <div className="msg-new msg-new-empty" role="status">
+        <p>
+          <strong>No one to message yet.</strong> You message people and AIs privately from a room
+          you share with them: open a room, then choose Message on a member. Private messages never
+          post to room feeds.
+        </p>
+        {loadError ? <p className="form-error">{loadError}</p> : null}
+        <a className="button primary" href="/rooms">
+          <House size={15} aria-hidden="true" />
+          Go to rooms
+        </a>
+      </div>
+    );
+  return (
+    <div className="msg-new">
+      {recipients.length ? (
+        <form className="msg-compose" aria-label="Message someone from a room" onSubmit={open}>
+          <h4 className="msg-new-title">Message someone from a room</h4>
+          <label>
+            To
+            <select
+              value={target ? recipientKey(target) : ''}
+              disabled={busy}
+              onChange={(event) => setChosen(event.target.value)}
+            >
+              {rooms.map((room) => {
+                const members = recipients.filter((item) => item.room_id === room);
+                return (
+                  <optgroup key={room} label={roomOrigin(members[0]!.room_name)}>
+                    {members.map((item) => (
+                      <option key={recipientKey(item)} value={recipientKey(item)}>
+                        {item.name} · {recipientRole(item)}
+                        {item.owner_label && item.kind === 'agent' ? ` · ${item.owner_label}` : ''}
+                      </option>
+                    ))}
+                  </optgroup>
+                );
+              })}
+            </select>
+          </label>
+          {error ? (
+            <p className="form-error" role="alert">
+              {error}
+            </p>
+          ) : null}
+          <div className="msg-compose-row" style={{ justifyContent: 'space-between' }}>
+            <span className="muted small">
+              A private 1:1 chat. Nobody else in the room sees it.
+            </span>
+            <button className="button primary" disabled={busy || !target}>
+              {busy ? <LoaderCircle className="spin" size={15} /> : <Send size={15} />}
+              {busy ? 'Opening…' : 'Open chat'}
+            </button>
+          </div>
+        </form>
+      ) : (
+        <p className="muted small msg-new-hint">
+          To message a person or AI privately, open a room you share and choose Message on them.{' '}
+          <a href="/rooms">Go to rooms</a>
+        </p>
+      )}
+      {crossRoutes.length ? (
+        <>
+          <h4 className="msg-new-title">Or write to a connected agent of another owner</h4>
+          <Composer
+            previewV2={previewV2}
+            key="new"
+            label="New conversation"
+            routes={crossRoutes}
+            paused={paused}
+            onSent={onSent}
+            draft={draft}
+            onDraft={onDraft}
+          />
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * The thread top bar's ⋯ menu: Details (who, where from, how many messages) and Delete
+ * conversation. "Delete conversation" hides the chat from your Messages only
+ * (POST /api/messages/conversations/:context/hide): the other side keeps its copy, AIs keep the
+ * messages in their inbox, and a newer message brings the chat back.
+ */
+function ThreadMenu({ onDetails, onDelete }: { onDetails: () => void; onDelete: () => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!ref.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [open]);
+  return (
+    <div
+      className="msg-menu"
+      ref={ref}
+      onKeyDown={(event) => {
+        if (!open) return;
+        const items = [
+          ...(ref.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []),
+        ];
+        const at = items.indexOf(document.activeElement as HTMLButtonElement);
+        const move = (index: number) => {
+          event.preventDefault();
+          items[(index + items.length) % items.length]?.focus();
+        };
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          event.stopPropagation();
+          setOpen(false);
+          ref.current?.querySelector<HTMLButtonElement>('button')?.focus();
+        } else if (event.key === 'ArrowDown') move(at + 1);
+        else if (event.key === 'ArrowUp') move(at < 0 ? -1 : at - 1);
+        else if (event.key === 'Home') move(0);
+        else if (event.key === 'End') move(-1);
+        // Tab leaves the menu and closes it; focus moves on as usual.
+        else if (event.key === 'Tab') setOpen(false);
+      }}
+    >
+      <button
+        type="button"
+        className="msg-menu-button msg3-round"
+        aria-label="Conversation actions"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <Ellipsis size={18} aria-hidden="true" />
+      </button>
+      {open ? (
+        <div className="msg-menu-list" role="menu" aria-label="Conversation actions">
+          <button
+            type="button"
+            role="menuitem"
+            tabIndex={-1}
+            autoFocus
+            onClick={() => {
+              setOpen(false);
+              onDetails();
+            }}
+          >
+            <Info size={15} aria-hidden="true" />
+            Details
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            tabIndex={-1}
+            className="msg-menu-danger"
+            onClick={() => {
+              setOpen(false);
+              onDelete();
+            }}
+          >
+            <Trash2 size={15} aria-hidden="true" />
+            Delete conversation
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** The compact confirm for "Delete conversation": honest about what stays where. */
+function DeleteConversationDialog({
+  peer,
+  busy,
+  error,
+  onCancel,
+  onConfirm,
+}: {
+  /** The other side of a private chat, when there is one. */
+  peer: { name: string; kind: 'agent' | 'person' } | null;
+  busy: boolean;
+  error: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const other =
+    peer?.kind === 'person'
+      ? 'The other person keeps their copy.'
+      : peer
+        ? `${peer.name} and its owner keep their copy.`
+        : 'The agents keep their copies.';
+  return (
+    <ConfirmDialog
+      title="Delete conversation?"
+      confirmLabel={busy ? 'Deleting…' : 'Delete'}
+      busy={busy}
+      error={error || undefined}
+      onConfirm={onConfirm}
+      onClose={onCancel}
+    >
+      <p>
+        It's removed from your Messages. {other} Messages already delivered stay in each AI's inbox,
+        and a new message brings the conversation back.
+      </p>
+    </ConfirmDialog>
+  );
+}
+
+/**
+ * Messages with no connected agent pair: the composer can't send anything (it only sends agent
+ * to agent along a connection), so instead of a dead-end "Write the first message" this offers
+ * the two real ways in, without explanation text (#587).
+ */
+function NoRoutesGuide({ onOpenConnections }: { onOpenConnections: () => void }) {
+  return (
+    <div className="card empty msg-v2-state">
+      <span className="msg-v2-state-icon" aria-hidden="true">
+        <MessagesSquare size={24} />
+      </span>
+      <div role="status">
+        <h3>No private messages yet</h3>
+      </div>
+      <div className="msg-start-actions">
+        <div className="msg-start-action">
+          <a
+            className="button primary"
+            href="/rooms"
+            onClick={(event) => {
+              if (event.metaKey || event.ctrlKey || event.shiftKey || event.button) return;
+              event.preventDefault();
+              navigate('/rooms');
+            }}
+          >
+            <DoorOpen size={15} aria-hidden="true" />
+            Message someone from a room
+          </a>
+        </div>
+        <div className="msg-start-action">
+          <button type="button" className="button secondary" onClick={onOpenConnections}>
+            <Link2 size={15} aria-hidden="true" />
+            Let your agents talk to each other
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const FILTERS: Array<{ id: InboxFilter; label: string; empty: string }> = [
+  { id: 'all', label: 'All', empty: 'No conversations' },
+  { id: 'unread', label: 'Unread', empty: 'No unread conversations' },
+  { id: 'agents', label: 'Agents', empty: 'No conversations with an AI' },
+];
+
+/**
+ * The Messages page (WORKSPACE_V3 §5). One view at a time: the inbox (a floating "Messages" pill
+ * with the live unread count and New conversation, the All / Unread / Agents tabs and one card
+ * list of conversations), or a thread (Back, the other side's pill and its ⋯ menu, the bubbles
+ * and the floating composer). An open thread is its own history entry, so the system back
+ * gesture returns to the inbox. Conversations are grouped by context_id.
+ */
 export function MessagesView({
   snapshot,
   unread,
   onOpenAgent,
   onSummaryChanged,
+  direct,
+  onOpenConnections,
 }: {
   snapshot: Snapshot;
   unread: Map<string, number>;
   onOpenAgent: (id: string) => void;
   onSummaryChanged: () => void;
+  /** Opens Connections, where two agents are connected so they can message each other. */
+  onOpenConnections: () => void;
+  /** "Message privately" from a room (#dm=<room>.<member>): open the pair's one thread. */
+  direct?: { room: string; to: string } | null;
 }) {
+  const [threadOpen, setThreadOpen] = useState(Boolean(direct));
+  const [filter, setFilter] = useState<InboxFilter>('all');
+  const [details, setDetails] = useState(false);
+  const listRef = useRef<HTMLElement>(null);
+  const threadRef = useRef<HTMLDivElement>(null);
+  const newMessageRef = useRef<HTMLButtonElement>(null);
+  const tabsRef = useRef<HTMLDivElement>(null);
+  const showThread = () => {
+    setThreadOpen(true);
+    setDetails(false);
+    // The open thread is its own history entry, so the system back gesture returns to the
+    // inbox instead of leaving Messages. The entry keeps the console's state (the view).
+    if (!isThreadEntry(window.history.state))
+      window.history.pushState({ ...window.history.state, [THREAD_ENTRY]: true }, '');
+    // The thread replaces the inbox: bring its top bar (and Back) into view below the sticky
+    // workspace bar (scroll-margin-top in messages-v2.css).
+    requestAnimationFrame(() => {
+      threadRef.current?.focus({ preventScroll: true });
+      threadRef.current?.scrollIntoView({ block: 'start' });
+    });
+  };
+  const closeThread = () => {
+    setThreadOpen(false);
+    setComposing(false);
+    setDetails(false);
+    requestAnimationFrame(() => {
+      // The chat you came from, else (it may be filtered out) the first row, New conversation or
+      // the current tab.
+      const list = listRef.current;
+      (
+        list?.querySelector<HTMLButtonElement>('[aria-current="true"]') ??
+        list?.querySelector<HTMLButtonElement>('.msg-list-item') ??
+        newMessageRef.current ??
+        tabsRef.current?.querySelector<HTMLButtonElement>('[aria-pressed="true"]')
+      )?.focus();
+    });
+  };
+  // Back (and Escape) step back through the thread's history entry when there is one, so
+  // in-page and system back stay in step. A thread opened by a deep link (#dm=) has no entry of
+  // its own and closes in place.
+  const showList = () => {
+    if (isThreadEntry(window.history.state)) window.history.back();
+    else closeThread();
+  };
+  const closeThreadRef = useRef(closeThread);
+  closeThreadRef.current = closeThread;
+  const threadOpenRef = useRef(threadOpen);
+  threadOpenRef.current = threadOpen;
+  // After a reload the page opens on the inbox, but the history entry may still be a thread's:
+  // make it the inbox's again, so the next thread pushes its own entry and Back stays in Messages.
+  useEffect(() => {
+    if (!threadOpenRef.current && isThreadEntry(window.history.state)) {
+      const { [THREAD_ENTRY]: _thread, ...rest } = window.history.state as Record<string, unknown>;
+      window.history.replaceState(rest, '');
+    }
+  }, []);
+  useEffect(() => {
+    const pop = () => {
+      if (isThreadEntry(window.history.state)) setThreadOpen(true);
+      else if (threadOpenRef.current) closeThreadRef.current();
+    };
+    window.addEventListener('popstate', pop);
+    return () => window.removeEventListener('popstate', pop);
+  }, []);
   const list = usePoll<{ conversations: ConversationSummary[] }>('/api/messages/conversations');
+  // The private thread opened from a room, before (or after) its first message exists.
+  const [opened, setOpened] = useState<DirectThread | null>(null);
+  const [openError, setOpenError] = useState('');
+  // While a room's private chat opens (directLoading), no other chat (the last one read, or the
+  // newest) stands in for it: its send box would be on screen, and a quick message would reach
+  // the wrong person.
+  const [directLoading, setDirectLoading] = useState(Boolean(direct));
+  // The inbox marks the chat you last opened (and Back returns focus to it).
+  const [visited, setVisited] = useState(Boolean(direct));
   // Selection is a context id; its chat is whichever group contains it, so re-sorting or a new
   // context joining the group never changes which chat is open.
   const workspace = snapshot.operator.id;
@@ -1012,8 +2005,74 @@ export function MessagesView({
     // Leaving Messages (or switching workspace, which remounts it) drops unused prefetches.
     return () => prefetched.clear();
   }, [workspace, remembered]);
+  useEffect(() => {
+    if (!direct) return;
+    let active = true;
+    setOpenError('');
+    setThreadOpen(true);
+    setVisited(true);
+    setDirectLoading(true);
+    // A chat that was open meanwhile steps aside until this one has opened.
+    setSelected(null);
+    api<DirectThread>(`/api/rooms/${encodeURIComponent(direct.room)}/direct`, {
+      to: direct.to,
+    })
+      .then((thread) => {
+        if (!active) return;
+        setOpened(thread);
+        setComposing(false);
+        setSelected(thread.context_id);
+      })
+      .catch((err) => active && setOpenError(describe(err)))
+      .finally(() => active && setDirectLoading(false));
+    return () => {
+      active = false;
+    };
+  }, [direct]);
   const [follow, setFollow] = useState(0);
   const drafts = useRef(new Map<string, string>());
+  // New conversation: people and AIs you share a room with, and other owners' connected agents.
+  const recipients = useRecipients(composing);
+  const crossRoutes = useCrossRoutes(snapshot, true);
+  // New conversation needs someone to write to: a member of one of your rooms, or another
+  // owner's agent along an approved connection. Without either, the guidance says where to start.
+  const canCompose = (recipients.items?.length ?? 0) > 0 || crossRoutes.length > 0;
+  // "Delete conversation" (the thread's ⋯ menu): the chat waiting for confirmation.
+  const [deleting, setDeleting] = useState<{
+    contexts: string[];
+    peer: { name: string; kind: 'agent' | 'person' } | null;
+  } | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
+  async function confirmDelete() {
+    if (!deleting || deleteBusy) return;
+    setDeleteBusy(true);
+    setDeleteError('');
+    try {
+      for (const context of deleting.contexts)
+        await api(`/api/messages/conversations/${encodeURIComponent(context)}/hide`, {});
+      setDeleting(null);
+      if (opened && deleting.contexts.includes(opened.context_id)) setOpened(null);
+      setSelected(null);
+      await list.refresh();
+      onSummaryChanged();
+      showList();
+    } catch (err) {
+      setDeleteError(describe(err));
+    } finally {
+      setDeleteBusy(false);
+    }
+  }
+  async function openRecipient(recipient: DirectRecipient) {
+    const opening = await api<DirectThread>(
+      `/api/rooms/${encodeURIComponent(recipient.room_id)}/direct`,
+      { to: recipient.member_id },
+    );
+    setOpened(opening);
+    setComposing(false);
+    setSelected(opening.context_id);
+    await list.refresh();
+  }
   const conversations = useMemo(
     () => groupConversations(list.data?.conversations ?? []),
     [list.data],
@@ -1024,22 +2083,50 @@ export function MessagesView({
       : null) ??
     conversations[0]?.context_id ??
     null;
-  const active = selected ?? (composing ? null : fallback);
-  // Pin the default chat once, so a later re-sort cannot swap the open chat.
+  const active = selected ?? (composing || directLoading ? null : fallback);
+  // Pin the default chat once, so a later re-sort cannot swap the chat that opens. It loads in
+  // the background, so opening it from the inbox is instant.
   useEffect(() => {
     if (!selected && active) setSelected(active);
   }, [selected, active]);
   const summary = conversations.find((item) => item.contexts.includes(active ?? ''));
+  // A private room thread: from the list, or the one just opened that has no message yet.
+  const directThread =
+    summary?.items.find((item) => item.direct)?.direct ??
+    (opened && opened.context_id === active ? opened : null);
+  const pendingDirect = !summary && directThread ? directThread : null;
   const thread = useThread(workspace, summary?.key ?? null, summary?.items ?? []);
+  // Reading a thread marks it read for you, whichever of your members received it (the owner's
+  // read mark), and a private room thread to your person also acknowledges the person's inbox
+  // (a person has no inbox view), so it drains like an AI's does when it acknowledges. An AI's
+  // own inbox is never acknowledged for it. Only a thread on screen counts as read.
+  const shownCount = thread.messages.length;
+  // A chat can group several contexts (legacy threads); the key keeps the effect's dependency stable.
+  const readContexts = !threadOpen
+    ? ''
+    : JSON.stringify(summary?.contexts ?? (directThread ? [directThread.context_id] : []));
+  useEffect(() => {
+    if (!readContexts || !shownCount) return;
+    Promise.all(
+      (JSON.parse(readContexts) as string[]).map((context) =>
+        api(`/api/messages/direct/${encodeURIComponent(context)}/read`, {}),
+      ),
+    )
+      // Re-read the list and the navigation count so every badge shows the server's count.
+      .then(() => {
+        void list.refresh();
+        onSummaryChanged();
+      })
+      .catch(() => undefined);
+  }, [readContexts, shownCount]);
   const newestContext = summary?.items[0]?.context_id;
   useEffect(() => {
     if (newestContext) writeLastChat(workspace, newestContext);
   }, [workspace, newestContext]);
   const participants = summary?.participants ?? [];
-  const threadRoutes = routesOf(
-    snapshot,
-    (route) => participants.includes(route.from.id) && participants.includes(route.to.id),
-  );
+  const inThread = (route: Route) =>
+    participants.includes(route.from.id) && participants.includes(route.to.id);
+  const threadRoutes = [...routesOf(snapshot, inThread), ...crossRoutes.filter(inThread)];
   // Default to answering the last message: its recipient writes back to its sender.
   const last = thread.messages.at(-1);
   const replyRoutes = last
@@ -1058,7 +2145,8 @@ export function MessagesView({
       .sort((a, b) => a.localeCompare(b))
       .join(' ⇄ ');
   async function sent(message: AgentMessage) {
-    if (composing) {
+    if (pendingDirect) setSelected(message.context_id);
+    else if (composing) {
       setComposing(false);
       setSelected(message.context_id);
     } else {
@@ -1069,154 +2157,492 @@ export function MessagesView({
     await Promise.all([list.refresh(), composing ? null : thread.refresh()]);
     onSummaryChanged();
   }
-  return (
-    <section className="panel" aria-label="Messages">
-      <MessageStyles />
-      <div className="list-toolbar">
-        <div className="filter-label">
-          <MessagesSquare size={16} aria-hidden="true" />
-          Conversations<span>{conversations.length}</span>
-        </div>
-        <div className="msg-compose-row" style={{ alignItems: 'center' }}>
-          <span className="muted small">Written by agents: check before you act on it</span>
-          <button
-            className="button secondary compact"
-            onClick={() => {
-              setComposing(true);
-              setSelected(null);
-            }}
-          >
-            <Plus size={14} />
-            New message
-          </button>
-        </div>
-      </div>
-      {withUnread.length ? (
-        <div className="msg-inboxes" aria-label="Agents with unread messages">
-          {withUnread.map((agent) => (
-            <button key={agent.id} className="msg-chip" onClick={() => onOpenAgent(agent.id)}>
-              <AgentGlyph agent={agent} size="small" />
-              {agent.name}
-              <span className="msg-count" aria-label={`${unread.get(agent.id)} unread`}>
-                {unread.get(agent.id)}
-              </span>
-            </button>
-          ))}
-        </div>
+  // A chat's display name, whether the other side is an AI, and who it belongs to (real fields).
+  const chatName = (chat: ChatGroup) =>
+    chat.desk ? 'Desk' : chat.direct ? chat.direct.peer.name : title(chat.participants);
+  const chatAI = (chat: ChatGroup) => (chat.direct ? chat.direct.peer.kind === 'agent' : true);
+  /** The id that colours a chat's avatar: the peer's member id, else the chat's own key. */
+  const chatAvatarId = (chat: ChatGroup) =>
+    chat.desk ? `desk:${chat.key}` : chat.direct ? chat.direct.peer.id : chat.key;
+  const peerOwner = (peer: DirectThread['peer']) =>
+    peer.own === true ? 'Your AI' : peer.kind === 'agent' ? peer.owner_label : null;
+  // The inbox row and the thread pill name a readable owner only: a person's raw account label
+  // ("Account 1a2b3c4d") stays in Details and the privacy line, where it explains who can read.
+  const shownOwner = (peer: DirectThread['peer']) => {
+    const owner = peerOwner(peer);
+    return owner && RAW_ACCOUNT_LABEL.test(owner) ? null : owner;
+  };
+  const chatMeta = (chat: ChatGroup) =>
+    chat.direct
+      ? [shownOwner(chat.direct.peer), roomOrigin(chat.direct.room_name)]
+          .filter(Boolean)
+          .join(' · ')
+      : '';
+  const totalUnread = sumUnread(list.data?.conversations ?? []);
+  const totalBadge = formatUnread(totalUnread.count, totalUnread.capped);
+  const shown = conversations.filter((chat) => {
+    const count = sumUnread(chat.items);
+    return matchesFilter(filter, { unread: count.count, capped: count.capped, ai: chatAI(chat) });
+  });
+  const threadNames = directThread
+    ? [directThread.self.name, directThread.peer.name]
+    : participants.map(nameOf);
+
+  /** The thread's top bar: Back, the other side's pill (name, badge, owner, room) and ⋯. */
+  const threadBar = (head: {
+    /** The chat's avatar id (chatAvatarId, or the peer's member id). */
+    id?: string;
+    name: string;
+    ai?: boolean;
+    meta?: string;
+    avatar?: boolean;
+    menu?: boolean;
+  }) => (
+    <div className="msg3-topbar">
+      <button
+        type="button"
+        className="msg-v2-back msg3-round"
+        aria-label="Back to inbox"
+        onClick={showList}
+      >
+        <ArrowLeft size={18} aria-hidden="true" />
+      </button>
+      <header className="msg-v2-head msg3-pill">
+        {head.avatar === false ? null : (
+          <MessageAvatar id={head.id ?? ''} name={head.name} ai={head.ai} />
+        )}
+        <h2>{head.name}</h2>
+        {head.avatar === false ? null : <KindTag ai={Boolean(head.ai)} />}
+        {head.meta ? <span className="msg3-pill-meta">{head.meta}</span> : null}
+      </header>
+      {head.menu && summary ? (
+        <ThreadMenu
+          onDetails={() => setDetails((on) => !on)}
+          onDelete={() => {
+            setDeleteError('');
+            setDeleting({
+              contexts: summary.contexts,
+              peer: directThread
+                ? { name: directThread.peer.name, kind: directThread.peer.kind }
+                : null,
+            });
+          }}
+        />
       ) : null}
-      {list.error ? (
-        <ReadError error={list.error} loading={list.loading} retry={list.refresh} />
-      ) : null}
-      {!list.data ? (
-        list.error ? null : (
-          <div className="loading-panel" role="status">
-            <LoaderCircle className="spin" />
-            <p>Loading conversations…</p>
+    </div>
+  );
+  const privacy = (privateThread: DirectThread) => (
+    <p className="msg-v2-private">
+      <LockKeyhole size={14} aria-hidden="true" />
+      <span>
+        {privacyNote(privateThread.self, privateThread.peer)} Private messages never post to room
+        feeds.
+      </span>
+    </p>
+  );
+  const detailsCard = (chat: ChatGroup) => (
+    <dl className="msg3-details" aria-label="Conversation details">
+      {chat.direct ? (
+        <>
+          <div>
+            <dt>With</dt>
+            <dd>
+              {chat.direct.peer.name} · {chat.direct.peer.kind === 'agent' ? 'AI' : 'person'}
+              {peerOwner(chat.direct.peer) ? ` · ${peerOwner(chat.direct.peer)}` : ''}
+            </dd>
           </div>
-        )
-      ) : !conversations.length && !composing ? (
-        <EmptyState
-          icon={<MessagesSquare size={25} />}
-          title="No messages yet"
-          action={
-            <button className="button primary" onClick={() => setComposing(true)}>
-              <Plus size={15} />
-              Write the first message
-            </button>
-          }
-        >
-          Start a conversation between your connected agents.
-        </EmptyState>
+          <div>
+            <dt>Writing as</dt>
+            <dd>{chat.direct.self.name}</dd>
+          </div>
+          <div>
+            <dt>Started in</dt>
+            <dd>#{chat.direct.room_name.trim().replace(/^#+/, '')}</dd>
+          </div>
+        </>
       ) : (
-        <div className="msg-layout">
-          <nav className="msg-list" aria-label="Conversations">
-            {conversations.map((conversation) => (
-              <button
-                key={conversation.key}
-                className="msg-list-item"
-                aria-current={conversation.key === summary?.key ? 'true' : undefined}
-                onClick={() => {
-                  setComposing(false);
-                  setSelected(conversation.context_id);
-                }}
-              >
-                <strong>{conversation.desk ? 'Desk' : title(conversation.participants)}</strong>
-                <span className="msg-preview">{preview(conversation.last_message)}</span>
-                <span className="msg-meta">
-                  <span>
-                    {conversation.message_count} message
-                    {conversation.message_count === 1 ? '' : 's'}
-                  </span>
-                  <span>{formatDate(conversation.last_message.created_at)}</span>
-                </span>
-              </button>
-            ))}
-          </nav>
-          <div className="msg-thread">
-            {composing || !summary ? (
-              <>
-                <div className="msg-thread-head">
-                  <strong>New conversation</strong>
-                </div>
-                <Composer
-                  key="new"
-                  label="New conversation"
-                  routes={routesOf(snapshot)}
-                  paused={snapshot.paused}
-                  onSent={sent}
-                  draft={drafts.current.get('new') ?? ''}
-                  onDraft={(text) => drafts.current.set('new', text)}
-                />
-              </>
-            ) : (
-              <>
-                <div className="msg-thread-head">
-                  <strong>{summary.desk ? 'Desk' : title(participants)}</strong>
-                  <span className="muted small">{summary.message_count} messages</span>
-                </div>
-                {thread.error ? (
-                  <ReadError error={thread.error} loading={thread.loading} retry={thread.refresh} />
-                ) : !thread.ready ? (
-                  <p role="status" className="muted small" style={{ padding: 'var(--space-4)' }}>
-                    Loading messages…
-                  </p>
-                ) : null}
-                <ThreadMessages
-                  key={`thread:${summary.key}`}
-                  messages={thread.messages}
-                  snapshot={snapshot}
-                  hasOlder={thread.ready && thread.hasOlder}
-                  loadingOlder={thread.loadingOlder}
-                  onOlder={thread.loadOlder}
-                  onTrim={thread.trim}
-                  follow={follow}
-                />
-                {thread.ready ? (
-                  <Composer
-                    key={`compose:${summary.key}`}
-                    label="Reply"
-                    routes={replyRoutes}
-                    contextId={summary.desk ? 'city-desk' : summary.context_id}
-                    replyTo={(route) =>
-                      summary.desk
-                        ? undefined
-                        : [...thread.messages]
-                            .reverse()
-                            .find((message) => message.to_agent_id === route.from.id)?.id
-                    }
-                    paused={snapshot.paused}
-                    onSent={sent}
-                    draft={drafts.current.get(summary.key) ?? ''}
-                    onDraft={(text) => drafts.current.set(summary.key, text)}
-                  />
-                ) : null}
-              </>
-            )}
-          </div>
+        <div>
+          <dt>Agents</dt>
+          <dd>{title(chat.participants)}</dd>
         </div>
       )}
+      <div>
+        <dt>Messages</dt>
+        <dd>{chat.message_count}</dd>
+      </div>
+      <div>
+        <dt>Last message</dt>
+        <dd>{formatDate(chat.last_message.created_at)}</dd>
+      </div>
+    </dl>
+  );
+
+  // One colour per chat and sender, different for each while there are at most 16 (the ids in
+  // a fixed order; src/shell/avatarColor.ts), shared by the inbox rows and the open thread.
+  const avatarColours = useAvatarColors(
+    [
+      ...new Set([
+        ...conversations.map(chatAvatarId),
+        ...thread.messages.map((message) => message.from_agent_id),
+        ...(pendingDirect ? [pendingDirect.peer.id] : []),
+      ]),
+    ].sort(),
+  );
+  const view = (
+    <section
+      className="panel messages-v2"
+      data-phone-thread={threadOpen}
+      data-view={threadOpen ? 'thread' : 'inbox'}
+      aria-label="Messages"
+      onKeyDown={(event) => {
+        // A dialog (the Delete confirm) handles its own Escape; it never closes the thread.
+        if (
+          threadOpen &&
+          !deleting &&
+          event.key === 'Escape' &&
+          !event.defaultPrevented &&
+          !(event.target as Element).closest?.('[role="dialog"]')
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+          showList();
+        }
+      }}
+    >
+      <MessageStyles />
+      {deleting ? (
+        <DeleteConversationDialog
+          peer={deleting.peer}
+          busy={deleteBusy}
+          error={deleteError}
+          onCancel={() => setDeleting(null)}
+          onConfirm={() => void confirmDelete()}
+        />
+      ) : null}
+      <div className="msg3-inbox" hidden={threadOpen}>
+        <div className="msg3-topbar">
+          <div className="msg3-pill msg-v2-heading">
+            <h1>Messages</h1>
+            <span className="msg3-live" data-unread={totalBadge ? 'true' : undefined}>
+              <i aria-hidden="true" />
+              <span aria-hidden="true">{totalBadge ? `${totalBadge} unread` : 'No unread'}</span>
+              <span className="visually-hidden">
+                {totalBadge ? unreadLabel(totalUnread.count, totalUnread.capped) : 'No unread'}
+              </span>
+            </span>
+          </div>
+          {/* No Refresh button: the inbox and the open thread poll on their own (POLL_MS) and
+              again when the tab becomes visible; a failed read keeps its own Retry. */}
+          {canCompose ? (
+            <button
+              ref={newMessageRef}
+              type="button"
+              className="msg3-primary"
+              onClick={() => {
+                setComposing(true);
+                setSelected(null);
+                showThread();
+              }}
+            >
+              <Plus size={16} aria-hidden="true" />
+              New conversation
+            </button>
+          ) : null}
+        </div>
+        <div className="msg3-page">
+          {list.data && conversations.length ? (
+            <div className="msg3-tabs" role="group" aria-label="Show" ref={tabsRef}>
+              {FILTERS.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  aria-pressed={filter === item.id}
+                  onClick={() => setFilter(item.id)}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {withUnread.length ? (
+            <div className="msg-inboxes" aria-label="Agents with unread messages">
+              {withUnread.map((agent) => (
+                <button key={agent.id} className="msg-chip" onClick={() => onOpenAgent(agent.id)}>
+                  <AgentGlyph agent={agent} size="small" />
+                  {agent.name}
+                  <span className="msg-count" aria-label={`${unread.get(agent.id)} unread`}>
+                    {unread.get(agent.id)}
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {list.error && list.data ? (
+            <ReadError error={list.error} loading={list.loading} retry={list.refresh} />
+          ) : null}
+          {!list.data ? (
+            list.error ? (
+              <div className="card empty msg-v2-state" data-tone="error">
+                <span className="msg-v2-state-icon" aria-hidden="true">
+                  <CircleAlert size={24} />
+                </span>
+                <div role="alert">
+                  <h3>Messages couldn't be loaded</h3>
+                  <p>{list.error}</p>
+                </div>
+                <button
+                  type="button"
+                  className="button primary"
+                  disabled={list.loading}
+                  onClick={() => void list.refresh()}
+                >
+                  {list.loading ? 'Retrying…' : 'Retry loading'}
+                </button>
+              </div>
+            ) : (
+              <div className="card loading-panel" role="status">
+                <div className="msg-v2-skeleton" aria-hidden="true">
+                  <i />
+                  <i />
+                  <i />
+                </div>
+                <p>Loading conversations…</p>
+              </div>
+            )
+          ) : !conversations.length ? (
+            !canCompose ? (
+              <NoRoutesGuide onOpenConnections={onOpenConnections} />
+            ) : (
+              <div className="card empty msg-v2-state">
+                <span className="msg-v2-state-icon" aria-hidden="true">
+                  <MessagesSquare size={24} />
+                </span>
+                <div role="status">
+                  <h3>No private messages yet</h3>
+                  <p>
+                    Choose “Message privately” on a member in a room to start a 1:1 conversation.
+                    Private messages never post to room feeds.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="button primary"
+                  onClick={() => {
+                    setComposing(true);
+                    showThread();
+                  }}
+                >
+                  <Plus size={15} aria-hidden="true" />
+                  Write the first message
+                </button>
+              </div>
+            )
+          ) : (
+            <>
+              <nav ref={listRef} className="card msg-list" aria-label="Conversations">
+                {shown.length ? null : (
+                  <p className="msg3-list-empty" role="status">
+                    {FILTERS.find((item) => item.id === filter)!.empty}
+                  </p>
+                )}
+                {shown.map((conversation) => {
+                  const name = chatName(conversation);
+                  const ai = chatAI(conversation);
+                  const meta = chatMeta(conversation);
+                  const count = sumUnread(conversation.items);
+                  const badge = formatUnread(count.count, count.capped);
+                  return (
+                    <button
+                      key={conversation.key}
+                      type="button"
+                      className="msg-list-item"
+                      data-unread={badge ? 'true' : undefined}
+                      aria-current={
+                        visited && conversation.key === summary?.key ? 'true' : undefined
+                      }
+                      onClick={() => {
+                        setVisited(true);
+                        setComposing(false);
+                        setSelected(conversation.context_id);
+                        showThread();
+                      }}
+                    >
+                      <MessageAvatar id={chatAvatarId(conversation)} name={name} ai={ai} />
+                      <span className="msg3-row-main">
+                        <span className="msg-v2-row">
+                          <strong>{name}</strong>
+                          {conversation.desk ? null : <KindTag ai={ai} />}
+                          <time
+                            className="msg-v2-time"
+                            dateTime={conversation.last_message.created_at}
+                            title={formatDate(conversation.last_message.created_at)}
+                          >
+                            {relativeTime(conversation.last_message.created_at)}
+                          </time>
+                        </span>
+                        <span className="msg-preview">{preview(conversation.last_message)}</span>
+                        {meta ? <span className="msg3-row-meta">{meta}</span> : null}
+                      </span>
+                      {badge ? (
+                        <span className="msg-v2-badge">
+                          <span aria-hidden="true">{badge}</span>
+                          <span className="visually-hidden">
+                            {', '}
+                            {unreadLabel(count.count, count.capped)}
+                          </span>
+                        </span>
+                      ) : null}
+                    </button>
+                  );
+                })}
+              </nav>
+              <p className="msg3-note">
+                Private messages reach everyone you share a room with: people, your own AIs and
+                invited AIs.
+              </p>
+            </>
+          )}
+        </div>
+      </div>
+      <div
+        ref={threadRef}
+        tabIndex={-1}
+        className="msg-thread"
+        aria-label="Conversation"
+        role="region"
+        hidden={!threadOpen}
+      >
+        {threadOpen ? <h1 className="visually-hidden">Messages</h1> : null}
+        {openError ? (
+          <p className="form-error msg3-open-error" role="alert">
+            Couldn't open the private chat. {openError}
+          </p>
+        ) : null}
+        {directLoading && !directThread ? (
+          <>
+            {threadBar({ name: 'Private message', avatar: false })}
+            <div className="msg-v2-thread-loading" role="status">
+              <div className="msg-v2-skeleton" aria-hidden="true">
+                <i />
+                <i />
+              </div>
+              <span className="visually-hidden">Opening the private chat…</span>
+            </div>
+          </>
+        ) : pendingDirect ? (
+          <>
+            {threadBar({
+              id: pendingDirect.peer.id,
+              name: pendingDirect.peer.name,
+              ai: pendingDirect.peer.kind === 'agent',
+              meta: [shownOwner(pendingDirect.peer), roomOrigin(pendingDirect.room_name)]
+                .filter(Boolean)
+                .join(' · '),
+            })}
+            {privacy(pendingDirect)}
+            <div className="msg-v2-state msg-v2-thread-empty">
+              <p role="status">No messages yet in this private thread.</p>
+            </div>
+            <DirectComposer
+              key={`direct:${pendingDirect.context_id}`}
+              thread={pendingDirect}
+              onSent={sent}
+              draft={drafts.current.get(pendingDirect.context_id) ?? ''}
+              onDraft={(text) => drafts.current.set(pendingDirect.context_id, text)}
+            />
+          </>
+        ) : composing || !summary ? (
+          <>
+            {threadBar({ name: 'New conversation', avatar: false })}
+            <div className="msg3-new">
+              <NewMessage
+                recipients={recipients.items}
+                error={recipients.error}
+                crossRoutes={crossRoutes}
+                paused={snapshot.paused}
+                previewV2
+                onOpen={openRecipient}
+                onSent={sent}
+                draft={drafts.current.get('new') ?? ''}
+                onDraft={(text) => drafts.current.set('new', text)}
+              />
+            </div>
+          </>
+        ) : (
+          <>
+            {threadBar({
+              id: chatAvatarId(summary),
+              name: chatName(summary),
+              ai: chatAI(summary),
+              meta: chatMeta(summary),
+              menu: true,
+            })}
+            {details ? detailsCard(summary) : null}
+            {directThread ? privacy(directThread) : null}
+            {thread.error ? (
+              <ReadError error={thread.error} loading={thread.loading} retry={thread.refresh} />
+            ) : !thread.ready ? (
+              <div className="msg-v2-thread-loading" role="status">
+                <div className="msg-v2-skeleton" aria-hidden="true">
+                  <i />
+                  <i />
+                </div>
+                <span className="visually-hidden">Loading messages…</span>
+              </div>
+            ) : null}
+            <ThreadMessages
+              visible={threadOpen}
+              previewV2
+              directThread={directThread}
+              names={threadNames}
+              key={`thread:${summary.key}`}
+              messages={thread.messages}
+              snapshot={snapshot}
+              hasOlder={thread.ready && thread.hasOlder}
+              loadingOlder={thread.loadingOlder}
+              onOlder={thread.loadOlder}
+              onTrim={thread.trim}
+              follow={follow}
+            />
+            {thread.ready && directThread ? (
+              <DirectComposer
+                key={`direct:${summary.key}`}
+                thread={directThread}
+                replyTo={
+                  [...thread.messages]
+                    .reverse()
+                    .find((message) => message.to_agent_id === directThread.self.id)?.id
+                }
+                onSent={sent}
+                draft={drafts.current.get(summary.key) ?? ''}
+                onDraft={(text) => drafts.current.set(summary.key, text)}
+              />
+            ) : thread.ready ? (
+              <Composer
+                previewV2
+                key={`compose:${summary.key}`}
+                label="Reply"
+                routes={replyRoutes}
+                contextId={summary.desk ? 'city-desk' : summary.context_id}
+                replyTo={(route) =>
+                  summary.desk
+                    ? undefined
+                    : [...thread.messages]
+                        .reverse()
+                        .find((message) => message.to_agent_id === route.from.id)?.id
+                }
+                paused={snapshot.paused}
+                onSent={sent}
+                draft={drafts.current.get(summary.key) ?? ''}
+                onDraft={(text) => drafts.current.set(summary.key, text)}
+              />
+            ) : null}
+          </>
+        )}
+      </div>
     </section>
   );
+  return <AvatarColorsContext.Provider value={avatarColours}>{view}</AvatarColorsContext.Provider>;
 }
 
 /** Inbox panel on the agent detail view. */

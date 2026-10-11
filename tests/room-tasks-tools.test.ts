@@ -22,7 +22,7 @@ registerRoomTasksMigration();
 
 /**
  * Room task tools module (docs/ROOM_TASKS.md "MCP tools"):
- * the nine city_room_task_* names each carry input, output, description,
+ * the fifteen city_room_task_* names each carry input, output, description,
  * annotation and scope; runRoomTaskTool dispatches to the real service.
  * Synthetic data only.
  */
@@ -151,9 +151,15 @@ test('every tool has input, output, description, annotation and scope', async ()
       'city_room_task_release',
       'city_room_task_result',
       'city_room_task_review',
+      'city_room_task_request_review',
+      'city_room_task_peer_review',
       'city_room_task_list',
       'city_room_task_get',
       'city_room_task_events',
+      'city_room_task_templates',
+      'city_room_task_comment_add',
+      'city_room_task_comment_list',
+      'city_room_task_comment_delete',
     ],
   );
   for (const name of ROOM_TASK_TOOLS) {
@@ -166,11 +172,11 @@ test('every tool has input, output, description, annotation and scope', async ()
     assert.ok(roomTaskAnnotations[name], `${name}: annotation`);
     assert.equal(ROOM_TASK_TOOL_SCOPES[name], 'rooms:join', `${name}: scope`);
   }
-  assert.equal(Object.keys(roomTaskInputSchemas).length, 9);
-  assert.equal(Object.keys(roomTaskOutputSchemas).length, 9);
-  assert.equal(Object.keys(roomTaskDescriptions).length, 9);
-  assert.equal(Object.keys(roomTaskAnnotations).length, 9);
-  assert.equal(Object.keys(ROOM_TASK_TOOL_SCOPES).length, 9);
+  assert.equal(Object.keys(roomTaskInputSchemas).length, 15);
+  assert.equal(Object.keys(roomTaskOutputSchemas).length, 15);
+  assert.equal(Object.keys(roomTaskDescriptions).length, 15);
+  assert.equal(Object.keys(roomTaskAnnotations).length, 15);
+  assert.equal(Object.keys(ROOM_TASK_TOOL_SCOPES).length, 15);
 });
 
 test('annotations match the contract table', async () => {
@@ -180,13 +186,19 @@ test('annotations match the contract table', async () => {
   > = {
     city_room_task_create: { read: false, dest: false, idem: true, open: true },
     city_room_task_claim: { read: false, dest: false, idem: false, open: true },
-    city_room_task_renew: { read: false, dest: false, idem: false, open: false },
+    city_room_task_renew: { read: false, dest: false, idem: false, open: true },
     city_room_task_release: { read: false, dest: true, idem: false, open: true },
-    city_room_task_result: { read: false, dest: false, idem: false, open: true },
+    city_room_task_result: { read: false, dest: true, idem: false, open: true },
     city_room_task_review: { read: false, dest: true, idem: false, open: true },
+    city_room_task_request_review: { read: false, dest: true, idem: true, open: true },
+    city_room_task_peer_review: { read: false, dest: false, idem: false, open: true },
     city_room_task_list: { read: true, dest: false, idem: true, open: false },
     city_room_task_get: { read: true, dest: false, idem: true, open: false },
     city_room_task_events: { read: true, dest: false, idem: true, open: false },
+    city_room_task_templates: { read: true, dest: false, idem: true, open: false },
+    city_room_task_comment_add: { read: false, dest: false, idem: false, open: true },
+    city_room_task_comment_list: { read: true, dest: false, idem: true, open: false },
+    city_room_task_comment_delete: { read: false, dest: true, idem: true, open: true },
   };
   for (const name of ROOM_TASK_TOOLS) {
     const seen = roomTaskAnnotations[name]!;
@@ -276,6 +288,7 @@ test('runRoomTaskTool round-trips create -> claim -> result -> review on the rea
   )) as any;
   assert.equal(roomTaskOutputSchemas.city_room_task_get.safeParse(fetched).success, true);
   assert.equal(fetched.task.claim?.agent_id, host);
+  assert.equal(fetched.task.submitted_by, null);
 
   const posted = (await runRoomTaskTool(
     tasks,
@@ -291,6 +304,9 @@ test('runRoomTaskTool round-trips create -> claim -> result -> review on the rea
   assert.equal(roomTaskOutputSchemas.city_room_task_result.safeParse(posted).success, true);
   assert.equal(posted.task.status, 'in_review');
   assert.deepEqual(posted.task.result, { kind: 'proposal', ref: 'proposal-7', revision: 'rev-3' });
+  // The hand-in keeps who did the work, in the tool output, after the claim is cleared.
+  assert.equal(posted.task.claim, null);
+  assert.equal(posted.task.submitted_by, host);
 
   const reviewed = (await runRoomTaskTool(
     tasks,
@@ -306,6 +322,15 @@ test('runRoomTaskTool round-trips create -> claim -> result -> review on the rea
   assert.equal(reviewed.decision, 'approve');
   assert.equal(reviewed.applied, true);
   assert.equal(reviewed.task.status, 'done');
+  assert.equal(reviewed.task.submitted_by, host);
+  const done = (await runRoomTaskTool(
+    tasks,
+    'city_room_task_list',
+    { room_id: roomId, status: 'done' },
+    principal,
+  )) as any;
+  assert.equal(roomTaskOutputSchemas.city_room_task_list.safeParse(done).success, true);
+  assert.equal(done.tasks[0].submitted_by, host);
 
   const events = (await runRoomTaskTool(
     tasks,

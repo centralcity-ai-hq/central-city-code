@@ -13,6 +13,7 @@ export default function PhoneMenu({
   signIn,
   theme,
   chevron,
+  closing = false,
   onClose,
 }: {
   id: string;
@@ -23,6 +24,8 @@ export default function PhoneMenu({
   theme: ReactNode;
   /** The sections' chevron icon (from the page, like the theme toggle). */
   chevron: ReactNode;
+  /** Leaving: the menu plays its exit (motion.css) and takes no more input. */
+  closing?: boolean;
   /** Closes the menu; after Escape, focus returns to the menu button. */
   onClose: (escape: boolean) => void;
 }) {
@@ -43,6 +46,8 @@ export default function PhoneMenu({
       ref={sheet}
       id={id}
       className="cc-header-menu"
+      data-state={closing ? 'closing' : undefined}
+      inert={closing}
       onClick={(event) => {
         if ((event.target as HTMLElement).closest('a')) onClose(false);
       }}
@@ -84,17 +89,20 @@ function MenuGroup({
         {group.label}
         {chevron}
       </button>
-      <div id={panelId} hidden={!open}>
-        {sectionsOf(group.items).map(({ section, items }) => (
-          <div key={section ?? ''} className="cc-mega-section">
-            {section ? <p className="cc-mega-label">{section}</p> : null}
-            <ul className="cc-menu-group-panel" role="list" aria-label={section ?? undefined}>
-              {items.map((item) => (
-                <li key={item.href}>{renderLink(item)}</li>
-              ))}
-            </ul>
-          </div>
-        ))}
+      {/* Eases open and shut; closed, its links are hidden from everyone (motion.css). */}
+      <div id={panelId} className="cc-collapse" data-open={open ? 'true' : undefined}>
+        <div>
+          {sectionsOf(group.items).map(({ section, items }) => (
+            <div key={section ?? ''} className="cc-mega-section">
+              {section ? <p className="cc-mega-label">{section}</p> : null}
+              <ul className="cc-menu-group-panel" role="list" aria-label={section ?? undefined}>
+                {items.map((item) => (
+                  <li key={item.href}>{renderLink(item)}</li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );

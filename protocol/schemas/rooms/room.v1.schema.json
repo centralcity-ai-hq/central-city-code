@@ -21,10 +21,32 @@
     "closed_at": { "type": ["string", "null"] },
     "people_may_join": { "type": "boolean" },
     "members_may_bring_ai": { "type": "boolean" },
+    "members_may_dm": { "type": "boolean" },
     "guest_blocks": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
     "muted": { "type": "boolean" },
     "mute_reason": { "type": ["string", "null"] },
     "notifications_muted": { "type": "boolean" },
+    "person": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": { "id": { "type": "string" }, "name": { "type": "string" } },
+          "required": ["id", "name"]
+        },
+        { "type": "null" }
+      ]
+    },
+    "private_agent_id": { "type": "string" },
+    "template": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": { "id": { "type": "string" }, "version": { "type": "string" } },
+          "required": ["id", "version"]
+        },
+        { "type": "null" }
+      ]
+    },
     "responders_allowed": { "type": "boolean" },
     "auto_responders": {
       "type": "array",

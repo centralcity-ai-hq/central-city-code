@@ -1,0 +1,337 @@
+/*
+ * Smart Rooms v2: the Needs-you list (its chip is in the v3 top bar, rooms-v3.css) and the
+ * Active-now section of the Members panel. SPEC 2.1-2.3. Everything is scoped to
+ * .rm-app[data-rooms='v2'], so with the rooms_v2 flag off nothing here matches. Colours come
+ * from the v2 tokens (rooms-v2.css): no orange; blue accent and neutral greys only.
+ */
+
+.rm-app[data-rooms='v2'] {
+  --rv2-pulse: #0284c7;
+}
+:root[data-theme='dark'] .rm-app[data-rooms='v2'] {
+  --rv2-pulse: #38bdf8;
+}
+
+/* Needs-you list: a small popover under the chip. */
+.rv2-needs {
+  position: relative;
+  display: inline-flex;
+}
+.rv2-needs-pop {
+  position: absolute;
+  top: calc(100% + calc(6 * var(--ws-px)));
+  right: 0;
+  z-index: 30;
+  width: min(360px, calc(100vw - calc(16 * var(--ws-px))));
+  max-height: min(420px, 70dvh);
+  overflow-y: auto;
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  background: var(--surface);
+  box-shadow: var(--shadow-floating);
+}
+.rv2-needs-head {
+  margin: var(--space-1) var(--space-2) var(--space-2);
+  color: var(--text-muted);
+  font: 600 11px/1.2 var(--font-sans);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.rv2-needs-list {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.rv2-needs-item {
+  display: grid;
+  grid-template-columns: calc(16 * var(--ws-px)) minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: calc(44 * var(--ws-px));
+  padding: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-s);
+  background: none;
+  color: var(--text-primary);
+  font: 400 max(12px, calc(13 * var(--ws-type-px)))/1.4 var(--font-sans);
+  text-align: left;
+}
+.rv2-needs-item svg {
+  margin-top: 2px;
+  color: var(--text-muted);
+}
+button.rv2-needs-item {
+  cursor: pointer;
+}
+button.rv2-needs-item:hover {
+  background: var(--bg-surface-hover);
+}
+.rv2-needs-text {
+  overflow-wrap: anywhere;
+}
+.rv2-needs-since,
+.rv2-needs-more {
+  color: var(--text-muted);
+  font: 400 12px/1.4 var(--font-sans);
+  white-space: nowrap;
+}
+.rv2-needs-more {
+  margin: var(--space-2);
+}
+/* Needs-you dismissals: a tick box per row, "Dismiss all" in the head, "Dismiss (n)" below. */
+.rv2-needs-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.rv2-needs-bar .rv2-needs-head {
+  margin-right: 0;
+}
+.rv2-needs-action {
+  min-height: 32px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  background: var(--surface);
+  color: var(--text-primary);
+  font: 500 12px/1 var(--font-sans);
+  cursor: pointer;
+}
+.rv2-needs-action:hover {
+  background: var(--bg-surface-hover);
+}
+.rv2-needs-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+}
+.rv2-needs-tick {
+  width: 16px;
+  height: 16px;
+  margin: 14px var(--space-1) 0 var(--space-2);
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+.rv2-needs-foot {
+  position: sticky;
+  bottom: calc(-1 * var(--space-2));
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--space-2);
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+.rv2-needs-dismiss {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--on-primary);
+}
+.rv2-needs-dismiss:hover {
+  background: var(--primary);
+  filter: brightness(1.08);
+}
+
+.rm-app[data-rooms='v2'] .rv2-needs-item:focus-visible,
+.rm-app[data-rooms='v2'] .rv2-needs-tick:focus-visible,
+.rm-app[data-rooms='v2'] .rv2-needs-action:focus-visible,
+.rm-app[data-rooms='v2'] .rv2-mute:focus-visible,
+.rm-app[data-rooms='v2'] .rv2-quiet-pill:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* Active now (SPEC 2.3): the top section of the Members panel. */
+.rv2-activity {
+  display: grid;
+  gap: var(--space-2);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.rv2-activity-head {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(6 * var(--ws-px));
+  margin: 0;
+  color: var(--text);
+  font: 600 calc(14 * var(--ws-type-px)) / calc(20 * var(--ws-type-px)) var(--font-sans);
+}
+.rv2-activity-head svg {
+  color: var(--rv2-pulse);
+}
+.rv2-activity-sub,
+.rv2-activity-notice {
+  margin: 0;
+  color: var(--text-muted);
+  font: 400 12px/1.4 var(--font-sans);
+}
+.rv2-activity-notice {
+  color: var(--text-secondary);
+}
+.rv2-ai-cards {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.rv2-ai-card {
+  display: grid;
+  gap: var(--space-2);
+  padding: calc(12 * var(--ws-px)) calc(14 * var(--ws-px));
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-m);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+.rv2-ai-card:hover {
+  border-color: var(--border);
+}
+.rv2-ai-card[data-muted] {
+  opacity: 0.6;
+  filter: grayscale(0.4);
+}
+.rv2-ai-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.rv2-ai-avatar {
+  flex: none;
+}
+.rv2-ai-who {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+.rv2-ai-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: calc(4 * var(--ws-px)) calc(8 * var(--ws-px));
+  min-width: 0;
+  color: var(--text-primary);
+  font: 600 calc(14 * var(--ws-type-px))/1.3 var(--font-sans);
+  overflow-wrap: anywhere;
+}
+.rv2-ai-badge {
+  color: var(--text-muted);
+  font: 400 12px/1.4 var(--font-sans);
+}
+.rv2-ai-line {
+  color: var(--text-muted);
+  font: 400 12px/1.4 var(--font-sans);
+}
+.rv2-ai-task,
+.rv2-says {
+  margin: 0;
+  color: var(--text-secondary);
+  font: 400 max(12px, calc(13 * var(--ws-type-px)))/1.45 var(--font-sans);
+  overflow-wrap: anywhere;
+}
+.rv2-ai-task-label {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.rv2-ai-task .rm-link-button {
+  text-align: left;
+}
+.rv2-says-label {
+  color: var(--text-muted);
+}
+.rv2-says-text {
+  font-style: italic;
+}
+.rv2-mute,
+.rv2-quiet-pill {
+  flex: none;
+  min-height: calc(32 * var(--ws-px));
+  padding: 3px calc(12 * var(--ws-px));
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font: 500 12px/1 var(--font-sans);
+  cursor: pointer;
+}
+.rv2-mute:hover:not(:disabled),
+.rv2-quiet-pill:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+.rv2-mute:disabled,
+.rv2-quiet-pill:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.rv2-activity-empty {
+  margin: 0;
+  padding: var(--space-5) var(--space-4);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-m);
+  color: var(--text-muted);
+  font: 400 max(12px, calc(13 * var(--ws-type-px)))/1.45 var(--font-sans);
+  text-align: center;
+}
+.rv2-task-summary {
+  margin: 0;
+  padding: calc(8 * var(--ws-px)) calc(12 * var(--ws-px));
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-m);
+  background: var(--bg-surface-hover);
+  color: var(--text-secondary);
+  font: 400 12px/1.4 var(--font-sans);
+}
+.rv2-in-review {
+  color: var(--accent-text);
+}
+.rv2-bulk {
+  margin-top: auto;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+}
+.rv2-bulk-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.rv2-bulk-confirm {
+  display: grid;
+  gap: var(--space-2);
+}
+.rv2-bulk-confirm p {
+  margin: 0;
+  color: var(--text-secondary);
+  font: 400 max(12px, calc(13 * var(--ws-type-px)))/1.45 var(--font-sans);
+}
+
+@media (max-width: 599px) {
+  .rv2-needs {
+    position: static;
+  }
+  .rv2-needs-action {
+    min-height: 44px;
+  }
+  .rv2-needs-tick {
+    width: 20px;
+    height: 20px;
+    margin-top: 12px;
+  }
+  .rv2-needs-pop {
+    position: fixed;
+    top: calc(60 * var(--ws-px));
+    right: calc(8 * var(--ws-px));
+    left: calc(8 * var(--ws-px));
+    width: auto;
+  }
+  .rv2-mute,
+  .rv2-quiet-pill {
+    min-height: calc(44 * var(--ws-px));
+  }
+}

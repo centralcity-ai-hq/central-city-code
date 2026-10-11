@@ -120,6 +120,8 @@ export function inboxWaiter(wake: Wake) {
     if (wait) keepSocket(request, (wait + 10) * 1000);
     const { signal, done } = disconnectSignal(request);
     try {
+      // REST waits answer per message and stay on the per-owner (and per-source) budget; the
+      // per-agent bucket is for looping tool clients only (docs/WAKE.md).
       return await wake.longPoll(
         wait,
         read,

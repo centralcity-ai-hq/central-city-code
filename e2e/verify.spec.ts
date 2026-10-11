@@ -1,5 +1,13 @@
 import { test, expect, type Page } from '@playwright/test';
-import { agentLeafHash, checkpointHash, merkleRoot, toHex } from '../shared/count-log/index';
+import {
+  agentLeafHash,
+  checkpointHash,
+  checkpointSigningInput,
+  merkleRoot,
+  sha256,
+  toHex,
+} from '../shared/count-log/index';
+import { landingWithTicker } from './landing-html';
 
 /*
  * /downtown/verify (verifiable agent count, T2): every check runs in the browser with
@@ -126,7 +134,7 @@ test('an owner never sees ✓ for a checkpoint whose signature is not confirmed;
   await expect(agentResult(mine, 'Careful Agent')).not.toBeEmpty();
   await expect(agentResult(mine, 'Careful Agent')).not.toContainText('✓');
   // The console demo's samples are never counted, and the page says so.
-  await expect(agentResult(mine, 'Atlas')).toContainText('Not counted (demo)');
+  await expect(agentResult(mine, 'Atlas')).toContainText('Not counted (CC agents)');
 });
 
 test('the owner list does not load the console snapshot; a checkpoint found only on refetch is "not yet checked"', async ({
@@ -142,13 +150,13 @@ test('the owner list does not load the console snapshot; a checkpoint found only
   const salt = new Uint8Array(32).fill(9);
   const leaf = await agentLeafHash(agentId, salt, '2099-01-01');
   const body = {
-    v: 1 as const,
+    v: 2 as const,
     date: '2099-01-01',
     tree_size: 1,
     withdrawn: 0,
     root: toHex(await merkleRoot([leaf])),
     prev_hash: null,
-    subcounts: { in_person_accounts: 1, in_ai_workspaces: 0, unclaimed: 0, revoked: 0 },
+    subcounts_commitment: 'ab'.repeat(32),
   };
   const checkpoint = {
     ...body,
@@ -250,59 +258,17 @@ test('before the first checkpoint the page still shows everything useful', async
   // The live count leads; the first-checkpoint note is a small status line.
   await expect(number.locator('.vf-figure')).toContainText('90 AI agents have joined Central City');
   await expect(number.getByRole('status')).toContainText(
-    'The public log starts with the first daily checkpoint at 00:10 UTC. Until then, the live number (90) comes from the server',
+    'The public log starts with the first daily checkpoint at 12:00 CEST. Until then, the live number (90) comes from the server',
   );
   await expect(page.getByRole('region', { name: 'Checkpoints' })).toHaveCount(0);
-  // Everything that exists now: entries, what is counted, the owner check and the data links.
-  await expect(page.getByRole('region', { name: 'Log entries' })).toContainText('No entries yet');
+  // Everything that exists now: what is counted and the owner check (the entries themselves are
+  // on the Agent Explorer, /explorer). The "data, and checking it yourself" box is gone.
+  await expect(page.getByRole('region', { name: 'Log entries' })).toHaveCount(0);
   await expect(page.getByRole('region', { name: 'What is counted' })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Check my agent' })).toBeVisible();
-  const data = page.getByRole('region', { name: 'The data, and checking it yourself' });
-  // Each data source opens in the page; the public copy and the checking code are plain links.
-  await expect(data.getByText('The signing key', { exact: true })).toBeVisible();
   await expect(
-    data.getByRole('link', { name: /centralcity-ai-org\/transparency/ }),
-  ).toHaveAttribute('href', 'https://github.com/centralcity-ai-org/transparency');
-  await expect(data.getByRole('link', { name: /The checking code/ })).toHaveAttribute(
-    'href',
-    '/downtown#district-5',
-  );
-  // The two columns balance: neither column is more than twice as tall as the other at 1440.
-  const [left, right] = await page
-    .locator('.vf-column')
-    .evaluateAll((columns) => columns.map((column) => column.getBoundingClientRect().height));
-  expect(Math.max(left!, right!) / Math.min(left!, right!)).toBeLessThan(2);
-});
-
-test('log entries open to their full fingerprint', async ({ page }) => {
-  const hash = 'ab'.repeat(32);
-  await page.route('**/api/public/count-log/leaves**', (route) =>
-    route.fulfill({
-      json: {
-        from: 0,
-        tree_size: 2,
-        leaves: [
-          { idx: 0, leaf_hash: hash },
-          { idx: 1, leaf_hash: 'cd'.repeat(32) },
-        ],
-      },
-    }),
-  );
-  await page.goto('/downtown/verify');
-  const entries = page.getByRole('region', { name: 'Log entries' });
-  // A short preview, newest first; the Live log has every entry.
-  await expect(entries).toContainText('All 2 entries, newest first.');
-  await expect(entries.locator('.vf-entry-number')).toHaveText(['#2', '#1']);
-  await entries.getByText('#1', { exact: true }).click();
-  await expect(entries.getByText(hash, { exact: true })).toBeVisible();
-  await expect(entries.getByRole('link', { name: 'This entry as data' }).last()).toHaveAttribute(
-    'href',
-    '/api/public/count-log/leaves?from=0&to=1',
-  );
-  await expect(entries.getByRole('link', { name: 'See the live log →' })).toHaveAttribute(
-    'href',
-    '/downtown/log',
-  );
+    page.getByRole('region', { name: 'The data, and checking it yourself' }),
+  ).toHaveCount(0);
 });
 
 test('"Verify here" on the homepage ticker leads to the page; signed out, the owner check asks to sign in', async ({
@@ -327,6 +293,8 @@ test('at 360 px the ticker with "Verify here" reserves its two lines (no layout 
   await page.setViewportSize({ width: 360, height: 780 });
   await signUpWithAgent(page, 'Shift Agent');
   await page.context().clearCookies();
+  // "/" as built without a count (e2e/landing-html.ts), so the client fills the reserved line.
+  await landingWithTicker(page);
   let release!: () => void;
   const gate = new Promise<void>((resolve) => (release = resolve));
   await page.route('**/api/public/stats', async (route) => {
@@ -428,21 +396,99 @@ test('signed out: anyone checks an entry by its fingerprint or number', async ({
   await expect(mine.getByRole('status')).toContainText('No entry #999999');
 });
 
-test('the data behind the number opens in the page, readable, with the raw file one click away', async ({
+test('a mixed v1/v2 log: withheld v1 entries show no signature status, never "signed ✓"', async ({
   page,
 }) => {
-  await page.goto('/downtown/verify');
-  const data = page.getByRole('region', { name: 'The data, and checking it yourself' });
-  await data.getByText('The signing key', { exact: true }).click();
-  await expect(data).toContainText('used to sign every checkpoint');
-  await data.getByText('Withdrawn agents', { exact: true }).click();
-  await expect(data).toContainText('None. No agent has ever been withdrawn from the count.');
-  await data.getByText('All checkpoints', { exact: true }).click();
-  await expect(data.getByRole('link', { name: 'Raw data' }).first()).toHaveAttribute(
-    'href',
-    '/api/public/count-log/checkpoints',
+  const keys = (await crypto.subtle.generateKey({ name: 'Ed25519' }, true, [
+    'sign',
+    'verify',
+  ])) as CryptoKeyPair;
+  const jwk = (await crypto.subtle.exportKey('jwk', keys.publicKey)) as JsonWebKey;
+  const signHash = async (hash: string) => ({
+    kid: 'e2e-mixed',
+    sig: Buffer.from(
+      await crypto.subtle.sign(
+        { name: 'Ed25519' },
+        keys.privateKey,
+        checkpointSigningInput(hash) as BufferSource,
+      ),
+    ).toString('base64url'),
+  });
+  const leaf = await sha256(new TextEncoder().encode('mixed-leaf'));
+  // Day 1 (v1, as served now: split, hash, signature and link withheld).
+  const v1 = {
+    v: 1,
+    date: '2026-09-30',
+    tree_size: 0,
+    withdrawn: 0,
+    root: toHex(await merkleRoot([])),
+    subcounts_withheld: true,
+    signature_withheld: true,
+    consistency: [],
+  };
+  // Day 2 (v2): a commitment instead of the split; it starts a new chain (no previous hash).
+  const body = {
+    v: 2 as const,
+    date: '2026-10-05',
+    tree_size: 1,
+    withdrawn: 0,
+    root: toHex(await merkleRoot([leaf])),
+    prev_hash: null,
+    subcounts_commitment: 'ef'.repeat(32),
+  };
+  const hash = await checkpointHash(body);
+  const v2 = { ...body, hash, signature: await signHash(hash), consistency: [] };
+  let served: unknown[] = [v1, v2];
+  await page.route('**/.well-known/jwks.json', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ keys: [{ ...jwk, kid: 'e2e-mixed' }] }),
+    }),
   );
-  await expect(
-    data.getByRole('link', { name: /centralcity-ai-org\/transparency/ }),
-  ).toHaveAttribute('href', 'https://github.com/centralcity-ai-org/transparency');
+  await page.route(
+    (url) => url.pathname === '/api/public/count-log/checkpoints',
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ checkpoints: served }),
+      }),
+  );
+  await page.goto('/downtown/verify');
+  const number = page.getByRole('region', { name: 'The number' });
+  await expect(number.getByText(/form one unbroken chain/)).toBeVisible();
+  await expect(number).not.toContainText('Problems found');
+  await expect(number).toContainText('Verified checkpoint');
+  await expect(number.locator('.vf-badge')).toHaveAttribute('data-ok', 'true');
+  await expect(number).toContainText(
+    'Every checkpoint from 2026-10-05 on is signed with Central City’s published key.',
+  );
+  await expect(page.locator('main')).not.toContainText(/not checkable|withheld/i);
+  await expect(number.locator('.vf-bad')).toHaveCount(0);
+  const history = page.getByRole('region', { name: 'Checkpoints' });
+  const v1Row = history.getByRole('row').filter({ hasText: '2026-09-30' });
+  // The v1 row shows what is checkable (append-only) and no signature status at all.
+  await expect(v1Row.getByRole('cell').last()).toHaveText('append-only ✓');
+  await expect(v1Row).not.toContainText('signed');
+  await expect(history.getByRole('row').filter({ hasText: '2026-10-05' })).toContainText(
+    'linked ✓ · signed ✓',
+  );
+
+  // Before the first v2 checkpoint: verified on what is checkable, with no signature line, no
+  // warning and never "signed".
+  served = [v1];
+  await page.reload();
+  await expect(number).toContainText('Verified checkpoint');
+  await expect(number.locator('.vf-badge')).toHaveAttribute('data-ok', 'true');
+  await expect(number.getByText(/first daily checkpoint verifies/)).toBeVisible();
+  await expect(number.locator('.vf-marks li')).toHaveCount(1);
+  await expect(number.locator('.vf-bad')).toHaveCount(0);
+  await expect(number).not.toContainText(/signed|not checkable/i);
+
+  // A v1 entry after the last v1 day is a problem.
+  served = [v1, { ...v1, date: '2026-10-06' }];
+  await page.reload();
+  await expect(number).toContainText('Problems found');
+  await expect(number).toContainText('a v1 checkpoint after 2026-10-04');
 });

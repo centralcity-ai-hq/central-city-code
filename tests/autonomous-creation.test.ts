@@ -522,6 +522,22 @@ test('external runtimes enroll once with a short-lived code; owner rotation stil
   assert.equal(rotated.statusCode, 200, rotated.body);
   assert.notEqual(rotated.json().token, credential);
   assert.equal(await count(app, 'SELECT count(*) FROM credentials'), 1);
+  // The masked credential hint is the owner's only: not in the runtime's enrollment answer, the
+  // Agent Card or the assistant's workspace view.
+  const hint = `…${(rotated.json().token as string).slice(-4)}`;
+  assert.equal(rotated.json().agent.credentialHint, hint);
+  const owned = (await snapshot(app, cookie)).agents.find((agent) => agent.id === first.agent.id);
+  assert.equal(owned?.credentialHint, hint);
+  assert.equal('credentialHint' in enrolled.json().agent, false);
+  const card = await app.inject({
+    method: 'GET',
+    url: path(first.agent_card_url),
+    headers: { cookie },
+  });
+  assert.equal(card.statusCode, 200, card.body);
+  assert.ok(!card.body.includes('credentialHint') && !card.body.includes(hint));
+  const assistantView = JSON.stringify(ok(await tool(app, token, 'city_workspace', {})));
+  assert.ok(!assistantView.includes('credentialHint') && !assistantView.includes(hint));
 });
 
 test('anonymous clients create unclaimed agents that an owner claims once', async (t) => {
@@ -1664,4 +1680,41 @@ test('a partition used again refreshes last_used_at so it is not evicted as idle
   now += 30 * 60_000;
   ok(await tool(app, null, 'city_create_agent', single(), '192.0.2.40'));
   assert.equal(await used(), now);
+});
+
+test('a manifest update that changes the display name shows as a rename in Activity', async (t) => {
+  const { app, cookie } = await fixture(t);
+  const token = await ownerGrant(app);
+  const first = ok(
+    await tool(app, token, 'city_create_agent', {
+      template: 'template:fact-checker@1.0.0',
+      idempotency_key: randomUUID(),
+    }),
+  );
+  const updated = ok(
+    await tool(app, token, 'city_create_agent', {
+      template: 'template:fact-checker@1.0.0',
+      overrides: { metadata: { displayName: 'Claim checker' } },
+      idempotency_key: randomUUID(),
+    }),
+  );
+  assert.equal(updated.agent.id, first.agent.id);
+  const state = await snapshot(app, cookie);
+  assert.equal(state.agents.find((agent) => agent.id === first.agent.id)?.name, 'Claim checker');
+  assert.ok(
+    state.events.some((item) => item.message === 'Renamed Fact checker to Claim checker.'),
+    'the owner sees the name change in Activity',
+  );
+  // Re-applying the same manifest changes nothing and records no further rename.
+  ok(
+    await tool(app, token, 'city_create_agent', {
+      template: 'template:fact-checker@1.0.0',
+      overrides: { metadata: { displayName: 'Claim checker' } },
+      idempotency_key: randomUUID(),
+    }),
+  );
+  const renames = (await snapshot(app, cookie)).events.filter((item) =>
+    /^Renamed /.test(item.message),
+  );
+  assert.equal(renames.length, 1);
 });

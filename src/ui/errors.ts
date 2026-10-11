@@ -72,6 +72,10 @@ const BY_CODE: Record<string, Copy | ((context: ErrorContext) => Copy)> = {
     title: `${context.agentName ? cleanName(context.agentName) : 'This agent'} is paused.`,
     detail: 'Resume it in Agents.',
   }),
+  elric_managed: {
+    title: 'Elric is managed by Central City.',
+    detail: 'Turn it off in Elric settings instead.',
+  },
   workspace_paused: { title: 'Your workspace is paused.', detail: 'Resume it to continue.' },
   rate_limited: {
     title: 'Too many messages at once.',
@@ -152,7 +156,7 @@ const BY_CODE: Record<string, Copy | ((context: ErrorContext) => Copy)> = {
   },
   OWNER_APPROVAL_REQUIRED: { title: 'This needs your approval first.' },
   UNCLAIMED_ZERO_COST_ONLY: {
-    title: 'Without an account, only free demo agents are allowed.',
+    title: 'Without an account, only the free CC agents are allowed.',
     detail: 'Sign in to do more.',
   },
 };

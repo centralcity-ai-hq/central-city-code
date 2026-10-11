@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
 
 async function openMessages(page: Page) {
   const created = await page.request.post('/api/auth/register', {
@@ -16,6 +16,24 @@ async function openMessages(page: Page) {
     .click();
 }
 
+/** Opens the (only) conversation: the thread replaces the inbox. */
+async function openChat(page: Page) {
+  await page
+    .getByRole('navigation', { name: 'Conversations', exact: true })
+    .getByRole('button')
+    .first()
+    .click();
+}
+
+/** The Messages read error: a titled alert whose body is the plain describeError copy. */
+async function expectReadError(scope: Locator | Page, body: string, timeout?: number) {
+  const alert = scope.getByRole('alert');
+  await expect(
+    alert.getByRole('heading', { name: "Messages couldn't be loaded", exact: true }),
+  ).toBeVisible({ timeout });
+  await expect(alert.locator('p')).toHaveText(body);
+}
+
 test('failed conversation read replaces loading and retry recovers to empty state', async ({
   page,
 }) => {
@@ -29,15 +47,15 @@ test('failed conversation read replaces loading and retry recovers to empty stat
   await openMessages(page);
   const messages = page.getByRole('region', { name: 'Messages', exact: true });
   // Plain copy from describeError (src/ui/errors.ts); server text is never shown.
-  await expect(messages.getByRole('alert')).toHaveText(
-    "Something in this form isn't right. Check it and try again.",
-  );
+  await expectReadError(messages, "Something in this form isn't right. Check it and try again.");
   await expect(messages.getByText('Loading conversations…')).toHaveCount(0);
   fail = false;
-  await messages.getByRole('button', { name: 'Retry', exact: true }).click();
-  await expect(messages.getByText('No messages yet')).toBeVisible();
+  await messages.getByRole('button', { name: 'Retry loading', exact: true }).click();
+  await expect(messages.getByText('No private messages yet')).toBeVisible();
   await expect(messages.getByRole('alert')).toHaveCount(0);
-  await expect(messages.getByRole('button', { name: 'Write the first message' })).toBeVisible();
+  // No connected agents: guidance, not a composer that can't send.
+  await expect(messages.getByRole('link', { name: 'Message someone from a room' })).toBeVisible();
+  await expect(messages.getByRole('button', { name: 'Write the first message' })).toHaveCount(0);
 });
 
 test('a failed read recovers on the next automatic poll without Retry', async ({ page }) => {
@@ -52,11 +70,9 @@ test('a failed read recovers on the next automatic poll without Retry', async ({
   });
   await openMessages(page);
   const messages = page.getByRole('region', { name: 'Messages', exact: true });
-  await expect(messages.getByRole('alert')).toHaveText(
-    "We couldn't reach Central City. Try again.",
-  );
+  await expectReadError(messages, "We couldn't reach Central City. Try again.");
   // No click: the 10-second poll alone must clear the error and show the real state.
-  await expect(messages.getByText('No messages yet')).toBeVisible({ timeout: 15_000 });
+  await expect(messages.getByText('No private messages yet')).toBeVisible({ timeout: 15_000 });
   await expect(messages.getByRole('alert')).toHaveCount(0);
   expect(requests).toBeGreaterThanOrEqual(2);
 });
@@ -73,13 +89,11 @@ test('stalled read times out without starting overlapping requests and can retry
   await openMessages(page);
   const messages = page.getByRole('region', { name: 'Messages', exact: true });
   await expect(messages.getByText('Loading conversations…')).toBeVisible();
-  await expect(messages.getByRole('alert')).toHaveText('This is taking too long. Try again.', {
-    timeout: 18000,
-  });
+  await expectReadError(messages, 'This is taking too long. Try again.', 18_000);
   expect(requests).toBe(1);
   await expect(messages.getByText('Loading conversations…')).toHaveCount(0);
-  await messages.getByRole('button', { name: 'Retry', exact: true }).click();
-  await expect(messages.getByText('No messages yet')).toBeVisible();
+  await messages.getByRole('button', { name: 'Retry loading', exact: true }).click();
+  await expect(messages.getByText('No private messages yet')).toBeVisible();
 });
 
 test('non-JSON errors stay readable', async ({ page }) => {
@@ -87,7 +101,7 @@ test('non-JSON errors stay readable', async ({ page }) => {
     route.fulfill({ status: 502, contentType: 'text/html', body: '<h1>Gateway unavailable</h1>' }),
   );
   await openMessages(page);
-  await expect(page.getByRole('alert')).toHaveText("We couldn't reach Central City. Try again.");
+  await expectReadError(page, "We couldn't reach Central City. Try again.");
   await expect(page.getByText('Loading conversations…')).toHaveCount(0);
 });
 
@@ -113,6 +127,7 @@ test('transient thread failures preserve history and composer; authorization los
     .getByRole('navigation', { name: 'Workspace' })
     .getByRole('button', { name: /^Messages/ })
     .click();
+  await openChat(page);
   await expect(page.getByRole('list', { name: 'Thread messages' })).toContainText(
     'Previously readable message',
   );
@@ -162,6 +177,7 @@ test('send queues a new read after a pending pre-send poll', async ({ page }) =>
     .getByRole('navigation', { name: 'Workspace' })
     .getByRole('button', { name: /^Messages/ })
     .click();
+  await openChat(page);
   await expect(page.getByRole('list', { name: 'Thread messages' })).toContainText(
     'Before pending read',
   );
@@ -186,9 +202,12 @@ test('send queues a new read after a pending pre-send poll', async ({ page }) =>
   await composer.getByRole('button', { name: 'Send message', exact: true }).click();
   expect((await sent).status()).toBe(201);
   await release!();
+  // The sent message already shows (it is added from the send's answer), so the text alone does
+  // not prove the new read: wait for the read the send queued behind the pending one, then check
+  // that the stale pending answer did not take the message away.
+  await expect.poll(() => reads, { timeout: 3000 }).toBeGreaterThanOrEqual(2);
   await expect(page.getByRole('list', { name: 'Thread messages' })).toContainText(
     'After pending read',
     { timeout: 3000 },
   );
-  expect(reads).toBeGreaterThanOrEqual(2);
 });

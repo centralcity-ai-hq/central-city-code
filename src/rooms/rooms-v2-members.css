@@ -1,0 +1,438 @@
+/*
+ * Smart Rooms v2 (preview): the Members panel (MembersV2.tsx, SPEC 2.7 and the 2.8 entry).
+ * Every rule is scoped to .rm-app[data-rooms='v2'], so with the rooms_v2 flag off nothing here
+ * matches. Tokens come from rooms-v2.css. Colours: blue accent and neutral greys; green only for
+ * a live status; red only for Remove; no orange. Every control keeps a 44 px hit area.
+ */
+
+/* Wider than the v1 panel on desktop, so a row keeps its name, badges and actions on one line. */
+@media (min-width: 900px) {
+  .rm-app[data-rooms='v2'] .rm-v2-members {
+    width: calc(400 * var(--ws-px));
+  }
+}
+.rm-app[data-rooms='v2'] .rm-v2-members {
+  --rv2-ai-badge-bg: rgba(99, 102, 241, 0.08);
+  --rv2-ai-badge-text: #4f46e5;
+  --rv2-ai-badge-border: rgba(99, 102, 241, 0.28);
+  gap: var(--space-3);
+  background: var(--canvas);
+}
+:root[data-theme='dark'] .rm-app[data-rooms='v2'] .rm-v2-members {
+  --rv2-ai-badge-bg: rgba(129, 140, 248, 0.14);
+  --rv2-ai-badge-text: #a5b4fc;
+  --rv2-ai-badge-border: rgba(129, 140, 248, 0.32);
+}
+
+/* Head: title, totals, close. */
+.rm-app[data-rooms='v2'] .rm-v2-members-head {
+  align-items: flex-start;
+  gap: var(--space-2);
+  background: var(--surface);
+  border-bottom-color: var(--border-subtle);
+}
+.rm-app[data-rooms='v2'] .rm-v2-members-head h2 {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(6 * var(--ws-px));
+  margin: 0;
+  font: 600 calc(18 * var(--ws-type-px)) / calc(24 * var(--ws-type-px)) var(--font-sans);
+  color: var(--text);
+}
+.rm-app[data-rooms='v2'] .rm-v2-members-head .rm-icon {
+  flex: none;
+  border-radius: var(--radius-full);
+}
+
+/* Search: sticky at the top of the scrolling sheet. */
+.rm-app[data-rooms='v2'] .rm-v2-members-search {
+  position: sticky;
+  top: calc(-1 * var(--space-4));
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  margin: 0 calc(-1 * var(--space-4));
+  padding: var(--space-2) var(--space-4);
+  background: var(--canvas);
+}
+.rm-app[data-rooms='v2'] .rm-v2-members-search .rm-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: var(--target);
+  padding: 0 calc(64 * var(--ws-px)) 0 calc(38 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  background: var(--surface);
+  color: var(--text);
+  font: var(--type-ui);
+}
+.rm-app[data-rooms='v2'] .rm-v2-members-search .rm-input::placeholder {
+  color: var(--text-muted);
+}
+.rm-app[data-rooms='v2'] .rm-v2-members-search .rm-input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-subtle);
+}
+.rm-app[data-rooms='v2'] .rm-v2-search-icon {
+  position: absolute;
+  left: calc(var(--space-4) + calc(12 * var(--ws-px)));
+  color: var(--text-muted);
+  pointer-events: none;
+}
+.rm-app[data-rooms='v2'] .rm-v2-kbd,
+.rm-app[data-rooms='v2'] .rm-v2-spinner {
+  position: absolute;
+  right: calc(var(--space-4) + calc(10 * var(--ws-px)));
+}
+.rm-app[data-rooms='v2'] .rm-v2-kbd {
+  padding: 1px calc(6 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--canvas);
+  color: var(--text-muted);
+  font: 500 11px/16px var(--font-sans);
+  pointer-events: none;
+}
+.rm-app[data-rooms='v2'] .rm-v2-spinner {
+  width: calc(14 * var(--ws-px));
+  height: calc(14 * var(--ws-px));
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: rm-v2-spin 0.6s linear infinite;
+}
+@keyframes rm-v2-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rm-app[data-rooms='v2'] .rm-v2-spinner {
+    animation-duration: 2s;
+  }
+}
+
+/* Groups: People, then AIs, each with its count. */
+.rm-app[data-rooms='v2'] .rm-v2-member-group {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.rm-app[data-rooms='v2'] .rm-v2-group-title {
+  display: flex;
+  align-items: baseline;
+  gap: calc(6 * var(--ws-px));
+  margin: 0;
+  padding: 0 var(--space-1);
+  color: var(--text-muted);
+  font: 600 11px/16px var(--font-sans);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.rm-app[data-rooms='v2'] .rm-v2-group-count {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.rm-app[data-rooms='v2'] .rm-v2-member-list {
+  display: grid;
+  gap: calc(6 * var(--ws-px));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  min-width: 0;
+}
+
+/* A row: avatar, name and badges, activity and says, actions. */
+.rm-app[data-rooms='v2'] .rm-v2-member {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: calc(10 * var(--ws-px)) calc(12 * var(--ws-px));
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-m);
+  background: var(--surface);
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+.rm-app[data-rooms='v2'] .rm-v2-member:hover {
+  background: var(--bg-surface-hover);
+  border-color: var(--border);
+}
+.rm-app[data-rooms='v2'] .rm-v2-member .rm-avatar {
+  grid-row: auto;
+  width: calc(32 * var(--ws-px));
+  height: calc(32 * var(--ws-px));
+  font-weight: 700;
+}
+.rm-app[data-rooms='v2'] .rm-v2-member .rm-avatar[data-offline] {
+  opacity: 0.5;
+  filter: grayscale(0.5);
+}
+.rm-app[data-rooms='v2'] .rm-v2-member-info {
+  flex: 1 1 0;
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.rm-app[data-rooms='v2'] .rm-v2-member-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(4 * var(--ws-px)) calc(6 * var(--ws-px));
+  min-width: 0;
+}
+.rm-app[data-rooms='v2'] .rm-v2-member-name {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text);
+  font: 600 max(12px, calc(13 * var(--ws-type-px))) / calc(18 * var(--ws-type-px)) var(--font-sans);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rm-app[data-rooms='v2'] .rm-v2-mbadge {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 1px calc(7 * var(--ws-px));
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--canvas);
+  color: var(--text-secondary);
+  font: 600 10px/14px var(--font-sans);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rm-app[data-rooms='v2'] .rm-v2-mbadge[data-kind='host'],
+.rm-app[data-rooms='v2'] .rm-v2-mbadge[data-kind='you'] {
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+.rm-app[data-rooms='v2'] .rm-v2-mbadge[data-kind='ai'],
+.rm-app[data-rooms='v2'] .rm-v2-mbadge[data-kind='elric'] {
+  border-color: var(--rv2-ai-badge-border);
+  background: var(--rv2-ai-badge-bg);
+  color: var(--rv2-ai-badge-text);
+}
+.rm-app[data-rooms='v2'] .rm-v2-member-activity {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(6 * var(--ws-px));
+  min-width: 0;
+  color: var(--text-muted);
+  font: var(--type-meta);
+}
+.rm-app[data-rooms='v2'] .rm-v2-member-activity-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rm-app[data-rooms='v2'] .rm-v2-member-dot {
+  flex: none;
+  width: calc(6 * var(--ws-px));
+  height: calc(6 * var(--ws-px));
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+.rm-app[data-rooms='v2'] .rm-v2-member-activity[data-status='active'] .rm-v2-member-dot {
+  background: var(--status-live);
+}
+.rm-app[data-rooms='v2'] .rm-v2-member-activity[data-status='idle'] .rm-v2-member-dot {
+  background: var(--accent);
+}
+.rm-app[data-rooms='v2'] .rm-v2-member-says {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font: var(--type-meta);
+  font-style: italic;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Actions: the Message pill and the host's row menu; both 44 px hit areas. */
+.rm-app[data-rooms='v2'] .rm-v2-member-actions {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.rm-app[data-rooms='v2'] .rm-v2-dm {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: calc(4 * var(--ws-px));
+  min-height: calc(30 * var(--ws-px));
+  padding: 3px calc(12 * var(--ws-px));
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  color: var(--accent-text);
+  font: 500 12px/16px var(--font-sans);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.rm-app[data-rooms='v2'] .rm-v2-dm::after,
+.rm-app[data-rooms='v2'] .rm-v2-row-menu-btn::after {
+  content: '';
+  position: absolute;
+  inset: calc(-7 * var(--ws-px)) -2px;
+}
+.rm-app[data-rooms='v2'] .rm-v2-dm:hover {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+.rm-app[data-rooms='v2'] .rm-v2-dm:active {
+  transform: scale(0.98);
+}
+.rm-app[data-rooms='v2'] .rm-v2-row-menu {
+  position: relative;
+  display: inline-flex;
+}
+.rm-app[data-rooms='v2'] .rm-v2-row-menu-btn {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: calc(32 * var(--ws-px));
+  height: calc(30 * var(--ws-px));
+  border: 1px solid transparent;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.rm-app[data-rooms='v2'] .rm-v2-row-menu-btn:hover,
+.rm-app[data-rooms='v2'] .rm-v2-row-menu-btn[aria-expanded='true'] {
+  border-color: var(--border);
+  background: var(--bg-surface-hover);
+}
+.rm-app[data-rooms='v2'] .rm-v2-row-menu-list {
+  position: absolute;
+  top: calc(100% + calc(6 * var(--ws-px)));
+  right: 0;
+  z-index: 5;
+  display: grid;
+  min-width: calc(184 * var(--ws-px));
+  padding: var(--space-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  background: var(--surface);
+  box-shadow: var(--shadow-elevated);
+}
+.rm-app[data-rooms='v2'] .rm-v2-row-menu-list [role='menuitem'] {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--target);
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font: var(--type-ui);
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+.rm-app[data-rooms='v2'] .rm-v2-row-menu-list [role='menuitem']:hover,
+.rm-app[data-rooms='v2'] .rm-v2-row-menu-list [role='menuitem']:focus-visible {
+  background: var(--bg-surface-hover);
+}
+.rm-app[data-rooms='v2'] .rm-v2-row-menu-list [data-danger] {
+  color: var(--status-danger);
+}
+.rm-app[data-rooms='v2'] .rm-v2-dm:focus-visible,
+.rm-app[data-rooms='v2'] .rm-v2-row-menu-btn:focus-visible,
+.rm-app[data-rooms='v2'] .rm-v2-more:focus-visible,
+.rm-app[data-rooms='v2'] .rm-v2-link:focus-visible,
+.rm-app[data-rooms='v2'] .rm-v2-row-menu-list [role='menuitem']:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+/* The Remove confirmation sits on its own line under the member. */
+.rm-app[data-rooms='v2'] .rm-v2-member > .rm-confirm {
+  flex: 1 0 100%;
+  display: flex;
+  flex-wrap: wrap;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* States and paging. */
+.rm-app[data-rooms='v2'] .rm-v2-members-note {
+  margin: 0;
+  color: var(--text-muted);
+  font: var(--type-meta);
+  text-align: center;
+}
+.rm-app[data-rooms='v2'] .rm-v2-members-error {
+  margin: 0;
+  color: var(--status-danger);
+  font: var(--type-meta);
+}
+.rm-app[data-rooms='v2'] .rm-v2-link {
+  min-height: var(--target);
+  padding: 0 var(--space-1);
+  border: 0;
+  background: none;
+  color: var(--accent-text);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.rm-app[data-rooms='v2'] .rm-v2-more {
+  min-height: var(--target);
+  padding: 0 var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  color: var(--accent-text);
+  font: var(--type-ui);
+  font-weight: 600;
+  cursor: pointer;
+}
+.rm-app[data-rooms='v2'] .rm-v2-more:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+.rm-app[data-rooms='v2'] .rm-v2-more:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* Phone: the sheet is full width; the Message pill keeps only its icon under 400 px. */
+@media (max-width: 599px) {
+  .rm-app[data-rooms='v2'] .rm-v2-members {
+    width: 100%;
+    max-width: 100vw;
+    overflow-x: hidden;
+  }
+  .rm-app[data-rooms='v2'] .rm-v2-member {
+    gap: var(--space-2);
+    padding: calc(10 * var(--ws-px));
+  }
+}
+@media (max-width: 399px) {
+  .rm-app[data-rooms='v2'] .rm-v2-dm {
+    padding: 3px calc(10 * var(--ws-px));
+  }
+  .rm-app[data-rooms='v2'] .rm-v2-kbd {
+    display: none;
+  }
+  .rm-app[data-rooms='v2'] .rm-v2-members-search .rm-input {
+    padding-right: calc(36 * var(--ws-px));
+  }
+}
+@media (hover: none) {
+  .rm-app[data-rooms='v2'] .rm-v2-kbd {
+    display: none;
+  }
+}

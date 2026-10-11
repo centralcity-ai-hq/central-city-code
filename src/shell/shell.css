@@ -23,9 +23,34 @@
 }
 
 .cc-header.is-scrolled {
-  background: var(--surface);
   border-bottom: 1px solid var(--border);
   box-shadow: var(--shadow-sm);
+}
+
+/* Once the page scrolls under it, the header is solid (as on openai.com), so the
+   header text reads well over any page (docs code blocks included). The surface sits on a layer
+   behind the header, not on the header itself: a backdrop-filter on the header would become
+   the containing block of its fixed menus (the full-screen phone menu, the mega panel). */
+.cc-header::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: transparent;
+  transition: background-color var(--dur-2) var(--ease-out);
+}
+.cc-header.is-scrolled::after {
+  background: var(--header-scrolled-bg);
+  -webkit-backdrop-filter: blur(20px) saturate(1.6);
+  backdrop-filter: blur(20px) saturate(1.6);
+}
+
+/* Without backdrop blur, an opaque surface keeps the header readable. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .cc-header.is-scrolled::after {
+    background: var(--surface-sunken);
+  }
 }
 
 .cc-header-inner,
@@ -114,10 +139,9 @@
   right: 0;
   z-index: 2;
   overflow: hidden;
-  /* A translucent surface over the blurred page (like the open header). */
-  background: rgb(255 255 255 / 0.82);
-  -webkit-backdrop-filter: blur(50px) saturate(2);
-  backdrop-filter: blur(50px) saturate(2);
+  /* A solid surface (--menu-surface-bg is opaque), so no backdrop blur: a 50 px blur behind an
+     opaque panel is invisible but costs a long frame every time a menu opens. */
+  background: var(--menu-surface-bg);
   box-shadow:
     0 1px 0 var(--border),
     var(--shadow-sm);
@@ -136,7 +160,7 @@
 }
 
 :root[data-theme='dark'] .cc-mega {
-  background: rgb(18 18 20 / 0.82);
+  background: var(--menu-surface-bg);
 }
 
 .cc-mega[data-open] {
@@ -154,23 +178,21 @@
     visibility 0s;
 }
 
-/* The open header shares the panel's translucent, blurred surface. A pseudo-element carries the
-   blur, so the header never becomes the containing block of its fixed children. */
+/* The open header shares the panel's solid surface. A pseudo-element carries it, so the header
+   never becomes the containing block of its fixed children. */
 .cc-header::before {
   content: '';
   position: absolute;
   inset: 0;
   z-index: -1;
-  background: rgb(255 255 255 / 0.82);
-  -webkit-backdrop-filter: blur(50px) saturate(2);
-  backdrop-filter: blur(50px) saturate(2);
+  background: var(--menu-surface-bg);
   opacity: 0;
   transition: opacity 150ms cubic-bezier(0.4, 0, 0.2, 1);
   pointer-events: none;
 }
 
 :root[data-theme='dark'] .cc-header::before {
-  background: rgb(18 18 20 / 0.82);
+  background: var(--menu-surface-bg);
 }
 
 .cc-header.is-open {
@@ -245,12 +267,10 @@
   transition: color 100ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.cc-header .cc-nav-link:hover {
-  color: var(--text-secondary);
-}
-
-.cc-header .cc-nav-link[aria-current='page'] {
-  color: var(--accent-text, var(--primary));
+@media (hover: hover) {
+  .cc-header .cc-nav-link:hover {
+    color: var(--text-secondary);
+  }
 }
 
 /* A menu item with one line under its name (Product › Elric), and a heading inside a menu. */
@@ -355,9 +375,11 @@
   align-items: center;
 }
 
-.cc-header-signin:hover,
-.nav-signin:hover {
-  opacity: 0.8;
+@media (hover: hover) {
+  .cc-header-signin:hover,
+  .nav-signin:hover {
+    opacity: 0.8;
+  }
 }
 
 /* Theme Toggle Button */
@@ -377,9 +399,11 @@
   flex-shrink: 0;
 }
 
-.theme-toggle-btn:hover {
-  color: var(--text-primary);
-  border-color: var(--border-strong);
+@media (hover: hover) {
+  .theme-toggle-btn:hover {
+    color: var(--text-primary);
+    border-color: var(--border-strong);
+  }
 }
 
 .theme-toggle-btn svg {
@@ -390,6 +414,14 @@
 
 .cc-header-invite {
   min-width: var(--target);
+}
+/* On the landing it swaps between secondary and primary as the hero button scrolls in and out.
+   .button fades only the background while the text colour switches at once, so the swap showed
+   dark text on blue for a moment (4.1:1, below AA). It swaps in one step instead. Two classes, so
+   .button and .btn (later in the bundle) can't put their transition back. */
+.button.cc-header-invite,
+.btn.cc-header-invite {
+  transition: none;
 }
 
 /* One control height on the right (36px, like openai.com's bar): Sign in, Invite and the theme
@@ -453,8 +485,10 @@
   text-decoration: none;
 }
 
-.cc-header-menu nav a:hover {
-  background: var(--bg-surface-hover);
+@media (hover: hover) {
+  .cc-header-menu nav a:hover {
+    background: var(--bg-surface-hover);
+  }
 }
 
 /* The phone menu's four groups: simple expandable sections. */
@@ -479,7 +513,7 @@
 
 .cc-menu-chevron {
   color: var(--text-muted);
-  transition: transform var(--dur-2) var(--ease-out);
+  transition: transform 200ms var(--motion-ease-out);
 }
 
 [aria-expanded='true'] > .cc-menu-chevron {
@@ -488,28 +522,6 @@
 
 .cc-menu-group-panel {
   padding: 0 var(--space-3) var(--space-3);
-}
-
-.cc-menu-group-panel[hidden] {
-  display: none;
-}
-
-/* A section's links arrive softly instead of popping in. */
-.cc-menu-group-panel:not([hidden]) {
-  animation: cc-menu-group-in 180ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-@keyframes cc-menu-group-in {
-  from {
-    opacity: 0;
-    transform: translateY(-4px);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .cc-menu-group-panel:not([hidden]) {
-    animation: none;
-  }
 }
 
 .cc-header-menu nav .cc-nav-link {
@@ -636,9 +648,11 @@
   min-height: 28px;
 }
 
-.footer-links a:hover,
-.cc-footer a:hover {
-  color: var(--text-primary);
+@media (hover: hover) {
+  .footer-links a:hover,
+  .cc-footer a:hover {
+    color: var(--text-primary);
+  }
 }
 
 .cc-footer-bottom,
@@ -654,6 +668,36 @@
   margin-top: 16px;
   font-size: 12px;
   color: var(--text-muted);
+}
+
+.cc-footer-start {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+}
+
+.cc-footer-socials {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: -12px;
+}
+
+.cc-footer-socials a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--target);
+  min-height: var(--target);
+  border-radius: 8px;
+  color: var(--text-secondary, inherit);
+}
+
+@media (hover: hover) {
+  .cc-footer-socials a:hover {
+    color: var(--text-primary);
+  }
 }
 
 .cc-footer-legal {
@@ -676,8 +720,10 @@
   align-items: center;
 }
 
-.cc-footer-bottom-links a:hover {
-  color: var(--text-primary);
+@media (hover: hover) {
+  .cc-footer-bottom-links a:hover {
+    color: var(--text-primary);
+  }
 }
 
 @media (max-width: 900px) {
@@ -735,8 +781,8 @@
    APP HEADER & 404 STATES
    -------------------------------------------------------------------------- */
 .topbar.cc-app-header {
-  height: 64px;
-  min-height: 64px;
+  height: calc(64 * var(--ws-px));
+  min-height: calc(64 * var(--ws-px));
   background: var(--bg-page);
   border-bottom: 1px solid var(--border);
   box-sizing: border-box;
@@ -747,6 +793,12 @@
   align-items: center;
   gap: var(--space-2);
   min-width: 0;
+}
+
+/* The phone's only menu button (rooms embed in the workspace): a full 44 px touch target. */
+.cc-app-header .mobile-menu {
+  width: calc(44 * var(--ws-px));
+  height: calc(44 * var(--ws-px));
 }
 
 .cc-app-header-title p {
@@ -793,4 +845,89 @@
   align-items: center;
   min-height: var(--target);
   cursor: pointer;
+}
+
+/* 404 (design pages-v2): a calm, confident not-found page with the useful next steps. */
+.cc-not-found {
+  max-width: 34rem;
+  gap: 20px;
+}
+.cc-not-found h1 {
+  font-size: clamp(2.5rem, 6vw, 4rem);
+  line-height: 1.05;
+  font-weight: 500;
+  letter-spacing: -0.03em;
+  text-wrap: balance;
+}
+.cc-not-found > p:not(.cc-not-found-eyebrow) {
+  font-size: clamp(1.0625rem, 2vw, 1.25rem);
+  line-height: 1.55;
+}
+.cc-state .cc-not-found-eyebrow {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.cc-not-found-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 8px;
+}
+/* Phones: the actions stack at one width, so two buttons of different lengths line up. */
+@media (max-width: 480px) {
+  .cc-not-found-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .cc-not-found-actions > * {
+    justify-content: center;
+  }
+}
+.cc-not-found-links {
+  width: 100%;
+  margin-top: 32px;
+}
+.cc-not-found-links ul {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 32px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--border-subtle, var(--border));
+}
+.cc-not-found-links a {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: var(--target, 44px);
+  padding: 8px 0;
+  color: var(--text-secondary);
+  text-decoration: none;
+}
+.cc-not-found-links a:hover {
+  color: var(--text-primary);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.cc-not-found-links a span {
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+}
+.cc-not-found-links a:hover span {
+  transform: translateX(3px);
+}
+@media (max-width: 480px) {
+  .cc-not-found-links ul {
+    grid-template-columns: 1fr;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cc-not-found-links a span {
+    transition: none;
+  }
 }

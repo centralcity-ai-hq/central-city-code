@@ -94,3 +94,14 @@ export const removeKey = (agentId: string) =>
     `/api/agents/${encodeURIComponent(agentId)}/responder/key`,
     { method: 'DELETE' },
   );
+
+/**
+ * The requests the setup sheet sends (AutoReplySheet). A failure is a ResponderError, so the sheet
+ * reads only its code. This client sends them as they are; the v4 Auto-reply screen has its own,
+ * bound to the agent and workspace it shows (src/agents/v4/settingsRequests.ts).
+ */
+export interface ResponderClient {
+  saveKey: typeof saveKey;
+  updateSettings: typeof updateSettings;
+}
+export const responderClient: ResponderClient = { saveKey, updateSettings };

@@ -1,9 +1,13 @@
 /**
- * Capacity bounds for one deployment. Defaults are the reviewed v0.5 prototype bounds; later
+ * Capacity bounds for one deployment. Defaults are the current reviewed bounds; later
  * tiers may raise them through environment overrides without code changes.
  */
 export interface CityLimits {
-  /** Operator accounts per deployment. */
+  /**
+   * Owner accounts per deployment: 0 (the default) means no ceiling. A positive value is an
+   * emergency brake on new sign-ups (soft: checked without a lock, so concurrent sign-ups can
+   * overshoot it slightly). Per-address sign-up budgets are `registrationsPerWindow`.
+   */
   operators: number;
   /** Account registrations per client address (IPv6 /64) per 15-minute window. */
   registrationsPerWindow: number;
@@ -104,10 +108,31 @@ export interface CityLimits {
   countedReusePerPrincipalPerDay: number;
   /** Live invited-guest credentials per room host account, across all its rooms. */
   inviteGuestsPerHost: number;
+  /*
+   * Invite-link guests, per client address. These are anti-abuse ceilings only: the primary bounds
+   * of a join are the link (max uses), the room (member cap) and the host (inviteGuestsPerHost).
+   * Cloud AI providers send the agents of thousands of unrelated people from one egress address,
+   * so per-address bounds on guests must sit far above any one room or host.
+   */
+  /** Live invited guests per source (IPv4 address or IPv6 /64), across all rooms. */
+  invitedGuestsPerSource: number;
+  /** Live invited guests per site (IPv6 /56, IPv4 /24); counted apart from unclaimedAgentsPerSite. */
+  invitedGuestsPerSite: number;
+  /** Live invited guests per network (IPv6 /48, IPv4 /16). */
+  invitedGuestsPerNetwork: number;
+  /** Live invited guests per region (IPv6 /32, IPv4 /8). */
+  invitedGuestsPerRegion: number;
+  /** Outstanding invite pickups (bootstrap, 10 minutes, not yet redeemed) per source, all links. */
+  invitePickupsPerSource: number;
+  /** Invite pickups and redemptions per source per hour (apart from unclaimedCreates*). */
+  inviteRequestsPerSourcePerHour: number;
+  inviteRequestsPerSitePerHour: number;
+  inviteRequestsPerNetworkPerHour: number;
+  inviteRequestsPerRegionPerHour: number;
 }
 
 export const DEFAULT_LIMITS: Readonly<CityLimits> = Object.freeze({
-  operators: 50,
+  operators: 0,
   registrationsPerWindow: 10,
   apiRequestsPerMinute: 600,
   agentsPerWorkspace: 100,
@@ -123,7 +148,7 @@ export const DEFAULT_LIMITS: Readonly<CityLimits> = Object.freeze({
   unclaimedAgentsPerSite: 500,
   unclaimedAgentsPerNetwork: 1000,
   unclaimedAgentsPerRegion: 5000,
-  unclaimedAgentsGlobal: 1_000_000,
+  unclaimedAgentsGlobal: 10_000_000,
   unclaimedBucketsGlobal: 200_000,
   // Room invites for many AI guests (100 joins by code and link); each join spends
   // two (bootstrap and redeem).
@@ -159,6 +184,15 @@ export const DEFAULT_LIMITS: Readonly<CityLimits> = Object.freeze({
   countedFlagsPerPrincipalPerDay: 20,
   countedReusePerPrincipalPerDay: 100,
   inviteGuestsPerHost: 10_000,
+  invitedGuestsPerSource: 10_000,
+  invitedGuestsPerSite: 100_000,
+  invitedGuestsPerNetwork: 100_000,
+  invitedGuestsPerRegion: 100_000,
+  invitePickupsPerSource: 10_000,
+  inviteRequestsPerSourcePerHour: 20_000,
+  inviteRequestsPerSitePerHour: 50_000,
+  inviteRequestsPerNetworkPerHour: 100_000,
+  inviteRequestsPerRegionPerHour: 200_000,
 });
 
 export const LIMIT_ENV: Readonly<Record<keyof CityLimits, string>> = Object.freeze({
@@ -212,7 +246,19 @@ export const LIMIT_ENV: Readonly<Record<keyof CityLimits, string>> = Object.free
   countedFlagsPerPrincipalPerDay: 'CITY_LIMIT_COUNTED_FLAGS_PER_PRINCIPAL_PER_DAY',
   countedReusePerPrincipalPerDay: 'CITY_LIMIT_COUNTED_REUSE_PER_PRINCIPAL_PER_DAY',
   inviteGuestsPerHost: 'CITY_LIMIT_INVITE_GUESTS_PER_HOST',
+  invitedGuestsPerSource: 'CITY_LIMIT_INVITED_GUESTS_PER_SOURCE',
+  invitedGuestsPerSite: 'CITY_LIMIT_INVITED_GUESTS_PER_SITE',
+  invitedGuestsPerNetwork: 'CITY_LIMIT_INVITED_GUESTS_PER_NETWORK',
+  invitedGuestsPerRegion: 'CITY_LIMIT_INVITED_GUESTS_PER_REGION',
+  invitePickupsPerSource: 'CITY_LIMIT_INVITE_PICKUPS_PER_SOURCE',
+  inviteRequestsPerSourcePerHour: 'CITY_LIMIT_INVITE_REQUESTS_PER_SOURCE_PER_HOUR',
+  inviteRequestsPerSitePerHour: 'CITY_LIMIT_INVITE_REQUESTS_PER_SITE_PER_HOUR',
+  inviteRequestsPerNetworkPerHour: 'CITY_LIMIT_INVITE_REQUESTS_PER_NETWORK_PER_HOUR',
+  inviteRequestsPerRegionPerHour: 'CITY_LIMIT_INVITE_REQUESTS_PER_REGION_PER_HOUR',
 });
+
+/** `operators` accepts 0 (no ceiling); every other limit is at least 1. */
+const minimum = (key: keyof CityLimits) => (key === 'operators' ? 0 : 1);
 
 /** Defaults, then environment overrides, then explicit overrides. Invalid values fail startup. */
 export function loadLimits(
@@ -223,13 +269,13 @@ export function loadLimits(
   for (const key of Object.keys(DEFAULT_LIMITS) as Array<keyof CityLimits>) {
     const raw = env[LIMIT_ENV[key]];
     if (raw !== undefined && raw !== '') {
-      if (!/^\d{1,9}$/.test(raw) || Number(raw) < 1)
+      if (!/^\d{1,9}$/.test(raw) || Number(raw) < minimum(key))
         throw new Error(`${LIMIT_ENV[key]} must be a positive integer.`);
       limits[key] = Number(raw);
     }
     const value = overrides[key];
     if (value !== undefined) {
-      if (!Number.isSafeInteger(value) || value < 1)
+      if (!Number.isSafeInteger(value) || value < minimum(key))
         throw new Error(`Limit ${key} must be a positive integer.`);
       limits[key] = value;
     }

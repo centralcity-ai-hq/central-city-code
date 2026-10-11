@@ -7,10 +7,12 @@ import {
   timingSafeEqual,
 } from 'node:crypto';
 import { z } from 'zod';
+import { guestDirectInputSchemas, type GuestDirectTool } from '../messaging/contract.js';
+import type { Messaging } from '../messaging/service.js';
 import type { Database, Transaction } from '../database.js';
 import { emptyWorkspace, iso } from '../model.js';
 import type { CityLimits } from '../limits.js';
-import { clientAddressPrefixes } from '../rate-limit.js';
+import { clientAddressKey, clientAddressPrefixes } from '../rate-limit.js';
 import { unclaimedScopeId } from '../autonomy/index.js';
 import { UNCLAIMED_AGENT_TTL_MS } from '../autonomy/expiry-schema.js';
 import {
@@ -30,6 +32,13 @@ import {
   reservedName,
 } from '../elric/names.js';
 import { ROOM_LIMITS } from '../rooms/contract.js';
+import type { RoomTasks } from '../rooms/tasks-service.js';
+import {
+  GUEST_OFFERED_TASK_TOOLS,
+  roomTasksEnabled,
+  runRoomTaskTool,
+  type RoomTaskToolName,
+} from '../rooms/tasks-tools.js';
 import { isStressTestHost, stressTestMaxGuests, stressTestOperators } from '../stress-allowlist.js';
 const hash = (value: string) =>
   createHash('sha256').update(`room-credential:${value}`).digest('hex');
@@ -47,13 +56,32 @@ export const credentialInvalid = () =>
     'room_credential_invalid',
     'Missing or invalid room credential: join with an invite link first.',
   );
-/** Guest tools on /api/public/invites/tools/<tool>. */
-export const GUEST_TOOLS = [
+/** Guest room tools on /api/public/invites/tools/<tool>. */
+export const GUEST_ROOM_TOOLS = [
   'city_room_read',
   'city_room_post',
   'city_room_members',
   'city_room_leave',
+  'city_room_search',
+  // Private room messages (docs/MESSAGING.md "Invite guests"): the guest's own inbox only.
+  'city_room_dm_read',
+  'city_room_dm_ack',
+  'city_room_dm_send',
 ] as const;
+const isGuestDirectTool = (tool: string): tool is GuestDirectTool =>
+  Object.hasOwn(guestDirectInputSchemas, tool);
+/**
+ * Room task tools a guest may call for its own room, when room tasks are on (the same rules as
+ * any member: review stays host-only, the per-owner create and per-agent claim budgets apply).
+ */
+export const GUEST_TASK_TOOLS = GUEST_OFFERED_TASK_TOOLS;
+const isGuestTaskTool = (tool: string): tool is RoomTaskToolName =>
+  (GUEST_TASK_TOOLS as readonly string[]).includes(tool);
+/** Every guest tool: the room tools, then the task tools while room tasks are on. */
+export const GUEST_TOOLS = [...GUEST_ROOM_TOOLS, ...GUEST_TASK_TOOLS] as const;
+/** The guest tools available now (task tools only while room tasks are on). */
+export const guestToolsNow = (): readonly string[] =>
+  roomTasksEnabled(process.env) ? GUEST_TOOLS : GUEST_ROOM_TOOLS;
 /**
  * Lifetime of every guest room credential, on every path (redeem, rejoin, renew; REST and
  * /mcp/open): 24 hours, as documented. The retained agent identity is separate.
@@ -77,7 +105,18 @@ const pasted = z.string().max(MAX_PASTE_LENGTH);
  * become a way to fetch another member's credential later, for example after a prompt injection).
  */
 export const JOIN_REPLAY_WINDOW_MS = 15 * 60_000;
-/** Live invite pickups (10 minutes each) per source: room of 100 guests from one host machine. */
+/**
+ * Outstanding invite pickups (live for 10 minutes, not yet redeemed) per source AND invitation
+ * code. A completed join (redeemed pickup) no longer counts, so the bound measures pickups in
+ * flight, not joins.
+ *
+ * Per-address bounds on invite joins are anti-abuse ceilings only. AI agents of thousands of
+ * unrelated people reach us from the shared egress addresses of their cloud providers (ChatGPT,
+ * Claude and the like), so the primary bounds are the link (max uses, the per-code pickup cap),
+ * the room (member cap) and the host (inviteGuestsPerHost); the per-address totals
+ * (caps.invitePickupsPerSource, caps.invitedGuestsPerSource and the site/network/region guest
+ * caps, server/limits.ts) sit far above any one room.
+ */
 export const INVITE_PICKUPS_PER_SOURCE = 100;
 /**
  * A host-issued rejoin link lets an invited guest that lost its room credential get a fresh one
@@ -129,6 +168,10 @@ interface Dependencies {
   caps: CityLimits;
   clock(): number;
   rooms: Rooms;
+  /** Room tasks (docs/ROOM_TASKS.md); guests use them for their own room only. */
+  tasks?: RoomTasks;
+  /** Private room messages: a guest reads, acknowledges and answers its own (city_room_dm_*). */
+  messaging?: Messaging;
   limit(key: string, max: number, window: number): Promise<void>;
 }
 /**
@@ -209,6 +252,41 @@ export function createRoomInvites(d: Dependencies) {
   const source = (address: string) =>
     unclaimedScopeId(secret(), 'invite-source', clientAddressPrefixes(address).source);
   /**
+   * The source a pickup is recorded under: a stress-test host's pickups get a source of their own
+   * (never counted against the real address's pickup bounds, which other people share).
+   */
+  const pickupSource = (address: string, stressHost: string | null) =>
+    stressHost
+      ? unclaimedScopeId(
+          secret(),
+          'invite-source',
+          `stress-host:${stressHost}:${clientAddressPrefixes(address).source}`,
+        )
+      : source(address);
+  /**
+   * Live credentials only: expired or revoked guests keep their identity but no longer hold a slot
+   * of this source's invitation quota. An anti-abuse ceiling across all rooms
+   * (caps.invitedGuestsPerSource, default 10,000; see INVITE_PICKUPS_PER_SOURCE): a room is
+   * bounded by its member cap, a host by inviteGuestsPerHost. Guests of stress-test hosts are left
+   * out: a stress test must never block other joins from its machine.
+   */
+  async function refuseSourceFull(q: Pick<Transaction, 'query'>, address: string, time: number) {
+    const occupancy = (
+      await q.query<{ n: string }>(
+        `SELECT count(*) AS n FROM room_invite_credentials
+         WHERE source_hash=$1 AND revoked_at IS NULL AND expires_at>$2
+           AND NOT (host_owner_id = ANY($3::text[]))`,
+        [source(address), time, [...stressTestOperators()]],
+      )
+    ).rows[0]!;
+    if (Number(occupancy.n) >= d.caps.invitedGuestsPerSource)
+      throw new RoomError(
+        429,
+        'invite_source_capacity',
+        'This source has reached invitation capacity.',
+      );
+  }
+  /**
    * A guest without an account removed from this room blocks its join source from joining the
    * room again as a guest for a while (migration 37; rooms/service.ts blockGuestSource). The
    * source may be shared (one IPv4 address behind NAT), so the host's removal reason is never
@@ -234,33 +312,113 @@ export function createRoomInvites(d: Dependencies) {
     throw error;
   }
   /**
-   * The room host of a pasted full-length join code when that host is a stress-test operator
+   * The room host of a pasted invitation when that host is a stress-test operator
    * (server/stress-allowlist.ts), else null. Its guests skip the unclaimed caps (per address and
    * deployment-wide); the room member cap and CITY_STRESS_TEST_MAX_GUESTS bound them, and the
-   * per-host guest cap still applies. Only full codes (256 bits)
-   * count, never short codes or room links, and nothing is looked up while the allowlist is
-   * empty, so public admissions behave exactly as before.
+   * per-host guest cap still applies. Reads the invitation the way the join does (joinCodeFrom):
+   * a join code, short code or /j/ link resolves through liveJoinLink, a room link or
+   * bare crr_ token through the room's link, without minting anything. Nothing is looked up
+   * while the allowlist is empty, so public admissions behave exactly as before.
    */
+  /**
+   * Live invited guests one host may have across their rooms: the public cap, or for an approved
+   * stress-test host CITY_STRESS_TEST_MAX_GUESTS (the documented bound for those hosts).
+   */
+  const guestCeiling = (hostOwnerId: string) =>
+    isStressTestHost(hostOwnerId) ? stressTestMaxGuests() : d.caps.inviteGuestsPerHost;
+  /**
+   * Serializes the host's live-guest count with the write that changes it (a new credential, or a
+   * renewed or revived one), and nothing else: a transaction-scoped advisory lock keyed by the
+   * host, taken as the last step before that write. It replaced a row lock on the host's
+   * workspace taken at the start of every join, which serialized whole joins per host.
+   */
+  const lockHostGuests = (q: Pick<Transaction, 'query'>, hostOwnerId: string) =>
+    q.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+      `invite-host-guests:${hostOwnerId}`,
+    ]);
+  /** Live guest credentials of a host, optionally leaving one agent out (its own renewal). */
+  const hostedGuests = async (
+    q: Pick<Transaction, 'query'>,
+    hostOwnerId: string,
+    time: number,
+    except: string | null = null,
+  ) =>
+    Number(
+      (
+        await q.query<{ n: string }>(
+          'SELECT count(*) AS n FROM room_invite_credentials WHERE host_owner_id=$1 AND agent_id IS DISTINCT FROM $2 AND revoked_at IS NULL AND expires_at>$3',
+          [hostOwnerId, except, time],
+        )
+      ).rows[0]!.n,
+    );
+  const hostFull = () =>
+    new RoomError(429, 'invite_host_capacity', 'The host invitation capacity is full.');
   async function stressHostOf(value: string, origin: string): Promise<string | null> {
     if (!stressTestOperators().size) return null;
     const code = inviteCodeFrom(value, origin);
-    if (!code || !/^[A-Za-z0-9_-]{43}$/.test(code)) return null;
-    const row = await liveJoinLink(d.db, code, d.clock());
-    return row?.target === 'room' && isStressTestHost(row.owner_id) ? row.owner_id : null;
+    if (code) {
+      if (isRejoinCode(code)) return null;
+      const row = await liveJoinLink(d.db, code, d.clock());
+      return row?.target === 'room' && isStressTestHost(row.owner_id) ? row.owner_id : null;
+    }
+    const room = roomTokenFrom(value, origin);
+    if (!room) return null;
+    const host = await d.rooms.hostOfRoomToken(d.db, room.token, room.slug, d.clock());
+    return host && isStressTestHost(host) ? host : null;
+  }
+  /**
+   * The generic per-address API limit (server/app.ts) for the two invite joins. While the
+   * stress-test allowlist is non-empty, app.ts defers it for these routes to here so a stress
+   * host's guests are not counted; every other caller is charged the same key, max and window.
+   * Called by the HTTP routes only (MCP joins are charged elsewhere), with the raw body so a malformed request is still charged before it is refused.
+   */
+  /** Positive stress-host lookups, keyed by origin and pasted code: one DB lookup a minute. */
+  const stressHostCache = new Map<string, { host: string; until: number }>();
+  const STRESS_HOST_CACHE_MS = 60_000;
+  const STRESS_HOST_CACHE_SIZE = 10_000;
+  async function cachedStressHostOf(value: string, origin: string): Promise<string | null> {
+    const key = `${origin}\n${value}`;
+    const now = d.clock();
+    const hit = stressHostCache.get(key);
+    if (hit && hit.until > now && isStressTestHost(hit.host)) return hit.host;
+    if (hit) stressHostCache.delete(key);
+    const host = await stressHostOf(value, origin);
+    if (host) {
+      if (stressHostCache.size >= STRESS_HOST_CACHE_SIZE)
+        stressHostCache.delete(stressHostCache.keys().next().value!);
+      stressHostCache.set(key, { host, until: now + STRESS_HOST_CACHE_MS });
+    }
+    return host;
+  }
+  async function deferredApiLimit(
+    body: unknown,
+    address: string,
+    origin: string,
+  ): Promise<string | null> {
+    if (!stressTestOperators().size) return null;
+    const ip = clientAddressKey(address);
+    // Charged before any lookup so a flood of random codes cannot buy unbounded DB queries.
+    await d.limit(`ip-lookup:${ip}`, 10 * d.caps.apiRequestsPerMinute, 60_000);
+    const code = z.object({ code: pasted }).safeParse(body);
+    const stressHost = code.success ? await cachedStressHostOf(code.data.code, origin) : null;
+    if (!stressHost) await d.limit(`ip:${ip}`, d.caps.apiRequestsPerMinute, 60_000);
+    return stressHost;
   }
   async function budget(address: string, stressHost: string | null = null) {
     // A stress-test host's guests skip the per-address hourly budgets (stressHostOf).
     if (stressHost) return;
     const prefixes = clientAddressPrefixes(address);
     const caps = d.caps;
+    // Invite traffic has budgets of its own (keys apart from anonymous agent creation), high
+    // enough for shared cloud egress; still fail-closed (anon-create prefixes).
     for (const [scope, value, max] of [
-      ['source', prefixes.source, caps.unclaimedCreatesPerSourcePerHour],
-      ['site', prefixes.site, caps.unclaimedCreatesPerSitePerHour],
-      ['network', prefixes.network, caps.unclaimedCreatesPerNetworkPerHour],
-      ['region', prefixes.region, caps.unclaimedCreatesPerRegionPerHour],
+      ['source', prefixes.source, caps.inviteRequestsPerSourcePerHour],
+      ['site', prefixes.site, caps.inviteRequestsPerSitePerHour],
+      ['network', prefixes.network, caps.inviteRequestsPerNetworkPerHour],
+      ['region', prefixes.region, caps.inviteRequestsPerRegionPerHour],
     ] as const)
       await d.limit(
-        scope === 'source' ? `anon-create:${value}` : `anon-create-${scope}:${value}`,
+        scope === 'source' ? `anon-create:invite:${value}` : `anon-create-${scope}:invite:${value}`,
         max,
         3_600_000,
       );
@@ -412,19 +570,12 @@ export function createRoomInvites(d: Dependencies) {
         if (state === 'deleted' || known.revoked_at === null) refuseState(state);
       }
       if (!row || row.token_hash !== hash(token) || Number(row.expires_at) <= time) throw denied();
-      await tx.query('SELECT operator_id FROM workspaces WHERE operator_id=$1 FOR UPDATE', [
-        row.host_owner_id,
-      ]);
-      const hosted = Number(
-        (
-          await tx.query<{ n: string }>(
-            'SELECT count(*) AS n FROM room_invite_credentials WHERE host_owner_id=$1 AND agent_id<>$2 AND revoked_at IS NULL AND expires_at>$3',
-            [row.host_owner_id, row.agent_id, time],
-          )
-        ).rows[0]!.n,
-      );
-      if (hosted >= d.caps.inviteGuestsPerHost)
-        throw new RoomError(429, 'invite_host_capacity', 'The host invitation capacity is full.');
+      await lockHostGuests(tx, row.host_owner_id);
+      if (
+        (await hostedGuests(tx, row.host_owner_id, time, row.agent_id)) >=
+        guestCeiling(row.host_owner_id)
+      )
+        throw hostFull();
       await tx.query(
         'UPDATE room_invite_credentials SET token_hash=$2, expires_at=$3 WHERE agent_id=$1 AND token_hash=$4 AND revoked_at IS NULL',
         [row.agent_id, hash(next), time + ttl, hash(token)],
@@ -517,19 +668,12 @@ export function createRoomInvites(d: Dependencies) {
       const given = Buffer.from(match[3]!);
       if (expected.length !== given.length || !timingSafeEqual(expected, given)) throw invalid();
       // The host quota counts live credentials; a rejoin may revive an expired one.
-      await tx.query('SELECT operator_id FROM workspaces WHERE operator_id=$1 FOR UPDATE', [
-        row.host_owner_id,
-      ]);
-      const hosted = Number(
-        (
-          await tx.query<{ n: string }>(
-            'SELECT count(*) AS n FROM room_invite_credentials WHERE host_owner_id=$1 AND agent_id<>$2 AND revoked_at IS NULL AND expires_at>$3',
-            [row.host_owner_id, row.agent_id, time],
-          )
-        ).rows[0]!.n,
-      );
-      if (hosted >= d.caps.inviteGuestsPerHost)
-        throw new RoomError(429, 'invite_host_capacity', 'The host invitation capacity is full.');
+      await lockHostGuests(tx, row.host_owner_id);
+      if (
+        (await hostedGuests(tx, row.host_owner_id, time, row.agent_id)) >=
+        guestCeiling(row.host_owner_id)
+      )
+        throw hostFull();
       const credentialExpires = time + GUEST_CREDENTIAL_TTL_MS;
       // Rotating the hash revokes every earlier credential of this member and uses the link up.
       await tx.query(
@@ -605,39 +749,44 @@ export function createRoomInvites(d: Dependencies) {
       Number(row.expires_at),
       Number(row.created_at) + 86_400_000,
     );
+    // A stress-test host's link is bounded only by its remaining uses (at most the room cap).
+    const stress = stressHost !== null && stressHost === row.owner_id;
+    const pickupHash = pickupSource(address, stress ? stressHost : null);
     await d.db.transaction(async (tx) => {
       await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
         `invite-code:${codeHash(values.code)}`,
       ]);
       await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
-        `invite-pickup:${source(address)}`,
+        `invite-pickup:${pickupHash}`,
       ]);
       await tx.query(
         'DELETE FROM room_invite_bootstrap WHERE handle_hash IN (SELECT handle_hash FROM room_invite_bootstrap WHERE expires_at<=$1 LIMIT 200 FOR UPDATE SKIP LOCKED)',
         [time],
       );
       const counts = (
-        await tx.query<{ code_count: string; source_count: string }>(
-          `SELECT (SELECT count(*) FROM room_invite_bootstrap WHERE code_hash=$1 AND expires_at>$3) AS code_count,
-          (SELECT count(*) FROM room_invite_bootstrap WHERE source_hash=$2 AND expires_at>$3) AS source_count`,
-          [codeHash(values.code), source(address), time],
+        await tx.query<{ code_count: string; source_code_count: string; source_count: string }>(
+          // Outstanding pickups only: redeemed ones (used_at set) are completed joins.
+          `SELECT (SELECT count(*) FROM room_invite_bootstrap WHERE code_hash=$1 AND expires_at>$3 AND used_at IS NULL) AS code_count,
+          (SELECT count(*) FROM room_invite_bootstrap WHERE source_hash=$2 AND code_hash=$1 AND expires_at>$3 AND used_at IS NULL) AS source_code_count,
+          (SELECT count(*) FROM room_invite_bootstrap WHERE source_hash=$2 AND expires_at>$3 AND used_at IS NULL) AS source_count`,
+          [codeHash(values.code), pickupHash, time],
         )
       ).rows[0]!;
-      // A stress-test host's link is bounded only by its remaining uses (at most the room cap).
-      const stress = stressHost !== null && stressHost === row.owner_id;
       const remaining = Math.max(1, (row.max_uses ?? ROOM_LIMITS.memberCapMax) - row.uses) * 3;
       const codeCap = stress
         ? remaining
         : Math.min(100, Math.max(1, (row.max_uses ?? 100) - row.uses) * 3);
       if (
         Number(counts.code_count) >= codeCap ||
-        (!stress && Number(counts.source_count) >= INVITE_PICKUPS_PER_SOURCE)
+        (!stress &&
+          (Number(counts.source_code_count) >= INVITE_PICKUPS_PER_SOURCE ||
+            Number(counts.source_count) >= d.caps.invitePickupsPerSource))
       )
         throw new RoomError(429, 'invite_capacity', 'Invitation pickup capacity is full.');
       await tx.query('INSERT INTO room_invite_bootstrap VALUES($1,$2,$3,$4,NULL)', [
         hash(handle),
         codeHash(values.code),
-        source(address),
+        pickupHash,
         expires,
       ]);
     });
@@ -668,9 +817,12 @@ export function createRoomInvites(d: Dependencies) {
     const values = { ...parsed, code: await joinCodeFrom(parsed.code, origin, pickupHash) };
     const prefixes = clientAddressPrefixes(address),
       caps = d.caps;
-    // A stress-test host's guests are accounted under scopes of their own (never counted
-    // against, or later subtracted from, the caller's real site, network and region).
-    const scope = (value: string) => (stressHost ? `stress-host:${stressHost}:${value}` : value);
+    // Invited guests are accounted under site, network and region scopes of their own: never
+    // counted against (or later subtracted from) the anonymous agent creation scopes of the same
+    // address, and capped by the much higher invitedGuestsPer* ceilings. A stress-test host's
+    // guests get scopes of their own again (stress-host:...).
+    const scope = (value: string) =>
+      stressHost ? `stress-host:${stressHost}:${value}` : `invite-guest:${value}`;
     const scopeIds = {
       site: unclaimedScopeId(secret(), 'site', scope(prefixes.site)),
       network: unclaimedScopeId(secret(), 'network', scope(prefixes.network)),
@@ -706,27 +858,10 @@ export function createRoomInvites(d: Dependencies) {
         pickup.used_at !== null ||
         Number(pickup.expires_at) <= time ||
         pickup.code_hash !== codeHash(values.code) ||
-        pickup.source_hash !== source(address)
+        (pickup.source_hash !== source(address) &&
+          (!stressHost || pickup.source_hash !== pickupSource(address, stressHost)))
       )
         throw invalid();
-      // Same-source admissions serialize across hosts, without storing the raw address.
-      await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [source(address)]);
-      const occupancy = Number(
-        (
-          await tx.query<{ n: string }>(
-            // Live credentials only: expired or revoked guests keep their identity but no
-            // longer hold a slot of this source's invitation quota.
-            'SELECT count(*) AS n FROM room_invite_credentials WHERE source_hash=$1 AND revoked_at IS NULL AND expires_at>$2',
-            [source(address), time],
-          )
-        ).rows[0]!.n,
-      );
-      if (!stressHost && occupancy >= caps.unclaimedAgentsPerSource)
-        throw new RoomError(
-          429,
-          'invite_source_capacity',
-          'This source has reached invitation capacity.',
-        );
       const link = await liveJoinLink(tx, values.code, time);
       if (
         !link ||
@@ -737,23 +872,16 @@ export function createRoomInvites(d: Dependencies) {
         (stressHost !== null && link.owner_id !== stressHost)
       )
         throw invalid();
-      // Serialize host-wide admission budget with other room membership mutations.
-      await tx.query('SELECT operator_id FROM workspaces WHERE operator_id=$1 FOR UPDATE', [
-        link.owner_id,
-      ]);
-      // Under the host lock, which a removal also holds (rooms.remove locks the host's workspace):
-      // a redeem queued behind a removal sees the block that removal committed.
+      // Unlocked early answers, in the order they were always given (source, blocked source, host).
+      // Not exact under concurrency: the same checks run again, exactly, under their locks below.
+      if (!stressHost) await refuseSourceFull(tx, address, time);
       await refuseBlockedSource(tx, link.room_id, address, time);
-      const hosted = Number(
-        (
-          await tx.query<{ n: string }>(
-            'SELECT count(*) AS n FROM room_invite_credentials WHERE host_owner_id=$1 AND revoked_at IS NULL AND expires_at>$2',
-            [link.owner_id, time],
-          )
-        ).rows[0]!.n,
-      );
-      if (hosted >= d.caps.inviteGuestsPerHost)
-        throw new RoomError(429, 'invite_host_capacity', 'The host invitation capacity is full.');
+      // A stress host is bounded by its own ceiling, checked after admission (stress_test_capacity).
+      if (
+        !isStressTestHost(link.owner_id) &&
+        (await hostedGuests(tx, link.owner_id, time)) >= d.caps.inviteGuestsPerHost
+      )
+        throw hostFull();
       if (reservedName(values.name))
         throw new RoomError(409, ELRIC_RESERVED_NAME_CODE, ELRIC_RESERVED_NAME_MESSAGE);
       const operatorId = randomUUID(),
@@ -783,19 +911,61 @@ export function createRoomInvites(d: Dependencies) {
         operatorId,
         JSON.stringify(workspace),
       ]);
+      // Rows of this guest alone (no contention): written before any shared lock is taken.
+      await tx.query(
+        'INSERT INTO unclaimed_buckets(operator_id,site_key,network_key,region_key,created_at,last_used_at) VALUES($1,$2,$3,$4,$5,$5)',
+        [operatorId, scopeIds.site, scopeIds.network, scopeIds.region, time],
+      );
+      await tx.query('INSERT INTO unclaimed_agent_expiry VALUES($1,$2,$3)', [
+        agentId,
+        operatorId,
+        expires,
+      ]);
+      await tx.query('UPDATE room_invite_bootstrap SET used_at=$2 WHERE handle_hash=$1', [
+        hash(values.handle),
+        time,
+      ]);
+      // Locks the room row (and its links) until commit: the member cap is exact per room, and
+      // a removal (which locks the room row too) is either committed before, or waits for, us.
       const joined = await d.rooms.admitInvited(
         tx,
         { operatorId, actor: 'invited AI', origin },
         { code: values.code, agentId },
         time,
       );
-      // A stress-test host's hard ceiling: live guests across all its rooms.
-      if (stressHost && hosted >= stressTestMaxGuests())
-        throw new RoomError(
-          429,
-          'stress_test_capacity',
-          'The load-test guest ceiling of this host is reached.',
-        );
+      // Under the room lock: a redeem queued behind a removal sees the block it committed.
+      await refuseBlockedSource(tx, joined.room_id, address, time);
+      // The exact host and source bounds, as the last steps before the credential is written:
+      // their locks are held only for the short rest of this transaction. Order: source, then
+      // host (renew and rejoin take only the host lock).
+      if (!stressHost) {
+        // Same-source admissions serialize across hosts, without storing the raw address. A
+        // stress host's guests are not counted per source, so they skip this lock.
+        await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [source(address)]);
+        await refuseSourceFull(tx, address, time);
+      }
+      await lockHostGuests(tx, link.owner_id);
+      if ((await hostedGuests(tx, link.owner_id, time)) >= guestCeiling(link.owner_id))
+        throw isStressTestHost(link.owner_id)
+          ? new RoomError(
+              429,
+              'stress_test_capacity',
+              'The load-test guest ceiling of this host is reached.',
+            )
+          : hostFull();
+      await tx.query(
+        'INSERT INTO room_invite_credentials(token_hash,operator_id,agent_id,room_id,host_owner_id,created_at,expires_at,source_hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',
+        [
+          hash(token),
+          operatorId,
+          agentId,
+          joined.room_id,
+          link.owner_id,
+          time,
+          credentialExpires,
+          source(address),
+        ],
+      );
       // A stress host's guests are still counted deployment-wide (the counters stay exact for
       // later removals) but not held to the deployment-wide caps; the per-address scopes are
       // skipped entirely.
@@ -805,9 +975,9 @@ export function createRoomInvites(d: Dependencies) {
         ...(stressHost
           ? []
           : ([
-              [`site:${scopeIds.site}`, caps.unclaimedAgentsPerSite],
-              [`network:${scopeIds.network}`, caps.unclaimedAgentsPerNetwork],
-              [`region:${scopeIds.region}`, caps.unclaimedAgentsPerRegion],
+              [`site:${scopeIds.site}`, caps.invitedGuestsPerSite],
+              [`network:${scopeIds.network}`, caps.invitedGuestsPerNetwork],
+              [`region:${scopeIds.region}`, caps.invitedGuestsPerRegion],
             ] as const)),
       ] as const) {
         const result = await tx.query(
@@ -828,32 +998,6 @@ export function createRoomInvites(d: Dependencies) {
             'Anonymous capacity is full. Existing agents are retained. Ask the host for access or retry later.',
           );
       }
-      await tx.query(
-        'INSERT INTO unclaimed_buckets(operator_id,site_key,network_key,region_key,created_at,last_used_at) VALUES($1,$2,$3,$4,$5,$5)',
-        [operatorId, scopeIds.site, scopeIds.network, scopeIds.region, time],
-      );
-      await tx.query('INSERT INTO unclaimed_agent_expiry VALUES($1,$2,$3)', [
-        agentId,
-        operatorId,
-        expires,
-      ]);
-      await tx.query(
-        'INSERT INTO room_invite_credentials(token_hash,operator_id,agent_id,room_id,host_owner_id,created_at,expires_at,source_hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',
-        [
-          hash(token),
-          operatorId,
-          agentId,
-          joined.room_id,
-          link.owner_id,
-          time,
-          credentialExpires,
-          source(address),
-        ],
-      );
-      await tx.query('UPDATE room_invite_bootstrap SET used_at=$2 WHERE handle_hash=$1', [
-        hash(values.handle),
-        time,
-      ]);
       return {
         room_id: joined.room_id,
         agent_id: agentId,
@@ -895,11 +1039,12 @@ export function createRoomInvites(d: Dependencies) {
   }
   async function invoke(token: string, tool: string, args: unknown, origin: string) {
     requireEnabled();
-    if (!(GUEST_TOOLS as readonly string[]).includes(tool))
+    const available = guestToolsNow();
+    if (!available.includes(tool) || (isGuestTaskTool(tool) && !d.tasks))
       throw new RoomError(
         404,
         'unknown_tool',
-        `Unknown guest tool. Use one of: ${GUEST_TOOLS.join(', ')}.`,
+        `Unknown guest tool. Use one of: ${(d.tasks ? available : GUEST_ROOM_TOOLS).join(', ')}.`,
       );
     const identity = await authenticate(d.db, token, d.clock());
     // Use the fail-closed anonymous limiter family for all sponsored activity.
@@ -917,6 +1062,66 @@ export function createRoomInvites(d: Dependencies) {
         throw denied();
     };
     const body = { ...input, room_id: identity.room_id };
+    if (isGuestDirectTool(tool)) {
+      if (!d.messaging) throw new RoomError(404, 'unknown_tool', 'Unknown guest tool.');
+      // The credential fixes both the room and the guest's own member: the inbox read or
+      // acknowledged is always the guest's own, and a send is a private message of its room.
+      const { room_id: _room, agent_id: _agent, ...rest } = input;
+      const principal = { operatorId: identity.operator_id };
+      // Like the room tools, only while the guest is still an active member of its room: a
+      // removed guest (its credential may outlive the removal) reads nothing more.
+      const memberGuard = async (tx: Transaction, time: number) => {
+        await guard(tx, time);
+        const active = await tx.query(
+          'SELECT 1 FROM room_members WHERE room_id=$1 AND agent_id=$2 AND removed_at IS NULL',
+          [identity.room_id, identity.agent_id],
+        );
+        if (!active.rows.length)
+          throw new RoomError(403, 'not_member', 'You are no longer a member of this room.');
+      };
+      if (tool === 'city_room_dm_read') {
+        const query = guestDirectInputSchemas.city_room_dm_read.parse(rest);
+        return d.messaging.readInbox(
+          principal,
+          identity.agent_id,
+          { ...query, start: 'acked' },
+          memberGuard,
+        );
+      }
+      if (tool === 'city_room_dm_ack') {
+        const { seq } = guestDirectInputSchemas.city_room_dm_ack.parse(rest);
+        return d.messaging.ack(principal, identity.agent_id, seq, memberGuard);
+      }
+      const message = guestDirectInputSchemas.city_room_dm_send.parse(rest);
+      const own = token.slice(4);
+      const text = JSON.stringify(message.parts ?? message.text ?? '');
+      if ([token, own, [...own].reverse().join('')].some((secret) => text.includes(secret)))
+        throw new RoomError(
+          400,
+          'credential_in_message',
+          'Never include a room credential in a message.',
+        );
+      return d.messaging.send(
+        principal,
+        identity.agent_id,
+        { ...message, room_id: identity.room_id },
+        memberGuard,
+      );
+    }
+    if (isGuestTaskTool(tool)) {
+      // The task service checks the member, the room and the task rules exactly as for any
+      // member; the guest acts as its own agent (create and claim name it).
+      // The template catalog takes no arguments: the room and agent are not passed.
+      if (tool === 'city_room_task_templates') {
+        const { room_id: _room, agent_id: _agent, ...rest } = input;
+        return runRoomTaskTool(d.tasks!, tool, rest, { ...p, guard });
+      }
+      const acting =
+        tool === 'city_room_task_create' || tool === 'city_room_task_claim'
+          ? { ...body, agent_id: identity.agent_id }
+          : body;
+      return runRoomTaskTool(d.tasks!, tool, acting, { ...p, guard });
+    }
     if (tool === 'city_room_post') {
       // Besides every credential prefix (rooms.post), refuse this guest's own secret without its
       // prefix and reversed: the usual shapes of a prompt-injected exfiltration request.
@@ -926,9 +1131,22 @@ export function createRoomInvites(d: Dependencies) {
       });
     }
     if (tool === 'city_room_members') return d.rooms.members(p, body, guard);
+    if (tool === 'city_room_search') return d.rooms.search(p, body, guard);
     if (tool === 'city_room_leave')
       return d.rooms.leave(p, { ...body, agent_id: identity.agent_id }, guard);
-    return d.rooms.read(p, body, guard);
+    // An invited AI's read may carry the handoff brief once (docs/ROOMS.md).
+    const read = await d.rooms.read({ ...p, handoffBrief: true }, body, guard);
+    if (!d.messaging || tool !== 'city_room_read') return read;
+    // Private messages wait in the guest's own inbox, not the room feed: say how many are
+    // unread, so a guest that only polls the room still learns it was written to.
+    const cursor = (
+      await d.db.query<{ next_seq: number | string; acked_seq: number | string }>(
+        'SELECT next_seq,acked_seq FROM inbox_cursors WHERE agent_id=$1',
+        [identity.agent_id],
+      )
+    ).rows[0];
+    const unread = cursor ? Number(cursor.next_seq) - 1 - Number(cursor.acked_seq) : 0;
+    return unread > 0 ? { ...(read as object), private_unread: unread } : read;
   }
   async function verify(token: string) {
     if (!enabled()) return null;
@@ -947,6 +1165,7 @@ export function createRoomInvites(d: Dependencies) {
     enabled,
     joinCodeFrom,
     chargeShortCode,
+    deferredApiLimit,
     bootstrap,
     redeem,
     replayJoin,

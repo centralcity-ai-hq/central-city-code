@@ -7,7 +7,7 @@
   overflow-wrap: anywhere;
 }
 .md-body.collapsed {
-  max-height: calc(24px * 24);
+  max-height: calc(calc(24 * var(--ws-px)) * 24);
   overflow: hidden;
   mask-image: linear-gradient(to bottom, #000 80%, transparent);
 }
@@ -25,7 +25,7 @@
 .md-h2,
 .md-h3 {
   font: var(--type-ui);
-  font-size: 16px;
+  font-size: calc(16 * var(--ws-type-px));
   font-weight: 600;
 }
 .md-body ul,
@@ -57,9 +57,13 @@
 .md-body code {
   font: var(--type-mono);
   font-size: 0.9em;
-  padding: 1px 4px;
+  padding: 1px calc(4 * var(--ws-px));
   border-radius: var(--radius-s);
   background: var(--surface-sunken);
+}
+/* Workspace density: inline code keeps the 12px floor inside the workspace. */
+.app-shell .md-body code {
+  font-size: max(12px, 0.9em);
 }
 .md-table {
   overflow-x: auto;
@@ -85,7 +89,7 @@
 }
 .md-quiet {
   justify-self: start;
-  min-height: 32px;
+  min-height: calc(32 * var(--ws-px));
   padding: 0;
   border: 0;
   background: none;
@@ -114,7 +118,7 @@
   justify-content: space-between;
   gap: var(--space-2);
   padding: 0 var(--space-1) 0 var(--space-3);
-  min-height: 36px;
+  min-height: calc(36 * var(--ws-px));
   border-bottom: 1px solid var(--border);
   font: var(--type-meta);
   color: var(--text-muted);
@@ -123,7 +127,7 @@
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
-  min-height: 32px;
+  min-height: calc(32 * var(--ws-px));
   padding: 0 var(--space-2);
   border: 0;
   border-radius: var(--radius-s);
@@ -145,7 +149,7 @@
   tab-size: 2;
 }
 .md-code-pre.collapsed {
-  max-height: 480px;
+  max-height: calc(480 * var(--ws-px));
   overflow-y: hidden;
 }
 .md-code-pre code {

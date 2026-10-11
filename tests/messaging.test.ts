@@ -183,9 +183,11 @@ test('owner sends as an agent; the recipient reads in order and acknowledges mon
   assert.equal(beyond.statusCode, 400);
   assert.equal(codeOf(beyond), 'ack_beyond_latest');
 
+  // Beta's two unacknowledged messages came from Alpha, another of the owner's own agents: the
+  // AI's inbox still holds them, but they are not unread for the owner.
   const summary = (await owner(app, cookie, 'GET', '/api/messages/summary')).json();
   assert.deepEqual(summary.inboxes, [
-    { agent_id: b.agent.id, latest_seq: 5, acked_seq: 3, unread: 2 },
+    { agent_id: b.agent.id, latest_seq: 5, acked_seq: 3, unread: 0, unread_capped: false },
   ]);
   const conversations = (await owner(app, cookie, 'GET', '/api/messages/conversations')).json();
   assert.equal(conversations.conversations.length, 1);
@@ -211,6 +213,56 @@ test('owner sends as an agent; the recipient reads in order and acknowledges mon
   assert.deepEqual(
     rest.messages.map((item: AgentMessage) => item.seq),
     [1, 2],
+  );
+});
+
+test('messages from before an agent was claimed are not unread for its new owner', async (t) => {
+  const { a, b, send, cookie, app } = await setup(t);
+  const res = await send(a.agent.id, { to_agent_id: b.agent.id, text: 'Sent while unclaimed' });
+  assert.equal(res.statusCode, 201, res.body);
+  // A claim moves the agents to the new owner but leaves their stored messages under the old
+  // owner ids (server/autonomy/index.ts): the message stays in Beta's inbox, unacknowledged.
+  await app.city.db.query(
+    "UPDATE messages SET sender_owner_id='previous-owner', recipient_owner_id='previous-owner' WHERE recipient_id=$1",
+    [b.agent.id],
+  );
+  const summary = (await owner(app, cookie, 'GET', '/api/messages/summary')).json();
+  assert.deepEqual(summary.inboxes, [
+    { agent_id: b.agent.id, latest_seq: 1, acked_seq: 0, unread: 0, unread_capped: false },
+  ]);
+  // The same as the list, which has no thread for it to open.
+  const list = (await owner(app, cookie, 'GET', '/api/messages/conversations')).json();
+  assert.deepEqual(list.conversations, []);
+});
+
+test('a conversation hidden before hides marked it read is not unread either', async (t) => {
+  const { a, b, send, cookie, app } = await setup(t);
+  const res = await send(a.agent.id, { to_agent_id: b.agent.id, text: 'From someone else' });
+  assert.equal(res.statusCode, 201, res.body);
+  // A message from another owner, so it counts as unread for this owner.
+  await app.city.db.query(
+    "UPDATE messages SET sender_owner_id='someone-else' WHERE recipient_id=$1",
+    [b.agent.id],
+  );
+  const before = (await owner(app, cookie, 'GET', '/api/messages/summary')).json();
+  assert.equal(
+    before.inboxes.find((i: { agent_id: string }) => i.agent_id === b.agent.id).unread,
+    1,
+  );
+  // Hidden without a read mark (hides from before the read mark was written with them).
+  const operator = (await owner(app, cookie, 'GET', '/api/session')).json().operator.id;
+  await app.city.db.query(
+    `INSERT INTO conversation_hidden(owner_id,context_id,hidden_at)
+       SELECT $1, context_id, created_at FROM messages WHERE recipient_id=$2`,
+    [operator, b.agent.id],
+  );
+  const list = (await owner(app, cookie, 'GET', '/api/messages/conversations')).json();
+  assert.deepEqual(list.conversations, []);
+  // The Messages count agrees with the list: nothing to open, nothing unread.
+  const after = (await owner(app, cookie, 'GET', '/api/messages/summary')).json();
+  assert.equal(
+    after.inboxes.find((i: { agent_id: string }) => i.agent_id === b.agent.id).unread,
+    0,
   );
 });
 
@@ -518,10 +570,11 @@ test('MCP tools: scopes are enforced separately for send and read, with machine-
     outputSchema: { type: string };
   }[];
   const byName = Object.fromEntries(list.map((tool) => [tool.name, tool]));
-  assert.equal(byName.city_read_inbox!.annotations.readOnlyHint, true);
+  // tools/list offers only what the grant can call: no inbox tools without messages:read.
+  assert.equal(byName.city_read_inbox, undefined);
+  assert.equal(byName.city_ack_inbox, undefined);
   assert.equal(byName.city_send_message!.annotations.readOnlyHint, false);
   assert.equal(byName.city_send_message!.annotations.destructiveHint, false);
-  assert.equal(byName.city_ack_inbox!.outputSchema.type, 'object');
   const sent = structured(
     await callTool(app, sendOnly, 'city_send_message', {
       from_agent_id: a.agent.id,
@@ -538,6 +591,15 @@ test('MCP tools: scopes are enforced separately for send and read, with machine-
   const readOnly = (
     await fullFlow(app, { scope: 'workspace:read messages:read', scopes: ['messages:read'] })
   ).tokens.access_token;
+  const readList = rpcResult((await mcpCall(app, readOnly, 'tools/list')).body).result.tools as {
+    name: string;
+    annotations: Record<string, boolean>;
+    outputSchema: { type: string };
+  }[];
+  const readByName = Object.fromEntries(readList.map((tool) => [tool.name, tool]));
+  assert.equal(readByName.city_read_inbox!.annotations.readOnlyHint, true);
+  assert.equal(readByName.city_ack_inbox!.outputSchema.type, 'object');
+  assert.equal(readByName.city_send_message, undefined);
   const denied = await callTool(app, readOnly, 'city_send_message', {
     from_agent_id: a.agent.id,
     to_agent_id: b.agent.id,

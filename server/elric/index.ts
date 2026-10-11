@@ -9,6 +9,8 @@ import { PendingActionError, rejectPendingAction } from './pending.js';
 import { registerElricOps } from './ops.js';
 import { elricPublicModel } from '../../shared/elric-copy.js';
 import { route } from './router.js';
+import { createCatchUp } from './catch-up.js';
+import { roomRefSchema } from '../rooms/contract.js';
 import { ELRIC_RESULTS, listElricTurns } from './turns.js';
 import {
   createElric,
@@ -39,8 +41,18 @@ export interface ElricWiring extends ElricDependencies {
   retryTimer?: boolean;
   /** false: no drain after responses (tests drive `elric.drain()` / `elric.run()` themselves). */
   autoDrain?: boolean;
+  /** Request rate limit (app.ts `limit`): throws a 429 when `key` is over `max` in `windowMs`. */
+  limit?(key: string, max: number, windowMs: number): Promise<void>;
 }
 
+/** Catch-ups per caller per minute (each may cost a model call; the cache serves repeats). */
+export const CATCH_UP_RATE = { max: 6, windowMs: 60_000 } as const;
+
+const catchUpParams = z.object({ room: roomRefSchema }).strict();
+const catchUpSeq = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+const catchUpBody = z
+  .object({ after_seq: catchUpSeq.optional(), to_seq: catchUpSeq.optional() })
+  .strict();
 const pendingParams = z.object({ id: z.string().uuid() }).strict();
 const approveBody = z.object({ args_hash: z.string().regex(/^[0-9a-f]{64}$/) }).strict();
 const settingsBody = z.object({ host_may_invoke: z.boolean() }).strict();
@@ -88,6 +100,24 @@ export function registerElric(app: FastifyInstance, d: ElricWiring): ElricServic
       });
     throw error;
   };
+
+  // "While you were away" (catch-up.ts): private to the caller, never posted to the room.
+  const catchUp = createCatchUp({
+    db: d.db,
+    clock: d.clock,
+    config: elric.config,
+    adapterFor: d.adapterFor,
+    tasksEnabled: d.tasksEnabled,
+    ...(d.env ? { env: d.env } : {}),
+    ...(d.sleep ? { sleep: d.sleep } : {}),
+    ...(d.log ? { log: d.log } : {}),
+  });
+  app.post('/api/rooms/:room/catch-up', async (request) => {
+    const ownerId = await owner(request);
+    await d.limit?.(`elric-catch-up:${ownerId}`, CATCH_UP_RATE.max, CATCH_UP_RATE.windowMs);
+    const { room } = catchUpParams.parse(request.params);
+    return catchUp.catchUp(ownerId, room, catchUpBody.parse(request.body ?? {}));
+  });
 
   app.get('/api/elric', async (request) => elric.status(await owner(request)));
   app.post('/api/elric', async (request, reply) => {

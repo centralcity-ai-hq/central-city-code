@@ -61,3 +61,64 @@ export async function validateCitations(
     .replace(/[ \t]{2,}/g, ' ');
   return { text: cleaned, kept: cited.filter((seq) => found.has(seq)), stripped };
 }
+
+/**
+ * A model answer that broke off mid-stream (docs/ELRIC.md): when at least this many visible
+ * characters arrived, the room gets that text with ELRIC_CUT_SHORT_MARKER on its own line instead
+ * of the "couldn't answer" line.
+ */
+export const ELRIC_PARTIAL_MIN_CHARS = 40;
+export const ELRIC_CUT_SHORT_MARKER = '(cut short)';
+
+/** Visible characters: code points of the text without whitespace. */
+export function visibleChars(text: string): number {
+  return [...text.replace(/\s+/gu, '')].length;
+}
+
+const FENCE = /^[ \t]{0,3}(`{3,}|~{3,})/;
+
+/** Closes a code fence left open at the end of `text` (with the same fence string). */
+export function closeOpenFence(text: string): string {
+  let open: string | null = null;
+  for (const line of text.split('\n')) {
+    const fence = FENCE.exec(line)?.[1];
+    if (!fence) continue;
+    if (open === null) open = fence;
+    else if (fence[0] === open[0] && fence.length >= open.length) open = null;
+  }
+  return open === null ? text : `${text.replace(/\s+$/u, '')}\n${open}`;
+}
+
+/** Grapheme cluster boundaries of `text` (never inside a surrogate pair or a ZWJ sequence). */
+function graphemeEnds(text: string): Set<number> {
+  const ends = new Set<number>();
+  for (const { index, segment } of new Intl.Segmenter(undefined, {
+    granularity: 'grapheme',
+  }).segment(text))
+    ends.add(index + segment.length);
+  return ends;
+}
+
+/**
+ * The cleanly cut prefix of a partial answer, or null when there is none: the text up to the
+ * last complete sentence or line that keeps at least `minChars` visible characters, with an open
+ * code fence closed. A sentence end counts only when something follows it in the stream (a space
+ * or a line break after . ! ? …, anything after a full-width 。！？), so "costs 3." from "3.50"
+ * is never taken as a sentence. The cut is always at a grapheme boundary.
+ */
+export function cutPartial(text: string, minChars = ELRIC_PARTIAL_MIN_CHARS): string | null {
+  const ends = graphemeEnds(text);
+  let best = -1;
+  const take = (at: number) => {
+    if (at > 0 && at < text.length && ends.has(at) && at > best) best = at;
+  };
+  for (const match of text.matchAll(/[.!?…]["'”’)\]]*(?=\s)/gu))
+    take(match.index + match[0].length);
+  for (const match of text.matchAll(/[。！？｡][」』）"'”’)\]]*/gu))
+    take(match.index + match[0].length);
+  for (const match of text.matchAll(/\n/gu)) take(match.index + 1);
+  if (best <= 0) return null;
+  const cut = text.slice(0, best).replace(/\s+$/u, '');
+  if (visibleChars(cut) < minChars) return null;
+  return closeOpenFence(cut);
+}

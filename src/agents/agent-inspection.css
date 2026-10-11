@@ -1,0 +1,274 @@
+.agent-inspection {
+  min-width: 0;
+  margin-block: calc(24 * var(--ws-px));
+  color: var(--text-primary);
+}
+
+.agent-inspection-tabs {
+  display: flex;
+  gap: calc(8 * var(--ws-px));
+  border-bottom: 1px solid var(--border);
+}
+
+.agent-inspection-tabs > button {
+  min-width: calc(44 * var(--ws-px));
+  min-height: calc(44 * var(--ws-px));
+  padding: calc(10 * var(--ws-px)) calc(16 * var(--ws-px));
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: calc(14 * var(--ws-type-px));
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.agent-inspection-tabs > button[aria-selected='true'] {
+  border-bottom-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.agent-inspection-tabs > button:hover {
+  background: var(--bg-surface-hover);
+}
+
+.agent-inspection-panel {
+  min-width: 0;
+  padding-top: calc(16 * var(--ws-px));
+  border-radius: 6px;
+}
+
+.agent-inspection-description,
+.agent-inspection-notice,
+.agent-inspection-empty p,
+.agent-inspection-destinations p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: calc(14 * var(--ws-type-px));
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.agent-inspection-notice {
+  margin-top: calc(12 * var(--ws-px));
+  padding: calc(12 * var(--ws-px));
+  border: 1px solid var(--accent-border);
+  border-radius: 8px;
+  background: var(--accent-subtle);
+  color: var(--text-primary);
+}
+
+.agent-inspection-list {
+  margin: calc(16 * var(--ws-px)) 0 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.agent-inspection-row {
+  display: flex;
+  align-items: center;
+  gap: calc(16 * var(--ws-px));
+  padding: calc(16 * var(--ws-px));
+  min-width: 0;
+}
+
+.agent-inspection-row + .agent-inspection-row {
+  border-top: 1px solid var(--border);
+}
+
+.agent-inspection-row-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.agent-inspection-row-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+  min-width: 0;
+}
+
+.agent-inspection h4 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: calc(14 * var(--ws-type-px));
+  font-weight: 600;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.agent-inspection-badge {
+  display: inline-flex;
+  max-width: 100%;
+  padding: 2px calc(8 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.agent-inspection-badge[data-state='requested'],
+.agent-inspection-badge[data-state='in_progress'],
+.agent-inspection-badge[data-state='review'] {
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+
+.agent-inspection-badge[data-state='approved'],
+.agent-inspection-badge[data-state='accepted'] {
+  border-color: var(--success);
+  background: var(--success-tint);
+  color: var(--success);
+}
+
+.agent-inspection-badge[data-state='failed'],
+.agent-inspection-error {
+  border-color: var(--error);
+  background: var(--error-tint);
+  color: var(--error);
+}
+
+.agent-inspection-route {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: calc(8 * var(--ws-px));
+  margin: calc(8 * var(--ws-px)) 0 0;
+  color: var(--text-secondary);
+  font-size: calc(14 * var(--ws-type-px));
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.agent-inspection-route > * {
+  min-width: 0;
+}
+
+.agent-inspection-route strong {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.agent-inspection-meta {
+  margin: calc(4 * var(--ws-px)) 0 0;
+  color: var(--text-muted);
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.agent-inspection-button {
+  flex-shrink: 0;
+  min-width: calc(44 * var(--ws-px));
+  min-height: calc(44 * var(--ws-px));
+  max-width: 100%;
+  padding: calc(10 * var(--ws-px)) calc(14 * var(--ws-px));
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-surface-elevated);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: calc(14 * var(--ws-type-px));
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.agent-inspection-button:hover {
+  border-color: var(--accent);
+  background: var(--bg-surface-hover);
+}
+
+.agent-inspection-button[aria-disabled='true'] {
+  color: var(--text-muted);
+  border-color: var(--border);
+  background: var(--bg-surface);
+  cursor: wait;
+}
+
+.agent-inspection-cross {
+  margin-top: calc(24 * var(--ws-px));
+  padding-top: calc(20 * var(--ws-px));
+  border-top: 1px solid var(--border);
+  min-width: 0;
+}
+
+.agent-inspection-cross-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(12 * var(--ws-px));
+  margin-bottom: calc(12 * var(--ws-px));
+}
+
+.agent-inspection-cross-heading h4 {
+  flex: 1;
+  min-width: 0;
+}
+
+.agent-inspection-more {
+  margin-top: calc(12 * var(--ws-px));
+}
+
+.agent-inspection button:focus-visible,
+.agent-inspection-panel:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+.agent-inspection-empty {
+  margin-top: calc(16 * var(--ws-px));
+  padding: calc(20 * var(--ws-px)) calc(16 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-surface);
+}
+
+.agent-inspection-empty p {
+  margin-top: calc(4 * var(--ws-px));
+}
+
+.agent-inspection-destinations {
+  display: grid;
+  gap: calc(20 * var(--ws-px));
+  margin-top: calc(24 * var(--ws-px));
+}
+
+.agent-inspection-destinations p {
+  margin-top: calc(4 * var(--ws-px));
+}
+
+.agent-inspection-destinations button {
+  margin-top: calc(12 * var(--ws-px));
+}
+
+@media (max-width: 480px) {
+  .agent-inspection-row {
+    align-items: stretch;
+    flex-direction: column;
+    gap: calc(12 * var(--ws-px));
+    padding: calc(12 * var(--ws-px));
+  }
+
+  .agent-inspection-row > .agent-inspection-button,
+  .agent-inspection-destinations button,
+  .agent-inspection-cross-heading button,
+  .agent-inspection-more {
+    width: 100%;
+  }
+
+  .agent-inspection-cross-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}

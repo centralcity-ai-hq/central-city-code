@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://centralcity.ai/schemas/mcp/city_room_overview.input.schema.json",
+  "title": "city_room_overview input",
+  "type": "object",
+  "properties": {
+    "room_id": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 64,
+      "description": "Room id (uuid) or slug (the <slug> in /r/<slug>).",
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+        },
+        { "pattern": "^[a-z0-9](?:[a-z0-9-]{1,62}[a-z0-9])$" }
+      ]
+    }
+  },
+  "required": ["room_id"],
+  "additionalProperties": false
+}

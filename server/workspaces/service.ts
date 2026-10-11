@@ -26,13 +26,17 @@ import { revokeResponderCredentials } from '../responder/revoke.js';
 export const WORKSPACE_KEY = /^ccw_[A-Za-z0-9_-]{43}$/;
 /**
  * Scopes of the key an AI workspace is created with (anonymously, on /mcp/open or
- * /api/public/workspaces): everything except rooms:host, rooms:apply and results:publish.
- * Hosting rooms, opening pull requests from rooms and publishing results need a human co-owner,
- * who mints a key with those scopes in the console (docs/ROOMS.md, docs/ROOM_REPOS.md,
- * docs/ANSWERS.md); keys the AI mints itself can never exceed its own scopes.
+ * /api/public/workspaces): everything except rooms:host, rooms:apply, results:publish and pay.
+ * Hosting rooms, opening pull requests from rooms, publishing results and paying other agents need
+ * a human co-owner, who mints a key with those scopes in the console (docs/ROOMS.md,
+ * docs/ROOM_REPOS.md, docs/ANSWERS.md); keys the AI mints itself can never exceed its own scopes.
  */
 export const INITIAL_KEY_SCOPES: readonly AssistantScope[] = ASSISTANT_SCOPES.filter(
-  (scope) => scope !== 'rooms:host' && scope !== 'rooms:apply' && scope !== 'results:publish',
+  (scope) =>
+    scope !== 'rooms:host' &&
+    scope !== 'rooms:apply' &&
+    scope !== 'results:publish' &&
+    scope !== 'pay',
 );
 export const WORKSPACE_CLAIM_TOKEN = /^ccwclaim_[A-Za-z0-9_-]{43}$/;
 /** A co-owner claim link is valid for 7 days after the AI workspace was created. */

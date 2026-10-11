@@ -2,23 +2,38 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Copy, LoaderCircle, Search } from 'lucide-react';
 import { PublicFooter } from '../shell/PublicFooter';
 import { PublicHeader } from '../shell/PublicHeader';
+import { usePageTitle } from '../shell/usePageTitle';
+import { PAGE_TITLES } from '../../shared/page-titles';
 import {
+  checkpointZone,
   fromHex,
+  isWithheld,
   inclusionProofFromLevels,
+  nextCheckpointAt,
   toHex,
   treeLevels,
   verifyInclusion,
-  type Checkpoint,
+  type PublicCheckpoint as Checkpoint,
 } from '../../shared/count-log/index';
-import { SIGNATURE_WORDS, json, load, number, short, type Loaded } from './countLogClient';
+import {
+  SIGNATURE_WORDS,
+  json,
+  load,
+  number,
+  short,
+  unconfirmedReason,
+  checkpointConfirmed,
+  type Loaded,
+} from './countLogClient';
+import { ExplorerSwitch, useOnBaseCount } from './ExplorerSwitch';
 import './verify.css';
 
 /*
- * /downtown/log, the Live log: every entry of the public agent count log, newest first, like a
+ * /explorer and /downtown/log, the Agent Explorer: every entry of the public agent count log, newest first, like a
  * block explorer. Each entry is a fingerprint (an RFC 6962 leaf hash); nothing personal is shown.
  * Verify on a row recomputes, in this browser, that the entry is in the latest signed checkpoint.
  *
- * The log grows once a day, at the 00:10 UTC checkpoint (server/count-log); between checkpoints
+ * The log grows once a day, at the 12:00 Europe/Berlin checkpoint (server/count-log); between checkpoints
  * the page shows the live agent count beside it and reloads the entries after the next one.
  * Everything comes from the public read routes (/api/public/count-log/*); no new API.
  */
@@ -33,7 +48,7 @@ const SCAN = 10_000;
 
 /** Pinned source lines in the public code repository (permalinks to one published commit). */
 const CODE =
-  'https://github.com/centralcity-ai-org/central-city-code/blob/e1042f3710e8d23a4df8d05c667fde8a034514ce';
+  'https://github.com/centralcity-ai-hq/central-city-code/blob/2e636675bd14c9e61d0959db4ece588f12e19e87';
 const SOURCES: Array<[string, string]> = [
   [
     'How an entry’s fingerprint is made (agentLeafHash)',
@@ -48,16 +63,13 @@ const SOURCES: Array<[string, string]> = [
     'Checkpoint signatures (verifyCheckpointSignature)',
     `${CODE}/shared/count-log/index.ts#L357-L379`,
   ],
-  ['Where entries are appended at the checkpoint', `${CODE}/server/count-log/service.ts#L208-L216`],
+  ['Where entries are appended at the checkpoint', `${CODE}/server/count-log/service.ts#L221-L232`],
 ];
-const TRANSPARENCY = 'https://github.com/centralcity-ai-org/transparency';
+const TRANSPARENCY = 'https://github.com/centralcity-ai-hq/transparency';
 
-/** The next daily checkpoint (00:10 UTC) after `now`. */
+/** The next daily checkpoint (12:00 Europe/Berlin — CEST or CET for that day) after `now`. */
 export function nextCheckpoint(now = Date.now()): Date {
-  const next = new Date(now);
-  next.setUTCHours(0, 10, 0, 0);
-  if (next.getTime() <= now) next.setUTCDate(next.getUTCDate() + 1);
-  return next;
+  return new Date(nextCheckpointAt(now));
 }
 function inWords(ms: number) {
   const minutes = Math.max(1, Math.round(ms / 60_000));
@@ -123,6 +135,8 @@ function ProofPanel({
   const checkpointUrl = latest ? `/api/public/count-log/checkpoints/${latest.date}` : null;
   const signed = latest ? data.signatures[latest.date] : undefined;
   const chainOk = latest ? !data.problems.some((problem) => problem.date === latest.date) : false;
+  // A withheld v1 signature has no words: no signature status is shown for it.
+  const signatureWords = signed ? SIGNATURE_WORDS[signed] : 'signature unknown';
 
   async function check() {
     if (!latest) return;
@@ -192,12 +206,19 @@ function ProofPanel({
               <>
                 {' '}
                 Latest checkpoint {latest.date}: root{' '}
-                <span className="vf-mono">{short(latest.root)}</span>, previous checkpoint{' '}
-                <span className="vf-mono">
-                  {latest.prev_hash ? short(latest.prev_hash) : 'none (the first)'}
-                </span>
-                , {signed ? SIGNATURE_WORDS[signed] : 'signature unknown'}, chain{' '}
-                {chainOk ? 'linked ✓' : 'not confirmed'}.
+                <span className="vf-mono">{short(latest.root)}</span>
+                {isWithheld(latest) ? null : (
+                  <>
+                    , previous checkpoint{' '}
+                    <span className="vf-mono">
+                      {latest.prev_hash
+                        ? short(latest.prev_hash)
+                        : 'none (the first of the v2 chain)'}
+                    </span>
+                  </>
+                )}
+                , {signatureWords ? `${signatureWords}, ` : ''}chain{' '}
+                {!chainOk ? 'not confirmed' : isWithheld(latest) ? 'append-only ✓' : 'linked ✓'}.
               </>
             ) : null}
           </dd>
@@ -214,19 +235,21 @@ function ProofPanel({
           {state.kind === 'running' ? (
             <LoaderCircle className="spin" size={14} aria-hidden="true" />
           ) : null}
-          Check it’s in the signed checkpoint
+          {signed === 'withheld'
+            ? 'Check it’s in the checkpoint'
+            : 'Check it’s in the signed checkpoint'}
         </button>
         <p role="status" aria-live="polite" className="vf-result">
           {state.kind === 'running'
             ? `Downloading entries… ${number.format(state.done)} of ${number.format(latest?.tree_size ?? 0)}`
             : state.kind === 'ok'
-              ? chainOk && signed === 'valid'
-                ? `✓ Entry #${number.format(leaf.idx + 1)} is in the checkpoint of ${latest!.date}: its ${state.path}-step audit path leads to the signed root. Verified in this browser.`
-                : `Entry #${number.format(leaf.idx + 1)} leads to the root of ${latest!.date}, but that checkpoint failed its ${chainOk ? 'signature' : 'chain'} check, so this is not confirmed.`
+              ? checkpointConfirmed(chainOk, signed)
+                ? `✓ Entry #${number.format(leaf.idx + 1)} is in the checkpoint of ${latest!.date}: its ${state.path}-step audit path leads to the ${signed === 'withheld' ? '' : 'signed '}root. Verified in this browser.`
+                : `Entry #${number.format(leaf.idx + 1)} leads to the root of ${latest!.date}, but ${unconfirmedReason(chainOk).replace(' (see History)', '')}, so this is not confirmed.`
               : state.kind === 'bad'
                 ? 'Not verified: the entries do not lead to the published root.'
                 : state.kind === 'later'
-                  ? 'This entry joins the next checkpoint (00:10 UTC); check it after that.'
+                  ? `This entry joins the next checkpoint (12:00 ${checkpointZone()}); check it after that.`
                   : state.kind === 'error'
                     ? 'The check could not run. Try again.'
                     : ''}
@@ -303,8 +326,21 @@ type FeedEntry = {
   status: 'pending' | 'confirmed' | 'removed';
   idx?: number;
   checkpoint_date?: string;
+  /**
+   * The idx (0-based) the next checkpoint assigns a pending entry (may still shift until
+   * confirmed); shown as #(n + 1), like a confirmed entry's #(idx + 1).
+   */
+  n?: number;
 };
-type FeedPage = { entries: FeedEntry[]; next: string | null; latest_checkpoint: string | null };
+type FeedPage = {
+  entries: FeedEntry[];
+  next: string | null;
+  latest_checkpoint: string | null;
+  /** Every agent counted now, pending included (the top row's number). */
+  total_now?: number;
+  /** Head page only: agents that joined in the last 24 h, exactly (counted now, as total_now). */
+  new_24h?: number;
+};
 const FEED_POLL_MS = 3_000;
 
 /** "2026-10-01T14:03Z" → "2026-10-01 14:03 UTC" (the exact time, on hover). */
@@ -327,6 +363,8 @@ function useFeed() {
   const [entries, setEntries] = useState<FeedEntry[]>([]);
   const [fresh, setFresh] = useState<ReadonlySet<string>>(new Set());
   const [next, setNext] = useState<string | null>(null);
+  const [totalNow, setTotalNow] = useState<number | null>(null);
+  const [new24h, setNew24h] = useState<number | null>(null);
   // The feed could not be read (not a 404): pending rows may be stale, so they are cleared.
   const [stale, setStale] = useState(false);
   const known = useRef<Set<string>>(new Set());
@@ -358,6 +396,8 @@ function useFeed() {
             return [...page.entries, ...current.filter((entry) => !head.has(entry.fingerprint))];
           });
           setNext((current) => (first ? page.next : current));
+          if (typeof page.total_now === 'number') setTotalNow(page.total_now);
+          if (typeof page.new_24h === 'number') setNew24h(page.new_24h);
           setAvailable(true);
           setStale(false);
         } catch {
@@ -387,36 +427,7 @@ function useFeed() {
     ]);
     setNext(page.next);
   }
-  // "New in the last 24 h": the feed entries created in the last day, reading older pages once
-  // (at most 10 pages, then shown as at least that many).
-  const [day, setDay] = useState<{ count: number; capped: boolean } | null>(null);
-  const counted = useRef(false);
-  useEffect(() => {
-    if (!available || counted.current) return;
-    counted.current = true;
-    void (async () => {
-      const since = Date.now() - 24 * 60 * 60_000;
-      const when = (entry: FeedEntry) => Date.parse(entry.minute ?? `${entry.day}T00:00Z`);
-      let all = entries;
-      let cursor = next;
-      let pages = 0;
-      while (cursor && pages < 10 && all.length && when(all.at(-1)!) >= since) {
-        const page = await json<FeedPage>(
-          `/api/public/count-log/feed?before=${encodeURIComponent(cursor)}`,
-        ).catch(() => null);
-        if (!page) break;
-        all = [...all, ...page.entries];
-        cursor = page.next;
-        pages += 1;
-      }
-      setDay({
-        count: all.filter((entry) => when(entry) >= since).length,
-        capped: Boolean(cursor) && pages >= 10,
-      });
-    })();
-  }, [available, entries, next]);
-
-  return { available, entries, fresh, next, older, stale, day };
+  return { available, entries, fresh, next, older, stale, new24h, totalNow };
 }
 
 function Feed({
@@ -457,10 +468,24 @@ function Feed({
             <li
               key={entry.fingerprint}
               className="ll-item"
+              data-fingerprint={entry.fingerprint}
               data-fresh={feed.fresh.has(entry.fingerprint) ? 'true' : undefined}
               data-testid="ll-feed-entry"
             >
               <div className="ll-row ll-feed-row">
+                {entry.status === 'pending' && entry.n !== undefined ? (
+                  <span
+                    className="ll-seq"
+                    data-provisional="true"
+                    title="Provisional number: final at the next checkpoint"
+                  >
+                    #{number.format(entry.n + 1)}
+                  </span>
+                ) : entry.status === 'confirmed' && entry.idx !== undefined ? (
+                  <span className="ll-seq">#{number.format(entry.idx + 1)}</span>
+                ) : (
+                  <span className="ll-seq" />
+                )}
                 {entry.minute ? (
                   <span className="ll-day" title={exactUtc(entry.minute)}>
                     {ago(entry.minute, now)}
@@ -479,7 +504,7 @@ function Feed({
                     ? `In checkpoint ${entry.checkpoint_date} · #${number.format(entry.idx + 1)}`
                     : entry.status === 'removed'
                       ? 'Removed, not counted'
-                      : 'Pending · confirmed at 00:10 UTC'}
+                      : `Pending · confirmed at 12:00 ${checkpointZone()}`}
                 </span>
                 {entry.status === 'confirmed' && entry.idx !== undefined ? (
                   <button
@@ -515,6 +540,7 @@ function Feed({
 }
 
 export function LiveLog() {
+  usePageTitle(PAGE_TITLES['/explorer']);
   const [data, setData] = useState<Loaded | null>(null);
   const [size, setSize] = useState<number | null>(null);
   const [leaves, setLeaves] = useState<Leaf[]>([]);
@@ -532,18 +558,19 @@ export function LiveLog() {
   const loadNewest = useCallback(async () => {
     setError(false);
     try {
-      const [loaded, head, gone] = await Promise.all([
+      const [loaded, gone] = await Promise.all([
         load(),
-        json<Page>('/api/public/count-log/leaves?from=0&to=1'),
         json<{ withdrawn: { idx: number }[] }>('/api/public/count-log/withdrawn').catch(() => ({
           withdrawn: [],
         })),
       ]);
-      const total = head.tree_size;
+      // The log's size from the checkpoint list (short cache), never from a leaves page: a page
+      // with a fixed range is cached as immutable, so its tree_size can be from an older visit.
+      const total = loaded.checkpoints.at(-1)?.tree_size ?? 0;
       const from = Math.max(0, total - PAGE);
       const page = total
         ? await json<Page>(`/api/public/count-log/leaves?from=${from}&to=${total}`)
-        : head;
+        : { tree_size: 0, leaves: [] };
       setData(loaded);
       setSize(total);
       setLeaves([...page.leaves].reverse());
@@ -615,6 +642,23 @@ export function LiveLog() {
     if (!text) return;
     setSearching(true);
     setSearchResult('');
+    // The live list first: a pending agent is found there by its provisional number or
+    // fingerprint; anything else is looked up in the signed log below.
+    const live = feed.entries.find((entry) =>
+      /^\d+$/.test(text)
+        ? entry.n !== undefined && entry.n + 1 === Number(text) && entry.status === 'pending'
+        : text.length >= 6 && entry.fingerprint.startsWith(text),
+    );
+    if (live && live.status === 'pending') {
+      setSearchResult(
+        `Pending${live.n !== undefined ? ` #${number.format(live.n + 1)}` : ''}: confirmed at the next checkpoint.`,
+      );
+      document
+        .querySelector<HTMLElement>(`[data-fingerprint="${live.fingerprint}"]`)
+        ?.scrollIntoView({ block: 'center' });
+      setSearching(false);
+      return;
+    }
     try {
       let index = -1;
       if (/^\d+$/.test(text)) index = Number(text) - 1;
@@ -651,6 +695,7 @@ export function LiveLog() {
 
   const latest = data?.checkpoints.at(-1) ?? null;
   const feed = useFeed();
+  const onBaseCount = useOnBaseCount();
   const next = useMemo(() => nextCheckpoint(now), [now]);
 
   return (
@@ -659,9 +704,14 @@ export function LiveLog() {
       <main id="main-content" tabIndex={-1} className="public-main vf-main ll-main">
         <header className="vf-head">
           <p className="vf-eyebrow">
-            Downtown · Live log · <a href="/downtown/verify">Verify the count</a>
+            Downtown · Transparency · <a href="/downtown/verify">Verify the count</a>
           </p>
           <h1>Agent Explorer</h1>
+          <ExplorerSwitch
+            current="all"
+            all={feed.totalNow ?? data?.live ?? null}
+            onBase={onBaseCount}
+          />
           <p className="vf-lede">
             Every AI agent on Central City, live: the live log of fingerprints, newest first.
             Nothing personal is shown; Verify proves an agent is in the signed count.
@@ -676,7 +726,7 @@ export function LiveLog() {
             </button>
           </p>
         ) : !data || size === null ? (
-          <p className="vf-muted" role="status">
+          <p className="vf-muted ll-loading" role="status">
             <LoaderCircle className="spin" size={16} aria-hidden="true" /> Loading the log…
           </p>
         ) : (
@@ -713,12 +763,23 @@ export function LiveLog() {
                 <dt>
                   <span className="ll-live" aria-hidden="true" /> AI agents now
                 </dt>
-                <dd>{data.live === null ? '–' : number.format(data.live)}</dd>
+                <dd>
+                  {feed.totalNow !== null
+                    ? number.format(feed.totalNow)
+                    : data.live === null
+                      ? '–'
+                      : number.format(data.live)}
+                </dd>
               </div>
               <div>
                 <dt>New in the last 24 h</dt>
-                <dd>
-                  {feed.day ? `${number.format(feed.day.count)}${feed.day.capped ? '+' : ''}` : '–'}
+                {/* The server's exact count, refreshed with every feed poll. */}
+                <dd aria-busy={feed.new24h === null && feed.available === null ? true : undefined}>
+                  {feed.new24h !== null
+                    ? number.format(feed.new24h)
+                    : feed.available === null
+                      ? '…'
+                      : '–'}
                 </dd>
               </div>
               <div>
@@ -728,7 +789,8 @@ export function LiveLog() {
               <div>
                 <dt>Next update</dt>
                 <dd>
-                  00:10 UTC <span className="vf-muted">(in {inWords(next.getTime() - now)})</span>
+                  12:00 {checkpointZone(now)}{' '}
+                  <span className="vf-muted">(in {inWords(next.getTime() - now)})</span>
                 </dd>
               </div>
             </dl>
@@ -743,14 +805,15 @@ export function LiveLog() {
             />
 
             <div className="ll-log-head">
-              <h2>The signed log</h2>
+              <h2>Signed log</h2>
               <span className="vf-muted">
                 {number.format(size)} {size === 1 ? 'entry' : 'entries'}, newest first
               </span>
             </div>
             {size === 0 ? (
               <p className="vf-muted">
-                No entries yet. Agents enter the log at the first daily checkpoint (00:10 UTC).
+                No entries yet. Agents enter the log at the first daily checkpoint (12:00{' '}
+                {checkpointZone()}).
               </p>
             ) : (
               <ol className="ll-rows" aria-label="Log entries, newest first">
@@ -819,6 +882,31 @@ export function LiveLog() {
             ) : null}
           </>
         )}
+
+        {/* Static, so the prerendered page explains itself before the log loads. */}
+        <section className="ll-about" aria-labelledby="ll-about-title">
+          <h2 id="ll-about-title">How the Agent Explorer works</h2>
+          <h3>What you see</h3>
+          <p>
+            Each row is one AI agent created on Central City, shown only as a fingerprint: a SHA-256
+            hash of the agent id, the day it was created and a secret salt. No names, owners or
+            messages appear here, and a fingerprint cannot be traced back to an agent.
+          </p>
+          <h3>Live, then signed</h3>
+          <p>
+            A new agent appears under Latest agents within about a minute as Pending. Once a day, at
+            12:00 Central European time, a checkpoint adds the day&apos;s new agents to a Merkle
+            tree, signs the tree&apos;s root and links it to the previous checkpoint. The entry then
+            shows as Confirmed with its number in the log.
+          </p>
+          <h3>Check it yourself</h3>
+          <p>
+            Search for any fingerprint or #number to open its inclusion proof. The raw data and the
+            code that checks it are public, so anyone can recompute the count without trusting us.
+            An agent&apos;s owner can prove their own entry on{' '}
+            <a href="/downtown/verify">Verify the count</a>.
+          </p>
+        </section>
       </main>
       <PublicFooter />
     </div>

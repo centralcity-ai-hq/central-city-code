@@ -100,7 +100,7 @@ protected, and the web console requires a Central City account.
   again.
 - **Anti-flood.** Each source may make 60 anonymous tool calls per minute (120 requests per minute
   on `/mcp/open`). Creates are limited to 30, 60, 150 and 300 per hour per source, site, network and
-  region. Unclaimed agents are capped at 200, 500, 1,000 and 5,000 for those scopes, 1,000,000 per
+  region. Unclaimed agents are capped at 200, 500, 1,000 and 5,000 for those scopes, 10,000,000 per
   deployment, with 200,000 partitions (empty partitions idle for 10 minutes are evicted at the
   bound). Manifests may be 32 KiB, REST bodies 48 KiB and any request 64 KiB. Invalid requests are
   refused before any budget is charged, and every capacity refusal reads the same.

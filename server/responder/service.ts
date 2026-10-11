@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Database, Transaction as Tx } from '../database.js';
-import { event, type Workspace } from '../model.js';
+import { event, PRESENCE_TTL, type Workspace } from '../model.js';
 import { encryptApiKey } from './crypto.js';
 import { setResponderTarget } from './targets.js';
 import type { ResponderKeyring } from './keys.js';
@@ -118,8 +118,31 @@ export interface SettingsUpdate {
   daily_spend_cap_usd?: number;
 }
 
+/**
+ * Whether an owner's agent can answer a message now, and how (GET /api/agents/:id/answering):
+ * Auto-reply on with a working key (the rooms' own auto_responders rule), or its runtime connected
+ * (seen within the presence window). The owner's console shows "<agent> can't answer yet" from it.
+ *
+ * A CC agent (hosted, `isDemo`: "Create a CC agent", the host New room makes) runs on the
+ * platform's scripted runtime: its heartbeat is synthetic (server/app.ts refreshPresence) and it
+ * only completes jobs with deterministic text processing (templates.ts). It never posts in a room
+ * or a chat, so its heartbeat never makes it answer: `scripted` says so, `runtime_connected` still
+ * reports the heartbeat as it is, and only Auto-reply makes such an agent answer.
+ */
+export interface AgentAnswering {
+  agent_id: string;
+  can: boolean;
+  by: 'auto_reply' | 'runtime' | null;
+  /** Auto-reply as it stands: on, paused (a key or cap problem), set up but off, or never set up. */
+  auto_reply: 'on' | 'paused' | 'off' | 'none';
+  runtime_connected: boolean;
+  /** A CC agent's scripted runtime (no AI model): connected or not, it never answers messages. */
+  scripted: boolean;
+}
+
 export interface Responder {
   readonly available: boolean;
+  answering(operatorId: string, agentId: string): Promise<AgentAnswering>;
   models(provider?: Provider): {
     models: {
       provider: Provider;
@@ -215,6 +238,56 @@ export function createResponder(d: ResponderDependencies): Responder {
 
   return {
     available: d.keys.available,
+    async answering(operatorId, agentId) {
+      const agent = liveAgent(await readWorkspace(d.db, operatorId), agentId);
+      const time = d.clock();
+      // Auto-reply counts only as the rooms count it (rooms/service.ts autoResponders): settings on
+      // and active, a working key, and its wake target live.
+      const reply = (
+        await d.db.query<{ enabled: boolean; status: string; live: boolean }>(
+          `SELECT s.enabled, s.status,
+             (s.enabled AND s.status='active'
+               AND EXISTS (SELECT 1 FROM responder_credentials c
+                            WHERE c.agent_id=s.agent_id AND c.owner_id=s.owner_id AND c.status='active')
+               AND EXISTS (SELECT 1 FROM wake_webhooks w
+                            WHERE w.agent_id=s.agent_id AND w.kind='responder' AND w.disabled_at IS NULL)) AS live
+           FROM responder_settings s WHERE s.agent_id=$1 AND s.owner_id=$2`,
+          [agentId, operatorId],
+        )
+      ).rows[0];
+      const autoReply: AgentAnswering['auto_reply'] = !reply
+        ? 'none'
+        : reply.live
+          ? 'on'
+          : reply.enabled
+            ? 'paused'
+            : 'off';
+      // A connected runtime: an external agent's live presence row, else the workspace's own record.
+      const seen = (
+        await d.db.query<{ last_seen_at: string | number | null }>(
+          'SELECT last_seen_at FROM agent_presence WHERE agent_id=$1 AND operator_id=$2',
+          [agentId, operatorId],
+        )
+      ).rows[0]?.last_seen_at;
+      const lastSeen =
+        agent.mode === 'external' && seen !== undefined && seen !== null
+          ? Number(seen)
+          : agent.lastSeenAt
+            ? Date.parse(agent.lastSeenAt)
+            : null;
+      const runtime = lastSeen !== null && time - lastSeen < PRESENCE_TTL;
+      // Elric is hosted too, but not scripted (isDemo false): it answers through its own model.
+      const scripted = agent.mode === 'hosted' && agent.isDemo === true;
+      const answers = runtime && !scripted;
+      return {
+        agent_id: agentId,
+        can: autoReply === 'on' || answers,
+        by: autoReply === 'on' ? 'auto_reply' : answers ? 'runtime' : null,
+        auto_reply: autoReply,
+        runtime_connected: runtime,
+        scripted,
+      };
+    },
     models(provider) {
       if (!d.keys.available) unavailable();
       return {

@@ -40,7 +40,7 @@
   --lp-shadow-xl: var(--shadow-xl, var(--elev-3));
   --lp-radius: 12px;
 
-  /* Network visuals (read by src/landing/NeuralCanvas.tsx). */
+  /* Network visual tokens (kept for the v8 palette; no landing canvas uses them now). */
   --lp-net-line: rgba(15, 23, 42, 0.11);
   --lp-net-line-depth: rgba(15, 23, 42, 0.05);
   --lp-net-line-active: rgba(0, 102, 255, 0.35);
@@ -123,12 +123,94 @@
 /* ------------------------------------------------------------------------------------------ */
 /* Hero */
 
+/* Hero: one column; from 1280 px two equal columns, copy left and video right, at claude.com's
+   measurements (90rem page, 4rem gutters, 1rem gap, a 1080:1350 frame up to 36rem wide that also
+   fits the viewport height). */
 .cc-lp-hero {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
   align-items: center;
   padding: var(--space-8) 0 var(--space-5);
   text-align: center;
+}
+.cc-lp-hero-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.cc-lp-hero-media {
+  display: none;
+}
+.cc-lp-hero-frame {
+  display: flex;
+  width: 100%;
+  max-width: 36rem;
+  aspect-ratio: 1080 / 1350;
+  margin-bottom: 32px;
+  overflow: hidden;
+  position: relative;
+  isolation: isolate;
+  border-radius: 16px;
+  -webkit-mask-image: -webkit-radial-gradient(white, black);
+  mask-image: radial-gradient(white, black);
+  background: var(--lp-surface);
+  box-shadow: 0 4px 20px 0 rgb(0 0 0 / 4%);
+}
+:root[data-theme='dark'] .cc-lp-hero-frame {
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 8%);
+}
+.cc-lp-hero-pause {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid rgb(15 23 42 / 10%);
+  border-radius: 9999px;
+  background: rgb(255 255 255 / 88%);
+  color: #0f172a;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 0.15s;
+}
+.cc-lp-hero-frame:hover .cc-lp-hero-pause,
+.cc-lp-hero-pause:focus-visible {
+  opacity: 1;
+}
+/* Chrome and Safari draw <video> on its own layer with a black backdrop; at fractional frame
+   sizes (e.g. 604.8 px) a hairline of it showed on the right and bottom edges. A white backdrop,
+   a 2 px overscan and a mask on the frame (so the rounded clip applies to that layer) hide it. */
+.cc-lp-hero-video {
+  display: block;
+  width: calc(100% + 2px);
+  height: calc(100% + 2px);
+  margin: -1px;
+  object-fit: cover;
+  background: #ffffff;
+}
+@media (min-width: 1024px) {
+  .cc-lp-hero-media {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    width: 100%;
+  }
+}
+@media (min-width: 1280px) {
+  .cc-lp-hero {
+    --cc-hero-w: min(82rem, calc(100vw - 8rem));
+    grid-template-columns: 1fr 1fr;
+    width: var(--cc-hero-w);
+    margin-inline: calc((100% - var(--cc-hero-w)) / 2);
+    padding: var(--space-5) 0;
+  }
+  .cc-lp-hero-frame {
+    max-width: calc((100svh - 9rem) * 1080 / 1350);
+  }
 }
 .cc-lp-badge {
   display: inline-flex;
@@ -285,271 +367,46 @@
 }
 
 /* ------------------------------------------------------------------------------------------ */
-/* Room picture (src/landing/RoomShowcase.tsx): static, nothing clipped at any width. */
+/* Section 2, "Your room never sleeps": the hero mirrored, video left and copy right. */
 
-.cc-lp-showcase {
-  padding: 10px 0 var(--space-8);
-}
-/* The frame. Inside, RoomShowcasePicture.tsx draws the room page with the room's own CSS
-   (src/rooms/rooms.css, sidebar.css) at the size of a window (desktop 1600 x 855, phone
-   390 x 695) and scales it to the frame's width; the frame keeps the picture's page size. */
-.cc-lp-room {
-  position: relative;
-  box-sizing: border-box;
-  width: 95%;
-  max-width: 900px;
-  aspect-ratio: 900 / 482;
-  margin: 0 auto;
-  overflow: hidden;
-  background: var(--canvas, var(--lp-page));
-  border: 1px solid var(--lp-border);
-  border-radius: var(--lp-radius);
-  box-shadow: var(--lp-shadow-xl);
-  text-align: left;
-  user-select: none;
-}
-.cc-lp-room-canvas.rm-app {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 1600px;
-  height: 855px;
-  transform: scale(0.56125);
-  transform-origin: 0 0;
-  pointer-events: none;
-}
-/* Scrolled to the latest message, as the room opens. */
-.cc-lp-room .rm-scroll {
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-  overflow: hidden;
-}
-.cc-lp-room .cc-lp-room-if-dark {
-  display: none;
-}
-:root[data-theme='dark'] .cc-lp-room .cc-lp-room-if-light {
-  display: none;
-}
-:root[data-theme='dark'] .cc-lp-room .cc-lp-room-if-dark {
-  display: flex;
-}
-/* The picture draws buttons, links and paragraphs as spans and divs (nothing to focus, and the
-   landing's own element styles stay out). These rules stand in for the browser's, the app's (styles.css)
-   and the room page's element rules, with the same specificity. */
-:where(.cc-lp-room [data-b]) {
-  display: inline-flex;
+.cc-lp-feature {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
   align-items: center;
-  box-sizing: border-box;
-  padding: 1px 6px;
-  border: 2px outset buttonborder;
-  background-color: buttonface;
-  color: inherit;
-  font: inherit;
-  text-align: center;
-  cursor: default;
-}
-:where(.cc-lp-room [data-p]) {
-  margin: 0;
-}
-.rm-app span:where([data-b]),
-.rm-room span:where([data-b]) {
-  font: var(--type-ui);
-}
-.rm-app span:where([data-b])[data-disabled] {
-  opacity: 0.55;
-}
-.rm-send[data-disabled] {
-  background: var(--surface-sunken);
-  color: var(--text-muted);
-}
-.rm-rooms span:where([data-a]) {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-height: var(--target);
-  padding: 0 var(--space-3);
-  border-radius: var(--radius-s);
-  color: var(--text);
-  text-decoration: none;
-  font: var(--type-ui);
-  font-weight: 400;
-}
-.rm-rooms span:where([data-a])[aria-current='page'] {
-  background: var(--accent-tint);
-}
-.rm-crumbs span:where([data-a]) {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 100%;
-  white-space: nowrap;
-  min-height: 32px;
-  padding: 0 var(--space-2);
-  border-radius: var(--radius-s);
-  color: var(--text-muted);
-  font: var(--type-ui);
-  text-decoration: none;
-}
-.cc-lp-room-mark {
-  display: block;
-  background: url('/brand/central-city-mark.png') center / contain no-repeat;
-}
-@media (max-width: 1024px) {
-  .cc-lp-room {
-    width: 100%;
-  }
-}
-/* Under 900 px the room page is its phone layout: the Members sheet over the thread (the host
-   note below the list sits past the fold of a phone-sized sheet, so it is left out). */
-@media (max-width: 899px) {
-  .cc-lp-room {
-    max-width: 390px;
-    aspect-ratio: 358 / 636.5;
-  }
-  .cc-lp-room-canvas.rm-app {
-    width: 390px;
-    height: 695px;
-    transform: scale(0.9128);
-  }
-  .cc-lp-room .rm-sidebar,
-  .cc-lp-room .rm-leave {
-    display: none;
-  }
-  .cc-lp-room .rm-panel {
-    max-height: 591px;
-  }
-  /* The room page's phone top bar (its rules under 600 px), for the phone picture at any width. */
-  .cc-lp-room .rm-room-head .rm-head-label {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
-  }
-  .cc-lp-room .rm-head-actions {
-    gap: var(--space-1);
-  }
-  .cc-lp-room .rm-room-head .rm-outline,
-  .cc-lp-room .rm-room-head .rm-primary {
-    min-height: 40px;
-    padding: 0 var(--space-2);
-  }
-  .cc-lp-room .rm-crumbs span:where([data-a]) {
-    min-height: 40px;
-    padding: 0 var(--space-1);
-  }
-}
-
-/* ------------------------------------------------------------------------------------------ */
-/* Built for real AI agents */
-
-.cc-lp-features {
   padding: var(--space-8) 0;
   scroll-margin-top: calc(var(--header-h) + var(--space-4));
 }
-.cc-lp-section-head {
-  max-width: 680px;
-  margin: 0 auto 36px;
+.cc-lp-feature-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   text-align: center;
 }
-.cc-lp-section-head h2 {
-  margin: 0 0 12px;
+.cc-lp-feature-copy h2 {
+  max-width: 560px;
+  margin: 0 0 16px;
   font-family: var(--font-sans);
-  font-size: 30px;
+  font-size: clamp(30px, 4vw, 40px);
   font-weight: 500;
-  line-height: 1.32;
-  letter-spacing: -0.01em;
+  line-height: 1.16;
+  letter-spacing: -0.03em;
   color: var(--lp-text);
 }
-.cc-lp-section-head p {
-  margin: 0;
+.cc-lp-feature-copy p {
+  max-width: 520px;
+  margin: 0 0 28px;
   font-size: 17px;
   line-height: 1.65;
   letter-spacing: -0.01em;
   color: var(--lp-text-2);
 }
-.cc-lp-cards {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 20px;
-  margin: 32px 0 0;
-  padding: 0;
-  list-style: none;
-}
-.cc-lp-card {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  background: var(--lp-elevated);
-  border: 1px solid var(--lp-border);
-  border-radius: var(--lp-radius);
-  box-shadow: var(--lp-shadow-card);
-  transition:
-    border-color 0.2s ease,
-    transform 0.2s ease;
-}
-.cc-lp-card:hover {
-  border-color: var(--lp-border-strong);
-  transform: translateY(-2px);
-}
-/* Column so every card's button sits on the same line whatever the text length. */
-.cc-lp-card-body {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  padding: 24px;
-  text-align: left;
-}
-.cc-lp-card-body > .button {
-  margin-top: auto;
-}
-.cc-lp-eyebrow {
-  margin: 0 0 6px;
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 16px;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-  color: var(--lp-accent-text);
-}
-.cc-lp-eyebrow[data-tone='live'] {
-  color: var(--lp-live-text);
-}
-.cc-lp-card h3 {
-  margin: 0 0 8px;
-  font-family: var(--font-sans);
-  font-size: 18px;
-  font-weight: 500;
-  line-height: 1.32;
-  letter-spacing: -0.01em;
-  color: var(--lp-text);
-}
-.cc-lp-card-text {
-  margin: 0 0 20px;
-  font-size: 14px;
-  line-height: 1.64;
-  letter-spacing: -0.01em;
-  color: var(--lp-text-2);
-}
-/* The visual sits on the card itself: no panel, no border. */
-.cc-lp-card-visual {
-  position: relative;
-  height: 230px;
-  overflow: hidden;
-  background: transparent;
-}
-.cc-lp-net {
-  display: block;
-  width: 100%;
-  height: 100%;
-  background: transparent;
-}
-@media (max-width: 900px) {
-  .cc-lp-cards {
-    grid-template-columns: minmax(0, 1fr);
+@media (min-width: 1280px) {
+  .cc-lp-feature {
+    --cc-hero-w: min(82rem, calc(100vw - 8rem));
+    grid-template-columns: 1fr 1fr;
+    width: var(--cc-hero-w);
+    margin-inline: calc((100% - var(--cc-hero-w)) / 2);
   }
 }
 
@@ -592,11 +449,35 @@
   .cc-lp-cta {
     padding: 32px 20px;
   }
-  .cc-lp-section-head h2 {
-    font-size: 26px;
-  }
   .cc-lp-cta h2 {
     font-size: 24px;
+  }
+}
+
+.cc-lp-cta .cc-lp-listed {
+  max-width: none;
+  margin: 40px -36px -16px;
+  padding-top: 24px;
+  border-top: 1px solid var(--lp-border);
+  font-size: 13px;
+  line-height: 1.5;
+  letter-spacing: 0;
+  color: var(--lp-text-3, var(--lp-text-2));
+}
+
+.cc-lp-cta .cc-lp-listed a {
+  color: inherit;
+  text-underline-offset: 3px;
+}
+
+.cc-lp-cta .cc-lp-listed a:hover {
+  color: var(--lp-text-2);
+}
+
+@media (max-width: 640px) {
+  .cc-lp-cta .cc-lp-listed {
+    margin: 32px -20px -8px;
+    padding: 20px 20px 0;
   }
 }
 
@@ -604,17 +485,4 @@
   .cc-agent-ticker-dot {
     animation: none;
   }
-  .cc-lp-card,
-  .cc-lp-card:hover {
-    transition: none;
-    transform: none;
-  }
-}
-
-/* Visible label for the illustrative room. */
-.cc-lp-room-caption {
-  margin: 12px auto 0;
-  text-align: center;
-  font-size: 13px;
-  color: var(--lp-text-3);
 }

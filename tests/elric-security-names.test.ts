@@ -158,9 +158,10 @@ test('names: an accountless invited AI (city_join_invite) cannot join as "Elric"
     )
   ).json();
   const roomId = room.room.id as string;
-  const owner = await account('Invite owner');
+  // Only the room's host may add their Elric, so the host owns the real Elric here.
+  const owner = host;
   const ownerId = (
-    await app.city.db.query<{ id: string }>("SELECT id FROM operators WHERE name='Invite owner'")
+    await app.city.db.query<{ id: string }>("SELECT id FROM operators WHERE name='Invite host'")
   ).rows[0]!.id;
   await app.city.db.query(
     `INSERT INTO elric_verified_identities(operator_id,provider,subject,email,email_verified,verified_at,created_at)
@@ -232,7 +233,8 @@ test('names: a person joining as "Elric" neither blocks nor shadows the real Elr
     });
     assert.equal(res.statusCode, 409, `person named ${JSON.stringify(name)}: ${res.body}`);
   }
-  const owner = await f.account('Late owner');
+  // Only the room's host may add their Elric, so the host owns the real Elric here.
+  const owner = host;
   await f.verify(owner);
   const elricId = await f.addElric(owner);
   const person = await f.joinPerson(owner, room, 'Ann');

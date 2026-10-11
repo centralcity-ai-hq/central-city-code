@@ -19,7 +19,7 @@ const REWRITES: [RegExp, string][] = [
   [/^A current directional connection is required\.?$/i, 'These agents are not connected.'],
   [
     /(Agent|Assistant|Native agent) (requests|jobs) are limited to hosted, zero-cost demonstrations\.?/i,
-    'Only the free demo agents can take this work.',
+    'Only the free CC agents can take this work.',
   ],
   [/^Account limit reached\.?$/i, 'This installation has reached its account limit.'],
   [/^Local agent limit reached\.?$/i, "You've reached the agent limit."],
@@ -39,7 +39,10 @@ type ErrorBody = { error?: unknown; code?: unknown; message?: unknown } | null |
 export function plainApiMessage(status: number, body: ErrorBody): string {
   const message = typeof body?.error === 'string' ? body.error.trim() : '';
   for (const [pattern, replacement] of REWRITES) if (pattern.test(message)) return replacement;
-  if (message && message.includes(' ') && !MACHINE_TEXT.test(message)) return message;
+  // These ordinary words contain "lease". Ignore only whole words while classifying, so
+  // identifiers such as leaseId, workerLease and releaseToken still use the shared copy.
+  const technicalText = message.replace(/\b(?:please|releases?|released)\b/gi, '');
+  if (message && message.includes(' ') && !MACHINE_TEXT.test(technicalText)) return message;
   const copy = describeError({ status, body });
   return copy.detail ? `${copy.title} ${copy.detail}` : copy.title;
 }
@@ -73,9 +76,9 @@ const EVENT_REWRITES: [RegExp, string | ((...groups: string[]) => string)][] = [
   [/ authenticated heartbeat received; online\./g, ' is online.'],
   [/ hosted runtime online\./g, ' is online.'],
   [/ heartbeat expired\./g, ' went offline.'],
-  [/ demonstration registered\./g, ' added as a demo agent.'],
-  [/ as a zero-cost deterministic demonstration/g, ' as a demo agent'],
-  [/ as a deterministic demonstration/g, ' as a demo agent'],
+  [/ demonstration registered\./g, ' added as a CC agent.'],
+  [/ as a zero-cost deterministic demonstration/g, ' as a CC agent'],
+  [/ as a deterministic demonstration/g, ' as a CC agent'],
   [/ as an external runtime awaiting enrollment/g, ' as an agent that runs on your own computer'],
   [/ as an external record awaiting owner runtime setup/g, ' as an agent that still needs setup'],
   [/ registered as an external runtime\./g, ' added. It runs on your own computer or server.'],
@@ -91,8 +94,8 @@ const EVENT_REWRITES: [RegExp, string | ((...groups: string[]) => string)][] = [
     / runtime enrolled with a single-use code and received its credential\./g,
     ' connected with its one-time code.',
   ],
-  [/ completed deterministic text processing\./g, ' finished the demo task.'],
-  [/ started deterministic text processing\./g, ' started the demo task.'],
+  [/ completed deterministic text processing\./g, ' finished the CC task.'],
+  [/ started deterministic text processing\./g, ' started the CC task.'],
   [/^Directional connection revoked\.$/, 'Connection removed.'],
   [/\(team route applied by /g, '(team connection set up by '],
   [/ connection requests by id /g, ' connection requests '],

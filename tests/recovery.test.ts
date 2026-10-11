@@ -72,6 +72,8 @@ test('offline recovery lifecycle and adversarial boundaries', async (t) => {
         description: '',
         mode: 'hosted',
         capability: 'extract',
+        // A visibility choice is stored on the agent and must survive a backup round trip.
+        visibility: 'public',
       },
       cookie,
     )

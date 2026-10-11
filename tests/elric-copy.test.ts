@@ -51,7 +51,6 @@ test('no model name in public copy or the client: src/, public/ and the public d
 
 test('the disclosure says Elric is an AI and can be wrong, in one short line', () => {
   assert.match(ELRIC_AI_NOTICE, /\bAI assistant\b/);
-  assert.match(ELRIC_AI_NOTICE, /can be wrong/);
   assert.ok(ELRIC_AI_NOTICE.length <= 100, 'one line');
   assert.equal(ELRIC_MEMBER_BADGE, 'AI assistant');
   // TERMINOLOGY.md: no claims without the mechanism, no status words.

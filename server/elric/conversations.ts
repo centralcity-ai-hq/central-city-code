@@ -4,6 +4,7 @@ import type { Database } from '../database.js';
 import { createPrivateRoom, PRIVATE_ROOM_NAME } from '../rooms/private.js';
 import { RoomError } from '../rooms/service.js';
 import { purgeElricConversation } from './erase.js';
+import type { TitleSource } from './titles.js';
 
 /**
  * Elric conversations: several private chats per owner, like a chat history. Each conversation is
@@ -19,7 +20,8 @@ import { purgeElricConversation } from './erase.js';
  * - `PATCH /api/elric/conversations/:id` `{ title }`: rename.
  * - `DELETE /api/elric/conversations/:id`: deletes it for good, content included.
  *
- * A conversation without a title of its own is titled from its first message.
+ * A conversation without a title of its own is titled from its first message (the fallback), and
+ * after Elric's first reply by a short generated title (titles.ts), unless the owner renamed it.
  */
 type Q = Pick<Database, 'query'>;
 
@@ -42,6 +44,8 @@ export interface Conversation {
   latest_seq: number;
   /** The Elric of this conversation was removed: history only, no new messages. */
   read_only: boolean;
+  /** 'fallback' (first message), 'user' (renamed or named at create) or 'auto' (titles.ts). */
+  title_source: TitleSource;
 }
 
 const refuse = (statusCode: number, errorCode: string, message: string) =>
@@ -81,9 +85,10 @@ type Row = {
   person: string | null;
   last_at: string | number | null;
   first_text: string | null;
+  title_source: TitleSource;
 };
 
-const SELECT = `SELECT r.id, r.slug, r.name, r.created_at, r.next_seq, r.closed_at,
+const SELECT = `SELECT r.id, r.slug, r.name, r.created_at, r.next_seq, r.closed_at, r.title_source,
     (SELECT m.agent_id FROM room_members m WHERE m.room_id=r.id AND m.kind='person'
        AND m.owner_id=$1 AND m.role='host' LIMIT 1) AS person,
     (SELECT max(x.created_at) FROM room_messages x WHERE x.room_id=r.id) AS last_at,
@@ -121,6 +126,7 @@ async function view(db: Q, row: Row): Promise<Conversation> {
     updated_at: new Date(Number(row.last_at ?? row.created_at)).toISOString(),
     latest_seq: Number(row.next_seq) - 1,
     read_only: row.closed_at !== null,
+    title_source: row.title_source,
   };
 }
 
@@ -130,7 +136,9 @@ export async function listConversations(
 ): Promise<{ conversations: Conversation[] }> {
   const rows = (
     await db.query<Row>(
-      `${SELECT} ORDER BY COALESCE((SELECT max(x.created_at) FROM room_messages x
+      // An empty chat (nothing said yet) is not listed, so unused chats never clutter the history;
+      // it still opens by id, and the console starts a new chat on its first message.
+      `${SELECT} AND r.next_seq > 1 ORDER BY COALESCE((SELECT max(x.created_at) FROM room_messages x
          WHERE x.room_id=r.id), r.created_at) DESC, r.id LIMIT ${CONVERSATIONS_MAX}`,
       [ownerId, UNTITLED],
     )
@@ -199,9 +207,10 @@ export async function createConversation(
     if (!elric) throw refuse(404, 'elric_not_found', 'You have no Elric.');
     await assertConversationCaps(tx, ownerId, time);
     const room = await createPrivateRoom(tx, { ownerId, elricAgentId: elric.agent_id, time });
-    await tx.query('UPDATE rooms SET name=$2 WHERE id=$1', [
+    await tx.query('UPDATE rooms SET name=$2, title_source=$3 WHERE id=$1', [
       room.room_id,
       title ?? NEW_CONVERSATION_TITLE,
+      title === undefined ? 'fallback' : 'user',
     ]);
     return room.room_id;
   });
@@ -210,8 +219,12 @@ export async function createConversation(
 
 export async function renameConversation(db: Q, ownerId: string, id: string, title: string) {
   const row = await one(db, ownerId, id);
-  await db.query('UPDATE rooms SET name=$2 WHERE id=$1 AND elric_private', [row.id, title]);
-  return view(db, { ...row, name: title });
+  // A title the owner chose: the generated title (titles.ts) never replaces it.
+  await db.query(`UPDATE rooms SET name=$2, title_source='user' WHERE id=$1 AND elric_private`, [
+    row.id,
+    title,
+  ]);
+  return view(db, { ...row, name: title, title_source: 'user' });
 }
 
 /**

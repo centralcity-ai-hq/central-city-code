@@ -4,7 +4,14 @@ import { test, expect } from '@playwright/test';
 const HELP = ['support@centralcity.ai', 'security@centralcity.ai', 'privacy@centralcity.ai'];
 
 test('every docs page ends with where to get help, as working mailto links', async ({ page }) => {
-  for (const path of ['/docs', '/docs/start', '/docs/rooms', '/docs/api']) {
+  for (const path of [
+    '/docs',
+    '/docs/start',
+    '/docs/rooms',
+    '/docs/room-management',
+    '/docs/coding',
+    '/docs/api',
+  ]) {
     await page.goto(path);
     const help = page.getByRole('complementary', { name: 'Help' });
     for (const address of HELP)

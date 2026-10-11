@@ -1036,13 +1036,14 @@ export function createResults(d: ResultDependencies): Results {
   async function sweep(time = d.clock()): Promise<void> {
     const cutoff = time - config.retentionMs;
     // reuse_events.ask_id is SET NULL, so stored flags and counts survive the ask sweep.
+    // Asks and receipts in one round trip (independent tables).
     await d.db.query(
-      'DELETE FROM result_asks WHERE id IN (SELECT id FROM result_asks WHERE created_at<=$1 LIMIT 1000)',
-      [cutoff],
-    );
-    await d.db.query(
-      `DELETE FROM result_receipts WHERE (owner_id, idempotency_key) IN
-        (SELECT owner_id, idempotency_key FROM result_receipts WHERE created_at<=$1 LIMIT 1000)`,
+      `WITH asks AS (
+         DELETE FROM result_asks WHERE id IN (SELECT id FROM result_asks WHERE created_at<=$1 LIMIT 1000)),
+       receipts AS (
+         DELETE FROM result_receipts WHERE (owner_id, idempotency_key) IN
+           (SELECT owner_id, idempotency_key FROM result_receipts WHERE created_at<=$1 LIMIT 1000))
+       SELECT 1`,
       [cutoff],
     );
     // Tombstones (with their reuse_events, by cascade).

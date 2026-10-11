@@ -31,7 +31,9 @@ async function fixture(t: { after: (fn: () => Promise<unknown>) => void }, wake:
   const app = await createApp({
     dataDir: ':memory:',
     startWorkers: false,
-    wake: { pollMs: 100, ...wake },
+    // A 200 ms settle window keeps the suite's wake-latency assertions meaningful; the settle
+    // behavior itself gets a dedicated test with a larger window.
+    wake: { pollMs: 100, settleMs: 200, ...wake },
   });
   t.after(() => app.close());
   return app;
@@ -211,8 +213,13 @@ test('direct-message mentions: recorded for the recipient only, listed, acknowle
 test('room mentions: only active members that can read the post; removal hides them', async (t) => {
   const app = await fixture(t);
   const scene = await roomScene(app);
-  // Scout (host's agent) is not a member; Bravo is.
-  const posted = await scene.post(scene.hostCookie, '@Bravo and @Scout: please check the plan');
+  // Scout (host's agent) is not a member; Bravo is. The host writes in its host AI's name
+  // (without agent_id the post would be the host's own, as a person).
+  const posted = await scene.post(
+    scene.hostCookie,
+    '@Bravo and @Scout: please check the plan',
+    scene.host,
+  );
   assert.equal(posted.statusCode, 201, posted.body);
   const bravo = await http(app, scene.memberCookie, 'GET', `/api/agents/${scene.member}/mentions`);
   assert.equal(bravo.json().mentions.length, 1);
@@ -284,6 +291,175 @@ test('long-poll wakes an idle inbox reader within 5 s and holds its answer until
   );
 });
 
+test('a woken tool wait collects a burst into one answer; browser reads answer at once', async (t) => {
+  const app = await fixture(t, { settleMs: 1500 });
+  const { cookie, a, b } = await pair(app);
+  const token = await grant(app, cookie, ['workspace:read', 'messages:read']);
+  const rest = http(app, cookie, 'GET', `/api/agents/${b}/inbox?since=0&wait=20`);
+  const mcp = tool(app, token, 'city_read_inbox', { agent_id: b, wait: 20 });
+  await sleep(400);
+  const sentAt = performance.now();
+  assert.equal((await send(app, cookie, a, b, 'burst 1')).statusCode, 201);
+  await sleep(500);
+  assert.equal((await send(app, cookie, a, b, 'burst 2')).statusCode, 201);
+  const [restPage, mcpPage] = await Promise.all([rest, mcp]);
+  const mcpLatency = performance.now() - sentAt;
+  type Row = { parts: { text: string }[] };
+  assert.deepEqual(
+    restPage.json().messages.map((m: Row) => m.parts[0]!.text),
+    ['burst 1'],
+    'the browser read answered at once with the first message only',
+  );
+  assert.deepEqual(
+    mcpPage.json().messages.map((m: Row) => m.parts[0]!.text),
+    ['burst 1', 'burst 2'],
+    'the tool wait collected the burst into one page (one client turn)',
+  );
+  assert.ok(
+    mcpLatency >= 1400 && mcpLatency < WAKE_BUDGET_MS,
+    `the tool answer waited out the settle window (${mcpLatency.toFixed(0)} ms)`,
+  );
+});
+
+test('waiting tool reads are capped per agent, beside the per-owner budget', async (t) => {
+  const app = await fixture(t, { rateLimits: { waitsPerMinutePerAgent: 2 } });
+  const { cookie, a, b } = await pair(app);
+  const token = await grant(app, cookie, ['workspace:read', 'messages:read']);
+  // Only waits that find nothing new are charged (a wait that answers news must never 429
+  // after the read advanced the caller's cursor, or the messages would be lost). News
+  // deliveries arrive via a woken 25 s wait (no settle window here); the empty waits are 1 s,
+  // so the 60 s bucket window (started by the first charge) is always open at the cap.
+  assert.equal(
+    (await tool(app, token, 'city_read_inbox', { agent_id: b, wait: 1 })).statusCode,
+    200,
+    'the first empty wait',
+  );
+  assert.equal((await send(app, cookie, a, b, 'one')).statusCode, 201);
+  const first = await tool(app, token, 'city_read_inbox', { agent_id: b, wait: 25 });
+  assert.equal(first.statusCode, 200, 'a wait that answers news is not charged');
+  // A tool read starts after the acknowledged seq and does not ack by itself: without an
+  // explicit city_ack_inbox the delivered message is returned again, so the next wait would
+  // find news and never be charged.
+  assert.equal(
+    (await tool(app, token, 'city_ack_inbox', { agent_id: b, seq: first.json().next_since }))
+      .statusCode,
+    200,
+  );
+  assert.equal(
+    (await tool(app, token, 'city_read_inbox', { agent_id: b, wait: 1 })).statusCode,
+    200,
+    'the second empty wait',
+  );
+  // Two charges are spent; a new message is still delivered (a charge never precedes
+  // delivery), and only the next empty wait 429s.
+  assert.equal((await send(app, cookie, a, b, 'two')).statusCode, 201);
+  const delivered = await tool(app, token, 'city_read_inbox', { agent_id: b, wait: 25 });
+  assert.equal(delivered.statusCode, 200, 'news is delivered over charged waits');
+  assert.equal(
+    (await tool(app, token, 'city_ack_inbox', { agent_id: b, seq: delivered.json().next_since }))
+      .statusCode,
+    200,
+  );
+  const capped = await tool(app, token, 'city_read_inbox', { agent_id: b, wait: 1 });
+  assert.equal(capped.statusCode, 429, 'the third empty waiting read of this agent in a minute');
+  assert.match(capped.body, /stop polling/i, 'the 429 tells the looping client to stop');
+  assert.ok(capped.headers['retry-after'], 'the 429 carries a retry-after');
+  // A 429 lands before any read, so a capped wait can never lose messages; a read without a
+  // wait still fetches them.
+  assert.equal(
+    (await tool(app, token, 'city_read_inbox', { agent_id: b })).statusCode,
+    200,
+    'reads without wait are not charged',
+  );
+  // REST waits answer per message: they stay on the owner budget, no per-agent cap.
+  const rest = await fixture(t, { rateLimits: { waitsPerMinutePerAgent: 2 } });
+  const third = await pair(rest);
+  for (let index = 0; index < 4; index++)
+    assert.equal(
+      (await http(rest, third.cookie, 'GET', `/api/agents/${third.b}/inbox?since=0&wait=1`))
+        .statusCode,
+      200,
+      'REST waits are not charged the agent bucket',
+    );
+  // Another agent of the same owner has its own bucket; inbox and mentions waits share it.
+  // With a per-agent cap of 1 the two empty waits are one charge each — no 60 s window race.
+  const solo = await fixture(t, { rateLimits: { waitsPerMinutePerAgent: 1 } });
+  const second = await pair(solo);
+  const soloToken = await grant(solo, second.cookie, ['workspace:read', 'messages:read']);
+  assert.equal(
+    (await tool(solo, soloToken, 'city_read_inbox', { agent_id: second.a, wait: 1 })).statusCode,
+    200,
+    'an empty wait on the other agent: its own bucket',
+  );
+  assert.equal(
+    (await tool(solo, soloToken, 'city_mentions', { agent_id: second.a, wait: 1 })).statusCode,
+    429,
+    'inbox and mentions tool waits share the agent bucket',
+  );
+});
+
+test('a denied wait never spends the agent bucket: the charge follows the permission check', async (t) => {
+  const app = await fixture(t, { rateLimits: { waitsPerMinutePerAgent: 2 } });
+  const { cookie, b } = await pair(app);
+  // A stranger's connector loops a waiting read of an agent it cannot see: every read 404s.
+  const strangerCookie = await account(app);
+  const strangerToken = await grant(app, strangerCookie, ['workspace:read', 'messages:read']);
+  for (let index = 0; index < 4; index++)
+    assert.equal(
+      (await tool(app, strangerToken, 'city_read_inbox', { agent_id: b, wait: 1 })).statusCode,
+      404,
+      'no access, no answer',
+    );
+  // The victim's bucket is untouched: the owner's own client still gets its full budget.
+  const token = await grant(app, cookie, ['workspace:read', 'messages:read']);
+  for (let index = 0; index < 2; index++)
+    assert.equal(
+      (await tool(app, token, 'city_read_inbox', { agent_id: b, wait: 1 })).statusCode,
+      200,
+      "the stranger's denied waits did not burn the agent's budget",
+    );
+  // (Asserting the cap itself here would race the bucket's 60 s wall-clock window; the
+  // per-agent cap is pinned by the test above on an agent with a fresh bucket.)
+});
+
+test('waiting room reads are capped per connector grant and room', async (t) => {
+  const app = await fixture(t, { rateLimits: { waitsPerMinutePerAgent: 2 } });
+  const { hostCookie, host, memberCookie, member, roomId, post } = await roomScene(app);
+  const token = await grant(app, memberCookie, ['workspace:read', 'rooms:join']);
+  const read = (room: string, wait = 1) =>
+    tool(app, token, 'city_room_read', { room_id: room, wait });
+  assert.equal((await read(roomId)).statusCode, 200, 'the first read marks the join news read');
+  // The two empty waits each charge once: after the second, a new post is still delivered
+  // (a charge never precedes delivery), and only then is the bucket spent.
+  assert.equal((await read(roomId)).statusCode, 200, 'first empty wait');
+  assert.equal((await read(roomId)).statusCode, 200, 'second empty wait');
+  assert.equal((await post(hostCookie, 'while charged')).statusCode, 201);
+  assert.equal((await read(roomId)).statusCode, 200, 'news is delivered over charged waits');
+  assert.equal(
+    (await read(roomId)).statusCode,
+    429,
+    'the third empty waiting read of one room in a minute',
+  );
+  // A second room of the same connector has its own bucket.
+  const second = await http(app, hostCookie, 'POST', '/api/rooms', {
+    agent_id: host,
+    name: 'Second wake room',
+    idempotency_key: randomUUID(),
+  });
+  assert.equal(second.statusCode, 201, second.body);
+  const joined = await http(app, memberCookie, 'POST', `/api/rooms/${second.json().room.id}/join`, {
+    link: second.json().link.link,
+    agent_id: member,
+    idempotency_key: randomUUID(),
+  });
+  assert.equal(joined.statusCode, 200, joined.body);
+  assert.equal(
+    (await read(second.json().room.id)).statusCode,
+    200,
+    'one connector may poll its rooms in parallel',
+  );
+});
+
 test('the batched cursor poll wakes waiters when the write came from another instance', async (t) => {
   const app = await fixture(t, { pollMs: 200 });
   const { cookie, a, b } = await pair(app);
@@ -333,6 +509,13 @@ test('room and mention long-polls: REST, city_room_read and city_mentions wake w
   const app = await fixture(t);
   const scene = await roomScene(app);
   const token = await grant(app, scene.memberCookie, ['workspace:read', 'rooms:join']);
+  // The first city_room_read carries the handoff brief (docs/ROOMS.md) and a long-poll would
+  // answer at once with it: a plain read consumes it, and it is delivered only once.
+  const first = await tool(app, token, 'city_room_read', { room_id: scene.roomId });
+  assert.equal(first.statusCode, 200, first.body);
+  assert.equal(typeof first.json().handoff_brief, 'string');
+  const second = await tool(app, token, 'city_room_read', { room_id: scene.roomId });
+  assert.equal(second.json().handoff_brief, undefined, 'the brief is delivered once');
   const roomRest = http(
     app,
     scene.memberCookie,
@@ -349,6 +532,7 @@ test('room and mention long-polls: REST, city_room_read and city_mentions wake w
   assert.equal(rest.statusCode, 200, rest.body);
   assert.equal(rest.json().messages.at(-1).text, 'Heads up @bravo');
   assert.equal(read.json().messages.at(-1).text, 'Heads up @bravo');
+  assert.equal(read.json().handoff_brief, undefined, 'the woken read has no second brief');
   assert.equal(mentions.json().mentions[0].excerpt, 'Heads up @bravo');
   assert.ok(latency < WAKE_BUDGET_MS, `room wake latency ${latency.toFixed(0)} ms`);
   t.diagnostic(`room + mention long-poll wake latency: ${latency.toFixed(1)} ms`);
@@ -356,6 +540,18 @@ test('room and mention long-polls: REST, city_room_read and city_mentions wake w
   const outsider = await account(app);
   const probe = await http(app, outsider, 'GET', `/api/rooms/${scene.roomId}/messages?wait=1`);
   assert.equal(probe.statusCode, 404);
+});
+
+test('a first waiting city_room_read with an undelivered handoff brief answers at once with it', async (t) => {
+  const app = await fixture(t);
+  const scene = await roomScene(app);
+  const token = await grant(app, scene.memberCookie, ['workspace:read', 'rooms:join']);
+  const startedAt = performance.now();
+  const read = await tool(app, token, 'city_room_read', { room_id: scene.roomId, wait: 20 });
+  const elapsed = performance.now() - startedAt;
+  assert.equal(read.statusCode, 200, read.body);
+  assert.match(read.json().handoff_brief, /handoff brief/);
+  assert.ok(elapsed < WAKE_BUDGET_MS, `brief long-poll answered after ${elapsed.toFixed(0)} ms`);
 });
 
 /** Reads Server-Sent Events from a fetch response body. */
@@ -701,14 +897,38 @@ test('review 1: waits and stream opens are charged per owner in the shared limit
     rateLimits: { waitsPerMinute: 2, streamOpensPerMinute: 1 },
     streamMs: 300,
   });
-  const { cookie, b } = await pair(app);
-  for (let index = 0; index < 2; index++)
-    assert.equal(
-      (await http(app, cookie, 'GET', `/api/agents/${b}/inbox?since=0&wait=1`)).statusCode,
-      200,
-    );
-  const limited = await http(app, cookie, 'GET', `/api/agents/${b}/mentions?wait=1`);
-  assert.equal(limited.statusCode, 429, 'third waiting read of this owner');
+  const { cookie, a, b } = await pair(app);
+  // A wait that answers news is never charged (the read advanced the caller's cursor, so a
+  // 429 there would lose the messages it just marked read).
+  assert.equal((await send(app, cookie, a, b, 'news')).statusCode, 201);
+  assert.equal(
+    (await http(app, cookie, 'GET', `/api/agents/${b}/inbox?since=0&wait=25`)).statusCode,
+    200,
+    'a wait with news is not charged',
+  );
+  // The charges come from empty waits. b's inbox now has history, and a REST inbox read
+  // returns its latest page (read or not), so it never finds that inbox empty again; a's
+  // inbox is empty and stays empty.
+  assert.equal(
+    (await http(app, cookie, 'GET', `/api/agents/${a}/inbox?since=0&wait=1`)).statusCode,
+    200,
+    'first empty wait',
+  );
+  assert.equal(
+    (await http(app, cookie, 'GET', `/api/agents/${a}/inbox?since=0&wait=1`)).statusCode,
+    200,
+    'second empty wait',
+  );
+  // Two owner charges are spent; a new mention is still delivered (a charge never precedes
+  // delivery), and only the next empty wait 429s.
+  assert.equal((await send(app, cookie, a, b, 'ping @City Hall')).statusCode, 201);
+  assert.equal(
+    (await http(app, cookie, 'GET', `/api/agents/${b}/mentions?wait=25`)).statusCode,
+    200,
+    'news is delivered over charged waits',
+  );
+  const limited = await http(app, cookie, 'GET', `/api/agents/${a}/mentions?wait=1`);
+  assert.equal(limited.statusCode, 429, 'third empty waiting read of this owner');
   assert.equal(
     (await http(app, cookie, 'GET', `/api/agents/${b}/inbox?since=0`)).statusCode,
     200,
@@ -719,7 +939,30 @@ test('review 1: waits and stream opens are charged per owner in the shared limit
   assert.equal(first.statusCode, 200);
   const second = await http(app, cookie, 'GET', `/api/v2/stream?agent=${b}`);
   assert.equal(second.statusCode, 429);
-  // Per source too: another owner behind the same address is limited, from elsewhere it is not.
+});
+
+test('review 1b: waiting reads are also charged per source address', async (t) => {
+  // The owner and the source-address buckets share the configured per-minute budget, and an
+  // address collects the charges of every owner behind it.
+  const app = await fixture(t, { rateLimits: { waitsPerMinute: 2 } });
+  // The first owner spends its two waits from the default address (127.0.0.1): its owner
+  // bucket and the address bucket are both spent. (A wait that answers news is never charged;
+  // that is pinned by review 1 above — these inboxes are empty and stay empty.)
+  const first = await pair(app);
+  assert.equal(
+    (await http(app, first.cookie, 'GET', `/api/agents/${first.b}/inbox?since=0&wait=1`))
+      .statusCode,
+    200,
+    'first empty wait charged',
+  );
+  assert.equal(
+    (await http(app, first.cookie, 'GET', `/api/agents/${first.b}/inbox?since=0&wait=1`))
+      .statusCode,
+    200,
+    'second empty wait charged',
+  );
+  // A second owner behind the same address has a fresh owner budget, but the address budget
+  // is spent; from a fresh address it gets its full budget.
   const other = await pair(app);
   const from = (remoteAddress: string) =>
     app.inject({

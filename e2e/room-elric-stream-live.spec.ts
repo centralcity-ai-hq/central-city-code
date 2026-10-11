@@ -31,7 +31,9 @@ test('with earlier Elric replies and a long thread, the dots and the draft show 
   expect(created.status()).toBe(201);
   await page.goto(`${base}/settings/account`);
   await page.getByRole('button', { name: 'Continue with Google' }).click();
-  await expect(page.getByRole('status')).toHaveText('Google account linked.');
+  await expect(
+    page.getByRole('status').filter({ hasText: 'Google account linked.' }),
+  ).toBeVisible();
   await page.getByLabel('Date of birth (for Elric, 18 or over)').fill('1990-05-17');
   await page.getByRole('button', { name: 'Save' }).click();
   await expect(page.getByText('Saved.')).toBeVisible();
@@ -96,8 +98,24 @@ test('with earlier Elric replies and a long thread, the dots and the draft show 
   // The dots appear right away, in view under the post.
   await expect(draft).toBeVisible({ timeout: 5_000 });
   await expect.poll(() => inView(draft)).toBe(true);
-  await expect(draft).toContainText('Streaming reply,', { timeout: 15_000 });
-  await expect.poll(() => inView(draft)).toBe(true);
+  // It is revealed smoothly, so it shows the answer's first words (a growing beginning of it), in
+  // view. Checked together while the draft is there: once the whole answer is in, the posted
+  // message may replace it at any moment, leaving no draft to measure.
+  const full = 'Streaming reply, part two, part three.';
+  await expect
+    .poll(
+      async () => {
+        const text = (
+          (await draft
+            .locator('.rm-bubble')
+            .textContent()
+            .catch(() => '')) ?? ''
+        ).trim();
+        return text.length > 0 && full.startsWith(text) && (await inView(draft));
+      },
+      { timeout: 15_000 },
+    )
+    .toBe(true);
   const reply = page
     .getByTestId('room-message')
     .filter({ hasText: 'Streaming reply, part two, part three.' });

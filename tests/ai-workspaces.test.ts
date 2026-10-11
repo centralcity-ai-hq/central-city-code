@@ -101,12 +101,16 @@ test('an AI creates its own workspace on /mcp/open and works on /mcp with its ke
   assert.equal(created.claim_url, `${base}/#claim=${created.claim_token}`);
   assert.equal(created.mcp_url, `${base}/mcp`);
   assert.equal(created.secrets_already_issued, false);
-  // Created without a human: every scope except rooms:host and results:publish (a co-owner can
-  // grant them later).
+  // Created without a human: every scope except rooms:host, rooms:apply, results:publish and pay
+  // (a co-owner can grant them later).
   assert.deepEqual(
     created.key.scopes,
     ASSISTANT_SCOPES.filter(
-      (scope) => scope !== 'rooms:host' && scope !== 'rooms:apply' && scope !== 'results:publish',
+      (scope) =>
+        scope !== 'rooms:host' &&
+        scope !== 'rooms:apply' &&
+        scope !== 'results:publish' &&
+        scope !== 'pay',
     ),
   );
   assert.match(created.slug, /^parity-lab-[0-9a-f]{10}$/);
@@ -457,6 +461,60 @@ test('a person claims an AI workspace, co-owns it in the console and can revoke 
   assert.equal((await tool(app, minted.json().workspace_key, 'city_workspace')).statusCode, 401);
   // The AI workspace stays reachable to its co-owner.
   assert.equal((await owner(app, person, 'GET', '/api/snapshot', undefined, aiId)).statusCode, 200);
+});
+
+test('Base registration routes act in the selected co-owned AI workspace', async (t) => {
+  const app = await fixture(t);
+  const created = (await createWorkspace(app, 'Base AI')).json();
+  const aiId = created.workspace_id as string;
+  const other = (await createWorkspace(app, 'Unlinked AI')).json();
+  const made = await tool(app, created.workspace_key, 'city_create_agent', {
+    name: 'Base scout',
+    capability: 'research',
+    mode: 'hosted',
+    idempotencyKey: randomUUID(),
+  });
+  assert.equal(made.statusCode, 200, made.body);
+  const agentId = made.json().agent.id as string;
+  // The Base routes find an agent's workspace through its manifest row.
+  await app.city.db.query(
+    "INSERT INTO agent_manifests(agent_id,revision,manifest_hash,manifest,created_at,operator_id) VALUES($1,1,'synthetic','{}'::jsonb,0,$2)",
+    [agentId, aiId],
+  );
+  const person = await account(app, 'Base co-owner');
+  const claimed = await owner(app, person, 'POST', '/api/workspaces/claim', {
+    claim_token: created.claim_token,
+  });
+  assert.equal(claimed.statusCode, 200, claimed.body);
+  const registration = `/api/base/agents/${agentId}/registration`;
+
+  // (a) The co-owned AI workspace selected: its agent is found.
+  const selected = await owner(app, person, 'GET', registration, undefined, aiId);
+  assert.equal(selected.statusCode, 200, selected.body);
+  assert.deepEqual(selected.json(), { identities: [] });
+  // (b) No selection: the person's own workspace, where the agent is not.
+  assert.equal((await owner(app, person, 'GET', registration)).statusCode, 404);
+  // (c) An AI workspace the person does not co-own, or a malformed selection: 404, no data.
+  for (const workspace of [other.workspace_id as string, 'not-a-workspace']) {
+    const refused = await owner(app, person, 'GET', registration, undefined, workspace);
+    assert.equal(refused.statusCode, 404, refused.body);
+    assert.equal(refused.json().identities, undefined);
+  }
+  // (d) Signed out: 401, also with a selection.
+  for (const headers of [jsonHeaders, { ...jsonHeaders, 'x-city-workspace': aiId }]) {
+    const anonymous = await app.inject({ method: 'GET', url: registration, headers });
+    assert.equal(anonymous.statusCode, 401, anonymous.body);
+  }
+  // (e) POST passes the same workspace check; past it, no chain runtime here answers 503.
+  const body = { ownerAddress: `0x${'2'.repeat(40)}` };
+  const register = `/api/base/agents/${agentId}/register`;
+  const started = await owner(app, person, 'POST', register, body, aiId);
+  assert.equal(started.statusCode, 503, started.body);
+  assert.equal((await owner(app, person, 'POST', register, body)).statusCode, 404);
+  assert.equal(
+    (await owner(app, person, 'POST', register, body, other.workspace_id)).statusCode,
+    404,
+  );
 });
 
 test('a key handed to another AI cannot take the workspace over', async (t) => {

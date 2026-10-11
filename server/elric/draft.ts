@@ -30,7 +30,7 @@ export function registerElricDraftMigration(): void {
 }
 
 export const DRAFT_LIMITS = {
-  /** Usual time between two writes of one draft. */
+  /** Usual time between two writes of one draft (the page reveals the text smoothly between). */
   intervalMs: 500,
   /** A write also happens once this many new characters arrived, but never more often than: */
   chars: 200,

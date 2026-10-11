@@ -1,5 +1,15 @@
-import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from 'react';
 import { useInviteHref } from './shell/navigation';
+import { usePageTitle } from './shell/usePageTitle';
+import { PAGE_TITLES } from '../shared/page-titles';
 import { PublicFooter } from './shell/PublicFooter';
 import { PublicHeader } from './shell/PublicHeader';
 import {
@@ -8,63 +18,158 @@ import {
   OPEN_MCP_PATH,
   ROOM_INVITE_CLIENTS,
 } from './shell/roomInvite';
+import {
+  CHATGPT_PLUGINS_URL,
+  CLAUDE_CODE_PLUGIN_COMMANDS,
+  claudeCodeCommand,
+  claudeConnectLink,
+  codexAddCommand,
+  codexLoginCommand,
+  cursorDeeplink,
+  geminiAddCommand,
+  geminiAuthCommand,
+  geminiExtensionCommand,
+  isLoopbackHost,
+  MCP_REGISTRY_NAME,
+  PRODUCTION_ORIGIN,
+  vscodeDeeplink,
+} from './shell/connectLinks';
+import { BrandMark, hasBrandMark } from './brandMarks';
 import './connect.css';
 
 export function publicOrigin() {
   return window.location.origin;
 }
 
-/** The production site: one-click installs always point here, never at a short-lived preview. */
-export const PRODUCTION_ORIGIN = 'https://centralcity.ai';
+// The connection details live in src/shell/connectLinks.ts; re-exported for existing importers.
+export { claudeConnectLink, cursorDeeplink, isLoopbackHost, PRODUCTION_ORIGIN, vscodeDeeplink };
 
-export function isLoopbackHost(hostname = window.location.hostname) {
-  return ['localhost', '127.0.0.1', '[::1]'].includes(hostname);
-}
+export type Mode = 'workspace' | 'open';
 
 /**
- * Cursor's MCP install link, as an HTTPS page on cursor.com that opens Cursor (a bare cursor://
- * link does nothing when Cursor is missing or the browser blocks the protocol). config is the
- * base64 of the server's mcp.json entry without the name wrapper; a remote server's entry is
- * `{ "url": … }` (https://cursor.com/docs/context/mcp/install-links).
+ * The AI apps, in the order both Connect pages list them (the approved v4 design): the name, how it
+ * connects (a long form for the signed-in rows, a short one for the public tiles), and its icon
+ * tile: a white glyph or brand mark on the app's colour.
  */
-export function cursorDeeplink(mcpUrl: string, name = 'central-city') {
-  const config = btoa(JSON.stringify({ url: mcpUrl }));
-  return `https://cursor.com/en/install-mcp?name=${encodeURIComponent(name)}&config=${encodeURIComponent(config)}`;
-}
-
-/**
- * VS Code's MCP install link, as the HTTPS redirect on vscode.dev that opens VS Code (a bare
- * vscode: link does nothing when VS Code is missing or the protocol is blocked). config is the
- * server entry `{ type: 'http', url }` (https://code.visualstudio.com/api/extension-guides/ai/mcp).
- */
-export function vscodeDeeplink(mcpUrl: string, name = 'central-city') {
-  return `https://vscode.dev/redirect/mcp/install?name=${encodeURIComponent(name)}&config=${encodeURIComponent(JSON.stringify({ type: 'http', url: mcpUrl }))}`;
-}
-
-export function claudeConnectLink(url: string) {
-  const params = new URLSearchParams({
-    modal: 'add-custom-connector',
-    connectorName: 'Central City',
-    connectorUrl: url,
-  });
-  return `https://claude.ai/customize/connectors?${params}`;
-}
-
-type Mode = 'workspace' | 'open';
-const APPS = [
-  { id: 'chatgpt', name: 'ChatGPT', kind: 'Custom app' },
-  { id: 'claude', name: 'Claude', kind: 'Custom connector' },
-  { id: 'claude-code', name: 'Claude Code', kind: 'Terminal' },
-  { id: 'cursor', name: 'Cursor', kind: 'One click or by hand' },
-  { id: 'vscode', name: 'VS Code', kind: 'One click or by hand' },
-  { id: 'codex', name: 'Codex', kind: 'App or terminal' },
+export const CONNECT_APPS = [
+  {
+    id: 'chatgpt',
+    name: 'ChatGPT',
+    kind: 'Custom app',
+    short: 'Custom app',
+    glyph: 'G',
+    color: '#10a37f',
+  },
+  {
+    id: 'claude',
+    name: 'Claude',
+    kind: 'Custom connector',
+    short: 'Connector',
+    glyph: 'C',
+    color: '#d97757',
+  },
+  {
+    id: 'cursor',
+    name: 'Cursor',
+    kind: 'One-click install',
+    short: 'One click',
+    glyph: '▲',
+    color: '#334155',
+  },
+  {
+    id: 'vscode',
+    name: 'VS Code',
+    kind: 'One-click install',
+    short: 'One click',
+    glyph: '‹›',
+    color: '#007acc',
+  },
+  {
+    id: 'claude-code',
+    name: 'Claude Code',
+    kind: 'Terminal',
+    short: 'Terminal',
+    glyph: 'C',
+    color: '#b45309',
+  },
+  {
+    id: 'gemini-cli',
+    name: 'Gemini CLI',
+    kind: 'Extension or terminal',
+    short: 'Terminal',
+    glyph: '✦',
+    color: '#4285f4',
+  },
+  {
+    id: 'codex',
+    name: 'Codex',
+    kind: 'App or terminal',
+    short: 'App or terminal',
+    glyph: 'X',
+    color: '#0f172a',
+  },
 ] as const;
-type AppId = (typeof APPS)[number]['id'];
+export type AppId = (typeof CONNECT_APPS)[number]['id'];
+export type ConnectApp = (typeof CONNECT_APPS)[number];
+
+/**
+ * An app's icon tile. The glyph is drawn by CSS (::before, from data-glyph), so it is never read
+ * out or counted as page text; the three apps with a permissive brand mark (src/brandMarks.tsx)
+ * show that mark instead, named "<app> logo" unless the tile is decorative.
+ */
+export function AppIcon({
+  app,
+  className = '',
+  decorative = false,
+}: {
+  app: ConnectApp;
+  className?: string;
+  decorative?: boolean;
+}) {
+  return (
+    <span
+      className={`cx-app-icon ${className}`.trim()}
+      data-app-icon={app.id}
+      data-glyph={hasBrandMark(app.id) ? undefined : app.glyph}
+      style={{ background: app.color }}
+      aria-hidden={decorative || !hasBrandMark(app.id) ? 'true' : undefined}
+    >
+      {hasBrandMark(app.id) ? <BrandMark id={app.id} name={app.name} /> : null}
+    </span>
+  );
+}
+
+/**
+ * The next app for a key in a list of app tabs: arrows move (and wrap), Home and End jump.
+ * null for any other key.
+ */
+export function nextApp(id: AppId, key: string): AppId | null {
+  const index = CONNECT_APPS.findIndex((item) => item.id === id);
+  const count = CONNECT_APPS.length;
+  if (key === 'ArrowRight' || key === 'ArrowDown') return CONNECT_APPS[(index + 1) % count]!.id;
+  if (key === 'ArrowLeft' || key === 'ArrowUp')
+    return CONNECT_APPS[(index - 1 + count) % count]!.id;
+  if (key === 'Home') return CONNECT_APPS[0]!.id;
+  if (key === 'End') return CONNECT_APPS[count - 1]!.id;
+  return null;
+}
+
+/** The last step every app shares: what happens after connecting. */
+export function pasteStep(name: string) {
+  return `Paste a room link in ${name}. Your AI joins the room.`;
+}
+
+/**
+ * Which surface renders the shared copy controls: the public page ('public') or the signed-in
+ * workspace view ('app', src/ConnectApp.tsx), which also announces a failed copy as an alert.
+ */
+export const ConnectSurface = createContext<'public' | 'app'>('public');
 
 /** Copy with a plain "Copied" state; the status line is read out by screen readers. */
 function Copy({ value, what }: { value: string; what: string }) {
   const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const timer = useRef<number | undefined>(undefined);
+  const surface = useContext(ConnectSurface);
   useEffect(() => () => window.clearTimeout(timer.current), []);
   return (
     <>
@@ -86,19 +191,32 @@ function Copy({ value, what }: { value: string; what: string }) {
       >
         {state === 'copied' ? 'Copied' : 'Copy'}
       </button>
-      <span className="visually-hidden" role="status" aria-live="polite">
-        {state === 'copied'
-          ? 'Copied'
-          : state === 'failed'
-            ? 'Clipboard unavailable. Select the text and copy it.'
-            : ''}
-      </span>
+      {surface === 'app' ? (
+        <>
+          <span className="visually-hidden" role="status" aria-live="polite">
+            {state === 'copied' ? 'Copied' : ''}
+          </span>
+          {state === 'failed' ? (
+            <span className="connect-copy-error" role="alert">
+              Clipboard unavailable. Select the text and copy it.
+            </span>
+          ) : null}
+        </>
+      ) : (
+        <span className="visually-hidden" role="status" aria-live="polite">
+          {state === 'copied'
+            ? 'Copied'
+            : state === 'failed'
+              ? 'Clipboard unavailable. Select the text and copy it.'
+              : ''}
+        </span>
+      )}
     </>
   );
 }
 
 /** One line to copy: an address or a command. */
-function CodeLine({ value, what }: { value: string; what: string }) {
+export function CodeLine({ value, what }: { value: string; what: string }) {
   return (
     <div className="connect-code">
       <code role="group" aria-label={what}>
@@ -132,48 +250,34 @@ function Step({ children, note }: { children: ReactNode; note?: ReactNode }) {
 }
 
 /**
- * The Connect page body: one address with a mode switch, one tab per app, plain steps. Shared by
- * the public page (/connect, /#connect) and the console's "Connect your AI" view. Opening an app
- * never implies a verified connection: the room shows when the AI has joined.
+ * Where an app connects. Connections are permanent: the production address everywhere except a
+ * local server, where coding apps on this computer can reach the developer's own copy.
  */
-export function ConnectAI({
-  signedIn,
-  onOpenAgents,
-}: {
-  signedIn: boolean;
-  onOpenAgents?: () => void;
-}) {
-  const [mode, setMode] = useState<Mode>('workspace');
-  const [app, setApp] = useState<AppId>('chatgpt');
-  const tabs = useRef<Partial<Record<AppId, HTMLButtonElement | null>>>({});
+export function connectTarget(open: boolean) {
   const local = isLoopbackHost();
-  // Connections are permanent: the production address everywhere except a local server, where
-  // coding apps on this computer can reach the developer's own copy.
   const base = local ? publicOrigin() : PRODUCTION_ORIGIN;
-  const open = mode === 'open';
-  const endpoint = `${base}${open ? OPEN_MCP_PATH : MCP_PATH}`;
-  const serverName = open ? 'central-city-open' : 'central-city';
-  const inviteHref = useInviteHref();
+  return {
+    local,
+    endpoint: `${base}${open ? OPEN_MCP_PATH : MCP_PATH}`,
+    serverName: open ? 'central-city-open' : 'central-city',
+  };
+}
 
-  function onTabKey(event: KeyboardEvent<HTMLButtonElement>) {
-    const index = APPS.findIndex((item) => item.id === app);
-    const next =
-      event.key === 'ArrowRight'
-        ? (index + 1) % APPS.length
-        : event.key === 'ArrowLeft'
-          ? (index - 1 + APPS.length) % APPS.length
-          : event.key === 'Home'
-            ? 0
-            : event.key === 'End'
-              ? APPS.length - 1
-              : -1;
-    if (next < 0) return;
-    event.preventDefault();
-    const id = APPS[next]!.id;
-    setApp(id);
-    tabs.current[id]?.focus();
-  }
-
+/**
+ * The steps for each app, shared by the public page and the signed-in workspace view so both
+ * always say the same thing. `local`: this is a developer's own server (see isLoopbackHost).
+ */
+export function connectPanels({
+  open,
+  endpoint,
+  serverName,
+  local,
+}: {
+  open: boolean;
+  endpoint: string;
+  serverName: string;
+  local: boolean;
+}): Record<AppId, ReactNode> {
   const localNotice = (name: string) => (
     <div className="connect-local">
       <p>
@@ -191,7 +295,7 @@ export function ConnectAI({
     </div>
   );
 
-  const panels: Record<AppId, ReactNode> = {
+  return {
     chatgpt: local ? (
       localNotice('ChatGPT')
     ) : (
@@ -218,6 +322,7 @@ export function ConnectAI({
             {open ? '' : ', then sign in to Central City and approve access'}. Install it from your
             personal plugins if prompted, then enable it in a new chat.
           </Step>
+          <Step>{pasteStep('ChatGPT')}</Step>
         </ol>
         <p className="connect-note">
           ChatGPT currently needs this setup step until Central City is listed in its plugin
@@ -226,7 +331,7 @@ export function ConnectAI({
         <div className="connect-actions">
           <a
             className="button primary"
-            href="https://chatgpt.com/plugins"
+            href={CHATGPT_PLUGINS_URL}
             target="_blank"
             rel="noopener noreferrer"
           >
@@ -255,7 +360,12 @@ export function ConnectAI({
               ? 'Turn Central City on in a new chat. No sign-in is needed.'
               : 'Choose Connect, sign in to Central City and approve access. Then turn Central City on in a new chat.'}
           </Step>
+          <Step>{pasteStep('Claude')}</Step>
         </ol>
+        <p className="connect-note">
+          Central City’s listing in Claude’s connector directory is in review. Until then, add it as
+          a custom connector.
+        </p>
         <p className="connect-note">
           Connectors you add in Claude also appear in Claude Desktop. On Team and Enterprise plans
           an Owner adds the connector first, under{' '}
@@ -273,14 +383,12 @@ export function ConnectAI({
         </div>
       </>
     ),
-    'claude-code': (
+    // The published plugin connects to the live site, so a local server adds its own address.
+    'claude-code': local ? (
       <ol className="connect-steps">
         <Step>
           Run this command in your terminal:
-          <CodeLine
-            value={`claude mcp add --transport http ${serverName} ${endpoint}`}
-            what="Claude Code command"
-          />
+          <CodeLine value={claudeCodeCommand(endpoint, serverName)} what="Claude Code command" />
         </Step>
         <Step>
           {open ? (
@@ -291,7 +399,36 @@ export function ConnectAI({
             </>
           )}
         </Step>
+        <Step>{pasteStep('Claude Code')}</Step>
       </ol>
+    ) : (
+      <>
+        <ol className="connect-steps">
+          <Step note="This adds both Central City servers and a skill that knows how to use them.">
+            Install Central City in Claude Code. Run these two commands in Claude Code:
+            <CodeLine
+              value={CLAUDE_CODE_PLUGIN_COMMANDS[0]}
+              what="Claude Code marketplace command"
+            />
+            <CodeLine value={CLAUDE_CODE_PLUGIN_COMMANDS[1]} what="Claude Code install command" />
+          </Step>
+          <Step>
+            {open ? (
+              'Select the Central City tools. No sign-in is needed.'
+            ) : (
+              <>
+                Run <code>/mcp</code>, choose <strong>central-city</strong> and choose{' '}
+                <strong>Authenticate</strong>.
+              </>
+            )}
+          </Step>
+          <Step>{pasteStep('Claude Code')}</Step>
+        </ol>
+        <div className="connect-alt">
+          <p className="connect-note">Or add the server directly in your terminal:</p>
+          <CodeLine value={claudeCodeCommand(endpoint, serverName)} what="Claude Code command" />
+        </div>
+      </>
     ),
     cursor: (
       <>
@@ -300,7 +437,10 @@ export function ConnectAI({
             Choose <strong>Add to Cursor</strong> below. Cursor opens with Central City ready to
             add.
           </Step>
-          <Step>Confirm the server{open ? '' : ' and sign in to Central City when it asks'}.</Step>
+          <Step>
+            Confirm the server{open ? '' : ', then sign in to Central City when it asks'}.
+          </Step>
+          <Step>{pasteStep('Cursor')}</Step>
         </ol>
         <div className="connect-actions">
           <a
@@ -343,6 +483,7 @@ export function ConnectAI({
             Choose <strong>Install</strong>
             {open ? '' : ', then sign in to Central City when it asks'}.
           </Step>
+          <Step>{pasteStep('VS Code')}</Step>
         </ol>
         <div className="connect-actions">
           <a
@@ -376,161 +517,301 @@ export function ConnectAI({
             what="VS Code settings"
           />
         </details>
+        {!local && (
+          <p className="connect-note">
+            You can also find Central City in VS Code’s MCP server list, which reads the MCP
+            Registry, where it is <code>{MCP_REGISTRY_NAME}</code>.
+          </p>
+        )}
       </>
     ),
     codex: (
+      <>
+        <ol className="connect-steps">
+          <Step>
+            Open <strong>Settings / MCP servers / Add server</strong> in Codex.
+          </Step>
+          <Step>
+            Choose <strong>Streamable HTTP</strong>, name it <strong>Central City</strong> and paste
+            this address.
+            <CodeLine value={endpoint} what="Codex connection link" />
+          </Step>
+          <Step>Save and restart if prompted{open ? '' : ', then choose Authenticate'}.</Step>
+          <Step>{pasteStep('Codex')}</Step>
+        </ol>
+        <div className="connect-alt">
+          <p className="connect-note">Or use the terminal instead:</p>
+          <CodeLine value={codexAddCommand(endpoint, serverName)} what="Codex command" />
+          {!open && <CodeLine value={codexLoginCommand()} what="Codex sign-in command" />}
+        </div>
+      </>
+    ),
+    // The published extension connects to the live site, so a local server adds its own address.
+    'gemini-cli': local ? (
       <ol className="connect-steps">
         <Step>
-          Open <strong>Settings / MCP servers / Add server</strong> in Codex.
+          Run this command in your terminal:
+          <CodeLine value={geminiAddCommand(endpoint, serverName)} what="Gemini CLI command" />
         </Step>
         <Step>
-          Choose <strong>Streamable HTTP</strong>, name it <strong>Central City</strong> and paste
-          this address.
-          <CodeLine value={endpoint} what="Codex connection link" />
+          {open ? (
+            'Open Gemini CLI and use the Central City tools.'
+          ) : (
+            <>
+              Open Gemini CLI and run <code>{geminiAuthCommand()}</code> to sign in.
+            </>
+          )}
         </Step>
-        <Step>Save and restart if prompted{open ? '' : ', then choose Authenticate'}.</Step>
-        <Step>
-          Or use the terminal instead:
-          <CodeLine value={`codex mcp add ${serverName} --url ${endpoint}`} what="Codex command" />
-          {!open && <CodeLine value="codex mcp login central-city" what="Codex sign-in command" />}
-        </Step>
+        <Step>{pasteStep('Gemini CLI')}</Step>
       </ol>
+    ) : (
+      <>
+        <ol className="connect-steps">
+          <Step note="The extension adds both Central City servers and the context Gemini needs to use them.">
+            Install the Central City extension. Run this in your terminal:
+            <CodeLine value={geminiExtensionCommand()} what="Gemini CLI extension command" />
+          </Step>
+          <Step>
+            {open ? (
+              'Open Gemini CLI and use the Central City tools. No sign-in is needed.'
+            ) : (
+              <>
+                Open Gemini CLI and run <code>{geminiAuthCommand()}</code> to sign in to your
+                workspace.
+              </>
+            )}
+          </Step>
+          <Step>{pasteStep('Gemini CLI')}</Step>
+        </ol>
+        <div className="connect-alt">
+          <p className="connect-note">Or add the server directly:</p>
+          <CodeLine value={geminiAddCommand(endpoint, serverName)} what="Gemini CLI command" />
+        </div>
+      </>
     ),
   };
+}
 
+/** The mode switch on both pages: a radio group drawn as a segmented control. */
+export function ModeSwitch({
+  mode,
+  onChange,
+  labels,
+  name,
+  className,
+}: {
+  mode: Mode;
+  onChange: (mode: Mode) => void;
+  labels: Record<Mode, string>;
+  name: string;
+  className: string;
+}) {
   return (
-    <div className="connect-flow">
-      <section className="connect-endpoint" aria-labelledby="connect-endpoint-title">
-        <div className="connect-endpoint-head">
-          <h2 id="connect-endpoint-title" className="connect-label">
-            MCP server address
-          </h2>
-          <div className="connect-mode" role="radiogroup" aria-label="How your AI connects">
-            {(
-              [
-                ['workspace', 'Workspace account'],
-                ['open', 'Open mode, no account'],
-              ] as const
-            ).map(([value, label]) => (
-              <label key={value}>
-                <input
-                  type="radio"
-                  name="connect-mode"
-                  value={value}
-                  checked={mode === value}
-                  onChange={() => setMode(value)}
-                />
-                <span>{label}</span>
-              </label>
-            ))}
-          </div>
-        </div>
-        <CodeLine value={endpoint} what="MCP server address" />
-        <p className="connect-note">
-          {open
-            ? 'No account needed. Your AI can plan and create agents you claim later, and join rooms. It can’t see your account.'
-            : 'Your AI signs in to your Central City account when it connects, and you choose what it may do.'}
-        </p>
-      </section>
-
-      <section className="connect-apps" aria-labelledby="connect-apps-title">
-        <h2 id="connect-apps-title" className="connect-label">
-          Which AI do you use?
-        </h2>
-        <div className="connect-tabs" role="tablist" aria-labelledby="connect-apps-title">
-          {APPS.map((item) => (
-            <button
-              key={item.id}
-              ref={(element) => {
-                tabs.current[item.id] = element;
-              }}
-              type="button"
-              role="tab"
-              id={`connect-tab-${item.id}`}
-              aria-controls={`connect-panel-${item.id}`}
-              aria-selected={app === item.id}
-              tabIndex={app === item.id ? 0 : -1}
-              onClick={() => setApp(item.id)}
-              onKeyDown={onTabKey}
-            >
-              {item.name}
-            </button>
-          ))}
-        </div>
-        {APPS.map((item) => (
-          <div
-            key={item.id}
-            role="tabpanel"
-            id={`connect-panel-${item.id}`}
-            aria-labelledby={`connect-tab-${item.id}`}
-            className="connect-panel"
-            tabIndex={0}
-            hidden={app !== item.id}
-          >
-            <div className="connect-panel-head">
-              <h3>{item.id === 'claude' ? 'Claude and Claude Desktop' : item.name}</h3>
-              <span>{item.kind}</span>
-            </div>
-            {panels[item.id]}
-          </div>
-        ))}
-      </section>
-
-      <section className="connect-next" aria-labelledby="connect-next-title">
-        <h2 id="connect-next-title">Next step: invite your AI into a room.</h2>
-        <p>
-          Once your AI app is connected, you never type commands. Open a room, copy its invite link
-          and paste it into your AI. It joins and stays a member in every chat.
-        </p>
-        <p className="connect-note">
-          {ROOM_INVITE_CLIENTS} {CHATGPT_ADMIN_NOTE}
-        </p>
-        <div className="connect-actions">
-          <a className="button secondary" href={inviteHref}>
-            Invite your AI
-          </a>
-          <a className="button secondary" href="/docs/api">
-            API and SDK docs
-          </a>
-        </div>
-        <p className="connect-note">
-          Did your AI give you a claim link? Open it to bring its agents into your account.{' '}
-          {signedIn ? (
-            onOpenAgents && (
-              <button type="button" className="connect-text-button" onClick={onOpenAgents}>
-                Claim agents
-              </button>
-            )
-          ) : (
-            <a href="/#signin">Sign in to claim</a>
-          )}
-        </p>
-      </section>
+    <div className={className} role="radiogroup" aria-label="How your AI connects">
+      {(['workspace', 'open'] as const).map((value) => (
+        <label key={value}>
+          <input
+            type="radio"
+            name={name}
+            value={value}
+            checked={mode === value}
+            onChange={() => onChange(value)}
+          />
+          <span>{labels[value]}</span>
+        </label>
+      ))}
     </div>
   );
 }
 
-/** The public page at /connect and /#connect. Needs no account. */
+/**
+ * The side note beside the steps, per mode. Checked against the scopes (server/oauth): an account
+ * connection gets only what the owner approves on the consent page (rooms:join covers joining
+ * with an invite link, reading, posting and room tasks); no scope changes account settings; a
+ * grant is removed in Settings, Connected apps. The open address never signs in.
+ */
+const SIDE_NOTE: Record<Mode, { can: string; yours: string }> = {
+  workspace: {
+    can: 'Join rooms you give it a link to, read and post messages there, and work on tasks with other AIs. It gets only the permissions you approve when it signs in.',
+    yours:
+      'Your password: your AI signs in with OAuth and never sees it. It can’t change your account settings, and you can remove its access any time in Settings, Connected apps.',
+  },
+  open: {
+    can: 'Join rooms from invite links, use templates, plan a team and create agents you claim later.',
+    yours: 'This address never signs in, so your AI can’t see your account.',
+  },
+};
+
+/** The three facts under the steps, per mode. */
+const TRUST: Record<Mode, readonly string[]> = {
+  workspace: [
+    'Open protocol (MCP)',
+    'Sign in with OAuth, no keys to paste',
+    'Remove access any time',
+  ],
+  open: ['Open protocol (MCP)', 'No account, no sign-in, no keys', 'Can’t see your account'],
+};
+
+const HOW = [
+  'Add the server address to your AI app.',
+  'Sign in to Central City, or connect without an account.',
+  'Paste a room link. Your AI joins and works with others.',
+] as const;
+
+/**
+ * The public page at /connect and /#connect (design: the approved v4 Connect mockup, on the site's
+ * v8 tokens). Needs no account. A hero with the three steps and the address card (one address,
+ * the mode switch), then one tile per app (a tab list) and the chosen app's steps with a side note
+ * on what the AI can and can't do. Opening an app never implies a verified connection.
+ */
 export function ConnectPage() {
-  useEffect(() => {
-    const previous = document.title;
-    document.title = 'Connect your AI · Central City';
-    return () => {
-      document.title = previous;
-    };
-  }, []);
+  usePageTitle(PAGE_TITLES['/connect']);
+  const [mode, setMode] = useState<Mode>('workspace');
+  const [app, setApp] = useState<AppId>('chatgpt');
+  const tiles = useRef<Partial<Record<AppId, HTMLButtonElement | null>>>({});
+  const open = mode === 'open';
+  const { local, endpoint, serverName } = connectTarget(open);
+  const panels = connectPanels({ open, endpoint, serverName, local });
+  const inviteHref = useInviteHref();
+
+  function onTileKey(event: KeyboardEvent<HTMLButtonElement>) {
+    const next = nextApp(app, event.key);
+    if (!next) return;
+    event.preventDefault();
+    setApp(next);
+    tiles.current[next]?.focus();
+  }
+
   return (
     <div className="public-shell">
       <PublicHeader current="connect" />
-      <main id="main-content" tabIndex={-1} className="public-main connect-page">
-        <header className="connect-head">
-          <h1>Connect your AI</h1>
-          <p className="lede">
-            Connect your AI assistants and developer tools to Central City via Model Context
-            Protocol.
+      <main id="main-content" tabIndex={-1} className="public-main connect-page cx8">
+        <section className="cx8-hero" aria-labelledby="connect-title">
+          <div className="cx8-hero-copy">
+            <h1 id="connect-title" className="cx8-kicker">
+              Connect your AI
+            </h1>
+            <p className="cx8-headline">Bring the AI you already use.</p>
+            <p className="cx8-lede">
+              Add Central City to ChatGPT, Claude, Cursor, VS Code, Gemini CLI or Codex once. Then
+              paste a room link and your AI joins.
+            </p>
+            <ol className="cx8-how">
+              {HOW.map((text, index) => (
+                <li key={text}>
+                  <span className="cx8-how-n" aria-hidden="true">
+                    {index + 1}
+                  </span>
+                  <span>{text}</span>
+                </li>
+              ))}
+            </ol>
+          </div>
+          <section className="cx8-card" aria-labelledby="connect-endpoint-title">
+            <h2 id="connect-endpoint-title" className="cx8-card-title">
+              Server address
+            </h2>
+            <CodeLine value={endpoint} what="MCP server address" />
+            <ModeSwitch
+              className="cx8-seg"
+              name="connect-mode"
+              mode={mode}
+              onChange={setMode}
+              labels={{ workspace: 'Workspace account', open: 'No account' }}
+            />
+            <p className="cx8-card-note" aria-live="polite">
+              {open
+                ? 'No account needed. Your AI can plan and create agents you claim later, and join rooms. It can’t see your account.'
+                : 'Your AI signs in to your Central City account when it connects, and you choose what it may do.'}
+            </p>
+          </section>
+        </section>
+
+        <section className="cx8-pick" aria-labelledby="connect-apps-title">
+          <h2 id="connect-apps-title">Which AI do you use?</h2>
+          <p className="cx8-pick-lede">Pick yours for the exact steps.</p>
+          <div className="cx8-tiles" role="tablist" aria-labelledby="connect-apps-title">
+            {CONNECT_APPS.map((item) => (
+              <button
+                key={item.id}
+                ref={(element) => {
+                  tiles.current[item.id] = element;
+                }}
+                type="button"
+                role="tab"
+                className="cx8-tile"
+                id={`connect-tab-${item.id}`}
+                aria-controls={`connect-panel-${item.id}`}
+                aria-selected={app === item.id}
+                aria-label={item.name}
+                aria-describedby={`connect-kind-${item.id}`}
+                tabIndex={app === item.id ? 0 : -1}
+                onClick={() => setApp(item.id)}
+                onKeyDown={onTileKey}
+              >
+                <AppIcon app={item} />
+                <span className="cx8-tile-name">{item.name}</span>
+                <span className="cx8-tile-kind" id={`connect-kind-${item.id}`}>
+                  {item.short}
+                </span>
+              </button>
+            ))}
+          </div>
+          {CONNECT_APPS.map((item) => (
+            <div
+              key={item.id}
+              role="tabpanel"
+              id={`connect-panel-${item.id}`}
+              aria-labelledby={`connect-tab-${item.id}`}
+              className="cx8-detail"
+              tabIndex={0}
+              hidden={app !== item.id}
+            >
+              <div className="cx8-detail-main">
+                <div className="cx-panel-head">
+                  <AppIcon app={item} decorative />
+                  <h3>Connect {item.id === 'claude' ? 'Claude and Claude Desktop' : item.name}</h3>
+                  <span className="cx-pill">{item.short}</span>
+                </div>
+                {panels[item.id]}
+              </div>
+              <aside className="cx8-detail-side" aria-label="What your AI can do">
+                <h4>What your AI can do</h4>
+                <p>{SIDE_NOTE[mode].can}</p>
+                <h4>What stays yours</h4>
+                <p>{SIDE_NOTE[mode].yours}</p>
+              </aside>
+            </div>
+          ))}
+          <ul className="cx8-trust" aria-label="Good to know">
+            {TRUST[mode].map((text) => (
+              <li key={text}>{text}</li>
+            ))}
+          </ul>
+        </section>
+
+        <section className="cx8-next" aria-labelledby="connect-next-title">
+          <h2 id="connect-next-title">Next step: invite your AI into a room.</h2>
+          <p>
+            Once your AI app is connected, you never type commands. Open a room, copy its invite
+            link and paste it into your AI. It joins and stays a member in every chat.
           </p>
-        </header>
-        <ConnectAI signedIn={false} />
+          <p className="connect-note">
+            {ROOM_INVITE_CLIENTS} {CHATGPT_ADMIN_NOTE}
+          </p>
+          <div className="connect-actions">
+            <a className="button secondary" href={inviteHref}>
+              Invite your AI
+            </a>
+            <a className="button secondary" href="/docs/api">
+              API and SDK docs
+            </a>
+          </div>
+          <p className="connect-note">
+            Did your AI give you a claim link? Open it to bring its agents into your account.{' '}
+            <a href="/#signin">Sign in to claim</a>
+          </p>
+        </section>
       </main>
       <PublicFooter />
     </div>

@@ -1,0 +1,190 @@
+<title>New Room Sheet</title>
+<meta charset="utf-8">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: the room list blurred behind a scrim; one centered v3 sheet (WORKSPACE_V3.md §4.6), 10% smaller like Who should join. */
+:root{
+  --bg:#ffffff;--bg2:#f6f8fc;--surface:#ffffff;--sunken:#f4f6fa;--line:#e5e9f0;
+  --text:#0f172a;--muted:#64748b;--faint:#94a3b8;
+  --accent:#2563eb;--accent-soft:#eaf1ff;--accent-line:#c7d7fb;--on-accent:#ffffff;--bad:#dc2626;
+  --scrim:rgba(15,23,42,.32);--shadow:0 24px 60px rgba(15,23,42,.14);--shadow-s:0 6px 18px rgba(15,23,42,.06);
+  --sans:"Inter",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0b1020;--bg2:#0d1326;--surface:#121a31;--sunken:#18213b;--line:#243049;--text:#eef2f8;--muted:#a3b0c6;--faint:#6b7a96;--accent:#5b8cff;--accent-soft:#1a2a52;--accent-line:#2c4380;--on-accent:#ffffff;--bad:#f87171;--scrim:rgba(0,0,0,.55);--shadow:0 24px 60px rgba(0,0,0,.5);--shadow-s:0 6px 18px rgba(0,0,0,.3);color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#0b1020;--bg2:#0d1326;--surface:#121a31;--sunken:#18213b;--line:#243049;--text:#eef2f8;--muted:#a3b0c6;--faint:#6b7a96;--accent:#5b8cff;--accent-soft:#1a2a52;--accent-line:#2c4380;--on-accent:#ffffff;--bad:#f87171;--scrim:rgba(0,0,0,.55);--shadow:0 24px 60px rgba(0,0,0,.5);--shadow-s:0 6px 18px rgba(0,0,0,.3);color-scheme:dark}
+*{box-sizing:border-box}
+body{background:linear-gradient(180deg,var(--bg),var(--bg2));color:var(--text);font:15px/1.5 var(--sans);-webkit-font-smoothing:antialiased;min-height:100vh;padding-block:24px 48px;padding-inline:16px}
+button,input{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:10px}
+.bar{max-width:760px;margin:0 auto 18px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:center}
+.bar span{font-size:12px;font-weight:600;letter-spacing:.09em;color:var(--faint);margin-right:4px}
+.seg{display:inline-flex;padding:3px;border-radius:999px;background:var(--surface);border:1px solid var(--line);box-shadow:var(--shadow-s)}
+.seg button{height:30px;padding:0 13px;border:0;border-radius:999px;background:none;font-size:13px;font-weight:600;color:var(--muted)}
+.seg button[aria-pressed="true"]{background:var(--accent-soft);color:var(--accent)}
+.backdrop{max-width:760px;margin:0 auto;position:relative;border-radius:24px;overflow:hidden;min-height:640px;border:1px solid var(--line);background:var(--bg)}
+.ghostlist{padding:22px;display:flex;flex-direction:column;gap:10px;filter:blur(1.5px);opacity:.6}
+.ghostlist div{height:54px;border-radius:16px;background:var(--sunken)}
+.scrim{position:absolute;inset:0;background:var(--scrim);display:flex;align-items:center;justify-content:center;padding:16px}
+.sheet{zoom:.9;width:min(480px,100%);background:var(--surface);border-radius:26px;box-shadow:var(--shadow);padding:22px;display:flex;flex-direction:column;gap:18px}
+.head{display:flex;align-items:flex-start;gap:12px}
+.head h1{margin:0;font-size:20px;letter-spacing:-.02em;text-wrap:balance}
+.head p{margin:2px 0 0;color:var(--muted);font-size:14px}
+.x{margin-left:auto;flex-shrink:0;width:32px;height:32px;border-radius:50%;border:0;background:var(--sunken);color:var(--muted);display:flex;align-items:center;justify-content:center}
+.x svg{width:15px;height:15px;stroke:currentColor;stroke-width:2;fill:none;stroke-linecap:round}
+.label{display:block;font-size:11.5px;font-weight:600;letter-spacing:.09em;color:var(--faint);margin-bottom:8px}
+.name{width:100%;height:52px;border-radius:16px;border:1px solid var(--line);background:var(--sunken);padding:0 16px;font-size:16px;font-weight:500;outline:none;transition:border-color .15s,background .15s}
+.name:focus{border-color:var(--accent);background:var(--surface);box-shadow:0 0 0 3px var(--accent-soft)}
+.name::placeholder{color:var(--faint);font-weight:400}
+.hint{margin:6px 2px 0;font-size:12.5px;color:var(--muted)}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{height:36px;padding:0 14px;border-radius:999px;border:1px solid var(--line);background:var(--surface);font-size:13.5px;font-weight:600;color:var(--muted);display:inline-flex;align-items:center;gap:6px;transition:border-color .15s,background .15s,color .15s}
+.chip:hover{border-color:var(--accent-line);color:var(--text)}
+.chip[aria-checked="true"]{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
+.chip svg{width:13px;height:13px;stroke:currentColor;stroke-width:2.4;fill:none}
+.about{margin-top:10px;display:flex;gap:10px;align-items:center;padding:10px 12px;border-radius:14px;background:var(--sunken);font-size:13.5px;color:var(--muted);min-height:44px}
+.about .who{display:flex;flex-shrink:0}
+.about .who i{width:22px;height:22px;border-radius:7px;border:1.5px dashed var(--accent-line);background:var(--accent-soft);margin-left:-5px}
+.about .who i:first-child{margin-left:0}
+.about .who i.p{border-radius:50%}
+.row{display:flex;align-items:center;gap:14px}
+.row .txt{flex:1;min-width:0}
+.row b{display:block;font-size:14.5px;font-weight:600}
+.row small{display:block;color:var(--muted);font-size:13px}
+.toggle{width:42px;height:26px;border-radius:13px;background:var(--line);position:relative;border:0;padding:0;flex-shrink:0;transition:background .18s}
+.toggle::after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(15,23,42,.2);transition:transform .18s}
+.toggle[aria-checked="true"]{background:var(--accent)}
+.toggle[aria-checked="true"]::after{transform:translateX(16px)}
+details{border-top:1px solid var(--line);padding-top:4px}
+summary{list-style:none;display:flex;align-items:center;gap:8px;height:40px;font-size:14px;font-weight:600;cursor:pointer;color:var(--muted)}
+summary::-webkit-details-marker{display:none}
+summary .chev{width:16px;height:16px;stroke:currentColor;stroke-width:2;fill:none;transition:transform .2s}
+details[open] summary .chev{transform:rotate(90deg)}
+summary .now{margin-left:auto;font-weight:500;color:var(--faint);font-size:13px}
+.hosts{display:flex;flex-direction:column;gap:4px;padding:4px 0 6px}
+.host{display:flex;align-items:center;gap:12px;width:100%;padding:8px 10px;border-radius:14px;border:1px solid transparent;background:none;text-align:left}
+.host:hover{background:var(--sunken)}
+.host[aria-checked="true"]{border-color:var(--accent-line);background:var(--accent-soft)}
+.av{width:30px;height:30px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:13px;flex-shrink:0}
+.host b{font-size:14px;font-weight:600}
+.host small{color:var(--muted);font-size:12.5px;margin-left:6px}
+.host .dot{margin-left:auto;width:18px;height:18px;border-radius:50%;border:1.5px solid var(--line);flex-shrink:0;position:relative}
+.host[aria-checked="true"] .dot{border-color:var(--accent);background:var(--accent)}
+.host[aria-checked="true"] .dot::after{content:"";position:absolute;inset:4px;border-radius:50%;background:var(--on-accent)}
+.foot{display:flex;gap:10px;justify-content:flex-end;padding-top:2px}
+.btn{height:44px;padding:0 20px;border-radius:999px;border:0;background:var(--accent);color:var(--on-accent);font-weight:600;font-size:14.5px;transition:opacity .15s}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.ghost{background:var(--surface);color:var(--text);border:1px solid var(--line)}
+.err{margin:-8px 2px 0;font-size:13px;color:var(--bad)}
+.notes{max-width:760px;margin:22px auto 0;color:var(--muted);font-size:13.5px;line-height:1.6}
+.notes h2{font-size:12px;letter-spacing:.09em;color:var(--faint);margin:0 0 6px}
+.notes ul{margin:0;padding-left:18px}
+@media (max-width:520px){.backdrop{min-height:720px}.foot .btn{flex:1}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div class="bar" role="group" aria-label="Mockup state">
+  <span>STATE</span>
+  <div class="seg">
+    <button type="button" id="st-agents" aria-pressed="true">Has agents</button>
+    <button type="button" id="st-first" aria-pressed="false">First room</button>
+  </div>
+</div>
+
+<div class="backdrop">
+  <div class="ghostlist" aria-hidden="true"><div></div><div></div><div></div><div></div><div></div></div>
+  <div class="scrim">
+    <form class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="nr-title" novalidate>
+      <div class="head">
+        <div>
+          <h1 id="nr-title">New room</h1>
+          <p>Name it. You invite who joins next.</p>
+        </div>
+        <button type="button" class="x" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+
+      <div>
+        <label class="label" for="nr-name">ROOM NAME</label>
+        <input class="name" id="nr-name" maxlength="80" placeholder="e.g. Launch week" autocomplete="off" value="lop">
+      </div>
+
+      <div>
+        <span class="label" id="nr-start">START FROM</span>
+        <div class="chips" role="radiogroup" aria-labelledby="nr-start" id="nr-templates"></div>
+        <div class="about" id="nr-about" aria-live="polite"></div>
+      </div>
+
+      <div class="row">
+        <div class="txt">
+          <b id="nr-hist-l">New members read earlier messages</b>
+          <small id="nr-hist-d">People and AIs who join later see the whole conversation.</small>
+        </div>
+        <button type="button" class="toggle" id="nr-hist" role="switch" aria-checked="true" aria-labelledby="nr-hist-l" aria-describedby="nr-hist-d"></button>
+      </div>
+
+      <div id="nr-first" hidden>
+        <label class="label" for="nr-agent">YOUR AI'S NAME</label>
+        <input class="name" id="nr-agent" maxlength="64" placeholder="e.g. Scout" autocomplete="off">
+        <p class="hint">It hosts the room. You can rename it in My agents.</p>
+      </div>
+
+      <details id="nr-more">
+        <summary>
+          <svg class="chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+          Host
+          <span class="now" id="nr-host-now">Sam's agent</span>
+        </summary>
+        <div class="hosts" role="radiogroup" aria-label="Host" id="nr-hosts"></div>
+      </details>
+
+      <p class="err" id="nr-err" role="alert" hidden></p>
+
+      <div class="foot">
+        <button type="button" class="btn ghost">Cancel</button>
+        <button type="submit" class="btn" id="nr-create">Create room</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="notes">
+  <h2>NOTES</h2>
+  <ul>
+    <li>Same tokens, sheet and sizes as Who should join (10% smaller than base v3). One column; every row lines up on the same 22px edge.</li>
+    <li>Start from: one row of chips with a check on the picked one, never a wrapped "Start / from" label. Under it one sunken line says what the template sets and who it suggests. Templates never add tasks or the name.</li>
+    <li>Host: no native select. A collapsed row shows the current host; open, it lists your agents as radio rows with avatars.</li>
+    <li>First room (no agent yet): "Your AI's name" appears in place of Host, required.</li>
+    <li>Create room stays off until the name (and, on a first room, the AI's name) is filled. The room then opens on the Who should join card.</li>
+  </ul>
+</div>
+
+<script>
+const T=[
+  {id:'blank',name:'Blank',about:'An empty room. You set the topic.',who:[]},
+  {id:'product-team',name:'Product team',about:'Plan, build and ship product changes together. Suggests a coding AI, a reviewer AI and a person.',who:['a','a','p']},
+  {id:'research-squad',name:'Research squad',about:'Answer questions with sources and a stated confidence. Suggests a research AI, a reviewer AI and a person.',who:['a','a','p']},
+  {id:'writing-room',name:'Writing room',about:'Draft, edit and finish texts for a stated audience. Suggests a writing AI, an editing AI and a person.',who:['a','a','p']},
+  {id:'code-review-crew',name:'Code review crew',about:'Review changes and triage bugs before they ship. Suggests a coding AI, a reviewer AI and a person.',who:['a','a','p']},
+];
+const H=[{n:'Sam\'s agent',c:'#2563eb',d:'your agent'},{n:'Scout',c:'#0f766e',d:'research'},{n:'Draft writer',c:'#7c3aed',d:'writing'}];
+let pick='blank',host=0,first=false;
+const $=(id)=>document.getElementById(id);
+const check='<svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg>';
+function draw(){
+  $('nr-templates').innerHTML=T.map((t)=>`<button type="button" class="chip" role="radio" aria-checked="${t.id===pick}" data-id="${t.id}">${t.id===pick?check:''}${t.name}</button>`).join('');
+  const t=T.find((x)=>x.id===pick);
+  $('nr-about').innerHTML=(t.who.length?`<span class="who" aria-hidden="true">${t.who.map((w)=>`<i class="${w==='p'?'p':''}"></i>`).join('')}</span>`:'')+`<span>${t.about}</span>`;
+  $('nr-hosts').innerHTML=H.map((h,i)=>`<button type="button" class="host" role="radio" aria-checked="${i===host}" data-i="${i}"><span class="av" style="background:${h.c}">${h.n[0]}</span><span><b>${h.n}</b><small>${h.d}</small></span><span class="dot"></span></button>`).join('');
+  $('nr-host-now').textContent=H[host].n;
+  $('nr-first').hidden=!first;$('nr-more').hidden=first;
+  const ok=$('nr-name').value.trim()&&(!first||$('nr-agent').value.trim());
+  $('nr-create').disabled=!ok;
+}
+$('nr-templates').addEventListener('click',(e)=>{const b=e.target.closest('[data-id]');if(b){pick=b.dataset.id;draw();}});
+$('nr-hosts').addEventListener('click',(e)=>{const b=e.target.closest('[data-i]');if(b){host=+b.dataset.i;draw();}});
+$('nr-hist').addEventListener('click',(e)=>{const b=e.currentTarget;b.setAttribute('aria-checked',b.getAttribute('aria-checked')!=='true');});
+['nr-name','nr-agent'].forEach((id)=>$(id).addEventListener('input',draw));
+for(const [id,v] of [['st-agents',false],['st-first',true]])$(id).addEventListener('click',()=>{first=v;$('st-agents').setAttribute('aria-pressed',!v);$('st-first').setAttribute('aria-pressed',v);draw();});
+$('sheet').addEventListener('submit',(e)=>{e.preventDefault();$('nr-err').hidden=false;$('nr-err').textContent='Mockup: the room would open on the Who should join card.';});
+draw();
+</script>

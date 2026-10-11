@@ -83,10 +83,6 @@
   background: var(--v8-card);
   box-shadow: var(--v8-shadow);
 }
-.vf-card-quiet {
-  background: var(--v8-quiet);
-  box-shadow: none;
-}
 .vf-card h2 {
   margin: 0;
   font-size: 17px;
@@ -251,6 +247,12 @@
   border-bottom: 1px solid var(--v8-border-soft);
   white-space: nowrap;
 }
+.vf-table td > a {
+  /* The day links are the table's only taps: 44 px tall on touch screens. */
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+}
 .vf-table tr:last-child td {
   border-bottom: 0;
 }
@@ -334,47 +336,6 @@
 }
 
 /* Log entries: each row opens to its full fingerprint and the raw data. */
-.vf-entries {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  display: grid;
-  max-height: 420px;
-  overflow-y: auto;
-  border: 1px solid var(--v8-border);
-  border-radius: 8px;
-}
-.vf-entries li + li {
-  border-top: 1px solid var(--v8-border-soft);
-}
-.vf-entries summary {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-height: var(--target, 44px);
-  padding: 0 14px;
-  cursor: pointer;
-  font-size: 13px;
-}
-.vf-entries details[open] {
-  padding-bottom: 12px;
-  background: var(--v8-quiet);
-}
-.vf-entries details > :not(summary) {
-  margin: 0 14px 6px;
-}
-.vf-entries a {
-  color: var(--v8-accent-text);
-  font-size: 13px;
-}
-.vf-entry-number {
-  min-width: 56px;
-  color: var(--v8-muted);
-  font-variant-numeric: tabular-nums;
-}
-.vf-entry-full {
-  overflow-wrap: anywhere;
-}
 .vf-table td a {
   color: var(--v8-accent-text);
 }
@@ -412,59 +373,9 @@
   font-size: 16px;
 }
 
-/* The data behind the number: one expandable panel per source. */
-.vf-panel {
-  border: 1px solid var(--v8-border);
-  border-radius: 8px;
-  background: var(--v8-card);
-}
-.vf-panel > summary {
-  display: flex;
-  align-items: center;
-  min-height: var(--target, 44px);
-  padding: 0 14px;
-  cursor: pointer;
-  font-size: 14px;
-  font-weight: 600;
-}
-.vf-panel[open] > summary {
-  border-bottom: 1px solid var(--v8-border-soft);
-}
-.vf-panel > :not(summary) {
-  margin: 12px 14px;
-}
-.vf-panel a,
+/* Links in the verify lists. */
 .vf-card .vf-list a {
   color: var(--v8-accent-text);
-}
-.vf-raw {
-  font-size: 12px;
-  color: var(--v8-muted);
-}
-.vf-keys {
-  margin: 0;
-  display: grid;
-  gap: 4px;
-  font-size: 13px;
-}
-.vf-keys dt {
-  color: var(--v8-muted);
-  font-size: 12px;
-}
-.vf-keys dd {
-  margin: 0 0 6px;
-  overflow-wrap: anywhere;
-}
-.vf-filter {
-  width: 100%;
-}
-
-/* The verify page's way to the Live log. */
-.vf-log-link {
-  display: inline-flex;
-  min-height: 44px;
-  align-items: center;
-  font-weight: 600;
 }
 
 /* The Live log (/downtown/log): stats, search and the entries, newest first. */
@@ -550,6 +461,10 @@
 }
 .ll-item {
   border-top: 1px solid var(--v8-border);
+  /* Hundreds of rows: the browser renders only the ones near the screen, so opening /explorer
+     does not lay out the whole list at once. 'auto' remembers each row's real height. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 53px;
 }
 .ll-item[data-open='true'] {
   background: var(--v8-quiet);
@@ -694,6 +609,10 @@
 }
 
 /* Live log Phase 2: the pending feed ("Just joined"), newest first, statuses flip in place. */
+/* While the log loads it holds a screen's height, so the footer is not pushed down later. */
+.ll-loading {
+  min-height: 100vh;
+}
 .ll-feed {
   margin: 0 0 20px;
 }
@@ -712,7 +631,10 @@
   font-size: 16px;
 }
 .ll-feed-row {
-  grid-template-columns: 110px minmax(0, 1fr) minmax(0, auto) 84px;
+  grid-template-columns: 84px 110px minmax(0, 1fr) minmax(0, auto) 84px;
+}
+.ll-seq[data-provisional='true'] {
+  color: var(--v8-muted);
 }
 .ll-badge {
   justify-self: start;
@@ -750,11 +672,14 @@
 }
 @media (max-width: 720px) {
   .ll-feed-row {
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     grid-template-areas:
-      'day verify'
-      'fp fp'
-      'status status';
+      'seq day verify'
+      'fp fp fp'
+      'status status status';
+  }
+  .ll-feed-row .ll-seq {
+    grid-area: seq;
   }
   .ll-feed-row .ll-day {
     grid-area: day;
@@ -804,4 +729,30 @@
 .ll-log-head h2 {
   margin: 0;
   font-size: 16px;
+}
+
+/* While the log loads the page holds a screen's height, so the footer does not show mid-screen
+   and then jump down when the cards arrive (layout shift). */
+.vf-main .vf-loading {
+  min-height: 100vh;
+}
+
+/* "How the Agent Explorer works" under the log (src/verify/LiveLog.tsx). */
+.ll-about {
+  max-width: 760px;
+  margin-top: 48px;
+  padding-top: 32px;
+  border-top: 1px solid var(--border);
+}
+.ll-about h2 {
+  margin: 0 0 8px;
+}
+.ll-about h3 {
+  margin: 20px 0 6px;
+  font-size: 1rem;
+}
+.ll-about p {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.6;
 }

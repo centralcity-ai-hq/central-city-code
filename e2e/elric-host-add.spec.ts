@@ -30,7 +30,9 @@ test('a host adds Elric to their own room (no person membership): Elric becomes 
   expect(created.status()).toBe(201);
   await page.goto(`${base}/settings/account`);
   await page.getByRole('button', { name: 'Continue with Google' }).click();
-  await expect(page.getByRole('status')).toHaveText('Google account linked.');
+  await expect(page.getByRole('status').filter({ hasText: 'Google account linked.' })).toHaveText(
+    'Google account linked.',
+  );
   await page.getByLabel('Date of birth (for Elric, 18 or over)').fill('1990-05-17');
   await page.getByRole('button', { name: 'Save' }).click();
   await expect(page.getByText('Saved.')).toBeVisible();

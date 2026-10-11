@@ -5,11 +5,12 @@
  */
 export const MCP_PATH = '/mcp';
 /**
- * What "Copy" puts on the clipboard for an AI: one ready line, not the bare link. "stay in it" is
- * the opt-in the server-side instructions look for, so the AI keeps checking without asking again.
+ * What "Copy" puts on the clipboard for an AI: one ready line, not the bare link. It asks for one
+ * read and a reply, and leaves later checks to the person: many AI apps have no background mode,
+ * so every check costs a full turn of the person's AI usage (the join result says the same).
  */
 export function roomInviteCopyLine(url: string) {
-  return `Join my Central City room and stay in it; reply when you're mentioned: ${url}`;
+  return `Join my Central City room, read it, and reply when I ask you to check it: ${url}`;
 }
 export const OPEN_MCP_PATH = '/mcp/open';
 

@@ -17,10 +17,13 @@ test('owner grants assistant agent creation, downloads config and revokes it', a
   await page.getByLabel('Account name').fill(`Assistant-${randomUUID().slice(0, 8)}`);
   await page.getByLabel('Password', { exact: true }).fill(`Synthetic-${randomUUID()}`);
   await page.getByRole('button', { name: 'Create account', exact: true }).click();
-  // A new account lands on the console Overview.
-  await expect(page.getByRole('heading', { name: 'Everything, at a glance.' })).toBeVisible();
-  await page.getByRole('button', { name: 'AI connections', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'AI connections.' })).toBeVisible();
+  // A new account lands on the workspace overview, the Network map.
+  await expect(page.getByRole('heading', { name: 'Network map', level: 1 })).toBeVisible();
+  // Settings opens on Connected apps; creating access for a local AI is under its local bridge.
+  await page.goto('/settings');
+  const preview = page.locator('.assistant-preview');
+  await expect(preview.getByRole('heading', { name: 'Connected apps', exact: true })).toBeVisible();
+  await preview.locator('summary').filter({ hasText: 'Advanced: local bridge' }).click();
   await expect(page.getByRole('button', { name: 'Create access', exact: true })).toBeDisabled();
   await expect(page.getByLabel('See your workspace', { exact: false })).toBeChecked();
   await expect(page.getByLabel('Create agents', { exact: false })).not.toBeChecked();
@@ -54,8 +57,9 @@ test('owner grants assistant agent creation, downloads config and revokes it', a
   expect(created.runtimeSetupRequired).toBe(true);
   expect(created.token).toBeUndefined();
   await page.getByRole('button', { name: 'I saved it — dismiss' }).click();
+  // A reload stays on Connected apps, and the secret is gone.
   await page.reload();
-  await page.getByRole('button', { name: 'AI connections', exact: true }).click();
+  await expect(preview.getByRole('heading', { name: 'Connected apps', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Download private connection file' })).toHaveCount(
     0,
   );
@@ -63,6 +67,9 @@ test('owner grants assistant agent creation, downloads config and revokes it', a
   await page
     .getByRole('button', { name: 'Remove access for Browser Assistant', exact: true })
     .click();
+  const confirm = page.getByRole('dialog', { name: 'Remove app access?', exact: true });
+  await confirm.getByRole('button', { name: 'Remove access', exact: true }).click();
+  await expect(confirm).toHaveCount(0);
   await expect(page.getByText('Removed', { exact: true })).toBeVisible();
   const denied = await page.request.post('/api/assistant/tools/city_workspace', {
     headers: { Authorization: `Bearer ${config.token}`, 'X-City-Request': '1' },

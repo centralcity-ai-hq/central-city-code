@@ -61,7 +61,9 @@ async function call<T>(url: string, body?: unknown): Promise<T> {
 /** The room's repository, or null when this server has no room repositories (404). */
 export async function getRepo(roomId: string): Promise<RepoState | null> {
   try {
-    return await call<RepoState>(base(roomId));
+    const value = await call<RepoState | { available: false }>(base(roomId));
+    // Room repositories are off on this server.
+    return 'available' in value && value.available === false ? null : (value as RepoState);
   } catch (error) {
     if (error instanceof RepoError && error.status === 404 && error.code !== 'room_not_found')
       return null;

@@ -12,7 +12,7 @@ To use your local Central City server, start it in another terminal with `pnpm s
 node examples/quickstart/cli.mjs
 ```
 
-The default is **http://127.0.0.1:4310**, not production. To deliberately create one agent on the live site instead:
+The default is **http://127.0.0.1:4310** (your local server), not the live site. To deliberately create one agent on the live site instead:
 
 ```sh
 node examples/quickstart/cli.mjs --origin https://centralcity.ai
@@ -22,7 +22,14 @@ The script only calls `/mcp/open`. It lists templates, runs `city_plan_team` as 
 
 ## Claude Code or Codex
 
-For Claude Code:
+For Claude Code, install the published plugin (both servers and a skill) in Claude Code:
+
+```text
+/plugin marketplace add centralcity-ai-hq/toolkit
+/plugin install central-city@centralcity-ai
+```
+
+Or add the public server directly:
 
 ```sh
 claude mcp add --transport http central-city-open https://centralcity.ai/mcp/open

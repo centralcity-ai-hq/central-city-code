@@ -2,16 +2,20 @@ import { useEffect, useRef } from 'react';
 import { ArrowRight, ExternalLink, X } from 'lucide-react';
 import { CopyButton } from '../components';
 import {
+  CHATGPT_PLUGINS_URL,
+  CLAUDE_CODE_PLUGIN_COMMANDS,
+  claudeCodeCommand,
   claudeConnectLink,
+  codexAddCommand,
+  codexLoginCommand,
   cursorDeeplink,
-  isLoopbackHost,
-  PRODUCTION_ORIGIN,
+  geminiAddCommand,
+  geminiAuthCommand,
+  geminiExtensionCommand,
   vscodeDeeplink,
-} from '../Connect';
-import { CHATGPT_ADMIN_NOTE, MCP_PATH } from '../shell/roomInvite';
-
-/** The server name the Connect page uses for a signed-in connection. */
-const SERVER = 'central-city';
+} from '../shell/connectLinks';
+import { CHATGPT_ADMIN_NOTE } from '../shell/roomInvite';
+import { connectEndpoint, isLocalConnect } from './aiApps';
 
 /** A copyable line (address or command), as on the Connect page. */
 function CopyLine({ value, describedAs }: { value: string; describedAs: string }) {
@@ -43,8 +47,8 @@ export function ConnectAiSheet({
   const dialog = useRef<HTMLDivElement>(null);
   const close = useRef(onClose);
   close.current = onClose;
-  const local = isLoopbackHost();
-  const endpoint = `${local ? window.location.origin : PRODUCTION_ORIGIN}${MCP_PATH}`;
+  const local = isLocalConnect();
+  const endpoint = connectEndpoint();
 
   // Focus the dialog, trap Tab inside it, close on Escape.
   useEffect(() => {
@@ -150,7 +154,7 @@ export function ConnectAiSheet({
                 </p>
                 <a
                   className="rm-connect-link"
-                  href="https://chatgpt.com/plugins"
+                  href={CHATGPT_PLUGINS_URL}
                   target="_blank"
                   rel="noopener noreferrer"
                 >
@@ -166,14 +170,32 @@ export function ConnectAiSheet({
               <span className="rm-role">Claude Code</span>
               <span className="rm-meta">Terminal</span>
             </div>
-            <p>
-              Run this in your terminal, then open Claude Code, run <code>/mcp</code> and choose
-              Authenticate.
-            </p>
-            <CopyLine
-              value={`claude mcp add --transport http ${SERVER} ${endpoint}`}
-              describedAs="Claude Code command"
-            />
+            {local ? (
+              <>
+                <p>
+                  Run this in your terminal, then open Claude Code, run <code>/mcp</code> and choose
+                  Authenticate.
+                </p>
+                <CopyLine value={claudeCodeCommand(endpoint)} describedAs="Claude Code command" />
+              </>
+            ) : (
+              <>
+                <p>
+                  Run these in Claude Code, then run <code>/mcp</code>, choose central-city and
+                  choose Authenticate.
+                </p>
+                <CopyLine
+                  value={CLAUDE_CODE_PLUGIN_COMMANDS[0]}
+                  describedAs="Claude Code marketplace command"
+                />
+                <CopyLine
+                  value={CLAUDE_CODE_PLUGIN_COMMANDS[1]}
+                  describedAs="Claude Code install command"
+                />
+                <p className="rm-meta">Or add the server directly:</p>
+                <CopyLine value={claudeCodeCommand(endpoint)} describedAs="Claude Code command" />
+              </>
+            )}
           </li>
           <li className="rm-connect-card">
             <div className="rm-connect-name">
@@ -181,11 +203,30 @@ export function ConnectAiSheet({
               <span className="rm-meta">Terminal</span>
             </div>
             <p>Run these in your terminal:</p>
-            <CopyLine
-              value={`codex mcp add ${SERVER} --url ${endpoint}`}
-              describedAs="Codex command"
-            />
-            <CopyLine value={`codex mcp login ${SERVER}`} describedAs="Codex sign-in command" />
+            <CopyLine value={codexAddCommand(endpoint)} describedAs="Codex command" />
+            <CopyLine value={codexLoginCommand()} describedAs="Codex sign-in command" />
+          </li>
+          <li className="rm-connect-card">
+            <div className="rm-connect-name">
+              <span className="rm-role">Gemini CLI</span>
+              <span className="rm-meta">Terminal</span>
+            </div>
+            <p>
+              Run this in your terminal, then open Gemini CLI and run{' '}
+              <code>{geminiAuthCommand()}</code>.
+            </p>
+            {local ? (
+              <CopyLine value={geminiAddCommand(endpoint)} describedAs="Gemini CLI command" />
+            ) : (
+              <>
+                <CopyLine
+                  value={geminiExtensionCommand()}
+                  describedAs="Gemini CLI extension command"
+                />
+                <p className="rm-meta">Or add the server directly:</p>
+                <CopyLine value={geminiAddCommand(endpoint)} describedAs="Gemini CLI command" />
+              </>
+            )}
           </li>
           <li className="rm-connect-card">
             <div className="rm-connect-name">
@@ -216,7 +257,7 @@ export function ConnectAiSheet({
           2.{' '}
           {host
             ? "Copy this room's invite link and paste it into your AI. It joins this room as a member."
-            : "Paste this room's invite link into your AI. The host can share it with you."}
+            : 'Then come back to this room and use Add my AI. No invite link needed.'}
         </p>
         <div className="rm-connect-foot">
           <a className="rm-connect-link" href="/#connect">

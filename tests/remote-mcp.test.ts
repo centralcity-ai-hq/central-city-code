@@ -21,6 +21,17 @@ import {
   TestProvider,
 } from './oauth-helpers.js';
 import type { Snapshot } from '../shared/types.js';
+import { ASSISTANT_SCOPES } from '../shared/assistant.js';
+import { ASSISTANT_TOOL_SCOPES } from '../server/assistant-access.js';
+
+/** A grant with every scope, so tools/list offers every tool (it hides what a grant cannot call). */
+const EVERY_SCOPE = { scope: ASSISTANT_SCOPES.join(' '), scopes: [...ASSISTANT_SCOPES] };
+
+/** Whether a grant holding `granted` can call `tool` (workspace:read plus the tool's own scope). */
+function callable(tool: string, granted: readonly string[]): boolean {
+  const own = (ASSISTANT_TOOL_SCOPES as Record<string, string>)[tool] ?? 'workspace:read';
+  return granted.includes('workspace:read') && granted.includes(own);
+}
 
 const agentArgs = (idempotencyKey = randomUUID()) => ({
   name: 'Remote record',
@@ -46,7 +57,7 @@ const callTool = async (
 
 test('remote tools mirror the bridge with schemas, annotations and structured results', async (t) => {
   const { app } = await fixture(t);
-  const { tokens } = await fullFlow(app);
+  const { tokens } = await fullFlow(app, EVERY_SCOPE);
   const list = await mcpCall(app, tokens.access_token, 'tools/list');
   const tools = rpcResult(list.body).result.tools as {
     name: string;
@@ -78,6 +89,7 @@ test('remote tools mirror the bridge with schemas, annotations and structured re
       'city_decide_connection',
       'city_revoke_connection',
       'city_create_room',
+      'city_list_room_templates',
       'city_room_link',
       'city_join_room',
       'city_room_post',
@@ -86,7 +98,13 @@ test('remote tools mirror the bridge with schemas, annotations and structured re
       'city_room_remove',
       'city_room_close',
       'city_room_leave',
+      'city_room_search',
       'city_room_update',
+      'city_room_pin',
+      'city_room_unpin',
+      'city_room_pins',
+      'city_room_brief',
+      'city_room_overview',
       'city_mentions',
       'city_ack_mentions',
       'city_set_wake_webhook',
@@ -113,17 +131,31 @@ test('remote tools mirror the bridge with schemas, annotations and structured re
     'city_ask',
     'city_set_wake_webhook',
     'city_create_invite',
+    // Pins are seen by every member of the room (other owners).
+    'city_room_pin',
+    'city_room_unpin',
+    // Returns messages written by other owners' agents and people.
+    'city_room_read',
+    // Create or change a space other owners' members share.
+    'city_create_room',
+    'city_room_update',
+    'city_room_remove',
+    'city_room_close',
+    'city_room_leave',
   ]);
   const DESTRUCTIVE = new Set([
     'city_cancel_job',
     'city_control',
     'city_apply_team',
+    // Updates a same-named agent in place.
+    'city_create_agent',
     'city_decide_connection',
     'city_revoke_connection',
     'city_revoke_invite',
     'city_room_remove',
     'city_room_close',
     'city_room_leave',
+    'city_room_unpin',
     'city_clear_wake_webhook',
     'city_unpublish_result',
     'city_room_link',
@@ -145,7 +177,7 @@ test('remote tools mirror the bridge with schemas, annotations and structured re
   assert.equal(byName.city_workspace!.annotations.readOnlyHint, true);
   assert.equal(byName.city_get_job!.annotations.readOnlyHint, true);
   assert.equal(byName.city_create_agent!.annotations.readOnlyHint, false);
-  assert.equal(byName.city_create_agent!.annotations.destructiveHint, false);
+  assert.equal(byName.city_create_agent!.annotations.destructiveHint, true);
   assert.equal(byName.city_create_agent!.annotations.idempotentHint, true);
   assert.equal(byName.city_cancel_job!.annotations.destructiveHint, true);
   // Legacy fields and manifest mode share one schema; the backend requires one complete form.
@@ -162,6 +194,8 @@ test('remote tools mirror the bridge with schemas, annotations and structured re
   ])
     assert.ok(byName.city_create_agent!.inputSchema.properties[field], field);
   assert.equal(byName.city_list_templates!.annotations.readOnlyHint, true);
+  assert.equal(byName.city_list_room_templates!.annotations.readOnlyHint, true);
+  assert.ok(byName.city_create_room!.inputSchema.properties.room_template_id);
   assert.equal(byName.city_plan_team!.annotations.readOnlyHint, true);
   assert.equal(byName.city_apply_team!.annotations.readOnlyHint, false);
   assert.equal(byName.city_control!.annotations.destructiveHint, true);
@@ -286,8 +320,13 @@ for (const mode of ['auto', 'legacy'] as const)
     );
     t.after(() => connected.close());
     const tools = await connected.listTools();
-    // 41 tools, minus the three workspace-key tools listed only to ccw_ sessions.
-    assert.equal(tools.tools.length, 38);
+    // Only the tools this grant can call (no workspace-key tools for an OAuth grant).
+    const granted = String(provider.saved?.scope ?? '').split(' ');
+    const listed = tools.tools.map((tool) => tool.name);
+    assert.ok(listed.includes('city_create_agent') && listed.includes('city_workspace'));
+    for (const name of listed)
+      assert.ok(callable(name, granted), `${name} is listed but not callable`);
+    assert.ok(!listed.includes('city_workspace_keys'));
     const key = randomUUID();
     const created = await connected.callTool({
       name: 'city_create_agent',
@@ -315,7 +354,7 @@ for (const mode of ['auto', 'legacy'] as const)
 
 test('server instructions and tool descriptions describe; they never direct unrequested calls', async (t) => {
   const { app } = await fixture(t);
-  const { tokens } = await fullFlow(app);
+  const { tokens } = await fullFlow(app, EVERY_SCOPE);
   const DIRECTIVE =
     /(^|[.:;!]\s+)always\b|\bsession start\b|\bbefore (computing|calling|you (do|compute|start))\b|\bkeep (calling|checking|polling)\b|\breply when\b|\bcall city_\w+ first\b|\bthen (call|report|read)\b|\bread (it|them) first\b|\bset up a check\b/i;
   const post = (url: string, method: string, token?: string) =>
@@ -491,4 +530,45 @@ test('paged city_room_members results validate against the advertised outputSche
   } while (cursor !== undefined && pages < 10);
   assert.equal(pages, 3);
   assert.deepEqual([...seen].sort(), [...agents].sort());
+});
+
+test('tools/list offers only the tools a grant can call; an unlisted tool still answers the step-up', async (t) => {
+  const { app } = await fixture(t);
+  // The scopes a chat app such as Claude asks for by default (the 401 challenge).
+  const scopes = [
+    'workspace:read',
+    'agents:create',
+    'rooms:join',
+    'rooms:host',
+    'messages:read',
+    'messages:send',
+  ];
+  const { tokens } = await fullFlow(app, { scope: scopes.join(' '), scopes });
+  const granted = tokens.scope.split(' ');
+  const list = rpcResult((await mcpCall(app, tokens.access_token, 'tools/list')).body).result
+    .tools as { name: string }[];
+  const names = list.map((tool) => tool.name);
+  for (const name of names)
+    assert.ok(callable(name, granted), `${name} is listed but not callable`);
+  for (const hidden of [
+    'city_create_invite',
+    'city_control',
+    'city_create_job',
+    'city_decide_connection',
+  ])
+    assert.ok(!names.includes(hidden), `${hidden} needs a scope this grant lacks`);
+  for (const shown of [
+    'city_workspace',
+    'city_create_room',
+    'city_join_room',
+    'city_room_post',
+    'city_send_message',
+  ])
+    assert.ok(names.includes(shown), `${shown} is callable and listed`);
+  // Still registered: calling it answers insufficient_scope naming the missing scope.
+  const call = await mcpCall(app, tokens.access_token, 'tools/call', {
+    name: 'city_control',
+    arguments: { agent_id: randomUUID(), action: 'pause' },
+  });
+  assert.match(call.body, /insufficient_scope|agents:control/);
 });

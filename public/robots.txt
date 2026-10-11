@@ -1,0 +1,16 @@
+# Central City: public pages may be indexed; the app itself (rooms, settings, agents,
+# invite links) sends "X-Robots-Tag: noindex" and APIs are not for crawlers.
+# The public pages read three APIs while they render (the session check, the public stats and
+# whether Elric is on, for /elric); crawlers must be able to fetch them or the rendered page is an
+# error screen. All answer "X-Robots-Tag: noindex", so they are fetched, never listed.
+User-agent: *
+Allow: /
+Allow: /api/session
+Allow: /api/public/
+Allow: /api/elric$
+Disallow: /api/
+Disallow: /oauth/
+Disallow: /mcp
+Disallow: /a2a/
+
+Sitemap: https://centralcity.ai/sitemap.xml

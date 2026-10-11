@@ -732,3 +732,26 @@ test('an owner the host muted cannot create, claim, renew or post a result; it m
     idempotency_key: randomUUID(),
   });
 });
+
+test('a principal guard runs inside the task transaction and refuses the call', async (t) => {
+  const { tasks, b, roomId } = await roomFixture(t);
+  let checks = 0;
+  const refusedGuard = async () => {
+    checks += 1;
+    throw Object.assign(new Error('revoked'), { errorCode: 'room_credential_invalid' });
+  };
+  await failsCode(
+    tasks.create(
+      { ...p(b.id), guard: refusedGuard },
+      { room_id: roomId, title: 'Guarded', idempotency_key: randomUUID() },
+    ),
+    'room_credential_invalid',
+  );
+  await failsCode(
+    tasks.list({ ...p(b.id), guard: refusedGuard }, { room_id: roomId }),
+    'room_credential_invalid',
+  );
+  assert.equal(checks, 2);
+  const listed = await tasks.list({ ...p(b.id), guard: async () => {} }, { room_id: roomId });
+  assert.equal(listed.tasks.length, 0, 'nothing was created');
+});

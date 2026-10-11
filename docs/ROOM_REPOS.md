@@ -19,12 +19,12 @@ execution**: tests run in the repository's own CI.
 
 ## Configuration
 
-| Variable                          | Value                          | Notes                                                                                                                    |
-| --------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
-| `CITY_ROOM_REPOS`                 | `1`                            | Turns the tools on. Anything else: off.                                                                                  |
-| `CITY_GITHUB_APP_ID`              | the App id                     | A public identifier.                                                                                                     |
+| Variable                          | Value                          | Notes                                                                                                                     |
+| --------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| `CITY_ROOM_REPOS`                 | `1`                            | Turns the tools on. Anything else: off.                                                                                   |
+| `CITY_GITHUB_APP_ID`              | the App id                     | A public identifier.                                                                                                      |
 | `CITY_GITHUB_APP_PRIVATE_KEY`     | the App private key (PEM)      | **Sensitive, Production only.** Set by the operator; never committed, logged or shown. Literal `\n` escapes are accepted. |
-| `CITY_GITHUB_INSTALLATION_OWNERS` | `installation_id:owner_id[,…]` | Which Central City owner may bind through which installation.                                                            |
+| `CITY_GITHUB_INSTALLATION_OWNERS` | `installation_id:owner_id[,…]` | Which Central City owner may bind through which installation.                                                             |
 
 Without an App id and key, the tools exist but answer `503 repos_not_configured`. A malformed
 key or allowlist fails at startup with a message that contains no key material. Previews and
@@ -69,7 +69,7 @@ recognized by recovery and never exported.
 | --------------------- | ------------- | -------------------- | ---------------------------------------------- |
 | `city_room_repo`      | `rooms:join`  | members              | read-only                                      |
 | `city_room_repo_read` | `rooms:join`  | members              | read-only                                      |
-| `city_room_propose`   | `rooms:join`  | members (not guests) | write, idempotent                              |
+| `city_room_propose`   | `rooms:join`  | members (not guests) | write, destructive, idempotent                 |
 | `city_room_proposals` | `rooms:join`  | members              | read-only                                      |
 | `city_room_proposal`  | `rooms:join`  | members              | read-only                                      |
 | `city_room_review`    | `rooms:join`  | members (not guests) | write, not destructive                         |
@@ -110,7 +110,7 @@ console's CSRF guard applies to every POST):
 
 | Route                                                                                       | Does                                                                                                                                                         |
 | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `GET /api/rooms/:room/repo`                                                                 | The binding (any member).                                                                                                                                    |
+| `GET /api/rooms/:room/repo`                                                                 | The binding (any member). With room repositories off on the server: `200 {available: false}`.                                                                |
 | `POST /api/rooms/:room/repo/preview {repo, agent_id?}`                                      | Host only: checks that the host's installation covers the repository and returns `{repo, default_branch, private, notice, confirm_repo}`. Nothing is stored. |
 | `POST /api/rooms/:room/repo {repo, agent_id?, acknowledge_member_read: true, confirm_repo}` | Host only: connects after the host ticked the notice and typed the repository name (`400 confirmation_mismatch` otherwise). `201` with the binding.          |
 | `POST /api/rooms/:room/repo/disconnect {agent_id?}`                                         | Host only: disconnects; reads stop at once.                                                                                                                  |

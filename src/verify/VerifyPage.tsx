@@ -2,9 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, LoaderCircle, TriangleAlert } from 'lucide-react';
 import { PublicFooter } from '../shell/PublicFooter';
 import { PublicHeader } from '../shell/PublicHeader';
+import { usePageTitle } from '../shell/usePageTitle';
+import { PAGE_TITLES } from '../../shared/page-titles';
 import {
+  checkpointZone,
   fromHex,
   inclusionProofFromLevels,
+  isWithheld,
   merkleRoot,
   toHex,
   treeLevels,
@@ -12,7 +16,7 @@ import {
   verifyAgentProof,
   type AgentProof,
   type ChainProblem,
-  type Checkpoint,
+  type PublicCheckpoint as Checkpoint,
 } from '../../shared/count-log/index';
 import {
   SIGNATURE_WORDS,
@@ -22,7 +26,9 @@ import {
   number,
   plural,
   short,
-  type Jwk,
+  signatureSummary,
+  unconfirmedReason,
+  checkpointConfirmed,
   type Loaded,
   type SignatureState,
 } from './countLogClient';
@@ -96,93 +102,6 @@ function LeavesCheck({ latest }: { latest: Checkpoint }) {
   );
 }
 
-/** How many of the newest entries the verify page previews; the Live log has them all. */
-const PREVIEW = 10;
-
-/**
- * The 10 newest public log entries (leaves), newest first, and the way to the Live log, which
- * lists every entry with paging, search and a proof per entry. This list verifies nothing.
- */
-function Entries() {
-  const [page, setPage] = useState<{
-    tree_size: number;
-    leaves: { idx: number; leaf_hash: string; day?: string }[];
-  } | null>(null);
-  const [error, setError] = useState(false);
-  const load = useCallback(async () => {
-    setError(false);
-    try {
-      const head = await json<{ tree_size: number }>('/api/public/count-log/leaves?from=0&to=1');
-      const from = Math.max(0, head.tree_size - PREVIEW);
-      const next = head.tree_size
-        ? await json<{
-            tree_size: number;
-            leaves: { idx: number; leaf_hash: string; day?: string }[];
-          }>(`/api/public/count-log/leaves?from=${from}&to=${head.tree_size}`)
-        : { tree_size: 0, leaves: [] };
-      setPage({ tree_size: next.tree_size, leaves: [...next.leaves].reverse() });
-    } catch {
-      setError(true);
-    }
-  }, []);
-  useEffect(() => {
-    void load();
-  }, [load]);
-  const link = (
-    <a className="vf-log-link" href="/downtown/log">
-      See the live log →
-    </a>
-  );
-  if (error)
-    return (
-      <p className="vf-bad-note" role="alert">
-        The entries could not be loaded.{' '}
-        <button type="button" className="text-link" onClick={() => void load()}>
-          Retry
-        </button>
-      </p>
-    );
-  if (!page)
-    return (
-      <p className="vf-muted" role="status">
-        <LoaderCircle className="spin" size={14} aria-hidden="true" /> Loading entries…
-      </p>
-    );
-  if (!page.tree_size)
-    return (
-      <p className="vf-muted">
-        No entries yet. Agents enter the log at the first daily checkpoint (00:10 UTC); from then on
-        every entry is listed in the live log.
-      </p>
-    );
-  return (
-    <>
-      <p className="vf-muted">
-        {page.leaves.length === page.tree_size
-          ? `${page.tree_size === 1 ? 'The only entry' : `All ${plural(page.tree_size, 'entry', 'entries')}`}, newest first.`
-          : `The ${number.format(page.leaves.length)} newest of ${plural(page.tree_size, 'entry', 'entries')}.`}
-      </p>
-      <ol className="vf-entries">
-        {page.leaves.map((leaf) => (
-          <li key={leaf.idx}>
-            <details>
-              <summary>
-                <span className="vf-entry-number">#{number.format(leaf.idx + 1)}</span>
-                <span className="vf-mono">{short(leaf.leaf_hash)}</span>
-              </summary>
-              <p className="vf-mono vf-entry-full">{leaf.leaf_hash}</p>
-              <a href={`/api/public/count-log/leaves?from=${leaf.idx}&to=${leaf.idx + 1}`}>
-                This entry as data
-              </a>
-            </details>
-          </li>
-        ))}
-      </ol>
-      {link}
-    </>
-  );
-}
-
 type OwnAgent = { id: string; name: string };
 
 /** A signed-in owner checks one of their own agents; the proof is verified here. */
@@ -231,12 +150,12 @@ function CheckMyAgent({
         | { pending: false; proof: AgentProof };
       if (body.pending)
         return setResult(
-          'Not in a checkpoint yet: agents created since the last checkpoint join at the next one (00:10 UTC).',
+          `Not in a checkpoint yet: agents created since the last checkpoint join at the next one (12:00 ${checkpointZone()}).`,
         );
       if ('excluded' in body)
         return setResult(
           body.excluded === 'demo'
-            ? 'Not counted (demo): the console demo’s sample agents are never part of the count.'
+            ? 'Not counted (CC agents): the console’s sample agents are never part of the count.'
             : 'Not counted: this account is listed as an internal test account.',
         );
       let list = checkpoints;
@@ -263,13 +182,12 @@ function CheckMyAgent({
         return setResult(
           `Included as #${body.proof.idx + 1} in the checkpoint of ${checkpoint.date}, which is newer than this page's checks: not yet checked. Reload the page to check its chain and signature.`,
         );
-      // ✓ only when the checkpoint itself is authentic: its chain checks and its signature.
+      // ✓ only when the checkpoint itself checks: its chain, and its signature unless withheld (v1).
       const chainOk = !problems.some((p) => p.date === checkpoint!.date);
-      const signed = signatures[checkpoint.date] === 'valid';
       setResult(
-        chainOk && signed
+        checkpointConfirmed(chainOk, signatures[checkpoint.date])
           ? `✓ Included as #${body.proof.idx + 1} in the checkpoint of ${checkpoint.date}. Verified in this browser.`
-          : `Included as #${body.proof.idx + 1} in the checkpoint of ${checkpoint.date}, but that checkpoint failed its ${chainOk ? 'signature' : 'chain'} check (see History), so this is not confirmed.`,
+          : `Included as #${body.proof.idx + 1} in the checkpoint of ${checkpoint.date}, but ${unconfirmedReason(chainOk)}, so this is not confirmed.`,
       );
     } catch {
       setResult('The check could not run. Try again.');
@@ -399,11 +317,10 @@ function EntryCheck({
       if (!ok)
         return setResult(`Not verified: entry #${index + 1} does not lead to the published root.`);
       const chainOk = !problems.some((p) => p.date === latest.date);
-      const signed = signatures[latest.date] === 'valid';
       setResult(
-        chainOk && signed
+        checkpointConfirmed(chainOk, signatures[latest.date])
           ? `✓ Entry #${index + 1} is in the checkpoint of ${latest.date}. Verified in this browser.`
-          : `Entry #${index + 1} is in the checkpoint of ${latest.date}, but that checkpoint failed its ${chainOk ? 'signature' : 'chain'} check (see History), so this is not confirmed.`,
+          : `Entry #${index + 1} is in the checkpoint of ${latest.date}, but ${unconfirmedReason(chainOk)}, so this is not confirmed.`,
       );
     } catch {
       setResult('The check could not run. Try again.');
@@ -437,206 +354,11 @@ function EntryCheck({
         </>
       ) : (
         <p className="vf-muted">
-          Available from the first checkpoint (00:10 UTC): paste an entry number or fingerprint from
-          Log entries and this page checks it against the checkpoint.
+          Available from the first checkpoint (12:00 {checkpointZone()}): paste an entry number or
+          fingerprint and this page checks it against the checkpoint.
         </p>
       )}
     </form>
-  );
-}
-
-type Withdrawn = { idx: number; reason: string; day: string };
-
-/** Loads one public file when its panel is first opened. */
-function useLazy<T>(open: boolean, path: string) {
-  const [state, setState] = useState<{ value?: T; error?: boolean }>({});
-  useEffect(() => {
-    if (!open || state.value !== undefined || state.error) return;
-    json<T>(path).then(
-      (value) => setState({ value }),
-      () => setState({ error: true }),
-    );
-  }, [open, path, state]);
-  return state;
-}
-
-/** One data source: what it is and why it matters, the content formatted, and the raw file. */
-function DataPanel({
-  id,
-  title,
-  why,
-  raw,
-  children,
-}: {
-  id: string;
-  title: string;
-  why: string;
-  raw: string;
-  children: (open: boolean) => React.ReactNode;
-}) {
-  const [open, setOpen] = useState(false);
-  return (
-    <details
-      className="vf-panel"
-      id={id}
-      onToggle={(event) => setOpen((event.currentTarget as HTMLDetailsElement).open)}
-    >
-      <summary>{title}</summary>
-      <p className="vf-muted">{why}</p>
-      {children(open)}
-      <p className="vf-raw">
-        <a href={raw}>Raw data</a> (for developers)
-      </p>
-    </details>
-  );
-}
-
-function WithdrawnList({ open }: { open: boolean }) {
-  const state = useLazy<{ withdrawn: Withdrawn[] }>(open, '/api/public/count-log/withdrawn');
-  if (state.error) return <p className="vf-bad-note">The list could not be loaded.</p>;
-  if (!state.value) return <p className="vf-muted">Loading…</p>;
-  const rows = state.value.withdrawn;
-  if (!rows.length) return <p>None. No agent has ever been withdrawn from the count.</p>;
-  return (
-    <div className="vf-table" tabIndex={0} role="region" aria-label="Withdrawn agents">
-      <table>
-        <thead>
-          <tr>
-            <th scope="col">Entry</th>
-            <th scope="col">Day</th>
-            <th scope="col">Reason</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={row.idx}>
-              <td>#{number.format(row.idx + 1)}</td>
-              <td>{row.day}</td>
-              <td>
-                {row.reason === 'no_longer_counted' ? 'No longer counted (abuse)' : row.reason}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function SigningKey({ open }: { open: boolean }) {
-  const state = useLazy<{ keys: Jwk[] }>(open, '/.well-known/jwks.json');
-  if (state.error) return <p className="vf-bad-note">The key could not be loaded.</p>;
-  if (!state.value) return <p className="vf-muted">Loading…</p>;
-  if (!state.value.keys.length) return <p>No signing key is published yet.</p>;
-  return (
-    <dl className="vf-keys">
-      {state.value.keys.map((key) => (
-        <div key={key.kid}>
-          <dt>Key id (its fingerprint)</dt>
-          <dd className="vf-mono">{key.kid}</dd>
-          <dt>Type</dt>
-          <dd>
-            {key.kty} {key.crv} public key, used to sign every checkpoint
-          </dd>
-          <dt>Public key</dt>
-          <dd className="vf-mono">{key.x}</dd>
-        </div>
-      ))}
-    </dl>
-  );
-}
-
-/** The data behind the number, readable in the page, with the raw files one click away. */
-function DataPanels({ data }: { data: Loaded }) {
-  const none = !data.checkpoints.length;
-  return (
-    <section className="vf-card vf-card-quiet" aria-labelledby="vf-data">
-      <h2 id="vf-data">The data, and checking it yourself</h2>
-      {none ? (
-        <p className="vf-muted">
-          The public log starts with the first daily checkpoint at 00:10 UTC. Until then the lists
-          below are empty; from then on each one fills in and can be checked here.
-        </p>
-      ) : null}
-      <DataPanel
-        id="vf-data-checkpoints"
-        title="All checkpoints"
-        why="One signed record per day: how many agents the log held and its fingerprint. Each day must extend the day before, so the count can only grow and can't be rewritten."
-        raw="/api/public/count-log/checkpoints"
-      >
-        {() =>
-          none ? (
-            <p>None yet. The first checkpoint is taken at 00:10 UTC.</p>
-          ) : (
-            <div className="vf-table" tabIndex={0} role="region" aria-label="All checkpoints">
-              <table>
-                <thead>
-                  <tr>
-                    <th scope="col">Day</th>
-                    <th scope="col">Count</th>
-                    <th scope="col">Fingerprint</th>
-                    <th scope="col">Signature</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {[...data.checkpoints].reverse().map((cp) => (
-                    <tr key={cp.date}>
-                      <td>{cp.date}</td>
-                      <td>{number.format(count(cp))}</td>
-                      <td className="vf-mono" title={cp.root}>
-                        {short(cp.root)}
-                      </td>
-                      <td>{SIGNATURE_WORDS[data.signatures[cp.date] ?? 'unsigned']}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )
-        }
-      </DataPanel>
-      <DataPanel
-        id="vf-data-agents"
-        title="Every counted agent"
-        why="One entry per agent, as a fingerprint that hides who it is. The checkpoint's fingerprint is rebuilt from exactly these entries, so none can be added or removed unseen."
-        raw="/api/public/count-log/leaves?from=0&to=10000"
-      >
-        {() => (
-          <p>
-            Listed under <a href="#vf-entries">Log entries</a>; use{' '}
-            <a href="#vf-entry-check">Check an entry</a> to find any one of them.
-          </p>
-        )}
-      </DataPanel>
-      <DataPanel
-        id="vf-data-withdrawn"
-        title="Withdrawn agents"
-        why="Agents taken out of the count (only for abuse). They stay in the log and are listed here, so the number is every entry minus these."
-        raw="/api/public/count-log/withdrawn"
-      >
-        {(open) => <WithdrawnList open={open} />}
-      </DataPanel>
-      <DataPanel
-        id="vf-data-key"
-        title="The signing key"
-        why="The public key Central City signs every checkpoint with. This page checks each signature against it, so a checkpoint can't be changed without it showing."
-        raw="/.well-known/jwks.json"
-      >
-        {(open) => <SigningKey open={open} />}
-      </DataPanel>
-      <ul className="vf-list">
-        <li>
-          <a href="https://github.com/centralcity-ai-org/transparency">
-            The public copy on GitHub (centralcity-ai-org/transparency)
-          </a>
-          : every checkpoint is also committed there daily, an independent timestamped record.
-        </li>
-        <li>
-          <a href="/downtown#district-5">The checking code (Downtown, District 5)</a>: the
-          open-source verifier behind this page, a standard public log (RFC 6962).
-        </li>
-      </ul>
-    </section>
   );
 }
 
@@ -651,8 +373,8 @@ function WhatIsCounted() {
           count: they joined.
         </li>
         <li>
-          Not counted: the three sample agents of the console demo, and any account listed as an
-          internal test account.
+          Not counted: the three CC agents of the console, and any account listed as an internal
+          test account.
         </li>
         <li>
           An agent removed from the app (only possible for abuse) is listed as withdrawn, never
@@ -664,6 +386,7 @@ function WhatIsCounted() {
 }
 
 export function VerifyPage() {
+  usePageTitle(PAGE_TITLES['/downtown/verify']);
   const [data, setData] = useState<Loaded | null>(null);
   const [error, setError] = useState(false);
   const refresh = useCallback(() => {
@@ -673,10 +396,12 @@ export function VerifyPage() {
   }, []);
   useEffect(refresh, [refresh]);
   const latest = data?.checkpoints.at(-1) ?? null;
-  const allSigned =
-    data &&
-    data.checkpoints.length > 0 &&
-    data.checkpoints.every((cp) => data.signatures[cp.date] === 'valid');
+  // Withheld v1 signatures are never counted as signed, and get no signature status at all: the
+  // checkpoint is verified on what is checkable (chain, consistency, inclusion), and signed once
+  // the latest checkpoint is v2 and signed.
+  const sigs = data ? signatureSummary(data) : null;
+  const allSigned = sigs ? sigs.state === 'all' || sigs.state === 'partial' : false;
+  const sigsOk = allSigned || sigs?.state === 'latest-withheld';
 
   return (
     <div className="public-shell">
@@ -699,7 +424,7 @@ export function VerifyPage() {
             </button>
           </p>
         ) : !data ? (
-          <p className="vf-muted" role="status">
+          <p className="vf-muted vf-loading" role="status">
             <LoaderCircle className="spin" size={16} aria-hidden="true" /> Checking the log…
           </p>
         ) : (
@@ -711,11 +436,8 @@ export function VerifyPage() {
                     The number
                   </h2>
                   {latest ? (
-                    <span
-                      className="vf-badge"
-                      data-ok={data.problems.length === 0 && Boolean(allSigned)}
-                    >
-                      {data.problems.length === 0 && allSigned
+                    <span className="vf-badge" data-ok={data.problems.length === 0 && sigsOk}>
+                      {data.problems.length === 0 && sigsOk
                         ? 'Verified checkpoint'
                         : 'Checkpoint with problems'}
                     </span>
@@ -736,7 +458,7 @@ export function VerifyPage() {
                       <p className="vf-muted">
                         Live now: {number.format(data.live)}.{' '}
                         {data.live > count(latest)
-                          ? `${plural(data.live - count(latest), 'agent', 'agents')} joined since; they appear in the next checkpoint (00:10 UTC).`
+                          ? `${plural(data.live - count(latest), 'agent', 'agents')} joined since; they appear in the next checkpoint (12:00 ${checkpointZone()}).`
                           : 'The same as the last checkpoint.'}
                       </p>
                     ) : null}
@@ -748,11 +470,15 @@ export function VerifyPage() {
                             : `The ${number.format(data.checkpoints.length)} daily checkpoints form one unbroken chain, and each day only added to the log.`
                           : `Problems found: ${data.problems.map((p) => `${p.date}: ${p.problem}`).join('; ')}.`}
                       </Mark>
-                      <Mark ok={Boolean(allSigned)}>
-                        {allSigned
-                          ? 'Every checkpoint is signed with Central City’s published key.'
-                          : 'Not every checkpoint signature could be confirmed (see History).'}
-                      </Mark>
+                      {sigs?.state === 'latest-withheld' ? null : (
+                        <Mark ok={allSigned}>
+                          {sigs?.state === 'all'
+                            ? 'Every checkpoint is signed with Central City’s published key.'
+                            : sigs?.state === 'partial'
+                              ? `Every checkpoint from ${sigs.firstSigned} on is signed with Central City’s published key.`
+                              : 'Not every checkpoint signature could be confirmed (see History).'}
+                        </Mark>
+                      )}
                     </ul>
                     <div className="vf-recount">
                       <p className="vf-recount-text">
@@ -775,7 +501,7 @@ export function VerifyPage() {
                     ) : null}
                     <p className="vf-status" role="status">
                       No checkpoint yet. The public log starts with the first daily checkpoint at
-                      00:10 UTC. Until then, the live number
+                      12:00 {checkpointZone()}. Until then, the live number
                       {data.live !== null ? ` (${number.format(data.live)})` : ''} comes from the
                       server's count; from the first checkpoint on, anyone can recount it here in
                       their browser.
@@ -793,16 +519,12 @@ export function VerifyPage() {
                 )}
               </section>
 
-              <section className="vf-card" aria-labelledby="vf-entries">
-                <h2 id="vf-entries">Log entries</h2>
-                <Entries />
-              </section>
-
               {data.checkpoints.length ? (
                 <section className="vf-card" aria-labelledby="vf-history">
                   <h2 id="vf-history">History</h2>
                   <p className="vf-muted">
-                    A checkpoint is published every day at 00:10 UTC. Each one extends the last.
+                    A checkpoint is published every day at 12:00 Berlin time. Each one extends the
+                    last.
                   </p>
                   <div className="vf-table" role="region" aria-label="Checkpoints" tabIndex={0}>
                     <table>
@@ -829,8 +551,14 @@ export function VerifyPage() {
                                 {short(cp.root)}
                               </td>
                               <td>
-                                {bad.length ? bad.map((p) => p.problem).join('; ') : 'linked ✓'} ·{' '}
-                                {SIGNATURE_WORDS[data.signatures[cp.date] ?? 'unsigned']}
+                                {bad.length
+                                  ? bad.map((p) => p.problem).join('; ')
+                                  : isWithheld(cp)
+                                    ? 'append-only ✓'
+                                    : 'linked ✓'}
+                                {SIGNATURE_WORDS[data.signatures[cp.date] ?? 'unsigned']
+                                  ? ` · ${SIGNATURE_WORDS[data.signatures[cp.date] ?? 'unsigned']}`
+                                  : null}
                               </td>
                             </tr>
                           );
@@ -859,8 +587,6 @@ export function VerifyPage() {
               </section>
 
               {data.checkpoints.length ? <WhatIsCounted /> : null}
-
-              <DataPanels data={data} />
             </div>
           </div>
         )}

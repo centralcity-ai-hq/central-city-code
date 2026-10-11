@@ -270,17 +270,23 @@ test('fallback: a 429 goes once to the fallback endpoint; the public model stays
   assert.equal(fallbackCalls.length, 1);
   assert.equal(answer.text, 'From the fallback.');
   assert.equal(answer.model, 'hosted-model-1');
-  // Both fail: the fallback's code, and a cold fallback is unreachable (never waited for).
+  // Both fail: the primary's code stays the cause (529 overloaded), the fallback's travels with
+  // it, and a cold fallback is unreachable (never waited for).
   const cold = {
     model: 'g',
     complete: async () => {
       throw new AdapterError('waking');
     },
   };
-  await rejectsWith(
+  await assert.rejects(
     new FallbackAdapter(adapter(api({ status: 529 }).fetch), cold).complete(request()),
-    'unreachable',
-    false,
+    (error) => {
+      assert.ok(error instanceof AdapterError);
+      assert.equal(error.code, 'server_error');
+      assert.equal(error.sent, false);
+      assert.equal(error.detail.fallbackCode, 'unreachable');
+      return true;
+    },
   );
   // A bad request is the request's fault: no fallback.
   let called = false;
@@ -371,7 +377,8 @@ test('end to end: a tool step and a reply through the service; no model name in 
 });
 
 test('end to end: provider down and no fallback → the plain failure line, allowance refunded', async (t) => {
-  const { fetch } = api({ status: 529 });
+  // Overloaded on the first try and on its one retry.
+  const { fetch } = api({ status: 529 }, { status: 529 });
   const models = elricModels(
     {
       CITY_ELRIC_PROVIDER: 'anthropic',
@@ -520,4 +527,44 @@ test('an invalid Elric configuration never stops the app: Elric is unavailable a
     assert.match(logs[0]!, /"event":"elric_config_invalid"/);
     assert.ok(!logs[0]!.includes(k), 'no key value in the log');
   }
+});
+
+test('a 429 carries its Retry-After; a fallback that was down is skipped for a minute', async () => {
+  const limited: FetchLike = async () => ({
+    status: 429,
+    headers: { get: (name: string) => (name.toLowerCase() === 'retry-after' ? '3' : null) },
+    text: async () => '{}',
+  });
+  await assert.rejects(adapter(limited).complete(request()), (error) => {
+    assert.ok(error instanceof AdapterError);
+    assert.deepEqual([error.code, error.detail.retryAfterMs], ['rate_limited', 3000]);
+    return true;
+  });
+  let now = 0;
+  let fallbackCalls = 0;
+  const down = {
+    model: 'g',
+    complete: async (r: ModelRequest) => {
+      fallbackCalls++;
+      // Never more than its share of the time left.
+      assert.ok((r.timeoutMs ?? 0) <= 10_000, `${r.timeoutMs}`);
+      throw new AdapterError('timeout', true);
+    },
+  };
+  const wrapped = new FallbackAdapter(
+    adapter(api({ status: 529 }, { status: 529 }, { status: 529 }).fetch),
+    down,
+    () => now,
+  );
+  const codes = async () =>
+    wrapped
+      .complete(request({ timeoutMs: 20_000 }))
+      .catch((error: AdapterError) => [error.code, error.detail.fallbackCode ?? null]);
+  assert.deepEqual(await codes(), ['server_error', 'timeout']);
+  now += 30_000;
+  assert.deepEqual(await codes(), ['server_error', null]);
+  assert.equal(fallbackCalls, 1);
+  now += 31_000;
+  await codes();
+  assert.equal(fallbackCalls, 2);
 });

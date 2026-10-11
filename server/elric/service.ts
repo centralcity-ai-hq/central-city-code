@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import { defaultPiiKeyring, isAdult } from '../google/pii.js';
 import type { Database, Transaction as Tx } from '../database.js';
 import { event, iso, type StoredAgent, type Workspace } from '../model.js';
 import {
+  eligibilityOf,
   elricEligibility,
   elricEligibilityRefusal,
   elricRoomAccess,
@@ -45,9 +47,18 @@ import {
   type PendingRunner,
 } from './pending.js';
 import { toolArgs } from './tools.js';
-import { containsCredential, stripMentions, validateCitations } from './reply.js';
+import {
+  ELRIC_CUT_SHORT_MARKER,
+  ELRIC_PARTIAL_MIN_CHARS,
+  containsCredential,
+  cutPartial,
+  stripMentions,
+  validateCitations,
+  visibleChars,
+} from './reply.js';
 import { deleteDraft, draftWriter, sweepStaleDrafts, writeDraft } from './draft.js';
 import { route, type ElricRoute } from './router.js';
+import { titleConversation } from './titles.js';
 import type { ElricOutcome } from './schema.js';
 import { checkToolCall, ELRIC_TOOLS, toolSpecs, type CheckedCall } from './tools.js';
 import {
@@ -79,7 +90,14 @@ export interface ElricPostArgs {
   text: string;
   idempotencyKey: string;
   /** The public, server-stamped attribution (room_messages.auto_reply). */
-  stamp: { provider: 'elric'; model: string; label: string; pending_id?: string };
+  stamp: {
+    provider: 'elric';
+    model: string;
+    label: string;
+    pending_id?: string;
+    /** The seq of the message this reply answers (the page matches it to the asker's post). */
+    reply_to?: number;
+  };
   /** Runs inside the post transaction under the room lock; a code refuses the post. */
   precondition: (tx: Q) => Promise<string | null>;
 }
@@ -123,6 +141,10 @@ export interface ElricDependencies {
   probe?: (point: 'reserved' | 'before_tool' | 'before_post') => Promise<void>;
   /** Wall time for the run budget (default Date.now); tests may inject it. */
   wallClock?: () => number;
+  /** Waits before the one retry of a transient model error (default setTimeout). */
+  sleep?: (ms: number) => Promise<void>;
+  /** Operator log for a failed turn: one JSON line with codes only (default console.warn). */
+  log?: (line: string) => void;
 }
 
 /**
@@ -240,6 +262,16 @@ const CHARGED_FAILURES: ReadonlySet<string> = new Set([
   'bad_response',
   'too_large',
 ]);
+
+/** Model errors worth one more try within the same run (overloaded, rate limited, 5xx, slow). */
+export const ELRIC_RETRY_ON: ReadonlySet<string> = new Set([
+  'rate_limited',
+  'server_error',
+  'timeout',
+  'unreachable',
+]);
+/** The wait before that one retry. */
+export const ELRIC_RETRY_BACKOFF_MS = 1_500;
 
 const INACTIVE: ReadonlySet<ElricAccessCode> = new Set(['paused', 'revoked']);
 
@@ -436,52 +468,88 @@ export function createElric(d: ElricDependencies) {
 
   async function usageView(ownerId: string): Promise<ElricUsageView> {
     const time = d.clock();
-    const day = dayOf(time);
     const row = (
       await d.db.query<{ short: number; summary: number; tool: number }>(
         'SELECT short,summary,tool FROM elric_usage WHERE owner_id=$1 AND day=$2',
-        [ownerId, day],
+        [ownerId, dayOf(time)],
       )
     ).rows[0];
+    return usageFrom(row, time);
+  }
+  function usageFrom(
+    row: { short: number | null; summary: number | null; tool: number | null } | undefined,
+    time: number,
+  ): ElricUsageView {
     return {
-      day,
+      day: dayOf(time),
       used: { short: row?.short ?? 0, summary: row?.summary ?? 0, tool: row?.tool ?? 0 },
       allowance: { ...config.allowance },
       resets_at: iso(resetAt(time)),
     };
   }
 
+  /**
+   * GET /api/elric. One round trip: today's usage, the owner's Elric, the invocations waking up
+   * and the identity row of the eligibility check, each read as usageView, ownElric, the waking
+   * list and elricEligibility read them, and decided by the same code.
+   */
   async function status(ownerId: string): Promise<ElricStatus> {
-    const usage = await usageView(ownerId);
-    const own = await ownElric(d.db, ownerId);
-    const waking = (
-      await d.db.query<{ room_id: string; source_seq: string | number; waking_since: string }>(
-        `SELECT room_id, source_seq, waking_since FROM elric_invocations
-          WHERE owner_id=$1 AND waking_since IS NOT NULL
-            AND (status='queued' OR (status='running' AND locked_until > $2))
-          ORDER BY waking_since LIMIT 20`,
-        [ownerId, d.clock()],
+    const time = d.clock();
+    const row = (
+      await d.db.query<{
+        short: number | null;
+        summary: number | null;
+        tool: number | null;
+        has_usage: boolean;
+        agent_id: string | null;
+        status: 'active' | 'paused' | null;
+        host_may_invoke: boolean | null;
+        kind: string | null;
+        provider: string | null;
+        email: string | null;
+        email_verified: boolean | null;
+        verified_at: string | number | null;
+        waking: { room_id: string; source_seq: string | number; waking_since: string | number }[];
+      }>(
+        `SELECT u.short, u.summary, u.tool, u.owner_id IS NOT NULL AS has_usage,
+                e.agent_id, e.status, e.host_may_invoke,
+                o.kind, v.provider, v.email, v.email_verified, v.verified_at,
+                (SELECT COALESCE(json_agg(json_build_object('room_id', k.room_id,
+                    'source_seq', k.source_seq, 'waking_since', k.waking_since)
+                    ORDER BY k.waking_since), '[]'::json)
+                   FROM (SELECT room_id, source_seq, waking_since FROM elric_invocations
+                          WHERE owner_id=$1 AND waking_since IS NOT NULL
+                            AND (status='queued' OR (status='running' AND locked_until > $3))
+                          ORDER BY waking_since LIMIT 20) k) AS waking
+           FROM (SELECT 1) one
+           LEFT JOIN elric_usage u ON u.owner_id=$1 AND u.day=$2
+           LEFT JOIN elric_agents e ON e.owner_id=$1 AND e.status <> 'revoked'
+           LEFT JOIN operators o ON o.id=$1
+           LEFT JOIN elric_verified_identities v ON v.operator_id=o.id`,
+        [ownerId, dayOf(time), time],
       )
-    ).rows;
+    ).rows[0]!;
+    const usage = usageFrom(row.has_usage ? row : undefined, time);
+    // The age check (server/google/pii.ts, the only reader of the date of birth) is one more
+    // round trip, and only once the identity qualifies.
+    const eligibility = await eligibilityOf(
+      row.kind === null ? undefined : { ...row, kind: row.kind },
+      () => isAdult(d.db, defaultPiiKeyring(), ownerId, time),
+    );
     return {
-      agent_id: own?.agent_id ?? null,
-      status: own?.status ?? null,
-      host_may_invoke: own?.host_may_invoke ?? false,
-      ...(await (async () => {
-        const eligibility = await elricEligibility(d.db, ownerId, d.clock());
-        return {
-          eligible: eligibility.eligible,
-          eligibility_reason: eligibility.eligible ? null : eligibility.reason,
-        };
-      })()),
+      agent_id: row.agent_id ?? null,
+      status: row.status ?? null,
+      host_may_invoke: row.agent_id === null ? false : (row.host_may_invoke ?? false),
+      eligible: eligibility.eligible,
+      eligibility_reason: eligibility.eligible ? null : eligibility.reason,
       usage,
       limit_notices: (Object.keys(usage.used) as ElricKind[])
         .filter((kind) => usage.used[kind] >= usage.allowance[kind])
         .map((kind) => elricLimitNotice('owner_allowance', kind)),
-      waking: waking.map((row) => ({
-        room_id: row.room_id,
-        source_seq: Number(row.source_seq),
-        since: iso(Number(row.waking_since)),
+      waking: row.waking.map((item) => ({
+        room_id: item.room_id,
+        source_seq: Number(item.source_seq),
+        since: iso(Number(item.waking_since)),
         text: ELRIC_WAKING_TEXT,
       })),
     };
@@ -563,6 +631,12 @@ export function createElric(d: ElricDependencies) {
     const wall = d.wallClock ?? Date.now;
     /** This function run's wall-time deadline (the drain's), so no call outlives the platform. */
     const deadline = options.deadline ?? wall() + config.runBudgetMs;
+    const sleep = d.sleep ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)));
+    const log = d.log ?? ((line: string) => console.warn(line));
+    /** The transient error code a model call of this run was retried after, if any. */
+    let retried: string | null = null;
+    /** The units reserved for this run's model calls (set once reserved). */
+    let budgetUnits = Infinity;
     /** Resumed after a deferral: the reservation was made by an earlier run. */
     let resumed = false;
     /** Model steps that answered in this run (a deferral is only possible before the first). */
@@ -588,7 +662,10 @@ export function createElric(d: ElricDependencies) {
      * names in plain words, and the reply's credential check. A credential stops drafting for
      * the run (the draft is deleted; the final check refuses the reply).
      */
+    /** The raw text the current model call has streamed so far (kept for a cut-short answer). */
+    let streamed = '';
     const onText = (text: string) => {
+      streamed = text;
       if (!draftsOn) return;
       const shown = plainToolWords(stripMentions(text.normalize('NFKC'))).slice(
         0,
@@ -733,8 +810,50 @@ export function createElric(d: ElricDependencies) {
         return 'stop';
       }
       await track(estimate);
+      retried = null;
       try {
-        const response = await adapter.complete({ ...request, timeoutMs: remaining });
+        let response: ModelResponse;
+        const attemptStarted = wall();
+        try {
+          response = await adapter.complete({ ...request, timeoutMs: remaining });
+        } catch (first) {
+          // One retry of a transient failure, after a backoff, when the run still has the time
+          // and the turn budget for it. Anything else, or a second failure, is thrown.
+          if (!(first instanceof AdapterError) || !ELRIC_RETRY_ON.has(first.code)) throw first;
+          const charged = first.sent && CHARGED_FAILURES.has(first.code) ? estimate : 0;
+          // A 429 says when to come back; otherwise the fixed backoff.
+          const backoff = first.detail.retryAfterMs ?? ELRIC_RETRY_BACKOFF_MS;
+          const left = deadline - wall() - config.callMarginMs - backoff;
+          // A timed-out call needs at least as long again; anything else at least minCallMs.
+          const needed =
+            first.code === 'timeout'
+              ? Math.max(config.minCallMs, wall() - attemptStarted)
+              : config.minCallMs;
+          if (left < needed || usage.units + charged + estimate > budgetUnits) throw first;
+          usage.units += charged;
+          // Recorded before the retry, so a run cut off during it settles both attempts.
+          await track(estimate);
+          retried = first.code;
+          await sleep(backoff);
+          try {
+            response = await adapter.complete({
+              ...request,
+              timeoutMs: deadline - wall() - config.callMarginMs,
+            });
+          } catch (second) {
+            // A retry that skipped a fallback known to be down keeps the first attempt's code.
+            if (
+              second instanceof AdapterError &&
+              !second.detail.fallbackCode &&
+              first.detail.fallbackCode
+            )
+              throw new AdapterError(second.code, second.sent, {
+                ...second.detail,
+                fallbackCode: first.detail.fallbackCode,
+              });
+            throw second;
+          }
+        }
         if (inv.waking_since !== null) {
           await d.db.query(
             `UPDATE elric_invocations SET waking_since=NULL
@@ -769,6 +888,59 @@ export function createElric(d: ElricDependencies) {
         status,
       });
 
+    /**
+     * The reply checks, the one path for everything a model wrote before it is posted (a whole
+     * answer or a cut-short one): no credential (refused, nothing posted), no live mentions, tool
+     * names in plain words, valid citations, the length cap. NFKC first (what the room parser and
+     * credential patterns see), then check and strip.
+     */
+    async function checkReply(
+      raw: string,
+      maxChars: number,
+    ): Promise<
+      | { ok: true; text: string; stripped: number }
+      | { ok: false; reason: 'credential_in_reply' | 'empty_reply' }
+    > {
+      const normalized = raw.normalize('NFKC');
+      if (containsCredential(normalized)) return { ok: false, reason: 'credential_in_reply' };
+      const cited = await validateCitations(
+        d.db,
+        inv.room_id,
+        plainToolWords(stripMentions(normalized)).trim(),
+        visibleFrom,
+        Number(inv.source_seq),
+      );
+      const text = cited.text.trim().slice(0, maxChars);
+      if (!text) return { ok: false, reason: 'empty_reply' };
+      return { ok: true, text, stripped: cited.stripped.length };
+    }
+    /** Posts a reply under the run's label: the model's ("Elric · AI") or the automated one. */
+    const postModelReply = (text: string) => {
+      // One source for the public label (shared/elric-copy.ts): "Elric · AI", or
+      // "Elric · automated" for a Tier 0 reply that no model wrote.
+      const shown = model ?? ELRIC_DETERMINISTIC_MODEL;
+      return d.postReply({
+        ownerId: inv.owner_id,
+        agentId: inv.agent_id,
+        roomId: inv.room_id,
+        text,
+        idempotencyKey: `elric:${inv.agent_id}:${inv.room_id}:${inv.source_seq}`,
+        stamp: {
+          provider: 'elric',
+          model: shown,
+          label: elricReplyLabel(shown),
+          reply_to: Number(inv.source_seq),
+          ...(pendingIds.length ? { pending_id: pendingIds[0]! } : {}),
+        },
+        precondition: async (tx) => {
+          const again = await recheck(tx, inv, leaseId, reservation !== null);
+          return again.ok ? null : again.code;
+        },
+      });
+    };
+    /** Elric sees messages after this seq (set once room access is checked; none before). */
+    let visibleFrom = Number.MAX_SAFE_INTEGER;
+
     const started = d.clock();
     if (Number(inv.reserved_units) > 0 && inv.usage_day && inv.kind) {
       reservation = { units: Number(inv.reserved_units), day: inv.usage_day, kind: inv.kind };
@@ -796,6 +968,7 @@ export function createElric(d: ElricDependencies) {
     const access = await elricRoomAccess(d.db, inv.agent_id, inv.room_id, { mode: 'write' });
     if (!access.ok)
       return finish(INACTIVE.has(access.code) ? 'refused_inactive' : 'refused_access', access.code);
+    visibleFrom = access.visibleFromSeq;
     const trigger = (
       await d.db.query<{ parts: unknown[]; sender_name: string; sender_agent_id: string }>(
         'SELECT parts,sender_name,sender_agent_id FROM room_messages WHERE room_id=$1 AND seq=$2',
@@ -829,6 +1002,29 @@ export function createElric(d: ElricDependencies) {
           : '',
       )
       .join('\n');
+    /**
+     * A reply is posted: name a private conversation after its first reply, in the background
+     * (titles.ts checks the rest: first reply, fallback title, kill switch, status, ceiling).
+     */
+    const nameConversation = (replyText: string) => {
+      const titling = titleConversation({
+        db: d.db,
+        adapter: d.adapterFor(1),
+        config,
+        clock: d.clock,
+        env: env(),
+        gpuUnits: (inputTokens, outputTokens) => unitsOf(1, { inputTokens, outputTokens }),
+        ownerId: inv.owner_id,
+        agentId: inv.agent_id,
+        roomId: inv.room_id,
+        userText: requestText,
+        replyText,
+        remainingMs: () => deadline - wall() - config.callMarginMs,
+      })
+        .then(() => undefined)
+        .finally(() => titles.delete(titling));
+      titles.add(titling);
+    };
     const chosen: ElricRoute = route(requestText);
     tier = chosen.tier;
 
@@ -884,6 +1080,7 @@ export function createElric(d: ElricDependencies) {
         });
       }
       if (!resumed) reservation = { units, day, kind: chosen.kind };
+      budgetUnits = units;
       await d.probe?.('reserved');
       const tasksOn = d.tasksEnabled() && !!d.createTask;
       const tools = toolSpecs(tasksOn);
@@ -899,6 +1096,7 @@ export function createElric(d: ElricDependencies) {
         agentName: access.agent.name,
         tools,
         maxSteps: config.maxSteps,
+        privateChat: access.room.elric_private,
       });
       const conversation: ElricMessage[] = [
         {
@@ -935,6 +1133,8 @@ export function createElric(d: ElricDependencies) {
         }
         const before = await d.db.transaction((tx) => recheck(tx, inv, leaseId, true));
         if (!before.ok) return refused(before.code);
+        // Only the text of the call that fails can become a cut-short answer.
+        streamed = '';
         let response: ModelResponse;
         try {
           const answered = await callModel(
@@ -964,6 +1164,54 @@ export function createElric(d: ElricDependencies) {
           // before anything was sent cost nothing. The allowance count is given back either way.
           if (error instanceof AdapterError && error.sent && CHARGED_FAILURES.has(code))
             usage.units += nextEstimate;
+          // Operators see why a turn failed: codes only, never prompt text, names or ids of people.
+          log(
+            JSON.stringify({
+              event: 'elric_turn_failed',
+              code,
+              primary_code: code,
+              fallback_code:
+                error instanceof AdapterError ? (error.detail.fallbackCode ?? null) : null,
+              retried,
+              tier: stepTier,
+              step,
+              sent: error instanceof AdapterError ? error.sent : false,
+            }),
+          );
+          // The answer broke off after real text: post that text, cut cleanly and marked, through
+          // the same reply checks as a whole answer. Billing: the units above are what the call
+          // consumed (as for any failure; nothing more is charged). The allowance count is NOT
+          // given back: the owner got an answer. Anything that fails the checks, or is too short,
+          // falls through to the plain line below (and its refund).
+          // The refusal checks run on the WHOLE streamed text, not only the part kept: a key
+          // after the cut would have refused the full answer, so it refuses the partial too (as
+          // does drafting having stopped for a credential).
+          const whole = streamed.normalize('NFKC');
+          const marker = `\n\n${ELRIC_CUT_SHORT_MARKER}`;
+          const cut =
+            !pendingIds.length && draftsOn && !containsCredential(whole)
+              ? cutPartial(streamed.slice(0, config.replyChars - marker.length))
+              : null;
+          if (cut !== null) {
+            const checked = await checkReply(cut, config.replyChars - marker.length);
+            if (checked.ok && visibleChars(checked.text) >= ELRIC_PARTIAL_MIN_CHARS) {
+              const posted = await postModelReply(`${checked.text}${marker}`);
+              if (posted.ok) {
+                log(
+                  JSON.stringify({
+                    event: 'elric_turn_partial',
+                    code,
+                    chars: [...checked.text].length,
+                    tier: stepTier,
+                    step,
+                  }),
+                );
+                const done = await finish('error', `partial:${code}`, { postedSeq: posted.seq });
+                nameConversation(checked.text);
+                return done;
+              }
+            }
+          }
           // Before any pending action, the owner gets a plain line instead of silence. No model
           // wrote it, so it carries the automated label.
           if (!pendingIds.length) {
@@ -977,6 +1225,7 @@ export function createElric(d: ElricDependencies) {
                 provider: 'elric',
                 model: ELRIC_DETERMINISTIC_MODEL,
                 label: elricReplyLabel(ELRIC_DETERMINISTIC_MODEL),
+                reply_to: Number(inv.source_seq),
               },
               precondition: async (tx) => {
                 const again = await recheck(tx, inv, leaseId, reservation !== null);
@@ -1140,45 +1389,20 @@ export function createElric(d: ElricDependencies) {
       if (pendingIds.length) text = ELRIC_PENDING_REPLY;
     }
 
-    // Reply checks: no credential (refused, nothing posted), no live mentions, valid citations.
-    // NFKC first (what the room parser and credential patterns see), then check and strip.
-    text = text.normalize('NFKC');
-    if (containsCredential(text)) return finish('refused_credential', 'credential_in_reply');
-    text = plainToolWords(stripMentions(text)).trim();
-    const cited = await validateCitations(
-      d.db,
-      inv.room_id,
-      text,
-      access.visibleFromSeq,
-      Number(inv.source_seq),
-    );
-    text = cited.text.trim().slice(0, config.replyChars);
-    if (cited.stripped.length) reason = reason ?? `citations_stripped:${cited.stripped.length}`;
-    if (!text) return finish('error', 'empty_reply', { refund: true });
+    const checked = await checkReply(text, config.replyChars);
+    if (!checked.ok)
+      return checked.reason === 'credential_in_reply'
+        ? finish('refused_credential', 'credential_in_reply')
+        : finish('error', 'empty_reply', { refund: true });
+    text = checked.text;
+    if (checked.stripped) reason = reason ?? `citations_stripped:${checked.stripped}`;
 
     await d.probe?.('before_post');
-    // One source for the public label (shared/elric-copy.ts): "Elric · AI", or
-    // "Elric · automated" for a Tier 0 reply that no model wrote.
-    const shown = model ?? ELRIC_DETERMINISTIC_MODEL;
-    const posted = await d.postReply({
-      ownerId: inv.owner_id,
-      agentId: inv.agent_id,
-      roomId: inv.room_id,
-      text,
-      idempotencyKey: `elric:${inv.agent_id}:${inv.room_id}:${inv.source_seq}`,
-      stamp: {
-        provider: 'elric',
-        model: shown,
-        label: elricReplyLabel(shown),
-        ...(pendingIds.length ? { pending_id: pendingIds[0]! } : {}),
-      },
-      precondition: async (tx) => {
-        const again = await recheck(tx, inv, leaseId, reservation !== null);
-        return again.ok ? null : again.code;
-      },
-    });
+    const posted = await postModelReply(text);
     if (!posted.ok) return refused(posted.code);
-    return finish(outcome, reason, { postedSeq: posted.seq });
+    const done = await finish(outcome, reason, { postedSeq: posted.seq });
+    nameConversation(text);
+    return done;
   }
 
   /** Tier 0: plain code over this room only (through the agent-bound access), no model. */
@@ -1221,11 +1445,16 @@ export function createElric(d: ElricDependencies) {
     return ['Open tasks:', ...lines, ...(tasks.length > 20 ? ['- and more'] : [])].join('\n');
   }
 
+  /** Title calls in flight (titles.ts); a drain waits for them so the platform keeps them. */
+  const titles = new Set<Promise<void>>();
+  const titlesSettled = async () => {
+    while (titles.size) await Promise.allSettled([...titles]);
+  };
+
   let draining: Promise<number> | null = null;
   /** Runs queued invocations (single-flight per instance) until none is left or the budget ends. */
   function drain(budgetMs = config.runBudgetMs): Promise<number> {
-    if (draining) return draining;
-    draining = (async () => {
+    draining ??= (async () => {
       const wall = d.wallClock ?? Date.now;
       // Never past the run budget: the platform cuts a function off at its limit.
       const deadline = wall() + Math.min(budgetMs, config.runBudgetMs);
@@ -1261,11 +1490,18 @@ export function createElric(d: ElricDependencies) {
           if (!progressed) break;
         }
       } finally {
+        // The queue is done: a new message may start the next drain right away, without
+        // waiting for a background title call (titles.ts).
         draining = null;
       }
       return handled;
     })();
-    return draining;
+    // The caller (one platform invocation) still waits for the title calls it started, so the
+    // platform keeps them; each one is capped at its run's deadline.
+    return draining.then(async (handled) => {
+      await titlesSettled();
+      return handled;
+    });
   }
 
   async function killSwitch(enabled: boolean, actor: string): Promise<void> {
@@ -1322,6 +1558,7 @@ export function createElric(d: ElricDependencies) {
       listElricTurns(d.db, ownerId, options),
     run,
     drain,
+    titlesSettled,
     killSwitch,
     approve,
   };

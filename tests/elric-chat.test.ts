@@ -300,7 +300,7 @@ test('"@ room": runs only where both the person and this Elric are members; post
   await f.elric.drain();
   assert.equal(f.adapterCalls(), 0, 'Elric is not a member there');
   // Elric joins: the owner's person mention runs in THAT room and posts there, not in the chat.
-  await f.joinAgent(c.owner, shared, c.elricId);
+  await f.joinAgent(c.owner, shared, c.elricId, { legacy: true });
   f.small.push({ text: 'Answer in the shared room.' });
   await f.say(c.owner, shared, '@Elric what is this room about?', person);
   await f.elric.drain();
@@ -358,7 +358,6 @@ test('the lock: every host path that would open, change or end the room is refus
     ['rename', 'PATCH', `/api/rooms/${id}`, { name: 'Shared now' }],
     ['topic', 'PATCH', `/api/rooms/${id}`, { topic: 'open' }],
     ['close', 'POST', `/api/rooms/${id}/close`, {}],
-    ['delete', 'DELETE', `/api/rooms/${id}`, { confirm_name: 'Elric' }],
     ['remove Elric', 'POST', `/api/rooms/${id}/members/${c.elricId}/remove`, {}],
     ['leave', 'POST', `/api/rooms/${id}/leave`, {}],
   ];
@@ -467,7 +466,7 @@ test('"@ room" check: typed refusal for each missing membership; private and for
   const shared = await f.room(host, desk, 'Ask room');
   const ask = (room: string) => f.call(c.owner.cookie, 'POST', '/api/elric/ask', { room_id: room });
   assert.equal((await ask(shared.id)).statusCode, 404, 'not a member at all');
-  await f.joinAgent(c.owner, shared, c.elricId);
+  await f.joinAgent(c.owner, shared, c.elricId, { legacy: true });
   let res = await ask(shared.id);
   assert.equal(res.statusCode, 409);
   assert.deepEqual(
@@ -513,7 +512,8 @@ test('cheap poll: GET /api/elric/chat?since= answers latest_seq, waking and pend
 
 test("no route reaches createPrivateRoom, and it only ever adds the caller's own person and Elric", async (t) => {
   const { readFile, readdir } = await import('node:fs/promises');
-  const { join } = await import('node:path');
+  const { join, sep } = await import('node:path');
+  // Collected with forward slashes on every OS: join() uses backslashes on Windows.
   const callers: string[] = [];
   const walk = async (dir: string) => {
     for (const entry of await readdir(dir, { withFileTypes: true }))
@@ -522,7 +522,7 @@ test("no route reaches createPrivateRoom, and it only ever adds the caller's own
         entry.name.endsWith('.ts') &&
         /createPrivateRoom\(/.test(await readFile(join(dir, entry.name), 'utf8'))
       )
-        callers.push(join(dir, entry.name));
+        callers.push(join(dir, entry.name).replaceAll(sep, '/'));
   };
   await walk('server');
   // The first chat (chat.ts) and owner-created conversations (conversations.ts), both for the

@@ -111,7 +111,7 @@
   border-radius: var(--radius-s);
   background: var(--surface);
   color: var(--text);
-  font: 400 16px/24px var(--font-sans);
+  font: 400 calc(16 * var(--ws-type-px)) / calc(24 * var(--ws-type-px)) var(--font-sans);
 }
 .rm-inline-error {
   display: flex;
@@ -149,8 +149,8 @@
 }
 .rm-person {
   display: inline-block;
-  margin-left: var(--space-1, 4px);
-  padding: 0 6px;
+  margin-left: var(--space-1, calc(4 * var(--ws-px)));
+  padding: 0 calc(6 * var(--ws-px));
   border-radius: var(--radius-full);
   background: var(--surface-sunken);
   color: var(--text-muted);
@@ -218,9 +218,9 @@
   white-space: nowrap;
 }
 .rm-badge {
-  min-width: 20px;
-  height: 20px;
-  padding: 0 6px;
+  min-width: calc(20 * var(--ws-px));
+  height: calc(20 * var(--ws-px));
+  padding: 0 calc(6 * var(--ws-px));
   display: inline-grid;
   place-items: center;
   border-radius: var(--radius-full);
@@ -240,7 +240,7 @@
 .rm-row-skeletons span,
 .rm-skeletons span {
   display: block;
-  height: 36px;
+  height: calc(36 * var(--ws-px));
   border-radius: var(--radius-s);
   background: var(--surface);
   opacity: 0.7;
@@ -303,7 +303,7 @@
 }
 .rm-skeletons span {
   width: 60%;
-  height: 56px;
+  height: calc(56 * var(--ws-px));
   border-radius: var(--radius-m);
 }
 .rm-skeletons span.right {
@@ -386,7 +386,7 @@
   color: var(--link);
 }
 .rm-mention {
-  padding: 0 4px;
+  padding: 0 calc(4 * var(--ws-px));
   border-radius: var(--radius-s);
   background: var(--mention-tint);
   color: var(--mention);
@@ -402,7 +402,7 @@
 }
 .rm-data summary {
   cursor: pointer;
-  min-height: 32px;
+  min-height: calc(32 * var(--ws-px));
   display: flex;
   align-items: center;
   color: var(--link);
@@ -410,7 +410,7 @@
 .rm-data pre {
   margin: 0 0 var(--space-2);
   padding: var(--space-2) var(--space-3);
-  max-height: 300px;
+  max-height: calc(300 * var(--ws-px));
   overflow: auto;
   border-radius: var(--radius-s);
   background: var(--surface-sunken);
@@ -426,7 +426,7 @@
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
-  min-height: 36px;
+  min-height: calc(36 * var(--ws-px));
   padding: 0 var(--space-4);
   border: 1px solid var(--border);
   border-radius: var(--radius-full);
@@ -437,8 +437,10 @@
 }
 .rm-empty {
   flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   display: grid;
-  align-content: center;
+  align-content: safe center;
   justify-items: center;
   gap: var(--space-3);
   padding: var(--space-6);
@@ -468,7 +470,7 @@
   left: var(--space-2);
   bottom: calc(100% + var(--space-2));
   z-index: 5;
-  min-width: 240px;
+  min-width: calc(240 * var(--ws-px));
   max-width: calc(100% - 2 * var(--space-2));
   margin: 0;
   padding: var(--space-1);
@@ -508,7 +510,7 @@
 .rm-mstatus {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: calc(6 * var(--ws-px));
   color: var(--text-muted);
   font: var(--type-meta);
   /* "Offline · 2 d ago" stays on one line next to the host actions. */
@@ -522,8 +524,8 @@
   text-overflow: ellipsis;
 }
 .rm-mstatus-dot {
-  width: 8px;
-  height: 8px;
+  width: calc(8 * var(--ws-px));
+  height: calc(8 * var(--ws-px));
   flex: none;
   border-radius: var(--radius-full);
   border: 1.5px solid var(--text-muted);
@@ -586,10 +588,10 @@
 }
 .rm-confirm .rm-danger,
 .rm-confirm .rm-quiet {
-  min-height: 30px;
-  padding: 0 10px;
-  font-size: 13px;
-  line-height: 18px;
+  min-height: calc(30 * var(--ws-px));
+  padding: 0 calc(10 * var(--ws-px));
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  line-height: calc(18 * var(--ws-type-px));
   white-space: nowrap;
 }
 .rm-confirm .rm-danger {
@@ -625,14 +627,15 @@
   justify-self: stretch;
 }
 .rm-invite .rm-check {
-  min-height: 32px;
+  min-height: calc(32 * var(--ws-px));
 }
 
 /* Sheets (Invite, New room) */
 .rm-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 20;
+  /* Above the sidebar (30) and the phone drawer (50): a modal covers the whole app. */
+  z-index: 60;
   display: grid;
   place-items: center;
   padding: var(--space-4);
@@ -762,8 +765,8 @@
   min-height: var(--target);
 }
 .rm-choice input {
-  width: 18px;
-  height: 18px;
+  width: calc(18 * var(--ws-px));
+  height: calc(18 * var(--ws-px));
   accent-color: var(--primary);
 }
 .rm-actions {
@@ -834,8 +837,8 @@
 /* Room tasks panel (TasksPanel.tsx): design tokens only, so it follows the theme and the v8
    foundation. Status is a text label plus a dot whose shape differs (never colour only). */
 .rm-task-count {
-  min-width: 18px;
-  padding: 0 5px;
+  min-width: calc(18 * var(--ws-px));
+  padding: 0 calc(5 * var(--ws-px));
   border-radius: var(--radius-full);
   background: var(--primary);
   color: var(--on-primary);
@@ -846,6 +849,60 @@
 .rm-task-form {
   display: grid;
   gap: var(--space-2);
+}
+/* "Start from": template radios drawn as chips that wrap on narrow screens. */
+.rm-task-templates {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.rm-task-templates legend {
+  padding: 0;
+  margin-bottom: var(--space-1);
+  font: var(--type-ui);
+}
+.rm-template-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+.rm-template-chip {
+  position: relative;
+  display: inline-flex;
+}
+.rm-template-chip input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.rm-template-chip span {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--target);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  color: var(--text);
+  font: var(--type-meta);
+  white-space: nowrap;
+}
+.rm-template-chip:hover span {
+  background: var(--accent-tint);
+}
+.rm-template-chip input:checked + span {
+  border-color: var(--primary);
+  background: var(--accent-tint);
+  font-weight: 600;
+}
+.rm-template-chip input:focus-visible + span {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
 .rm-task-details {
   min-height: calc(var(--target) * 2);
@@ -892,14 +949,14 @@
 .rm-task-status {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: calc(6 * var(--ws-px));
   color: var(--text-muted);
   font: var(--type-meta);
   white-space: nowrap;
 }
 .rm-task-dot {
-  width: 8px;
-  height: 8px;
+  width: calc(8 * var(--ws-px));
+  height: calc(8 * var(--ws-px));
   flex: none;
   border: 1.5px solid var(--text-muted);
   border-radius: var(--radius-full);
@@ -933,6 +990,19 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+/* Task details rendered as Markdown (TasksPanel TaskBody): compact headings in the card. */
+.rm-task-md {
+  white-space: normal;
+}
+.rm-task-md .rm-task-plain {
+  margin: 0;
+  white-space: pre-wrap;
+}
+.rm-task-md .md-h {
+  font: var(--type-meta);
+  font-weight: 600;
+  color: var(--text);
+}
 .rm-task-ref {
   color: var(--text);
   font-family: var(--font-mono);
@@ -944,6 +1014,87 @@
 }
 .rm-task-cancel {
   justify-self: start;
+}
+/* Task comments (TaskComments.tsx): a thread inside the task card, design tokens only. */
+.rm-task-comments-toggle {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.rm-task-comment-count {
+  min-width: calc(18 * var(--ws-px));
+  padding: 0 calc(5 * var(--ws-px));
+  border-radius: var(--radius-full);
+  background: var(--accent-tint);
+  color: var(--text);
+  font: var(--type-meta);
+  font-weight: 600;
+  text-align: center;
+}
+.rm-comments {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+.rm-comment-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+.rm-comment {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: var(--space-2);
+  border-radius: var(--radius-m);
+  background: var(--surface-sunken);
+}
+.rm-comment[data-own] {
+  background: var(--accent-tint);
+}
+.rm-comment-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0 var(--space-2);
+}
+.rm-comment-author {
+  min-width: 0;
+  font: var(--type-meta);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.rm-comment-body {
+  margin: 0;
+  color: var(--text);
+  font: var(--type-ui);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.rm-comment-delete {
+  justify-self: start;
+}
+.rm-comment-form {
+  display: grid;
+  gap: var(--space-1);
+}
+.rm-comment-input {
+  min-height: calc(var(--target) * 1.5);
+  padding-block: var(--space-2);
+  resize: vertical;
+}
+.rm-comment-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
 }
 
 /* Room Code panel (RepoPanel.tsx): design tokens only. */
@@ -975,7 +1126,7 @@
 /* Room page: top bar, document-style thread, floating composer, side panels, Connect AI.
    Design tokens only; the room uses the site font (Inter) and the site type scale. */
 .rm-room {
-  --type-heading: 500 16px/24px var(--font-sans);
+  --type-heading: 500 calc(16 * var(--ws-type-px)) / calc(24 * var(--ws-type-px)) var(--font-sans);
   font: var(--type-body);
 }
 .rm-room button,
@@ -1005,10 +1156,10 @@
 .rm-crumbs a {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: calc(6 * var(--ws-px));
   max-width: 100%;
   white-space: nowrap;
-  min-height: 32px;
+  min-height: calc(32 * var(--ws-px));
   padding: 0 var(--space-2);
   border-radius: var(--radius-s);
   color: var(--text-muted);
@@ -1030,7 +1181,7 @@
   align-items: center;
   justify-content: center;
   gap: var(--space-2);
-  min-height: 36px;
+  min-height: calc(36 * var(--ws-px));
   padding: 0 var(--space-3);
   border: 1px solid var(--border-control);
   border-radius: var(--radius-s);
@@ -1047,16 +1198,16 @@
   background: var(--accent-tint);
 }
 .rm-room-head .rm-primary {
-  min-height: 36px;
+  min-height: calc(36 * var(--ws-px));
 }
 .rm-icon-btn {
-  width: 36px;
+  width: calc(36 * var(--ws-px));
   padding: 0;
 }
 .rm-count,
 .rm-task-count {
-  min-width: 20px;
-  padding: 0 6px;
+  min-width: calc(20 * var(--ws-px));
+  padding: 0 calc(6 * var(--ws-px));
   border-radius: var(--radius-full);
   background: var(--surface-sunken);
   color: var(--text);
@@ -1072,7 +1223,7 @@
   top: calc(100% + var(--space-1));
   right: 0;
   z-index: 12;
-  min-width: 220px;
+  min-width: calc(220 * var(--ws-px));
   display: grid;
   padding: var(--space-1);
   border: 1px solid var(--border);
@@ -1084,7 +1235,7 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  min-height: 36px;
+  min-height: calc(36 * var(--ws-px));
   padding: 0 var(--space-3);
   border: 0;
   border-radius: var(--radius-s);
@@ -1129,7 +1280,7 @@
 /* Messages read like a document: avatar, byline, body. No bubbles. */
 .rm-message {
   display: grid;
-  grid-template-columns: 32px minmax(0, 1fr);
+  grid-template-columns: calc(32 * var(--ws-px)) minmax(0, 1fr);
   column-gap: var(--space-3);
   margin-top: var(--space-5);
 }
@@ -1142,8 +1293,8 @@
 .rm-avatar {
   grid-column: 1;
   grid-row: 1 / span 2;
-  width: 32px;
-  height: 32px;
+  width: calc(32 * var(--ws-px));
+  height: calc(32 * var(--ws-px));
   display: inline-grid;
   place-items: center;
   border: 1px solid var(--border);
@@ -1167,7 +1318,7 @@
   flex-wrap: wrap;
   align-items: baseline;
   gap: 2px var(--space-2);
-  min-height: 24px;
+  min-height: calc(24 * var(--ws-px));
   margin-bottom: 2px;
   color: var(--text-muted);
   font: var(--type-meta);
@@ -1185,7 +1336,7 @@
 .rm-person {
   display: inline-block;
   margin: 0;
-  padding: 0 6px;
+  padding: 0 calc(6 * var(--ws-px));
   border: 1px solid var(--border);
   border-radius: var(--radius-s);
   background: var(--surface-sunken);
@@ -1213,7 +1364,7 @@
 }
 .rm-own-bubble {
   max-width: 75%;
-  padding: 10px 14px;
+  padding: calc(10 * var(--ws-px)) calc(14 * var(--ws-px));
   border-radius: 12px;
   background: var(--bg-surface-hover);
 }
@@ -1273,9 +1424,9 @@
   flex: 0 1 auto;
   min-width: 0;
   max-width: 24ch;
-  height: 28px;
-  min-height: 28px;
-  padding: 0 4px;
+  height: calc(28 * var(--ws-px));
+  min-height: calc(28 * var(--ws-px));
+  padding: 0 calc(4 * var(--ws-px));
   border: 0;
   border-radius: var(--radius-full);
   background: transparent;
@@ -1293,7 +1444,7 @@
 }
 .rm-compose-row textarea {
   flex: 1;
-  min-height: 40px;
+  min-height: calc(40 * var(--ws-px));
   padding: var(--space-2) var(--space-1);
   border: 0;
   outline: none;
@@ -1301,11 +1452,11 @@
   background: none;
   color: var(--text);
   /* 16px keeps phones from zooming the page on focus. */
-  font: 400 16px/24px var(--font-sans);
+  font: 400 calc(16 * var(--ws-type-px)) / calc(24 * var(--ws-type-px)) var(--font-sans);
 }
 @media (min-width: 900px) {
   .rm-compose-row textarea {
-    font-size: 15px;
+    font-size: calc(15 * var(--ws-type-px));
   }
 }
 .rm-compose-tools {
@@ -1317,8 +1468,8 @@
   flex: 1;
 }
 .rm-tool {
-  width: 32px;
-  height: 32px;
+  width: calc(32 * var(--ws-px));
+  height: calc(32 * var(--ws-px));
   display: inline-grid;
   place-items: center;
   border: 0;
@@ -1333,8 +1484,8 @@
 }
 .rm-send {
   flex: none;
-  width: 36px;
-  height: 36px;
+  width: calc(36 * var(--ws-px));
+  height: calc(36 * var(--ws-px));
   display: grid;
   place-items: center;
   border: 0;
@@ -1350,7 +1501,7 @@
 
 /* Side panels (Members, Tasks, Code). */
 .rm-panel {
-  width: 340px;
+  width: calc(340 * var(--ws-px));
   flex: none;
   display: flex;
   flex-direction: column;
@@ -1429,7 +1580,7 @@
   gap: var(--space-3);
 }
 .rm-textarea {
-  min-height: 80px;
+  min-height: calc(80 * var(--ws-px));
   padding: var(--space-2) var(--space-3);
   resize: vertical;
 }
@@ -1513,10 +1664,10 @@
 }
 .rm-delete-confirm .rm-danger,
 .rm-delete-confirm .rm-quiet {
-  min-height: 30px;
-  padding: 0 10px;
-  font-size: 13px;
-  line-height: 18px;
+  min-height: calc(30 * var(--ws-px));
+  padding: 0 calc(10 * var(--ws-px));
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  line-height: calc(18 * var(--ws-type-px));
 }
 /* The Remove confirmation adds a reason field under the question. */
 .rm-remove-confirm {
@@ -1531,7 +1682,7 @@
 }
 .rm-remove-confirm .rm-input {
   flex-basis: 100%;
-  min-height: 36px;
+  min-height: calc(36 * var(--ws-px));
 }
 .rm-remove-note {
   flex-basis: 100%;
@@ -1556,10 +1707,10 @@
 .rm-danger-row .rm-danger.rm-danger-solid,
 .rm-delete-confirm .rm-danger.rm-danger-solid,
 .rm-delete-confirm .rm-secondary {
-  min-height: 32px;
+  min-height: calc(32 * var(--ws-px));
   padding: 0 var(--space-3);
-  font-size: 13px;
-  line-height: 18px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  line-height: calc(18 * var(--ws-type-px));
 }
 .rm-app .rm-danger.rm-danger-solid:hover:not(:disabled),
 .rm-panel .rm-danger.rm-danger-solid:hover:not(:disabled) {
@@ -1578,10 +1729,10 @@
   cursor: not-allowed;
 }
 .rm-panel .rm-remove-confirm .rm-danger.rm-danger-solid {
-  min-height: 32px;
+  min-height: calc(32 * var(--ws-px));
   padding: 0 var(--space-3);
-  font-size: 13px;
-  line-height: 18px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  line-height: calc(18 * var(--ws-type-px));
 }
 /* The neutral secondary button next to a filled red one (Cancel). */
 .rm-secondary {
@@ -1607,14 +1758,14 @@
   gap: var(--space-1);
 }
 .rm-member-actions .rm-quiet {
-  min-height: 32px;
+  min-height: calc(32 * var(--ws-px));
   padding: 0 var(--space-2);
   font: var(--type-meta);
 }
 .rm-muted-label {
   justify-self: start;
   margin-top: 2px;
-  padding: 0 6px;
+  padding: 0 calc(6 * var(--ws-px));
   border: 1px solid var(--border);
   border-radius: var(--radius-s);
   color: var(--text-muted);
@@ -1681,7 +1832,7 @@
   flex: none;
 }
 .rm-copy-line .copy-button {
-  min-height: 32px;
+  min-height: calc(32 * var(--ws-px));
   padding: 0 var(--space-3);
   font: var(--type-ui);
 }
@@ -1693,7 +1844,7 @@
 .rm-connect-link {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: calc(4 * var(--ws-px));
   justify-self: start;
   color: var(--link);
   font: var(--type-ui);
@@ -1739,11 +1890,11 @@
   }
   .rm-room-head .rm-outline,
   .rm-room-head .rm-primary {
-    min-height: 40px;
+    min-height: calc(40 * var(--ws-px));
     padding: 0 var(--space-2);
   }
   .rm-crumbs a {
-    min-height: 40px;
+    min-height: calc(40 * var(--ws-px));
     padding: 0 var(--space-1);
   }
   .rm-panel {
@@ -1755,12 +1906,12 @@
     border-radius: var(--radius-l) var(--radius-l) 0 0;
   }
   .rm-message {
-    grid-template-columns: 28px minmax(0, 1fr);
+    grid-template-columns: calc(28 * var(--ws-px)) minmax(0, 1fr);
     column-gap: var(--space-2);
   }
   .rm-avatar {
-    width: 28px;
-    height: 28px;
+    width: calc(28 * var(--ws-px));
+    height: calc(28 * var(--ws-px));
   }
   .rm-composer {
     width: calc(100% - 2 * var(--space-2));
@@ -1781,11 +1932,11 @@
   background: var(--surface-sunken);
   border: 1px solid var(--border);
   border-radius: var(--radius-m);
-  padding: 8px 12px;
+  padding: calc(8 * var(--ws-px)) calc(12 * var(--ws-px));
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: calc(12 * var(--ws-px));
   margin: 0;
 }
 .rm-elric-card-left {
@@ -1796,7 +1947,7 @@
   min-width: 0;
 }
 .rm-elric-card-text {
-  font-size: 12.5px;
+  font-size: max(12px, calc(12.5 * var(--ws-type-px)));
   color: var(--text-primary);
   font-weight: 500;
 }
@@ -1807,19 +1958,19 @@
 }
 .rm-dob-disclosure {
   font-size: 11.5px;
-  margin-top: 4px;
+  margin-top: calc(4 * var(--ws-px));
   line-height: 1.3;
 }
 .rm-elric-card-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: calc(6 * var(--ws-px));
   flex-shrink: 0;
 }
 .rm-btn-sm {
-  height: 26px;
-  min-height: 26px;
-  padding: 0 10px;
+  height: calc(26 * var(--ws-px));
+  min-height: calc(26 * var(--ws-px));
+  padding: 0 calc(10 * var(--ws-px));
   border-radius: var(--radius-s);
   font-size: 12px;
   font-weight: 500;
@@ -1864,7 +2015,7 @@
 .rm-badge-elric {
   display: inline-flex;
   align-items: center;
-  padding: 0 5px;
+  padding: 0 calc(5 * var(--ws-px));
   border-radius: var(--radius-s);
   background: var(--surface-sunken);
   border: 1px solid var(--border);
@@ -1877,7 +2028,7 @@
 .rm-badge-reply {
   display: inline-flex;
   align-items: center;
-  padding: 0 6px;
+  padding: 0 calc(6 * var(--ws-px));
   border-radius: var(--radius-full);
   background: var(--surface-sunken);
   border: 1px solid var(--border);
@@ -1895,11 +2046,11 @@
   margin-left: 2px;
 }
 .rm-elric-card-error {
-  margin: 4px 0 0;
+  margin: calc(4 * var(--ws-px)) 0 0;
   font-size: 12px;
 }
 .rm-dob-title {
-  font-size: 18px;
+  font-size: calc(18 * var(--ws-type-px));
   font-weight: 600;
   margin: 0;
 }
@@ -1908,13 +2059,13 @@
 }
 .rm-dob-note {
   margin: 0;
-  font-size: 13px;
-  line-height: 18px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  line-height: calc(18 * var(--ws-type-px));
   color: var(--text-muted);
 }
 .rm-dob-error {
   margin: 0;
-  font-size: 13px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
   color: var(--error);
 }
 
@@ -1922,15 +2073,94 @@
 .rm-members-add-elric {
   display: flex;
 }
-/* Room header: the host's one-click Elric switch next to Members ("Elric", the track, On/Off). */
+/* Room header: the host's one-click Elric switch ("Elric", the track, On/Off). */
 .rm-head-elric {
   display: inline-flex;
   align-items: center;
 }
+/* "+ Add Elric" before Elric was ever added: a dashed outline, the accent colour. */
+.rm-room-head .rm-head-add-elric {
+  border-style: dashed;
+  border-color: var(--primary);
+  color: var(--primary);
+  white-space: nowrap;
+}
 .rm-head-elric .cc-switch {
-  gap: 6px;
-  font-size: 14px;
+  gap: calc(6 * var(--ws-px));
+  font-size: calc(14 * var(--ws-type-px));
   font-weight: 500;
+}
+
+/* The host's Elric switch while a step is missing (ElricSetupSwitch): a small popover under it. */
+.rm-elric-setup {
+  position: relative;
+  display: inline-flex;
+}
+.rm-elric-popover {
+  position: absolute;
+  top: calc(100% + calc(8 * var(--ws-px)));
+  right: 0;
+  z-index: 30;
+  width: min(320px, calc(100vw - calc(32 * var(--ws-px))));
+  box-sizing: border-box;
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--elev-3);
+  text-align: left;
+  white-space: normal;
+}
+.rm-elric-popover,
+.rm-elric-popover form {
+  display: grid;
+  gap: var(--space-3);
+}
+.rm-elric-popover-title {
+  margin: 0;
+  font-size: calc(16 * var(--ws-type-px));
+  line-height: calc(22 * var(--ws-type-px));
+  font-weight: 600;
+}
+.rm-elric-popover .rm-actions {
+  margin: 0;
+}
+.rm-elric-popover-link {
+  text-decoration: none;
+}
+/* In the Members panel it opens in place, under the switch, as wide as the panel. */
+.rm-members-add-elric .rm-elric-setup {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-2);
+  width: 100%;
+}
+.rm-members-add-elric .rm-elric-popover {
+  position: static;
+  width: 100%;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .rm-elric-popover {
+    animation: rm-elric-popover-in 120ms ease-out;
+  }
+}
+@keyframes rm-elric-popover-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+/* Phones: a card along the bottom of the screen, full width with the 16px gutter. */
+@media (max-width: 640px) {
+  .rm-head-elric .rm-elric-popover {
+    position: fixed;
+    top: auto;
+    left: calc(16 * var(--ws-px));
+    right: calc(16 * var(--ws-px));
+    bottom: max(calc(16 * var(--ws-px)), env(safe-area-inset-bottom));
+    width: auto;
+  }
 }
 
 .rm-btn-add-elric {
@@ -1939,14 +2169,14 @@
   justify-content: center;
   gap: var(--space-2);
   width: 100%;
-  height: 34px;
+  height: calc(34 * var(--ws-px));
   padding: 0 var(--space-3);
   border-radius: var(--radius-m);
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text);
   font: var(--type-ui);
-  font-size: 13px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
   font-weight: 500;
   cursor: pointer;
   transition:
@@ -1964,19 +2194,19 @@
 
 @media (max-width: 480px) {
   .rm-elric-card {
-    padding: 6px 10px;
-    gap: 8px;
+    padding: calc(6 * var(--ws-px)) calc(10 * var(--ws-px));
+    gap: calc(8 * var(--ws-px));
   }
   .rm-elric-card-text {
     font-size: 12px;
   }
   .rm-elric-card-actions {
-    gap: 4px;
+    gap: calc(4 * var(--ws-px));
   }
   .rm-btn-sm {
-    height: 24px;
-    min-height: 24px;
-    padding: 0 8px;
+    height: calc(24 * var(--ws-px));
+    min-height: calc(24 * var(--ws-px));
+    padding: 0 calc(8 * var(--ws-px));
     font-size: 11.5px;
   }
 }
@@ -1985,8 +2215,8 @@
 .rm-waking-pill {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 3px 10px;
+  gap: calc(6 * var(--ws-px));
+  padding: 3px calc(10 * var(--ws-px));
   border-radius: var(--radius-full);
   background: var(--surface-sunken);
   border: 1px solid var(--border);
@@ -1996,8 +2226,8 @@
   animation: pulseOpacity 2s ease-in-out infinite;
 }
 .rm-pulse-dot {
-  width: 6px;
-  height: 6px;
+  width: calc(6 * var(--ws-px));
+  height: calc(6 * var(--ws-px));
   border-radius: 50%;
   background: var(--accent);
   animation: pulseDot 1.4s ease-in-out infinite;
@@ -2035,17 +2265,17 @@
   border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
   border-radius: var(--radius-s);
-  padding: 6px 10px;
+  padding: calc(6 * var(--ws-px)) calc(10 * var(--ws-px));
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: calc(10 * var(--ws-px));
   box-shadow: var(--shadow-sm);
 }
 .rm-limit-content {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: calc(7 * var(--ws-px));
   font-size: 12px;
 }
 .rm-limit-icon {
@@ -2058,12 +2288,12 @@
 }
 .rm-limit-text span {
   color: var(--text-muted);
-  margin-left: 4px;
+  margin-left: calc(4 * var(--ws-px));
 }
 .rm-limit-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: calc(6 * var(--ws-px));
   flex-shrink: 0;
 }
 .rm-limit-cta {
@@ -2072,8 +2302,8 @@
   color: var(--text-primary);
   font-size: 11.5px;
   font-weight: 500;
-  height: 24px;
-  padding: 0 8px;
+  height: calc(24 * var(--ws-px));
+  padding: 0 calc(8 * var(--ws-px));
   border-radius: 4px;
   text-decoration: none;
   display: inline-flex;
@@ -2091,27 +2321,27 @@
   border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
   border-radius: var(--radius-s);
-  padding: 6px 10px;
+  padding: calc(6 * var(--ws-px)) calc(10 * var(--ws-px));
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: calc(10 * var(--ws-px));
   font-size: 12px;
   color: var(--text-primary);
 }
 .rm-ephemeral-content {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: calc(7 * var(--ws-px));
 }
 .rm-notice-dismiss {
   background: transparent;
   border: none;
   color: var(--text-muted);
   cursor: pointer;
-  font-size: 16px;
+  font-size: calc(16 * var(--ws-type-px));
   line-height: 1;
-  padding: 2px 6px;
+  padding: 2px calc(6 * var(--ws-px));
   border-radius: var(--radius-s);
   display: inline-flex;
   align-items: center;
@@ -2131,20 +2361,20 @@
 /* Inline Elric approval card under pending message */
 .rm-approval-card {
   margin-top: var(--space-2);
-  max-width: 440px;
+  max-width: calc(440 * var(--ws-px));
   background: var(--surface-sunken);
   border: 1px solid var(--border);
   border-radius: var(--radius-m);
-  padding: 10px 14px;
+  padding: calc(10 * var(--ws-px)) calc(14 * var(--ws-px));
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: calc(8 * var(--ws-px));
 }
 .rm-approval-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: calc(8 * var(--ws-px));
 }
 .rm-approval-tool {
   font-size: 11px;
@@ -2164,7 +2394,7 @@
   gap: 2px;
 }
 .rm-approval-title {
-  font-size: 13px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
   font-weight: 500;
   color: var(--text-primary);
   line-height: 1.4;
@@ -2176,7 +2406,7 @@
 .rm-approval-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: calc(8 * var(--ws-px));
   margin-top: 2px;
 }
 .rm-approval-decided {
@@ -2187,7 +2417,7 @@
   align-items: center;
   font-size: 12px;
   font-weight: 500;
-  padding: 2px 8px;
+  padding: 2px calc(8 * var(--ws-px));
   border-radius: var(--radius-s);
 }
 .rm-approval-status.approved {
@@ -2205,14 +2435,14 @@
 
 @media (max-width: 599px) {
   .rm-elric-card {
-    padding: 6px 8px;
+    padding: calc(6 * var(--ws-px)) calc(8 * var(--ws-px));
   }
   .rm-elric-card-text {
     font-size: 11.5px;
   }
   .rm-limit-alert,
   .rm-ephemeral-notice {
-    padding: 5px 8px;
+    padding: calc(5 * var(--ws-px)) calc(8 * var(--ws-px));
   }
   .rm-elric-card-wrap {
     width: calc(100% - 2 * var(--space-2));
@@ -2222,4 +2452,406 @@
     width: calc(100% - 2 * var(--space-2));
     margin-bottom: var(--space-2);
   }
+}
+
+/* Phone viewports (360–420 px): Members, Elric, Tasks, Invite and More share one header row
+   without overflow, even with the Elric switch and a two-digit task count. Tighter spacing,
+   compact Elric switch with On/Off state dropped (the knob position and colour show it;
+   aria-checked carries it for screen readers). Search and Connect AI move into the More menu,
+   and the Room list link gives way: it is the first entry of the menu the Open menu button
+   opens, and squeezed here it slid under Members. */
+@media (max-width: 420px) {
+  .rm-room-head {
+    padding-inline: var(--space-2);
+  }
+  .rm-room-head .rm-crumbs {
+    display: none;
+  }
+  .rm-room-head .rm-head-actions {
+    margin-left: auto;
+    gap: 2px;
+  }
+  .rm-room-head .rm-outline,
+  .rm-room-head .rm-primary {
+    padding: 0 calc(6 * var(--ws-px));
+  }
+  .rm-head-elric .cc-switch {
+    gap: calc(4 * var(--ws-px));
+    padding: 0 2px;
+  }
+  .rm-head-elric .cc-switch-state {
+    display: none;
+  }
+  .rm-head-elric .cc-switch-track {
+    width: calc(32 * var(--ws-px));
+    height: calc(20 * var(--ws-px));
+  }
+  .rm-head-elric .cc-switch-thumb {
+    width: calc(16 * var(--ws-px));
+    height: calc(16 * var(--ws-px));
+  }
+  .rm-head-elric .cc-switch[aria-checked='true'] .cc-switch-thumb {
+    transform: translateX(12px);
+  }
+}
+
+/* "Add my AI" (AddMyAiSheet.tsx): the banner's inline action and the list of your AIs. */
+.rm-link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--accent-text, var(--link));
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.rm-link-button:focus-visible {
+  outline: 2px solid var(--focus-ring, currentColor);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+.rm-add-ai-list {
+  display: grid;
+  gap: calc(4 * var(--ws-px));
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.rm-add-ai-list legend {
+  margin-bottom: calc(8 * var(--ws-px));
+  padding: 0;
+}
+.rm-add-ai-option {
+  display: flex;
+  align-items: center;
+  gap: calc(10 * var(--ws-px));
+  min-height: var(--target, calc(44 * var(--ws-px)));
+  padding: 0 calc(12 * var(--ws-px));
+  border: 1px solid var(--border-subtle, var(--border));
+  border-radius: 8px;
+  cursor: pointer;
+}
+.rm-add-ai-option:has(input:checked) {
+  border-color: var(--accent, currentColor);
+}
+
+@media (max-width: 599px) {
+  .rm-empty {
+    padding: var(--space-5) var(--space-3);
+  }
+}
+
+/* New room (src/rooms/RoomsApp.tsx): name first, "Start from" chips, Settings collapsed, one
+ * full-width Create room. A centered modal on desktop; under 900 px the shared sheet rules make it
+ * a bottom sheet. Colors are the rooms tokens (--primary, --accent-tint), so v2 stays blue. */
+.rm-sheet.rm-new-room {
+  width: min(440px, 100%);
+  gap: var(--space-4);
+}
+.rm-new-room-name .rm-input {
+  min-height: calc(48 * var(--ws-px));
+  font-size: calc(16 * var(--ws-type-px));
+}
+.rm-room-templates {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.rm-room-templates legend {
+  padding: 0;
+  margin-bottom: var(--space-2);
+  font: var(--type-ui);
+}
+.rm-room-template-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.rm-room-template {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+}
+.rm-room-template input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.rm-room-template-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: calc(44 * var(--ws-px));
+  min-height: calc(38 * var(--ws-px));
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  color: var(--text);
+  font: var(--type-ui);
+  white-space: nowrap;
+  transition:
+    background var(--dur-1) var(--ease-out),
+    border-color var(--dur-1) var(--ease-out);
+}
+.rm-room-template:hover .rm-room-template-chip {
+  background: var(--accent-tint);
+}
+.rm-room-template input:checked + .rm-room-template-chip {
+  border-color: var(--primary);
+  background: var(--accent-tint);
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+.rm-room-template-chip svg {
+  color: var(--primary);
+  flex: none;
+}
+.rm-room-template input:focus-visible + .rm-room-template-chip {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.rm-new-room-settings summary {
+  min-height: calc(36 * var(--ws-px));
+  width: max-content;
+  gap: var(--space-1);
+  list-style: none;
+}
+.rm-new-room-settings summary::-webkit-details-marker {
+  display: none;
+}
+.rm-new-room-settings summary svg {
+  transition: transform var(--dur-1) var(--ease-out);
+}
+.rm-new-room-settings[open] summary svg {
+  transform: rotate(90deg);
+}
+.rm-new-room-settings-body {
+  display: grid;
+  gap: var(--space-3);
+  padding-top: var(--space-2);
+}
+.rm-primary.rm-new-room-create {
+  width: 100%;
+  min-height: calc(48 * var(--ws-px));
+  border-radius: var(--radius-m);
+  font: var(--type-ui);
+  font-weight: 600;
+}
+@media (max-width: 899px) {
+  .rm-sheet.rm-new-room {
+    width: 100%;
+    padding-bottom: calc(var(--space-5) + env(safe-area-inset-bottom, 0px));
+  }
+  .rm-new-room-name .rm-input,
+  .rm-primary.rm-new-room-create {
+    min-height: calc(44 * var(--ws-px));
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rm-room-template-chip,
+  .rm-new-room-settings summary svg {
+    transition: none;
+  }
+}
+
+/* Search panel (city_room_search): query, filters, results that jump into the thread. */
+.rm-search-form {
+  display: grid;
+  gap: var(--space-2);
+}
+.rm-search-box {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.rm-search-box > svg {
+  position: absolute;
+  left: var(--space-3);
+  color: var(--text-muted);
+  pointer-events: none;
+}
+.rm-search-box .rm-input {
+  padding-left: calc(var(--space-3) + calc(24 * var(--ws-px)));
+}
+.rm-search-filters {
+  display: grid;
+  gap: var(--space-2);
+  font: var(--type-ui);
+}
+.rm-search-filters[open] {
+  padding-bottom: var(--space-1);
+}
+.rm-search-filters > summary {
+  min-height: var(--target);
+  display: flex;
+  align-items: center;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.rm-search-filters > :not(summary) {
+  margin-top: var(--space-2);
+}
+.rm-search-dates {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+.rm-search-results {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.rm-search-result {
+  display: grid;
+  gap: var(--space-1);
+  width: 100%;
+  min-height: var(--target);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  background: var(--surface);
+  color: var(--text);
+  font: var(--type-ui);
+  text-align: left;
+  cursor: pointer;
+}
+.rm-search-result:hover {
+  background: var(--bg-surface-hover);
+}
+.rm-search-result:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.rm-search-byline {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.rm-search-byline time {
+  color: var(--text-muted);
+  font: var(--type-meta);
+}
+.rm-search-snippet {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.rm-search-snippet mark {
+  border-radius: 2px;
+  background: var(--warning-tint);
+  color: inherit;
+  font-weight: 600;
+}
+.rm-search-empty {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-4) var(--space-3);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-s);
+  color: var(--text-muted);
+  font: var(--type-ui);
+  text-align: center;
+}
+.rm-search-empty strong {
+  color: var(--text);
+}
+.rm-search-more {
+  justify-self: center;
+}
+/* A search result shown in the thread: a short highlight. */
+.rm-message.rm-found,
+.rm-system-line.rm-found {
+  border-radius: var(--radius-s);
+  background: var(--warning-tint);
+  box-shadow: 0 0 0 var(--space-1) var(--warning-tint);
+  transition: background var(--dur-1) var(--ease-out);
+}
+.rm-message:focus {
+  outline: none;
+}
+.rm-message:focus-visible {
+  outline: 2px solid var(--focus);
+}
+@media (prefers-reduced-motion: reduce) {
+  .rm-message.rm-found {
+    transition: none;
+  }
+}
+/* Phones (<= 420 px): Search lives in the More menu so the header fits phone widths. */
+@media (max-width: 420px) {
+  .rm-room-head .rm-search-head {
+    display: none;
+  }
+}
+
+/* Peer review on a task card (PeerReview.tsx): design tokens only. */
+.rm-peer-review {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border-left: 3px solid var(--border);
+  border-radius: var(--radius-s);
+}
+.rm-peer-review[data-status='approved'] {
+  border-left-color: var(--success);
+}
+.rm-peer-review[data-status='changes_requested'] {
+  border-left-color: var(--warning);
+}
+.rm-peer-review > p {
+  margin: 0;
+}
+.rm-peer-checklist {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text-muted);
+  font: var(--type-meta);
+  overflow-wrap: anywhere;
+}
+.rm-peer-ticks {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.rm-peer-tick {
+  display: flex;
+  gap: var(--space-2);
+  align-items: flex-start;
+  overflow-wrap: anywhere;
+}
+
+/* "Message privately" (src/rooms/direct.ts): a member action, and an icon on message authors. */
+a.rm-direct {
+  text-decoration: none;
+  white-space: nowrap;
+}
+.rm-direct-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--target);
+  min-height: var(--target);
+  margin: calc(var(--target) / -4) 0;
+  border-radius: var(--radius-s);
+  color: var(--text-muted);
+}
+.rm-direct-icon:hover,
+.rm-direct-icon:focus-visible {
+  background: var(--surface-sunken);
+  color: var(--text);
 }

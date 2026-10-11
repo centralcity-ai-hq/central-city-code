@@ -37,6 +37,12 @@ Apache-2.0 distribution; keep their copyright/licence notices when redistributin
 | `typescript` 7.0.2 and `@typescript/typescript-*` native binaries  | Apache-2.0                         | dev   | Build tooling only.                                                                                                                                                                                               |
 | `fsevents` 2.3.3                                                   | MIT                                | dev   | macOS-only optional dependency; installed on macOS only.                                                                                                                                                          |
 
+### Vendored assets
+
+| Asset                                                             | Source                                                                                | Licence | Notes                                                                                                                                                                                                             |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude, Claude Code and Cursor brand marks (`src/brandMarks.tsx`) | [Simple Icons](https://simpleicons.org) 16.34.0, path data copied (no npm dependency) | CC0-1.0 | Used only to name the app on the Connect AI cards; the marks remain trademarks of their owners. OpenAI (ChatGPT, Codex) and Microsoft (VS Code) marks are not in Simple Icons, so those cards keep neutral icons. |
+
 Platform-only packages that were not installed during this review (only the macOS arm64
 variants were), with the licence of their package family: `@esbuild/*` (MIT),
 `@rolldown/binding-*` (MIT), `@typescript/typescript-*` (Apache-2.0), `lightningcss-*` (MPL-2.0).
@@ -178,6 +184,7 @@ checksum-verified at run time), GitHub Actions `actions/checkout`, `actions/setu
 | postgres-interval                                 | 1.2.0   | MIT           |        |
 | process-warning                                   | 4.0.1   | MIT           |        |
 | process-warning                                   | 5.1.0   | MIT           |        |
+| qrcode-generator                                  | 1.4.4   | MIT           | yes    |
 | quick-format-unescaped                            | 4.0.4   | MIT           |        |
 | react                                             | 19.3.0  | MIT           | yes    |
 | react-dom                                         | 19.3.0  | MIT           | yes    |

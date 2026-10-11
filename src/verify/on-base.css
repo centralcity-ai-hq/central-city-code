@@ -1,0 +1,829 @@
+/*
+ * The Agent Explorer's On Base view, its Verify and the passport (docs/design/on-base-mockup.html,
+ * approved by the product owner 10 Oct 2026). The explorer's own tokens (verify.css) and Rooms'
+ * small pills.
+ */
+
+/* The switch under the title: two links, the current one raised. */
+.ob-switch {
+  display: inline-flex;
+  align-self: flex-start;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--v8-inset);
+}
+.ob-switch a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 13px;
+  border-radius: 999px;
+  color: var(--v8-muted);
+  font-size: 12.5px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.ob-switch a small {
+  color: var(--v8-muted);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+.ob-switch a[aria-current='page'] {
+  background: var(--v8-card);
+  color: var(--v8-text);
+  box-shadow: var(--v8-shadow);
+}
+.ob-switch a:focus-visible {
+  outline: 2px solid var(--v8-accent);
+  outline-offset: 1px;
+}
+
+/* Rooms' small pill (34 workspace px, 13 semibold); 44 px on phones. */
+.ob-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 31px;
+  padding: 0 14px;
+  border: 1px solid var(--v8-border);
+  border-radius: 999px;
+  background: var(--v8-card);
+  color: var(--v8-text);
+  font: 600 12.5px/1 var(--font-sans);
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ob-pill:hover {
+  background: var(--v8-quiet);
+}
+.ob-pill[aria-expanded='true'],
+.ob-pill.ink {
+  border-color: var(--v8-text);
+  background: var(--v8-text);
+  color: var(--v8-card);
+}
+.ob-pill:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.ob-under {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 6px 16px;
+  margin: 0;
+  color: var(--v8-muted);
+  font-size: 12.5px;
+}
+.ob-under a {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--v8-accent-text);
+  font-weight: 600;
+  text-decoration: none;
+}
+.ob-under a:hover {
+  text-decoration: underline;
+}
+
+.ob-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 2px 12px;
+  margin: 8px 0 0;
+}
+.ob-head h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+}
+.ob-head span {
+  color: var(--v8-muted);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The list: Verify | Base ID | Agent | Owner wallet | Status */
+.ob-table {
+  overflow: hidden;
+  border: 1px solid var(--v8-border);
+  border-radius: 12px;
+  background: var(--v8-card);
+}
+.ob-thead,
+.ob-row {
+  display: grid;
+  grid-template-columns: 92px 96px minmax(0, 1.2fr) minmax(0, 1fr) 150px;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+}
+.ob-thead {
+  height: 38px;
+  border-bottom: 1px solid var(--v8-border);
+  background: var(--v8-quiet);
+  color: var(--v8-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.ob-item + .ob-item {
+  border-top: 1px solid var(--v8-border);
+}
+.ob-row {
+  min-height: 52px;
+}
+.ob-item[data-open='true'] > .ob-row {
+  background: var(--v8-quiet);
+}
+.ob-id {
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.ob-agent {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+.ob-agent b {
+  overflow: hidden;
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ob-agent b[data-private] {
+  color: var(--v8-muted);
+  font-weight: 500;
+}
+/* The name, and under it the row's Central City score (the passport's line, .ob-pp-city). */
+.ob-agent-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.ob-city {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ob-city[data-scored] {
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+/* Central City blue for the Agent Explorer's agent icons and "Finalizing". */
+.ob-agent,
+.ob-status {
+  --ob-cc-blue: #2457f5;
+  --ob-cc-blue-text: #2457f5;
+}
+[data-theme='dark'] .ob-agent,
+[data-theme='dark'] .ob-status {
+  /* The lighter Central City blue on a dark page, so the text stays readable. */
+  --ob-cc-blue-text: #98b0ff;
+}
+/* The explorer list: every agent icon in Central City blue, whatever colour the agent has. */
+.ob-agent .ob-av {
+  background: var(--ob-cc-blue);
+}
+.ob-av {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: var(--ob-c, var(--v8-muted));
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+}
+.ob-wallet {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--v8-muted);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12.5px;
+}
+.ob-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.ob-status[data-state='final'] {
+  color: var(--success);
+}
+.ob-status[data-state='finalizing'] {
+  color: var(--ob-cc-blue-text);
+}
+/* Finalizing in the Agent Explorer: Central City blue, its dot too (the passport keeps its own). */
+.ob-status[data-state='finalizing'] .ob-pulse {
+  background: var(--ob-cc-blue);
+}
+.ob-status small {
+  display: block;
+  color: var(--v8-muted);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+.ob-pulse {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--warning);
+  animation: ob-pulse 1.6s ease-in-out infinite;
+}
+@keyframes ob-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* Verify: the four checks under the row (or on the passport) */
+.ob-check {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 16px 18px 120px;
+  border-top: 1px solid var(--v8-border);
+  background: var(--v8-quiet);
+}
+.ob-check[data-place='passport'] {
+  padding-left: 16px;
+  border-top: 0;
+}
+.ob-check-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  margin: 0;
+  color: var(--v8-muted);
+  font-size: 12.5px;
+}
+.ob-check-head b {
+  color: var(--v8-text);
+  font-size: 13.5px;
+}
+.ob-ticks {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 18px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ob-tick {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+.ob-tick > i {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  border-radius: 50%;
+}
+.ob-tick[data-state='pass'] > i {
+  background: var(--success-tint);
+  color: var(--success);
+}
+.ob-tick[data-state='fail'] > i {
+  background: var(--v8-danger-bg);
+  color: var(--v8-danger);
+}
+.ob-tick[data-state='pending'] > i {
+  background: var(--warning-tint);
+  color: var(--warning);
+}
+.ob-tick div {
+  min-width: 0;
+}
+.ob-tick b {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+}
+.ob-tick[data-state='fail'] b {
+  color: var(--v8-danger);
+}
+.ob-tick span {
+  display: block;
+  overflow-wrap: anywhere;
+  color: var(--v8-muted);
+  font-size: 12px;
+}
+.ob-check-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ob-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--v8-border);
+  border-radius: 12px;
+  background: var(--v8-card);
+}
+.ob-banner[data-tone='bad'] {
+  background: var(--v8-danger-bg);
+}
+.ob-banner[data-tone='warn'] {
+  background: var(--warning-tint);
+}
+.ob-banner b {
+  display: block;
+  font-size: 13.5px;
+}
+.ob-banner p {
+  margin: 2px 0 0;
+  color: var(--v8-muted);
+  font-size: 12.5px;
+}
+.ob-banner .ob-pill {
+  flex: none;
+  margin-left: auto;
+}
+
+.ob-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 44px 16px;
+  text-align: center;
+}
+.ob-empty b {
+  font-size: 14.5px;
+}
+.ob-empty span {
+  max-width: 44ch;
+  color: var(--v8-muted);
+  font-size: 13px;
+}
+.ob-sk {
+  height: 12px;
+  border-radius: 6px;
+  background: var(--v8-inset);
+  animation: ob-sk 1.4s ease-in-out infinite;
+}
+@keyframes ob-sk {
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@media (max-width: 640px) {
+  .ob-switch {
+    align-self: stretch;
+  }
+  .ob-switch a {
+    flex: 1;
+    justify-content: center;
+    height: 32px;
+    padding: 0 8px;
+  }
+  .ob-pill {
+    height: 44px;
+    padding: 0 16px;
+  }
+  .ob-row .ob-pill {
+    height: 36px;
+  }
+  .ob-thead {
+    display: none;
+  }
+  .ob-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: 'id status' 'agent agent' 'wallet verify';
+    gap: 4px 10px;
+    padding: 12px 14px;
+  }
+  .ob-c-verify {
+    grid-area: verify;
+    justify-self: end;
+  }
+  .ob-c-id {
+    grid-area: id;
+  }
+  .ob-c-agent {
+    grid-area: agent;
+  }
+  .ob-c-wallet {
+    grid-area: wallet;
+  }
+  .ob-c-status {
+    grid-area: status;
+    justify-self: end;
+  }
+  .ob-check {
+    padding: 14px;
+  }
+  .ob-ticks {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ob-pulse,
+  .ob-sk {
+    animation: none;
+  }
+}
+
+/* The page: the explorer's column, its stats with a quiet line under each number. */
+.vf-head > .ob-switch {
+  margin-block: 10px 6px;
+}
+.ob-main .ll-stats dd.ob-stat-sub {
+  margin: 2px 0 0;
+  color: var(--v8-muted);
+  font-size: 11.5px;
+  font-weight: 400;
+}
+.ob-main .ll-stats .ob-sk {
+  display: inline-block;
+  width: 72px;
+}
+.ob-copy {
+  width: 24px;
+  height: 24px;
+}
+.ob-more {
+  align-self: center;
+  margin: 4px auto 0;
+}
+/* Names and wallets, not fingerprints: the search reads in the page's own face. */
+.ob-main .vf-input {
+  font-family: inherit;
+}
+/* The passport (/a/<Base ID>): one centred column, the explorer's header and eyebrow. */
+.vf-main.ob-pp-main {
+  --ob-pp-faint: color-mix(in srgb, var(--v8-muted) 72%, var(--v8-card));
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  max-width: 1000px;
+  padding: 36px 32px 72px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.ob-pp-main .vf-head.ob-pp-top {
+  gap: 18px;
+  max-width: none;
+  margin: 0;
+}
+.ob-pp-main .vf-eyebrow a {
+  color: inherit;
+  text-decoration: none;
+}
+.ob-pp-main .vf-eyebrow a:hover {
+  text-decoration: underline;
+}
+.ob-pp-num {
+  font-variant-numeric: tabular-nums;
+}
+.ob-pp-mono {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12.5px;
+  letter-spacing: 0;
+}
+
+/* Avatar, name, "Base agent · ID n" and the status chip */
+.ob-pp-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+.ob-pp-head > div {
+  min-width: 0;
+}
+.ob-av.ob-pp-av {
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  font-size: 22px;
+  font-style: normal;
+}
+/* The passport's agent icon in Central City blue, whatever colour the agent has (as in the
+   explorer list); the white initial reads on it in both themes. The loading one stays grey. */
+.ob-av.ob-pp-av:not(.ob-pp-sk-av) {
+  background: #2457f5;
+}
+.ob-pp-main .ob-pp-head h1 {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+}
+.ob-pp-main .ob-pp-head h1[data-private] {
+  color: var(--v8-muted);
+}
+.ob-pp-main .ob-pp-head p {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin: 2px 0 0;
+  color: var(--v8-muted);
+}
+.ob-pp-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.ob-pp-chip[data-state='final'] {
+  background: var(--success-tint);
+  color: var(--success);
+}
+.ob-pp-chip[data-state='finalizing'] {
+  background: var(--warning-tint);
+  color: var(--warning);
+}
+.ob-pp-chip .ob-pulse {
+  margin-top: 0;
+}
+.ob-pp-since {
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The facts: label | value | copy or Basescan */
+.ob-pp-facts,
+.ob-pp-card {
+  overflow: hidden;
+  margin: 0;
+  border: 1px solid var(--v8-border);
+  border-radius: 12px;
+  background: var(--v8-card);
+}
+/* The facts keep a list's own air above and below (1em), as in the mockup. */
+.ob-pp-facts {
+  margin: 14px 0;
+}
+.ob-pp-fact {
+  position: relative;
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  min-height: 46px;
+  padding: 0 28px 0 16px;
+  border-top: 1px solid var(--v8-border);
+}
+.ob-pp-fact:first-child {
+  border-top: 0;
+}
+.ob-pp-fact[data-tool='true'] {
+  padding-right: 50px;
+}
+.ob-pp-fact dt {
+  color: var(--v8-muted);
+  font-size: 13px;
+}
+.ob-pp-fact dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.ob-pp-tx {
+  color: inherit;
+}
+.ob-pp-note {
+  color: var(--ob-pp-faint);
+  font-size: 12px;
+}
+.ob-pp-cp {
+  position: absolute;
+  top: 50%;
+  right: 16px;
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--ob-pp-faint);
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+.ob-pp-cp:hover {
+  background: var(--v8-quiet);
+  color: var(--v8-text);
+}
+.ob-pp-cp:focus-visible {
+  outline: 2px solid var(--v8-accent);
+  outline-offset: 1px;
+}
+.ob-pp-copied {
+  position: absolute;
+  top: 50%;
+  right: 44px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: var(--success-tint);
+  color: var(--success);
+  font-size: 11.5px;
+  font-weight: 600;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+.ob-pp-copied:empty {
+  padding: 0;
+}
+
+/* Verify, Reputation: a heading with its note, then a card */
+.ob-pp-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ob-pp-sec-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 2px 12px;
+}
+.ob-pp-sec-head h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+}
+.ob-pp-sec-head span {
+  color: var(--v8-muted);
+  font-size: 12.5px;
+}
+.ob-pp-verify {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 16px;
+  padding: 14px 16px;
+}
+.ob-pp-main .ob-pp-verify p {
+  flex: 1 1 280px;
+  max-width: 64ch;
+  color: var(--v8-muted);
+  font-size: 13px;
+}
+/* The Central City score: "4.6 ★ from 12 Central City agents", above the entries */
+.ob-pp-main .ob-pp-city {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--v8-border);
+  color: var(--v8-muted);
+  font-size: 13.5px;
+  overflow-wrap: anywhere;
+}
+.ob-pp-main .ob-pp-city[data-scored] {
+  color: inherit;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.ob-pp-reps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ob-pp-rep {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 12px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--v8-border);
+}
+.ob-pp-rep:first-child {
+  border-top: 0;
+}
+.ob-pp-rep b {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+.ob-pp-score {
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.ob-pp-main .ob-pp-rep p {
+  grid-column: 1 / -1;
+  overflow-wrap: anywhere;
+  color: var(--v8-muted);
+  font-size: 13px;
+}
+.ob-pp-rep a {
+  color: inherit;
+  text-decoration: none;
+}
+.ob-pp-rep a:hover {
+  text-decoration: underline;
+}
+.ob-pp-main .ob-pp-none {
+  padding: 14px 16px;
+  color: var(--v8-muted);
+  font-size: 13px;
+}
+.ob-pp-main .ob-pp-rep-note {
+  margin: 0;
+  color: var(--ob-pp-faint);
+  font-size: 12px;
+}
+.ob-pp-later {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px dashed var(--v8-border);
+  border-radius: 12px;
+  color: var(--v8-muted);
+  font-size: 13px;
+}
+.ob-pp-later b {
+  color: var(--v8-text);
+}
+
+/* Loading */
+.ob-pp-sk-av {
+  background: var(--v8-inset);
+  animation: ob-sk 1.4s ease-in-out infinite;
+}
+.ob-pp-sk-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+@media (max-width: 640px) {
+  .vf-main.ob-pp-main {
+    gap: 14px;
+    padding: 22px 16px 56px;
+  }
+  .ob-av.ob-pp-av {
+    width: 48px;
+    height: 48px;
+    font-size: 19px;
+  }
+  .ob-pp-main .ob-pp-head h1 {
+    font-size: 24px;
+  }
+  /* Facts stack: the label over the value, the copy button beside both. */
+  .ob-pp-fact {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px 10px;
+    padding: 10px 24px 10px 14px;
+  }
+  .ob-pp-fact[data-tool='true'] {
+    padding-right: 46px;
+  }
+  .ob-pp-fact dt {
+    font-size: 12px;
+  }
+  .ob-pp-cp {
+    right: 14px;
+  }
+  .ob-pp-copied {
+    top: 10px;
+    right: 42px;
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ob-pp-sk-av {
+    animation: none;
+  }
+}

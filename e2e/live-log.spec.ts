@@ -20,24 +20,32 @@ const json = (body: unknown) => ({
   body: JSON.stringify(body),
 });
 
-/** A synthetic log of `size` leaves with a matching checkpoint, signed when `signed`. */
-async function mockLog(page: Page, size: number, withdrawn: number[] = [], signed = false) {
+/**
+ * A synthetic log of `size` leaves with a matching checkpoint, signed when `signed`, or a v1
+ * checkpoint as served now (hash, signature and link withheld) when `signed` is 'v1'.
+ */
+async function mockLog(
+  page: Page,
+  size: number,
+  withdrawn: number[] = [],
+  signed: boolean | 'v1' = false,
+) {
   const leaves = await Promise.all(
     Array.from({ length: size }, (_, idx) => sha256(new TextEncoder().encode(`leaf-${idx}`))),
   );
   const hex = leaves.map(toHex);
   const body = {
-    v: 1 as const,
+    v: 2 as const,
     date: '2026-10-01',
     tree_size: size,
     withdrawn: withdrawn.length,
     root: toHex(await merkleRoot(leaves)),
     prev_hash: null,
-    subcounts: { in_person_accounts: size, in_ai_workspaces: 0, unclaimed: 0, revoked: 0 },
+    subcounts_commitment: 'ab'.repeat(32),
   };
   const hash = await checkpointHash(body);
   let signature: { kid: string; sig: string } | null = null;
-  if (signed) {
+  if (signed === true) {
     const keys = (await crypto.subtle.generateKey({ name: 'Ed25519' }, true, [
       'sign',
       'verify',
@@ -55,7 +63,19 @@ async function mockLog(page: Page, size: number, withdrawn: number[] = [], signe
       route.fulfill(json({ keys: [{ kid: 'e2e-key', kty: jwk.kty, crv: jwk.crv, x: jwk.x }] })),
     );
   }
-  const checkpoint = { ...body, hash, signature, consistency: [] };
+  const checkpoint =
+    signed === 'v1'
+      ? {
+          v: 1,
+          date: body.date,
+          tree_size: size,
+          withdrawn: withdrawn.length,
+          root: body.root,
+          subcounts_withheld: true,
+          signature_withheld: true,
+          consistency: [],
+        }
+      : { ...body, hash, signature, consistency: [] };
   await page.route(
     (url) => url.pathname === '/api/public/count-log/checkpoints',
     (route) => route.fulfill(json({ checkpoints: [checkpoint] })),
@@ -84,6 +104,11 @@ async function mockLog(page: Page, size: number, withdrawn: number[] = [], signe
   await page.route('**/api/public/stats', (route) =>
     route.fulfill(json({ ai_agents_total: 4321 })),
   );
+  // No live feed unless a test serves one (registered later, so it takes precedence): the e2e
+  // server's real feed would otherwise replace this synthetic log's numbers.
+  await page.route('**/api/public/count-log/feed*', (route) =>
+    route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"Not found."}' }),
+  );
   return hex;
 }
 
@@ -91,6 +116,8 @@ test('the live log lists entries newest first and proves one in this browser', a
   await mockLog(page, 7, [], true);
   await page.goto('/downtown/log');
   await expect(page.getByRole('heading', { level: 1, name: 'Agent Explorer' })).toBeVisible();
+  // One page name: the header says Agent Explorer, never "Live log".
+  await expect(page.locator('.vf-head')).not.toContainText('Live log');
   const entries = page.getByTestId('ll-entry');
   // Newest first: the first row is the last entry, never #1.
   await expect(entries.first()).toContainText('#7');
@@ -108,13 +135,13 @@ test('the live log lists entries newest first and proves one in this browser', a
   );
   await expect(proof.getByRole('link', { name: /agentLeafHash/ })).toHaveAttribute(
     'href',
-    /^https:\/\/github\.com\/centralcity-ai-org\/central-city-code\/blob\/[0-9a-f]{40}\/shared\/count-log\/index\.ts#L\d+-L\d+$/,
+    /^https:\/\/github\.com\/centralcity-ai-hq\/central-city-code\/blob\/[0-9a-f]{40}\/shared\/count-log\/index\.ts#L\d+-L\d+$/,
   );
   await expect(
     proof.getByRole('link', { name: /Independent copies of the signed checkpoints/ }),
   ).toHaveAttribute(
     'href',
-    'https://github.com/centralcity-ai-org/transparency/tree/main/agent-count',
+    'https://github.com/centralcity-ai-hq/transparency/tree/main/agent-count',
   );
   await expect(proof.getByLabel('curl commands', { exact: true })).toContainText(
     '/api/public/count-log/checkpoints/2026-10-01',
@@ -123,6 +150,24 @@ test('the live log lists entries newest first and proves one in this browser', a
   await expect(proof.getByRole('status')).toContainText(
     '✓ Entry #7 is in the checkpoint of 2026-10-01',
   );
+});
+
+test('a withheld v1 checkpoint: no signature status, and the inclusion proof still checks', async ({
+  page,
+}) => {
+  await mockLog(page, 5, [], 'v1');
+  await page.goto('/downtown/log');
+  const entries = page.getByTestId('ll-entry');
+  await entries.first().getByRole('button', { name: 'Verify' }).click();
+  const proof = entries.first().getByTestId('ll-proof');
+  await expect(proof).toContainText(/: root [0-9a-f]{12}…[0-9a-f]{6}, chain append-only ✓\./);
+  await expect(proof).not.toContainText(/withheld|\(v1\)|, previous checkpoint/);
+  await expect(proof).not.toContainText(/signed ✓|not checkable|signature unknown/);
+  await proof.getByRole('button', { name: 'Check it’s in the checkpoint' }).click();
+  await expect(proof.getByRole('status')).toContainText(
+    '✓ Entry #5 is in the checkpoint of 2026-10-01',
+  );
+  await expect(proof.getByRole('status')).not.toContainText(/signed|not confirmed/);
 });
 
 test('paging goes back in time, search jumps to an entry, withdrawn entries are marked', async ({
@@ -167,17 +212,20 @@ test('paging goes back in time, search jumps to an entry, withdrawn entries are 
   await expect(page.getByText('There is no entry #999 yet.')).toBeVisible();
 });
 
-test('the verify page previews the 10 newest entries and links to the live log', async ({
+test('the verify page has no entry list; /explorer and /downtown/log are the same page', async ({
   page,
 }) => {
   await mockLog(page, 30);
   await page.goto('/downtown/verify');
-  const list = page.locator('.vf-entries > li');
-  await expect(list).toHaveCount(10);
-  await expect(list.first()).toContainText('#30');
-  await page.getByRole('link', { name: 'See the live log →' }).click();
-  await expect(page).toHaveURL(/\/downtown\/log$/);
-  await expect(page.getByRole('heading', { level: 1, name: 'Agent Explorer' })).toBeVisible();
+  await expect(
+    page.getByRole('heading', { level: 1, name: 'Verify the agent count' }),
+  ).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Log entries' })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: /See the live log/ })).toHaveCount(0);
+  for (const path of ['/explorer', '/downtown/log']) {
+    await page.goto(path);
+    await expect(page.getByRole('heading', { level: 1, name: 'Agent Explorer' })).toBeVisible();
+  }
 });
 
 test('390 px: stacked rows, no sideways scroll, light and dark', async ({ page }) => {
@@ -237,20 +285,21 @@ test('Phase 2 feed: new agents appear as pending, then flip in place to confirme
         ],
         next: null,
         latest_checkpoint: '2026-10-01',
+        new_24h: later ? 3 : 2,
       }),
     );
   });
   await page.goto('/downtown/log');
   const feed = page.getByRole('region', { name: 'Latest agents' });
   await expect(feed).toContainText('Preview, not yet signed');
-  // The stats bar counts the feed's agents of the last 24 h (the two made minutes ago).
+  // The stats bar shows the server's count of the last 24 h.
   await expect(page.locator('.ll-stats')).toContainText('New in the last 24 h');
   await expect(
     page.locator('.ll-stats div').filter({ hasText: 'New in the last 24 h' }),
   ).toContainText('2');
   const rows = feed.getByTestId('ll-feed-entry');
   await expect(rows).toHaveCount(3);
-  await expect(rows.first()).toContainText('Pending · confirmed at 00:10 UTC');
+  await expect(rows.first()).toContainText('Pending · confirmed at 12:00 CEST');
   await expect(rows.first()).toContainText('2 min ago');
   // The exact minute on hover, in UTC.
   await expect(rows.first().locator('.ll-day')).toHaveAttribute(
@@ -335,12 +384,80 @@ test('Agent Explorer is in the Open Source menu and the footer', async ({ page }
   const nav = page.getByRole('banner').getByRole('navigation', { name: 'Public' });
   await nav.getByRole('button', { name: 'Open Source', exact: true }).click();
   const entry = page.getByRole('link', { name: /^Agent Explorer/ }).first();
-  await expect(entry).toHaveAttribute('href', '/downtown/log');
+  await expect(entry).toHaveAttribute('href', '/explorer');
   await expect(entry).toContainText('Every AI agent on Central City, live');
   await expect(
     page.getByRole('contentinfo').getByRole('link', { name: 'Agent Explorer', exact: true }),
-  ).toHaveAttribute('href', '/downtown/log');
+  ).toHaveAttribute('href', '/explorer');
   await entry.click();
   await expect(page.getByRole('heading', { level: 1, name: 'Agent Explorer' })).toBeVisible();
   await expect(page.getByPlaceholder('Fingerprint or #number')).toBeVisible();
+});
+
+test('the main list is the live feed: live numbers, total now, new rows on top, confirmed in place', async ({
+  page,
+}) => {
+  await mockLog(page, 5_420, [], true);
+  const minute = new Date(Date.now() - 60_000).toISOString().slice(0, 16) + 'Z';
+  const fp = (n: number) => n.toString(16).padStart(2, '0').repeat(32);
+  let polls = 0;
+  let beforeRequests = 0;
+  await page.route('**/api/public/count-log/feed*', (route) => {
+    if (route.request().url().includes('before=')) beforeRequests += 1;
+    polls += 1;
+    const later = polls > 1;
+    return route.fulfill(
+      json({
+        entries: [
+          ...(later
+            ? [{ fingerprint: fp(32), minute, day: '2026-10-01', status: 'pending', n: 5_431 }]
+            : []),
+          // n is the 0-based idx the next checkpoint assigns (server/count-log/pending.ts),
+          // shown as #(n + 1).
+          { fingerprint: fp(31), minute, day: '2026-10-01', status: 'pending', n: 5_430 },
+          later
+            ? {
+                fingerprint: fp(30),
+                minute,
+                day: '2026-10-01',
+                status: 'confirmed',
+                idx: 5_419,
+                checkpoint_date: '2026-10-01',
+              }
+            : { fingerprint: fp(30), minute, day: '2026-10-01', status: 'pending', n: 5_429 },
+        ],
+        next: null,
+        latest_checkpoint: '2026-10-01',
+        total_now: later ? 5_432 : 5_431,
+        // Far more than the feed's pages: the exact server count, never "550+".
+        new_24h: later ? 25_118 : 25_117,
+      }),
+    );
+  });
+  await page.goto('/downtown/log');
+  const rows = page.getByRole('region', { name: 'Latest agents' }).getByTestId('ll-feed-entry');
+  // Newest first; the top row is the live total, provisional while pending.
+  await expect(rows.first().locator('.ll-seq')).toHaveText('#5,431');
+  await expect(rows.first().locator('.ll-seq')).toHaveAttribute('data-provisional', 'true');
+  const now = page.locator('.ll-stats div').filter({ hasText: 'AI agents now' });
+  await expect(now).toContainText('5,431');
+  const day = page.locator('.ll-stats div').filter({ hasText: 'New in the last 24 h' });
+  await expect(day.locator('dd')).toHaveText('25,117');
+  await expect(day.locator('dd')).not.toHaveAttribute('aria-busy', 'true');
+  // The next poll: a newcomer on top, the total follows, a pending row is confirmed in place.
+  await expect(rows.first().locator('.ll-seq')).toHaveText('#5,432', { timeout: 8_000 });
+  await expect(now).toContainText('5,432');
+  // It updates live with the same poll, exact (no "+"), and no older pages are read to count.
+  await expect(day.locator('dd')).toHaveText('25,118');
+  expect(beforeRequests).toBe(0);
+  const confirmed = rows.filter({ hasText: fp(30).slice(0, 12) });
+  await expect(confirmed).toContainText('In checkpoint 2026-10-01 · #5,420');
+  await expect(confirmed.locator('.ll-seq')).toHaveText('#5,420');
+  await expect(confirmed.locator('.ll-seq')).not.toHaveAttribute('data-provisional', 'true');
+  // Search finds a pending agent in the live list by its provisional number.
+  await page.getByPlaceholder('Fingerprint or #number').fill('#5,431');
+  await page.getByRole('button', { name: 'Find' }).click();
+  await expect(page.getByText('Pending #5,431: confirmed at the next checkpoint.')).toBeVisible();
+  // The signed checkpoint list stays below.
+  await expect(page.getByRole('heading', { name: 'Signed log' })).toBeVisible();
 });

@@ -102,9 +102,10 @@ test(`a room of ${MEMBERS} members: post, mention, read and list stay fast; the 
   const room = created.json().room as { id: string; member_cap: number };
   assert.equal(room.member_cap, MEMBERS);
 
-  // Bulk fixture: MEMBERS - 1 synthetic unclaimed guests with one agent each, like invited AIs.
+  // Bulk fixture: MEMBERS - 2 synthetic unclaimed guests with one agent each, like invited AIs,
+  // next to the host's two members (its agent and itself as a person, in its room from creation).
   const fill = performance.now();
-  const others = MEMBERS - 1;
+  const others = MEMBERS - 2;
   const base = Date.now() - 86_400_000;
   await db.query(
     `INSERT INTO operators(id,name,name_key,password_hash,salt,kind)

@@ -144,7 +144,7 @@ for (const c of cases)
     const base = await f.scene();
     const r2 = await f.room(base.host, base.hostAgent, 'Room Beta');
     const p2 = await f.joinPerson(base.owner, r2, 'Ann');
-    await f.joinAgent(base.owner, r2, base.elricId);
+    await f.joinAgent(base.owner, r2, base.elricId, { legacy: true });
     await f.say(base.owner, r2, 'Bob: the Q4 budget is 91,000', p2);
     await f.say(base.owner, r2, 'R2-ONLY deployment passcode 553311', p2);
     const s: S = { ...base, r2 };

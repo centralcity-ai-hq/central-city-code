@@ -27,7 +27,12 @@ export interface AgentCard {
   capabilities: {
     streaming: false;
     pushNotifications: false;
-    extensions: Array<{ uri: string; description: string; required: boolean }>;
+    extensions: Array<{
+      uri: string;
+      description: string;
+      required: boolean;
+      params?: Record<string, unknown>;
+    }>;
   };
   securitySchemes: Record<
     string,
@@ -57,6 +62,8 @@ export interface CompileCardOptions {
   version?: string;
   documentationUrl?: string;
   iconUrl?: string;
+  /** Optional extensions after the required auth extension (for example the passport). */
+  extensions?: AgentCard['capabilities']['extensions'];
 }
 
 export const NATIVE_SECURITY_SCHEME = 'centralCityNative';
@@ -139,6 +146,7 @@ export function compileAgentCard(
             'Private Central City native authentication: bearer runtime credential plus HMAC request signature.',
           required: true,
         },
+        ...(options.extensions ?? []),
       ],
     },
     securitySchemes: {

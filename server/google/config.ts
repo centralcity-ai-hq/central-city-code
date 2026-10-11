@@ -61,6 +61,11 @@ export interface GoogleSignInOptions {
   env?: Record<string, string | undefined>;
   /** Tests only: replaces the HTTP calls to Google's token and JWKS endpoints. */
   transport?: GoogleTransport;
+  /**
+   * Tests only, set through createApp options (never the environment): the per-address budgets
+   * for starts and callbacks. The browser e2e server serves every Google spec from one address.
+   */
+  addressLimits?: { startsPerAddress?: number; callbacksPerAddress?: number };
 }
 
 export interface GoogleClient {

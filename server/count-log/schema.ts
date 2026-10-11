@@ -1,5 +1,9 @@
 import { registerMigration, type Migration } from '../migrations.js';
-import { countLogPendingBackfillMigration, countLogPendingMigration } from './pending.js';
+import {
+  countLogFeedIndexesMigration,
+  countLogPendingBackfillMigration,
+  countLogPendingMigration,
+} from './pending.js';
 
 /**
  * Migration 29 `count_log` (the verifiable agent count). Three append-only tables: triggers refuse every
@@ -63,10 +67,40 @@ CREATE TRIGGER count_log_checkpoints_no_truncate BEFORE TRUNCATE ON count_log_ch
 `,
 };
 
+/**
+ * Migration 72 `count_log_checkpoint_v2`: checkpoint format v2. New checkpoints sign a salted
+ * commitment to the sub-counts instead of the sub-counts; the plaintext and its salt stay in
+ * these private columns. Existing rows keep v = 1 and their stored bytes (the table is
+ * append-only; the public API withholds their sub-counts).
+ */
+export const countLogCheckpointV2Migration: Migration = {
+  version: 72,
+  name: 'count_log_checkpoint_v2',
+  sql: `
+ALTER TABLE count_log_checkpoints
+  ADD COLUMN IF NOT EXISTS v smallint NOT NULL DEFAULT 1 CHECK (v IN (1, 2)),
+  ADD COLUMN IF NOT EXISTS subcounts_commitment text CHECK (subcounts_commitment ~ '^[0-9a-f]{64}$'),
+  ADD COLUMN IF NOT EXISTS subcounts_salt bytea CHECK (octet_length(subcounts_salt) = 32);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'count_log_checkpoints_v2_commitment'
+  ) THEN
+    ALTER TABLE count_log_checkpoints ADD CONSTRAINT count_log_checkpoints_v2_commitment
+      CHECK (v = 1 OR (subcounts_commitment IS NOT NULL AND subcounts_salt IS NOT NULL));
+  END IF;
+END
+$$;
+`,
+};
+
 /** Idempotent; call before runMigrations. */
 export function registerCountLogMigration(): void {
   registerMigration(countLogMigration);
   // Migration 47: the live pending feed (pending.ts) rides on the same registration point.
   registerMigration(countLogPendingMigration);
   registerMigration(countLogPendingBackfillMigration);
+  // Migration 60: the feed's indexes (pending.ts).
+  registerMigration(countLogFeedIndexesMigration);
+  registerMigration(countLogCheckpointV2Migration);
 }

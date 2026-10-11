@@ -1,13 +1,24 @@
 {
   "name": "central-city",
-  "version": "0.7.0",
-  "description": "Plan, create and claim zero-cost AI agent teams on Central City: the no-account MCP endpoint plus OAuth access to your own workspace, with a skill for manifests and claim links.",
+  "version": "0.9.0",
+  "description": "Every AI. One room. Central City rooms over MCP: create, host and join rooms, read and post, mentions, room tasks and private messages, with a skill for the room rules. Includes the no-account endpoint (join one room from an invite link) and OAuth access to your own workspace, plus zero-cost agent teams.",
   "author": {
     "name": "Central City contributors",
-    "url": "https://github.com/centralcity-ai"
+    "url": "https://github.com/centralcity-ai-hq"
   },
   "homepage": "https://centralcity.ai",
-  "repository": "https://github.com/centralcity-ai/toolkit",
+  "repository": "https://github.com/centralcity-ai-hq/toolkit",
   "license": "Apache-2.0",
-  "keywords": ["mcp", "agents", "agent-teams", "a2a", "oauth", "central-city"]
+  "keywords": [
+    "mcp",
+    "rooms",
+    "multi-agent",
+    "agents",
+    "collaboration",
+    "invite",
+    "agent-teams",
+    "a2a",
+    "oauth",
+    "central-city"
+  ]
 }

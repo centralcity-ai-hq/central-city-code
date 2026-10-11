@@ -37,8 +37,15 @@ test('link a Google account, sign in with it, and unlink it', async ({ page }) =
   await expect(page.getByRole('heading', { name: 'Google account' })).toBeVisible();
   await page.getByRole('button', { name: 'Continue with Google' }).click();
   await expect(page).toHaveURL(`${base}/settings/account`);
-  await expect(page.getByRole('status')).toHaveText('Google account linked.');
-  await expect(page.getByText('Linked to synthetic.person@example.com.')).toBeVisible();
+  // While the profile and the link still load, their loading lines are statuses too.
+  await expect(page.getByRole('status').filter({ hasText: 'Google account linked.' })).toHaveText(
+    'Google account linked.',
+  );
+  await expect(
+    page
+      .getByRole('region', { name: 'Account' })
+      .getByText('Linked to synthetic.person@example.com'),
+  ).toBeVisible();
 
   // The date of birth for Elric (18 or over).
   await page.getByLabel('Date of birth (for Elric, 18 or over)').fill('1990-05-17');
@@ -59,7 +66,15 @@ test('link a Google account, sign in with it, and unlink it', async ({ page }) =
 
   // Unlink: the account no longer signs in with Google.
   await page.goto(`${base}/settings/account`);
-  await page.getByRole('button', { name: 'Unlink' }).click();
+  // Unlink asks first: it also deletes the date of birth saved for Elric.
+  await page.getByRole('button', { name: 'Unlink Google' }).click();
+  await page
+    .getByRole('dialog', { name: 'Unlink Google?' })
+    .getByRole('button', { name: 'Unlink Google' })
+    .click();
+  await expect(
+    page.getByRole('status').filter({ hasText: 'Google account unlinked.' }),
+  ).toBeVisible();
   await expect(page.getByRole('button', { name: 'Continue with Google' })).toBeVisible();
   await page.request.post(`${base}/api/auth/logout`, {
     headers: { 'x-city-request': '1' },
@@ -95,11 +110,54 @@ test('sign up with Google: name and Terms first; Back never skips them', async (
   await page.getByLabel('Account name').fill(`Googler ${Date.now()}`);
   const accept = page.getByRole('button', { name: 'Continue' });
   await expect(accept).toBeDisabled();
-  await page.getByRole('checkbox').check();
+  // The newsletter opt-in is offered, unticked, with no email field (the Google address is used).
+  await expect(
+    page.getByRole('checkbox', { name: 'Subscribe to the Central City newsletter' }),
+  ).not.toBeChecked();
+  await expect(page.getByRole('textbox', { name: 'Email' })).toHaveCount(0);
+  await page.getByRole('checkbox', { name: /I accept the Terms/ }).check();
   await accept.click();
   await expect(gate).toHaveCount(0);
+  // A new account meets Elric once, after the Terms; skipping goes on to the app.
+  await expect(
+    page.getByRole('heading', { name: 'Meet Elric, your AI assistant in Central City' }),
+  ).toBeVisible();
+  await page.getByRole('button', { name: 'Skip for now' }).click();
   await expect(page).toHaveURL(/\/rooms/);
   expect((await page.request.get(`${base}/api/rooms`)).status()).toBe(200);
+});
+
+test('Meet Elric after sign-up shows the AI notice and opens the Elric chat, once', async ({
+  page,
+}) => {
+  await mockGoogle(page, `3${Date.now()}`);
+  await page.goto(`${base}/#create`);
+  await page.getByRole('button', { name: 'Continue with Google' }).click();
+  // The sign-up form has an "Account name" field too: wait for the onboarding screen first, or
+  // the name can go into the form that is being left and the onboarding name stays empty.
+  await expect(page).toHaveURL(`${base}/settings/account`);
+  await expect(page.getByRole('heading', { name: 'Finish creating your account' })).toBeVisible();
+  await page.getByLabel('Account name').fill(`Meeter ${Date.now()}`);
+  await page.getByRole('checkbox', { name: /I accept the Terms/ }).check();
+  await page.getByRole('button', { name: 'Continue' }).click();
+  const meet = page.getByRole('heading', {
+    name: 'Meet Elric, your AI assistant in Central City',
+  });
+  await expect(meet).toBeVisible();
+  await expect(page.getByText('Elric is the native AI assistant of Central City.')).toBeVisible();
+  await page.getByRole('link', { name: 'Meet Elric' }).click();
+  await expect(page).toHaveURL(`${base}/elric`);
+  // Once only: signed out and back in with the same Google account, the app opens directly.
+  const out = await page.request.post(`${base}/api/auth/logout`, {
+    headers: { 'x-city-request': '1' },
+    data: {},
+  });
+  expect(out.ok()).toBeTruthy();
+  await page.goto(`${base}/signin`);
+  await page.getByRole('button', { name: 'Continue with Google' }).click();
+  await expect(page).toHaveURL(/\/rooms$/);
+  await expect(meet).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Finish creating your account' })).toHaveCount(0);
 });
 
 test('without the flag, sign-in shows no Google button', async ({ page }) => {

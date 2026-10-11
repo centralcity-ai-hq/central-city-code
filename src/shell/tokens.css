@@ -36,6 +36,10 @@
   --bg-page: #ffffff;
   --bg-surface: #f8f9fa;
   --bg-surface-elevated: #ffffff;
+  /* The scrolled header and the open menu are solid (as on openai.com): the page under them never
+     shows through; with a menu open, the page below it is dimmed and blurred instead. */
+  --header-scrolled-bg: var(--bg-surface-elevated);
+  --menu-surface-bg: var(--bg-surface-elevated);
   --bg-surface-hover: #f1f3f5;
   --bg-surface-active: #e9ecef;
   --bg-inset: #f4f4f6;
@@ -166,6 +170,12 @@
   --page-max: 1200px;
   --header-h: 64px;
 
+  /* Workspace density (see "Workspace density" below): one CSS pixel everywhere except the
+     signed-in workspace, which redefines both. A hard-coded workspace length is written as
+     calc(N * var(--ws-px)), a font size or line height as calc(N * var(--ws-type-px)). */
+  --ws-px: 1px;
+  --ws-type-px: 1px;
+
   /* Motion */
   --dur-1: 100ms;
   --dur-2: 150ms;
@@ -174,6 +184,17 @@
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in: cubic-bezier(0.4, 0, 1, 1);
   --ease-standard: cubic-bezier(0.16, 1, 0.3, 1);
+  /* Motion system v1 (src/shell/motion.css). Things decelerate in and leave 30 to 40% faster;
+     presses sink at once and spring back. */
+  --motion-duration-instant: 90ms; /* icon flips, toggles */
+  --motion-duration-fast: 150ms; /* presses, hover, colour */
+  --motion-duration-normal: 240ms; /* dropdowns, accordions, dialogs */
+  --motion-duration-enter: 280ms; /* drawers, sheets, full menus */
+  --motion-duration-exit: 180ms; /* dismissals */
+  --motion-ease-out: cubic-bezier(0.16, 1, 0.3, 1); /* entrances */
+  --motion-ease-in: cubic-bezier(0.4, 0, 0.7, 1); /* exits */
+  --motion-ease-standard: cubic-bezier(0.2, 0, 0, 1); /* equal changes */
+  --motion-ease-spring: cubic-bezier(0.25, 1, 0.5, 1); /* press */
 
   color-scheme: light;
   font: var(--type-body);
@@ -195,6 +216,73 @@
 }
 
 /* ========================================================================
+   Workspace density
+   The signed-in workspace (.app-shell: sidebar, rooms, My agents, Messages, Settings, Network
+   map, Connect AI, Advanced and Elric) is drawn 10% smaller than the public pages: type, spacing,
+   sidebar width, row and control heights and icons. Public pages keep the scale above.
+   - Body text never drops below 12px (13px becomes 12px; 12px and smaller stay as they are).
+   - On phones and touch screens only the type is smaller: spacing and control sizes stay as
+     they are, so 44px touch targets stay 44px, and text fields keep 16px type.
+   ======================================================================== */
+.app-shell {
+  --ws-px: 0.9px;
+  --ws-type-px: 0.9px;
+
+  --type-display: 500 calc(48 * var(--ws-type-px)) / 1.16 var(--font-sans);
+  --type-title: 500 calc(30 * var(--ws-type-px)) / 1.32 var(--font-sans);
+  --type-heading: 500 calc(18 * var(--ws-type-px)) / 1.32 var(--font-sans);
+  --type-body: 400 calc(16 * var(--ws-type-px)) / calc(24 * var(--ws-type-px)) var(--font-sans);
+  --type-ui: 500 calc(14 * var(--ws-type-px)) / calc(20 * var(--ws-type-px)) var(--font-sans);
+  --type-meta: 400 max(12px, calc(13 * var(--ws-type-px))) / calc(18 * var(--ws-type-px))
+    var(--font-sans);
+  --type-mono: 400 max(12px, calc(13 * var(--ws-type-px))) / calc(20 * var(--ws-type-px))
+    var(--font-mono);
+  /* Aliases from styles.css resolve on :root, so they are restated here. */
+  --type-hero: var(--type-display);
+  --type-hero-mobile: 600 calc(32 * var(--ws-type-px)) / calc(36 * var(--ws-type-px))
+    var(--font-sans);
+  --type-page: var(--type-title);
+  --type-section: var(--type-heading);
+  --type-label: var(--type-ui);
+
+  --space-1: calc(4 * var(--ws-px));
+  --space-2: calc(8 * var(--ws-px));
+  --space-3: calc(12 * var(--ws-px));
+  --space-4: calc(16 * var(--ws-px));
+  --space-5: calc(24 * var(--ws-px));
+  --space-6: calc(32 * var(--ws-px));
+  --space-7: calc(48 * var(--ws-px));
+  --space-8: calc(64 * var(--ws-px));
+  --space-9: calc(96 * var(--ws-px));
+
+  --target: calc(44 * var(--ws-px));
+  --sidebar-w: calc(272 * var(--ws-px));
+  --header-h: calc(64 * var(--ws-px));
+
+  font: var(--type-body);
+}
+@media (max-width: 480px) {
+  .app-shell {
+    --type-display: 500 calc(34 * var(--ws-type-px)) / 1.16 var(--font-sans);
+    --type-title: 500 calc(26 * var(--ws-type-px)) / 1.32 var(--font-sans);
+  }
+}
+@media (max-width: 640px), (pointer: coarse) {
+  .app-shell {
+    --ws-px: 1px;
+  }
+  /* Phones zoom the page when a text field under 16px gets focus; fields keep 16px there. */
+  .app-shell
+    :is(
+      input:not([type='checkbox'], [type='radio'], [type='range'], [type='color']),
+      textarea,
+      select
+    ) {
+    font-size: 16px !important;
+  }
+}
+
+/* ========================================================================
    v8 FOUNDATION TOKENS — DARK MODE
    Applied only when html[data-theme="dark"] is set (the visitor picked dark).
    ======================================================================== */
@@ -204,6 +292,8 @@
   --bg-page: #09090b;
   --bg-surface: #121214;
   --bg-surface-elevated: #18181b;
+  --header-scrolled-bg: var(--bg-surface-elevated);
+  --menu-surface-bg: var(--bg-surface-elevated);
   --bg-surface-hover: #202024;
   --bg-surface-active: #27272a;
   --bg-inset: #0e0e10;
@@ -288,5 +378,64 @@
     --dur-2: 0ms;
     --dur-3: 0ms;
     --dur-4: 100ms;
+    --motion-duration-instant: 0ms;
+    --motion-duration-fast: 0ms;
+    --motion-duration-normal: 0ms;
+    --motion-duration-enter: 0ms;
+    --motion-duration-exit: 0ms;
   }
+}
+/* Workspace density: icons (lucide) are sized by their width and height attributes; any
+   stylesheet rule that sizes an icon still wins over these. */
+:where(.app-shell) :where(svg.lucide[width='11']) {
+  width: calc(11 * var(--ws-px));
+  height: calc(11 * var(--ws-px));
+}
+:where(.app-shell) :where(svg.lucide[width='12']) {
+  width: calc(12 * var(--ws-px));
+  height: calc(12 * var(--ws-px));
+}
+:where(.app-shell) :where(svg.lucide[width='13']) {
+  width: calc(13 * var(--ws-px));
+  height: calc(13 * var(--ws-px));
+}
+:where(.app-shell) :where(svg.lucide[width='14']) {
+  width: calc(14 * var(--ws-px));
+  height: calc(14 * var(--ws-px));
+}
+:where(.app-shell) :where(svg.lucide[width='15']) {
+  width: calc(15 * var(--ws-px));
+  height: calc(15 * var(--ws-px));
+}
+:where(.app-shell) :where(svg.lucide[width='16']) {
+  width: calc(16 * var(--ws-px));
+  height: calc(16 * var(--ws-px));
+}
+:where(.app-shell) :where(svg.lucide[width='17']) {
+  width: calc(17 * var(--ws-px));
+  height: calc(17 * var(--ws-px));
+}
+:where(.app-shell) :where(svg.lucide[width='18']) {
+  width: calc(18 * var(--ws-px));
+  height: calc(18 * var(--ws-px));
+}
+:where(.app-shell) :where(svg.lucide[width='20']) {
+  width: calc(20 * var(--ws-px));
+  height: calc(20 * var(--ws-px));
+}
+:where(.app-shell) :where(svg.lucide[width='21']) {
+  width: calc(21 * var(--ws-px));
+  height: calc(21 * var(--ws-px));
+}
+:where(.app-shell) :where(svg.lucide[width='22']) {
+  width: calc(22 * var(--ws-px));
+  height: calc(22 * var(--ws-px));
+}
+:where(.app-shell) :where(svg.lucide[width='24']) {
+  width: calc(24 * var(--ws-px));
+  height: calc(24 * var(--ws-px));
+}
+:where(.app-shell) :where(svg.lucide[width='25']) {
+  width: calc(25 * var(--ws-px));
+  height: calc(25 * var(--ws-px));
 }

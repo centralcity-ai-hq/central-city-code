@@ -8,7 +8,8 @@ import { test, expect as baseExpect, type Browser, type Page } from '@playwright
 const expect = baseExpect.configure({ timeout: 15_000 });
 const PASSWORD = 'Local-test-only-passphrase-2026';
 const headers = { 'X-City-Request': '1' };
-const OVERVIEW = 'Everything, at a glance.';
+// The Overview's heading in the workspace.
+const OVERVIEW = 'Network map';
 
 const uniqueName = (label: string) => `${label}-${crypto.randomUUID().slice(0, 6)}`;
 

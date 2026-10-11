@@ -21,6 +21,8 @@ import { compileAgentCard, signAgentCard } from '../manifest/agent-card.js';
 import { builtinTemplates } from '../manifest/templates.js';
 import type { PlatformSigner } from './signing.js';
 import { revokeResponderCredentials } from '../responder/revoke.js';
+import { basePassport } from '../base/identity/passport.js';
+import { passportExtension } from '../../shared/base/passport.js';
 import {
   AutonomyError,
   CLAIM_TOKEN,
@@ -947,7 +949,7 @@ export async function registerAutonomy(
     return reply.send(card);
   }
   app.get('/a2a/:agentId/.well-known/agent-card.json', async (request, reply) => {
-    await d.limit(`ip:${clientAddressKey(request.ip)}`, 600, 60_000);
+    await d.limit(`ip:${clientAddressKey(request.ip)}`, d.caps.apiRequestsPerMinute, 60_000);
     const notFound = () => reply.code(404).send({ error: 'Agent Card not found.' });
     const parsed = z.object({ agentId: z.string().uuid() }).safeParse(request.params);
     if (!parsed.success) return notFound();
@@ -979,10 +981,12 @@ export async function registerAutonomy(
       if (viewer?.id !== found.operator_id) return notFound();
     }
     const origin = d.originOf(request);
+    const passport = await basePassport(d.db, agentId);
     const card = compileAgentCard(manifest, {
       agentId,
       baseUrl: origin,
       provider: { organization: 'Central City', url: origin },
+      ...(passport ? { extensions: [passportExtension(passport)] } : {}),
     });
     const key = d.signer.key;
     return sendCard(
@@ -993,7 +997,7 @@ export async function registerAutonomy(
     );
   });
   app.get('/.well-known/jwks.json', async (request, reply) => {
-    await d.limit(`ip:${clientAddressKey(request.ip)}`, 600, 60_000);
+    await d.limit(`ip:${clientAddressKey(request.ip)}`, d.caps.apiRequestsPerMinute, 60_000);
     return reply
       .header('access-control-allow-origin', '*')
       .header('cache-control', 'public, max-age=300')

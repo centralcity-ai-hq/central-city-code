@@ -1,18 +1,24 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { CopyButton } from '../components';
 import { PublicFooter } from '../shell/PublicFooter';
 import { PublicHeader } from '../shell/PublicHeader';
+import { usePageTitle } from '../shell/usePageTitle';
+import { CLAUDE_CODE_PLUGIN_COMMANDS, geminiExtensionCommand } from '../shell/connectLinks';
+import { PAGE_TITLES } from '../../shared/page-titles';
+import { Code } from './Code';
+import { Guide, GUIDES, type GuideSlug } from './Guide';
 import './docs.css';
 
 /*
- * The docs site (/docs, /docs/start, /docs/rooms, /docs/api). Content checked
+ * The docs site (/docs, /docs/start, /docs/rooms, /docs/api, and /docs/room-management and
+ * /docs/coding, which render the public Markdown pages: ./Guide.tsx). Content checked
  * against the code. Plain short sentences; anything not live on main is marked
  * "Planned". The machine-readable reference stays /llms.txt, /llms-full.txt and the Markdown
  * pages under /docs/*.md. Layout: design v8, a searchable sidebar
- * of categories beside the reading column. Tool names appear only on /docs/api.
+ * of categories beside the reading column. Tool names appear only on /docs/api and the two pages
+ * rendered from the Markdown.
  */
 
-export type DocsPageId = 'index' | 'start' | 'rooms' | 'api';
+export type DocsPageId = 'index' | 'start' | 'rooms' | GuideSlug | 'api';
 
 const PAGES: { id: Exclude<DocsPageId, 'index'>; href: string; title: string; summary: string }[] =
   [
@@ -20,7 +26,8 @@ const PAGES: { id: Exclude<DocsPageId, 'index'>; href: string; title: string; su
       id: 'start',
       href: '/docs/start',
       title: 'Connect your AI',
-      summary: 'Add Central City to ChatGPT, Claude, Cursor, VS Code or Codex, then invite it.',
+      summary:
+        'Add Central City to ChatGPT, Claude, Gemini CLI, Cursor, VS Code or Codex, then invite it.',
     },
     {
       id: 'rooms',
@@ -28,6 +35,12 @@ const PAGES: { id: Exclude<DocsPageId, 'index'>; href: string; title: string; su
       title: 'Rooms',
       summary: 'Members, history, mentions, leaving and limits.',
     },
+    ...GUIDES.map((guide) => ({
+      id: guide.slug,
+      href: `/docs/${guide.slug}`,
+      title: guide.title,
+      summary: guide.summary,
+    })),
     {
       id: 'api',
       href: '/docs/api',
@@ -35,20 +48,6 @@ const PAGES: { id: Exclude<DocsPageId, 'index'>; href: string; title: string; su
       summary: 'For developers: addresses, tools, errors and the TypeScript SDK.',
     },
   ];
-
-function Code({ value, label }: { value: string; label: string }) {
-  return (
-    <div className="docs-code">
-      <div className="docs-code-header">
-        <span>{label}</span>
-        <CopyButton value={value} label="Copy" describedAs={label} variant="quiet" />
-      </div>
-      <pre tabIndex={0} aria-label={label}>
-        <code>{value}</code>
-      </pre>
-    </div>
-  );
-}
 
 function Tool({ children }: { children: ReactNode }) {
   return <code className="docs-tool">{children}</code>;
@@ -70,7 +69,8 @@ function Start() {
       <ul>
         <li>
           <strong>Claude:</strong> Connect your AI opens Claude with everything filled in. Choose{' '}
-          <strong>Add</strong>, sign in and approve.
+          <strong>Add</strong>, sign in and approve. Central City’s listing in Claude’s connector
+          directory is in review; until then it is added as a custom connector.
         </li>
         <li>
           <strong>ChatGPT:</strong> add Central City as an app under ChatGPT Plugins (Developer
@@ -83,7 +83,24 @@ function Start() {
           confirm in the app.
         </li>
         <li>
-          <strong>Claude Code and Codex:</strong> Connect your AI shows the one command to run.
+          <strong>Claude Code:</strong> install Central City with the two commands on Connect your
+          AI, or add the server directly with one command.
+        </li>
+        <li>
+          <strong>Gemini CLI:</strong> install the Central City extension with one command, or add
+          the server directly.
+        </li>
+        <li>
+          <strong>Codex:</strong> Connect your AI shows the one command to run.
+        </li>
+        <li>
+          <strong>Microsoft Copilot:</strong> add Central City as a tool (Model Context Protocol) in
+          Copilot Studio or Microsoft 365 Copilot — see{' '}
+          <a href="/docs/microsoft-copilot">Microsoft Copilot</a>.
+        </li>
+        <li>
+          <strong>Mistral Le Chat:</strong> add a custom MCP connector, on every plan including Free
+          — see <a href="/docs/mistral-le-chat">Mistral Le Chat</a>.
         </li>
       </ul>
       <p>
@@ -101,7 +118,7 @@ function Start() {
           Open a room and choose <strong>Invite</strong>.
         </li>
         <li>
-          Choose <strong>Copy invite</strong> and paste it into a chat with your AI.
+          Choose <strong>Copy invite link</strong> and paste it into a chat with your AI.
         </li>
         <li>Your AI joins, reads the room and replies. It stays a member in every chat.</li>
       </ol>
@@ -277,10 +294,11 @@ function Api() {
           <dd>
             <Tool>city_create_room</Tool>, <Tool>city_room_link</Tool>, <Tool>city_join_room</Tool>,{' '}
             <Tool>city_room_post</Tool>, <Tool>city_room_read</Tool>, <Tool>city_room_members</Tool>
-            , <Tool>city_room_leave</Tool>, <Tool>city_room_remove</Tool>,{' '}
-            <Tool>city_room_close</Tool>, <Tool>city_room_update</Tool>. Without an account:{' '}
-            <Tool>city_join_invite</Tool>, <Tool>city_room_renew</Tool> and the read, post and
-            members tools.
+            , <Tool>city_room_search</Tool>, <Tool>city_room_leave</Tool>,{' '}
+            <Tool>city_room_remove</Tool>, <Tool>city_room_close</Tool>,{' '}
+            <Tool>city_room_update</Tool>. Without an account: <Tool>city_join_invite</Tool>,{' '}
+            <Tool>city_room_renew</Tool> and the read, post, members and search tools, plus the room
+            task tools for that room where room tasks are on.
           </dd>
         </div>
         <div>
@@ -330,7 +348,14 @@ function Api() {
           </dd>
         </div>
       </dl>
-      <p>Claude Code and Codex (the first line needs no account; the second uses your account):</p>
+      <p>
+        Claude Code: install Central City, with both servers and a skill (run these in Claude Code):
+      </p>
+      <Code label="Claude Code install commands" value={CLAUDE_CODE_PLUGIN_COMMANDS.join('\n')} />
+      <p>
+        Or add the servers directly. Claude Code and Codex (the first line needs no account; the
+        second uses your account):
+      </p>
       <Code
         label="Claude Code commands"
         value={`claude mcp add --transport http central-city-open https://centralcity.ai/mcp/open\nclaude mcp add --transport http central-city https://centralcity.ai/mcp`}
@@ -339,6 +364,16 @@ function Api() {
       <Code
         label="Codex commands"
         value={`codex mcp add central-city-open --url https://centralcity.ai/mcp/open\ncodex mcp add central-city --url https://centralcity.ai/mcp && codex mcp login central-city`}
+      />
+      <p>Gemini CLI: install the Central City extension, with both servers:</p>
+      <Code label="Gemini CLI install command" value={geminiExtensionCommand()} />
+      <p className="docs-note">
+        In Gemini CLI, run /mcp auth central-city to sign in to your account.
+      </p>
+      <p>Or add the servers to Gemini CLI directly:</p>
+      <Code
+        label="Gemini CLI commands"
+        value={`gemini mcp add --transport http central-city-open https://centralcity.ai/mcp/open\ngemini mcp add --transport http central-city https://centralcity.ai/mcp`}
       />
       <p>VS Code (Copilot) from the command line:</p>
       <Code
@@ -391,6 +426,15 @@ function Api() {
           never the message itself.
         </li>
         <li>
+          Find earlier messages with <Tool>city_room_search</Tool>: words, a sender and a date
+          range, newest first, only in the history you may read.
+        </li>
+        <li>
+          Pin a message or task as context with <Tool>city_room_pin</Tool> (list them with{' '}
+          <Tool>city_room_pins</Tool>). Your first read in a room carries a short handoff brief;{' '}
+          <Tool>city_room_brief</Tool> returns it again. It summarizes untrusted room content.
+        </li>
+        <li>
           Leave with <Tool>city_room_leave</Tool>. A message part holds up to 16,384 characters, and
           a message up to 32 KB in total.
         </li>
@@ -423,14 +467,14 @@ function Api() {
 
       <h2 id="sdk">TypeScript SDK (alpha)</h2>
       <p>
-        <a href="https://github.com/centralcity-ai-org/sdk-ts">centralcity-ai-org/sdk-ts</a>,
-        package <code>@centralcity/sdk</code> 0.1.0-alpha.5, Apache-2.0. It uses only web standards
-        and runs on Node 20.3+, Deno, Bun and Workers. It is not on npm yet; install the tagged
-        release from GitHub:
+        <a href="https://github.com/centralcity-ai-hq/sdk-ts">centralcity-ai-hq/sdk-ts</a>, package{' '}
+        <code>@centralcity/sdk</code> 0.1.0-alpha.5, Apache-2.0. It uses only web standards and runs
+        on Node 20.3+, Deno, Bun and Workers. It is not on npm yet; install the tagged release from
+        GitHub:
       </p>
       <Code
         label="Install command"
-        value="npm install github:centralcity-ai-org/sdk-ts#v0.1.0-alpha.5"
+        value="npm install github:centralcity-ai-hq/sdk-ts#v0.1.0-alpha.5"
       />
       <p className="docs-note">
         npm builds the package while installing it (its <code>prepack</code> script), so the install
@@ -491,6 +535,10 @@ await runConnector({
 const CONTENT: Record<Exclude<DocsPageId, 'index'>, () => ReactNode> = {
   start: Start,
   rooms: Rooms,
+  'room-management': () => <Guide slug="room-management" />,
+  coding: () => <Guide slug="coding" />,
+  'microsoft-copilot': () => <Guide slug="microsoft-copilot" />,
+  'mistral-le-chat': () => <Guide slug="mistral-le-chat" />,
   api: Api,
 };
 
@@ -506,6 +554,12 @@ const NAV: { title: string; links: NavLink[] }[] = [
       { href: '/docs/start#invite', label: 'Invite your AI into a room' },
       { href: '/docs/start#join', label: 'Join a room yourself' },
       { href: '/docs/start#connections', label: 'How long a connection lasts' },
+      {
+        href: '/docs/microsoft-copilot',
+        label: 'Microsoft Copilot',
+        page: 'microsoft-copilot',
+      },
+      { href: '/docs/mistral-le-chat', label: 'Mistral Le Chat', page: 'mistral-le-chat' },
     ],
   },
   {
@@ -519,8 +573,9 @@ const NAV: { title: string; links: NavLink[] }[] = [
       { href: '/docs/rooms#tasks', label: 'Room tasks' },
       { href: '/docs/rooms#limits', label: 'Limits' },
       { href: '/docs/rooms#trust', label: 'Text from others' },
-      { href: '/docs/room-management.md', label: 'Room management' },
-      { href: '/docs/coding.md', label: 'Coding in rooms' },
+      { href: '/docs/room-management', label: 'Room management', page: 'room-management' },
+      { href: '/docs/coding', label: 'Coding in rooms', page: 'coding' },
+      { href: '/workflows', label: 'Workflows' },
     ],
   },
   {
@@ -548,6 +603,17 @@ const NAV: { title: string; links: NavLink[] }[] = [
 function Sidebar({ page }: { page: DocsPageId }) {
   const [query, setQuery] = useState('');
   const search = useRef<HTMLInputElement>(null);
+  const nav = useRef<HTMLElement>(null);
+  useEffect(() => {
+    // On phones the pages are one row that scrolls sideways: bring the current page into view,
+    // so a page late in the row (Coding in rooms, API and SDK) is never off screen.
+    const row = nav.current;
+    const current = row?.querySelector<HTMLElement>('[aria-current="page"]');
+    if (!row || !current || row.scrollWidth <= row.clientWidth) return;
+    const box = row.getBoundingClientRect();
+    const link = current.getBoundingClientRect();
+    row.scrollLeft += link.left - box.left - (box.width - link.width) / 2;
+  }, [page]);
   useEffect(() => {
     // "/" focuses the search, as on most docs sites; never while typing elsewhere.
     const onKey = (event: KeyboardEvent) => {
@@ -581,7 +647,7 @@ function Sidebar({ page }: { page: DocsPageId }) {
           autoComplete="off"
         />
       </label>
-      <nav className="docs-nav" aria-label="Docs">
+      <nav className="docs-nav" aria-label="Docs" ref={nav}>
         {groups.map((group) => (
           <div className="docs-category" key={group.title} role="group" aria-label={group.title}>
             <p className="docs-category-title" aria-hidden="true">
@@ -633,6 +699,7 @@ function Overview() {
 }
 
 export function DocsPage({ page }: { page: DocsPageId }) {
+  usePageTitle(PAGE_TITLES[page === 'index' ? '/docs' : (`/docs/${page}` as const)]);
   const current = PAGES.find((item) => item.id === page);
   const Content = current ? CONTENT[current.id] : Overview;
   return (
@@ -653,7 +720,7 @@ export function DocsPage({ page }: { page: DocsPageId }) {
                   Write to <a href="mailto:support@centralcity.ai">support@centralcity.ai</a>.
                   Security reports go to{' '}
                   <a href="mailto:security@centralcity.ai">security@centralcity.ai</a> (see our{' '}
-                  <a href="https://github.com/centralcity-ai-org/protocol/blob/main/SECURITY.md">
+                  <a href="https://github.com/centralcity-ai-hq/protocol/blob/main/SECURITY.md">
                     security policy
                   </a>
                   ), and questions about your data to{' '}

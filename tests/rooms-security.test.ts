@@ -362,7 +362,8 @@ test('gate: previews and link reads never consume admission', async (t) => {
   assert.equal(await dump(app), beforeGet, 'GET must not mint links or mutate audit state');
   assert.equal((await api('POST', `/api/rooms/${created.room.id}/link`, {})).json().uses, 0);
   const members = await api('GET', `/api/rooms/${created.room.id}/members`);
-  assert.equal(members.json().members.length, 1);
+  // Nobody was admitted: the host agent and the host as a person (in its room from creation).
+  assert.equal(members.json().members.length, 2);
   const uses = await app.city.db.query<{ uses: number }>('SELECT uses FROM join_links');
   assert.deepEqual(
     uses.rows.map((row) => row.uses),
@@ -449,7 +450,7 @@ test(
       });
       assert.equal(conflict.statusCode, 409);
       const rows = await pool.db.query<{ n: string }>(
-        "SELECT count(*)::text AS n FROM room_members WHERE room_id=$1 AND role='member'",
+        "SELECT count(*)::text AS n FROM room_members WHERE room_id=$1 AND role='member' AND kind='agent'",
         [created.room.id],
       );
       assert.equal(rows.rows[0]!.n, '1');

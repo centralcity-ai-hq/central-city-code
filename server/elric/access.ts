@@ -34,6 +34,8 @@ export interface ElricRoom {
   host_owner_id: string;
   history: string;
   next_seq: number;
+  /** The owner's private /elric chat (rooms.elric_private); every other room is a group room. */
+  elric_private: boolean;
 }
 
 export type ElricAccess =
@@ -96,7 +98,7 @@ export async function elricRoomAccess(
         responders_allowed: boolean;
       }
     >(
-      `SELECT id,name,topic,host_owner_id,history,next_seq,closed_at,deleted_at,responders_allowed
+      `SELECT id,name,topic,host_owner_id,history,next_seq,elric_private,closed_at,deleted_at,responders_allowed
          FROM rooms WHERE id=$1${options.lock ? ' FOR UPDATE' : ''}`,
       [roomId],
     )
@@ -136,6 +138,7 @@ export async function elricRoomAccess(
       host_owner_id: room.host_owner_id,
       history: room.history,
       next_seq: Number(room.next_seq),
+      elric_private: room.elric_private === true,
     },
     visibleFromSeq: Number(member.visible_from_seq),
   };
@@ -164,19 +167,33 @@ export async function elricEligibility(
   now: number = Date.now(),
 ): Promise<ElricEligibility> {
   const row = (
-    await q.query<{
-      kind: string;
-      provider: string | null;
-      email: string | null;
-      email_verified: boolean | null;
-      verified_at: string | number | null;
-    }>(
+    await q.query<IdentityRow>(
       `SELECT o.kind, v.provider, v.email, v.email_verified, v.verified_at
          FROM operators o LEFT JOIN elric_verified_identities v ON v.operator_id=o.id
         WHERE o.id=$1`,
       [operatorId],
     )
   ).rows[0];
+  return eligibilityOf(row, () => isAdult(q, defaultPiiKeyring(), operatorId, now));
+}
+
+/** The operator's kind and verified identity, as elricEligibility reads them. */
+export interface IdentityRow {
+  kind: string;
+  provider: string | null;
+  email: string | null;
+  email_verified: boolean | null;
+  verified_at: string | number | null;
+}
+
+/**
+ * elricEligibility's decision for an identity row already read (undefined: no operator); `adult`
+ * is asked only once the identity qualifies.
+ */
+export async function eligibilityOf(
+  row: IdentityRow | undefined,
+  adult: () => Promise<boolean | null> | boolean | null,
+): Promise<ElricEligibility> {
   if (!row) return { eligible: false, reason: 'unknown' };
   if (row.kind !== 'owner') return { eligible: false, reason: 'not_person' };
   if (
@@ -187,9 +204,9 @@ export async function elricEligibility(
   )
     return { eligible: false, reason: 'unverified' };
   // The 18+ age confirmation (server/google/pii.ts): under 18 locks the account for Elric.
-  const adult = await isAdult(q, defaultPiiKeyring(), operatorId, now);
-  if (adult === false) return { eligible: false, reason: 'age_under_18' };
-  if (adult !== true) return { eligible: false, reason: 'age_unknown' };
+  const isAdultNow = await adult();
+  if (isAdultNow === false) return { eligible: false, reason: 'age_under_18' };
+  if (isAdultNow !== true) return { eligible: false, reason: 'age_unknown' };
   return { eligible: true, email: row.email };
 }
 
@@ -220,10 +237,16 @@ export function elricEligibilityRefusal(
 }
 
 /**
- * The ids among `agentIds` that are (non-revoked) Elric agents. Third-party control paths
- * (city_control through an `agents:control` grant or workspace key) refuse these: only the
- * owner's console pauses, resumes or revokes Elric.
+ * Elric is managed by Central City: per-agent destructive routes (console revoke and credential
+ * rotation) and city_control refuse it with `409 elric_managed`. Elric's own settings (off
+ * switch) and account erasure are the only paths that deactivate it.
  */
+export const ELRIC_MANAGED = {
+  code: 'elric_managed',
+  message: 'Elric is managed by Central City. Turn it off in Elric settings instead.',
+} as const;
+
+/** The ids among `agentIds` that are (non-revoked) Elric agents. */
 export async function elricAgentIds(q: Q, agentIds: readonly string[]): Promise<Set<string>> {
   if (!agentIds.length) return new Set();
   return new Set(

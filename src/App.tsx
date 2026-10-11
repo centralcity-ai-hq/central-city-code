@@ -1,3 +1,9 @@
+import { noteElricStatus } from './elric/prefetch';
+import { PageArea } from './shell/PageArea';
+import { AgentInspectionTabs } from './agents/AgentInspectionTabs';
+import { DataExport } from './settings/DataExport';
+import { ActivityLog } from './settings/ActivityLog';
+import { isSettingsSection, SettingsLayout } from './settings/SettingsLayout';
 import {
   lazy,
   Suspense,
@@ -17,7 +23,6 @@ import {
   Check,
   CheckCheck,
   CircleHelp,
-  Download,
   DoorOpen,
   FileText,
   Layers3,
@@ -42,8 +47,13 @@ import {
   Unplug,
   X,
 } from 'lucide-react';
-import type { Agent, Capability, Job, Operator, Snapshot, WorkspaceExport } from '../shared/types';
-import { api, selectWorkspace } from './api';
+import type { Agent, Capability, Job, Operator, Snapshot } from '../shared/types';
+import { api, selectWorkspace, selectedWorkspaceId } from './api';
+import { useWorkspaceV2 } from './shell/workspaceV2';
+import { setSidebarOpen } from './shell/sidebarRooms';
+import { MyAgentsV2, type AgentRequest } from './agents/MyAgentsV2';
+import { unreadMessagesLabel, WorkspaceNavigation } from './shell/WorkspaceNavigation';
+import { openWorkspaceView, workspaceView } from './shell/workspaceDestinations';
 import { useSnapshot } from './useSnapshot';
 import { Workflows } from './Workflows';
 import { AssistantAccess, permissionLabel } from './AssistantAccess';
@@ -53,7 +63,9 @@ import { WorkspaceKeys } from './WorkspaceKeys';
 import { AutoReplySection } from './responder';
 import type { WorkspaceMembership } from '../shared/assistant';
 import { AgentInbox, forgetMessagesState, MessagesView, useInboxSummary } from './Messages';
-import { INVITE_ROOMS_PATH, navigate } from './shell/navigation';
+import { directFromHash } from './rooms/direct';
+import { INVITE_ROOMS_PATH, navigate, takeNextPageNote } from './shell/navigation';
+import { markInAppChange } from './shell/pageNavigation';
 import {
   AgentGlyph,
   capabilityLabels,
@@ -67,7 +79,7 @@ import {
   Status,
   TextLink,
 } from './components';
-import { CityMark, Lockup, SkipLink, ThemeToggle } from './brand';
+import { Lockup, SkipLink, ThemeToggle } from './brand';
 import { FormError } from './Auth';
 import {
   aiCreated,
@@ -81,12 +93,17 @@ import {
   lineageDepth,
   type ExchangeState,
 } from './circle';
-import { ConnectAI } from './Connect';
+import { ConnectAIApp } from './ConnectApp';
 import { AppHeader } from './shell/AppHeader';
+import { applyPageTitle } from './shell/usePageTitle';
 import { codeFromPaste, eventTypeLabel, plainEvent } from './ui/plainText';
 import { ReadableData } from './ui/ReadableData';
+import { elricEntry, type ElricEntryStatus } from './elric/entry';
+import { clearPendingDraft } from './elric/pendingDraft';
 import { PublicFooter } from './shell/PublicFooter';
 import { PublicHeader } from './shell/PublicHeader';
+import './advanced-v2.css';
+import { NetworkMap } from './network/NetworkMap';
 
 /** Its own chunk: only owners on a server with Elric open it. */
 const ElricActivity = lazy(() =>
@@ -100,6 +117,7 @@ type View =
   | 'jobs'
   | 'connections'
   | 'activity'
+  | 'data'
   | 'collaborations'
   | 'messages'
   | 'assistants'
@@ -110,7 +128,6 @@ type Dialog =
   | { kind: 'job'; connectionId?: string }
   | { kind: 'agent'; id: string }
   | { kind: 'result'; id: string }
-  | { kind: 'export' }
   | { kind: 'token'; token: string; agent: Agent; rotated?: boolean }
   | null;
 const navigation = [
@@ -132,7 +149,18 @@ const navigation = [
  * Switching remounts the console for the selected workspace; every request then carries
  * X-City-Workspace, which the server honors only for co-owned workspaces.
  */
-export function Workspaces({ person, onLogout }: { person: Operator; onLogout: () => void }) {
+export function Workspaces({
+  person,
+  onLogout,
+  children,
+  pageTitle,
+}: {
+  person: Operator;
+  onLogout: () => void;
+  children?: ReactNode;
+  pageTitle?: string;
+}) {
+  const workspaceV2 = useWorkspaceV2();
   const own: WorkspaceMembership = {
     id: person.id,
     name: person.name,
@@ -140,26 +168,42 @@ export function Workspaces({ person, onLogout }: { person: Operator; onLogout: (
     role: 'owner',
   };
   const [memberships, setMemberships] = useState<WorkspaceMembership[]>([own]);
-  const [activeId, setActiveId] = useState(person.id);
+  const [activeId, setActiveId] = useState(
+    () => (workspaceV2 ? selectedWorkspaceId() : null) ?? person.id,
+  );
+  const [membershipError, setMembershipError] = useState(false);
   const reload = useCallback(async () => {
     try {
       const value = await api<{ workspaces: WorkspaceMembership[] }>('/api/workspaces');
       setMemberships(value.workspaces);
+      setMembershipError(false);
     } catch {
-      // The console reports connectivity problems itself; keep the current list.
+      setMembershipError(true);
     }
   }, []);
   useEffect(() => {
     void reload();
   }, [reload]);
-  const active = memberships.find((item) => item.id === activeId) ?? own;
+  const active =
+    memberships.find((item) => item.id === activeId) ?? (workspaceV2 ? undefined : own);
+  if (!active)
+    return (
+      <div role="status">
+        <p>{membershipError ? 'Workspace list unavailable.' : 'Loading workspace…'}</p>
+        <button onClick={() => void reload()}>Retry</button>
+        <button onClick={() => switchTo(person.id)}>Return to your workspace</button>
+      </div>
+    );
   function switchTo(id: string) {
     selectWorkspace(id === person.id ? null : id);
     setActiveId(id);
+    if (workspaceV2) window.dispatchEvent(new PopStateEvent('popstate'));
   }
   return (
     <Console
       key={active.id}
+      pageContent={children}
+      pageTitle={pageTitle}
       operator={{ id: active.id, name: active.name }}
       kind={active.kind}
       workspaces={memberships}
@@ -173,6 +217,22 @@ export function Workspaces({ person, onLogout }: { person: Operator; onLogout: (
   );
 }
 
+/**
+ * The workspace preview (`?workspace=v2`) names some views differently in its navigation. Each
+ * view's heading, header title and tab title use the same name as its menu entry. Routes and
+ * view ids stay as they are, so existing links and history entries keep working.
+ */
+const previewTitles: Partial<Record<View, string>> = {
+  network: 'Network map',
+  connect: 'Connect AI',
+  agents: 'My agents',
+  collaborations: 'Research & review',
+  connections: 'Agent permissions',
+  assistants: 'Connected apps',
+  data: 'Data & export',
+  activity: 'Activity log',
+};
+
 const headings: Record<View, { title: ReactNode; lede: string }> = {
   network: {
     title: (
@@ -184,7 +244,7 @@ const headings: Record<View, { title: ReactNode; lede: string }> = {
   },
   connect: {
     title: 'Connect your AI.',
-    lede: 'Add Central City to ChatGPT, Claude, Cursor, VS Code or Codex once. After that, you only paste links.',
+    lede: 'Add Central City to ChatGPT, Claude, Gemini CLI, Cursor, VS Code or Codex once. After that, you only paste links.',
   },
   agents: {
     title: 'Your agents.',
@@ -214,6 +274,7 @@ const headings: Record<View, { title: ReactNode; lede: string }> = {
     title: 'Elric.',
     lede: 'What your Elric did, and what it may do.',
   },
+  data: { title: 'Data & export', lede: 'Download the records for this workspace.' },
   activity: {
     title: 'Activity.',
     lede: 'Everything that happened in your account, newest first.',
@@ -265,7 +326,11 @@ function Console({
   onSwitch,
   onWorkspacesChanged,
   onLogout,
+  pageContent,
+  pageTitle,
 }: {
+  pageContent?: ReactNode;
+  pageTitle?: string;
   operator: Operator;
   kind: 'owner' | 'ai';
   workspaces: WorkspaceMembership[];
@@ -278,34 +343,116 @@ function Console({
     operator.id,
     onLogout,
   );
+  const workspaceV2 = useWorkspaceV2();
   // A claim link (#claim=<token>) opens the agents view with the token prefilled.
+  // "Message privately" from a room opens Messages on the pair's thread (#dm=<room>.<member>).
+  const [direct, setDirect] = useState(() => directFromHash(window.location.hash));
   const [view, setView] = useState<View>(() =>
-    window.location.hash.startsWith('#claim=')
-      ? 'agents'
-      : window.location.hash === '#connect'
-        ? 'connect'
-        : 'network',
+    direct
+      ? 'messages'
+      : window.location.hash.startsWith('#claim=')
+        ? 'agents'
+        : window.location.hash === '#connect'
+          ? 'connect'
+          : window.location.hash === '#elric'
+            ? 'elric'
+            : // A console view with its own address (/settings, /agents; see Root) or Back/Forward.
+              (workspaceView(window.history.state, operator.id) ?? 'network'),
   );
   useEffect(() => {
-    if (['#signin', '#create', '#connect'].includes(window.location.hash))
-      window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    // The claim form removes its secret fragment after reading it. Preserve the console
+    // destination before that happens so Root cannot mistake it for a fresh home entry.
+    if (workspaceV2 && !pageContent)
+      window.history.replaceState(
+        { ...window.history.state, workspaceView: view, workspaceId: operator.id },
+        '',
+      );
+    if (
+      ['#signin', '#create', '#connect', '#elric'].includes(window.location.hash) ||
+      window.location.hash.startsWith('#dm=')
+    )
+      window.history.replaceState(
+        workspaceV2 ? { workspaceView: view, workspaceId: operator.id } : null,
+        '',
+        window.location.pathname + window.location.search,
+      );
   }, []);
+  useEffect(() => {
+    if (!workspaceV2) return;
+    const sync = () => {
+      const hash = window.location.hash;
+      const directEntry = directFromHash(hash);
+      if (directEntry) setDirect(directEntry);
+      const next = directEntry
+        ? 'messages'
+        : hash === '#connect'
+          ? 'connect'
+          : hash === '#elric'
+            ? 'elric'
+            : hash.startsWith('#claim=')
+              ? 'agents'
+              : workspaceView(window.history.state, operator.id);
+      if (next) {
+        window.history.replaceState(
+          { ...window.history.state, workspaceView: next, workspaceId: operator.id },
+          '',
+        );
+        setView(next);
+      }
+      setMobileNav(false);
+    };
+    window.addEventListener('popstate', sync);
+    window.addEventListener('hashchange', sync);
+    return () => {
+      window.removeEventListener('popstate', sync);
+      window.removeEventListener('hashchange', sync);
+    };
+  }, [workspaceV2, operator.id]);
   const [dialog, setDialog] = useState<Dialog>(null);
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [mobileNav, setMobileNav] = useState(false);
+  const closeNavigation = useCallback(() => setMobileNav(false), []);
+  // A room page's top bar opens the drawer with its own ☰ chip (the shell row steps aside).
+  useEffect(() => {
+    if (!workspaceV2) return;
+    setSidebarOpen(() => setMobileNav(true));
+    return () => setSidebarOpen(null);
+  }, [workspaceV2]);
   // Elric lives in the person's own workspace, and only when the server has it.
-  const [elricOn, setElricOn] = useState(false);
+  // An account that cannot use Elric yet (no Google sign-in, no date of birth) goes to /elric,
+  // which shows the step it needs; under 18 sees no entry at all (src/elric/entry.ts).
+  const [elric, setElric] = useState<'hidden' | 'activity' | 'setup' | null>(null);
+  // Elric's agent id, so My agents can tell the first-party assistant apart from added agents.
+  const [elricAgentId, setElricAgentId] = useState<string | null>(null);
+  // Elric's own state, for its pinned row in My agents (On / Paused).
+  const [elricStatus, setElricStatus] = useState<'active' | 'paused' | 'revoked' | null>(null);
   useEffect(() => {
     if (kind === 'ai') return;
     let active = true;
-    api('/api/elric')
-      .then(() => active && setElricOn(true))
-      .catch(() => active && setElricOn(false));
+    api<ElricEntryStatus & { status?: 'active' | 'paused' | 'revoked' | null }>('/api/elric')
+      .then((status) => {
+        if (!active) return;
+        setElric(elricEntry(status));
+        setElricAgentId(status.agent_id ?? null);
+        setElricStatus(status.status ?? null);
+        noteElricStatus(status);
+      })
+      .catch(() => active && setElric('hidden'));
     return () => {
       active = false;
     };
   }, [kind]);
-  const shownNavigation = navigation.filter((item) => item.id !== 'elric' || elricOn);
+  const elricOn = elric === 'activity';
+  // Opened as /#elric (or still on the view) while the account needs a setup step: /elric.
+  // No entry (under 18, Elric off, status failed): the overview.
+  useEffect(() => {
+    if (view !== 'elric') return;
+    if (elric === 'setup') navigate('/elric', true);
+    else if (elric === 'hidden') changeView('network');
+  }, [view, elric]);
+  const shownNavigation = navigation.filter(
+    (item) => item.id !== 'elric' || elric === 'activity' || elric === 'setup',
+  );
   const [query, setQuery] = useState('');
   const [notice, setNotice] = useState('');
   const [actionError, setActionError] = useState('');
@@ -319,21 +466,35 @@ function Console({
     window.clearTimeout(noticeTimer.current);
     noticeTimer.current = window.setTimeout(() => setNotice(''), 6500);
   }
+  // A note the last page left ("Chat deleted."): shown once the next page has rendered, whether
+  // the console stayed or mounted fresh.
+  useEffect(() => {
+    const note = takeNextPageNote();
+    if (note) notify(note);
+  }, [pageContent, view]);
   async function action(key: string, fn: () => Promise<unknown>, message?: string) {
-    if (busy) return;
+    await attempt(key, fn, message);
+  }
+  /** Runs an action; resolves to its error message ('' when it went through or did not run). */
+  async function attempt(key: string, fn: () => Promise<unknown>, message?: string) {
+    if (busy) return '';
     setBusy(key);
     setActionError('');
     try {
       await fn();
       await refresh();
       if (message) notify(message);
+      return '';
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'That action could not be completed.');
+      const failure = err instanceof Error ? err.message : 'That action could not be completed.';
+      setActionError(failure);
+      return failure;
     } finally {
       setBusy('');
     }
   }
   function changeView(next: View) {
+    if (workspaceV2) openWorkspaceView(next, operator.id);
     setView(next);
     setQuery('');
     setMobileNav(false);
@@ -357,10 +518,178 @@ function Console({
     setSelectedAgent(id);
     setDialog({ kind: 'agent', id });
   };
-  const heading = headings[view];
+  // In My agents' claim sheet the page's error banner sits behind the backdrop, so a failed
+  // claim is shown in the sheet instead.
+  const [claimSheetError, setClaimSheetError] = useState('');
+  /** The claim form; `onClaimed` runs only after a claim went through (My agents closes its sheet). */
+  const claimAgentsFor = (onClaimed?: () => void) => (
+    <ClaimAgents
+      busy={Boolean(busy)}
+      error={onClaimed ? claimSheetError : ''}
+      onClaim={async (token) => {
+        let claimed = false;
+        if (onClaimed) setClaimSheetError('');
+        const failure = await (token.startsWith('ccwclaim_')
+          ? attempt(
+              'claim',
+              async () => {
+                await api('/api/workspaces/claim', { claim_token: token });
+                claimed = true;
+                onWorkspacesChanged();
+              },
+              'AI workspace claimed. You now co-own it; switch to it from the menu at the top left.',
+            )
+          : attempt(
+              'claim',
+              async () => {
+                await api('/api/agents/claim', { claim_token: token });
+                claimed = true;
+              },
+              'The agents are now in your workspace.',
+            ));
+        if (claimed) onClaimed?.();
+        else if (onClaimed && failure) {
+          setActionError('');
+          setClaimSheetError(failure);
+        }
+      }}
+    />
+  );
+  const claimAgents = claimAgentsFor();
+  // Connect AI's "Claim agents" opens My agents with its claim sheet (My agents v4 has no form
+  // on the page); My agents clears the request once the sheet is open.
+  const [claimRequested, setClaimRequested] = useState(false);
+  // The network map's "Open agent", an unread chip in Messages (on the agent's Messages) and a new
+  // template agent show that agent in My agents' pane; the classic console opens its dialog.
+  const [agentRequested, setAgentRequested] = useState<AgentRequest | null>(null);
+  const showAgent = (id: string, screen?: 'messages') => {
+    if (!workspaceV2) return openAgent(id);
+    if (view !== 'agents') changeView('agents');
+    setAgentRequested({ id, screen });
+  };
+  const agentsFooter = (
+    <>
+      <div className="list-panel-footer">
+        <span>Adds 3 example agents. Scripted, no AI. Remove anytime.</span>
+        <button
+          className="text-link"
+          disabled={Boolean(busy)}
+          onClick={() =>
+            void action('demo', () => api('/api/demo/start', {}), 'The CC agents are ready.')
+          }
+        >
+          Generate your first CC agents
+          <Play size={13} />
+        </button>
+      </div>
+      {claimAgents}
+    </>
+  );
+  const signOut = () =>
+    void action('logout', async () => {
+      await api('/api/auth/logout', {});
+      // Cached conversations and the prefetch stay on this device otherwise.
+      forgetMessagesState();
+      // A message typed for Elric before signing in must not reach the next person.
+      clearPendingDraft();
+      onLogout();
+    });
+  const workspaceSelect =
+    workspaces.length > 1 ? (
+      <select
+        className="workspace-select"
+        aria-label="Switch workspace"
+        value={operator.id}
+        onChange={(event) => onSwitch(event.target.value)}
+      >
+        {workspaces.map((item) => (
+          <option key={item.id} value={item.id}>
+            {item.kind === 'ai' ? `${item.name} (AI workspace)` : `${item.name} (yours)`}
+          </option>
+        ))}
+      </select>
+    ) : null;
+  const accountDetail = kind === 'ai' ? 'AI workspace · you co-own it' : 'Private workspace';
+  const accountControls = (
+    <div className="sidebar-bottom">
+      <div className="sidebar-account">
+        <span>Theme</span>
+        <ThemeToggle />
+      </div>
+      <button className="signout" disabled={refreshing} onClick={() => void refresh()}>
+        <RefreshCw size={15} className={refreshing ? 'spin' : ''} aria-hidden="true" />
+        Refresh
+      </button>
+      <button className="signout" disabled={Boolean(busy)} onClick={signOut}>
+        <LogOut size={15} aria-hidden="true" />
+        Sign out
+      </button>
+    </div>
+  );
+  // Workspace v2 Advanced views (Research & review, Agent permissions, Network map) take the
+  // Rooms v2 look from advanced-v2.css; their markup, data and actions stay the same.
+  const advancedV2 =
+    workspaceV2 && (view === 'network' || view === 'collaborations' || view === 'connections');
+  // Workspace v2 Settings sections render their own header and section rail.
+  const settingsSection = workspaceV2 && isSettingsSection(view) ? view : null;
+  const heading =
+    workspaceV2 && view === 'activity'
+      ? { title: 'Activity log', lede: 'Recent events in this workspace.' }
+      : workspaceV2 && view === 'messages'
+        ? {
+            title: 'Messages',
+            lede: 'Private messages from rooms, and conversations between your agents.',
+          }
+        : workspaceV2 &&
+            (view === 'network' ||
+              view === 'collaborations' ||
+              view === 'connections' ||
+              view === 'connect')
+          ? {
+              title: previewTitles[view],
+              // The v2 Network map shows only the map, so its lede names only agents and routes.
+              lede:
+                view === 'network'
+                  ? 'Your agents and who can send work to whom.'
+                  : view === 'connect'
+                    ? 'Add Central City to your AI app once. After that, you only paste room links.'
+                    : headings[view].lede,
+            }
+          : workspaceV2 && view === 'agents'
+            ? { title: 'Your agents', lede: headings.agents.lede }
+            : headings[view];
+  const headerTitle =
+    pageTitle ??
+    (workspaceV2 ? previewTitles[view] : undefined) ??
+    navigation.find((item) => item.id === view)?.label ??
+    'Workspace';
+  // The preview's console views name the tab after the view, as its menu does. Pages shown inside
+  // the console (pageContent) set their own title.
+  useEffect(() => {
+    if (!workspaceV2 || pageContent) return;
+    return applyPageTitle(document, `${headerTitle} · Central City`);
+  }, [workspaceV2, pageContent, headerTitle]);
   return (
-    <div className="app-shell">
-      <SkipLink />
+    // data-live: the live event stream is connected (no header label shows it: WORKSPACE_V3 §6).
+    <div
+      className="app-shell"
+      data-workspace={workspaceV2 ? 'v2' : undefined}
+      data-live={streamLive ? 'true' : 'false'}
+    >
+      {pageContent ? (
+        <a
+          className="skip-link"
+          href="#workspace-page-content"
+          onClick={(event) => {
+            event.preventDefault();
+            document.getElementById('workspace-page-content')?.focus();
+          }}
+        >
+          Skip to content
+        </a>
+      ) : (
+        <SkipLink />
+      )}
       {mobileNav ? (
         <button
           className="nav-backdrop"
@@ -369,672 +698,731 @@ function Console({
         />
       ) : null}
       <aside className={`sidebar ${mobileNav ? 'open' : ''}`}>
-        <Lockup onClick={() => changeView('network')} label="Central City overview" />
-        <div className="workspace-switch">
-          <span className="workspace-avatar" aria-hidden="true">
-            {operator.name.slice(0, 1).toUpperCase()}
-          </span>
-          <div>
-            <strong>{operator.name}</strong>
-            <span>{kind === 'ai' ? 'AI workspace · you co-own it' : 'Private workspace'}</span>
-          </div>
-          <LockKeyhole size={13} aria-hidden="true" />
-          {workspaces.length > 1 ? (
-            <select
-              className="workspace-select"
-              aria-label="Switch workspace"
-              value={operator.id}
-              onChange={(event) => onSwitch(event.target.value)}
-            >
-              {workspaces.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.kind === 'ai' ? `${item.name} (AI workspace)` : `${item.name} (yours)`}
-                </option>
-              ))}
-            </select>
-          ) : null}
-        </div>
-        <p className="nav-label">Workspace</p>
-        <nav aria-label="Workspace">
-          <a
-            className="nav-item"
-            href="/rooms"
-            onClick={(event) => {
-              if (event.metaKey || event.ctrlKey || event.shiftKey || event.button) return;
-              event.preventDefault();
-              navigate('/rooms');
-            }}
-          >
-            <DoorOpen size={18} strokeWidth={1.6} aria-hidden="true" />
-            <span>Rooms</span>
-          </a>
-          {shownNavigation.map((item) => (
-            <button
-              key={item.id}
-              className={`nav-item ${view === item.id ? 'active' : ''} ${item.id === 'connect' ? 'nav-connect' : ''}`}
-              aria-current={view === item.id ? 'page' : undefined}
-              aria-describedby={
-                item.id === 'jobs' && activeJobs.length + reviewJobs.length
-                  ? 'exchange-count'
-                  : undefined
-              }
-              onClick={() => changeView(item.id)}
-            >
-              <item.icon size={18} strokeWidth={1.6} aria-hidden="true" />
-              <span>{item.label}</span>
-              {item.id === 'messages' && inboxes.total ? (
-                <span className="nav-count" aria-label={`${inboxes.total} unread messages`}>
-                  {inboxes.total}
-                </span>
-              ) : null}
-              {item.id === 'jobs' && activeJobs.length + reviewJobs.length ? (
-                <>
-                  <span className="nav-count" aria-hidden="true">
-                    {activeJobs.length + reviewJobs.length}
-                  </span>
-                  <span id="exchange-count" className="visually-hidden" aria-hidden="true">
-                    {activeJobs.length} open, {reviewJobs.length} to review
-                  </span>
-                </>
-              ) : null}
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar-note">
-          <AgentGlyph agent={{ capability: 'research' }} />
-          <h3>Work with your AI.</h3>
-          <p>Invite it into a room, or add an agent of your own.</p>
-          <a
-            className="text-link"
-            href={INVITE_ROOMS_PATH}
-            onClick={(event) => {
-              if (event.metaKey || event.ctrlKey || event.shiftKey || event.button) return;
-              event.preventDefault();
-              navigate(INVITE_ROOMS_PATH);
-            }}
-          >
-            Invite your AI
-            <ArrowUpRight size={14} />
-          </a>
-          <button className="text-link" onClick={() => setDialog({ kind: 'create' })}>
-            Add an agent
-            <ArrowUpRight size={14} />
-          </button>
-        </div>
-        <div className="sidebar-bottom">
-          <div className="sidebar-account">
-            <span>Theme</span>
-            <ThemeToggle />
-          </div>
-          <button className="signout" disabled={refreshing} onClick={() => void refresh()}>
-            <RefreshCw size={15} className={refreshing ? 'spin' : ''} aria-hidden="true" />
-            Refresh
-          </button>
-          <button
-            className="signout"
-            disabled={Boolean(busy)}
-            onClick={() =>
-              void action('logout', async () => {
-                await api('/api/auth/logout', {});
-                // Cached conversations and the prefetch stay on this device otherwise.
-                forgetMessagesState();
-                onLogout();
-              })
-            }
-          >
-            <LogOut size={15} aria-hidden="true" />
-            Sign out
-          </button>
-        </div>
-      </aside>
-      <div className="workspace-content">
-        <AppHeader
-          title={navigation.find((item) => item.id === view)?.label ?? 'Workspace'}
-          live={streamLive}
-          onOpenNavigation={() => setMobileNav(true)}
-        />
-        <main id="main-content" tabIndex={-1} className="main-content">
-          <div className="page-heading">
-            <div>
-              <p className="page-kicker">
-                Central City / {kind === 'ai' ? 'AI workspace' : 'Private workspace'}
-              </p>
-              <h1>{heading.title}</h1>
-              <p>{heading.lede}</p>
+        {!workspaceV2 ? (
+          <>
+            <Lockup onClick={() => changeView('network')} label="Central City overview" />
+            <div className="workspace-switch">
+              <span className="workspace-avatar" aria-hidden="true">
+                {operator.name.slice(0, 1).toUpperCase()}
+              </span>
+              <div>
+                <strong>{operator.name}</strong>
+                <span>{accountDetail}</span>
+              </div>
+              <LockKeyhole size={13} aria-hidden="true" />
+              {workspaceSelect}
             </div>
-            <div className="page-actions">
-              {view === 'connections' ? (
-                <button
-                  className="button primary"
-                  onClick={() => setDialog({ kind: 'connection' })}
-                  disabled={!hasAgents}
-                >
-                  <Plus size={16} />
-                  New connection
-                </button>
-              ) : view === 'jobs' ? (
-                <button
-                  className="button primary"
-                  onClick={() => setDialog({ kind: 'job' })}
-                  disabled={!hasAgents || snapshot?.paused}
-                >
-                  <Plus size={16} />
-                  Send work
-                </button>
-              ) : view === 'collaborations' ||
-                view === 'messages' ||
-                view === 'assistants' ||
-                view === 'elric' ||
-                view === 'connect' ? null : (
-                <>
-                  <button className="button secondary" onClick={() => changeView('jobs')}>
-                    <Scale size={16} />
-                    Exchanges
-                  </button>
-                  <button className="button primary" onClick={() => setDialog({ kind: 'create' })}>
-                    <Plus size={16} />
-                    Add agent
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-          {error || actionError ? (
-            <div className="error-banner" role="alert">
-              <CircleHelp size={17} aria-hidden="true" />
-              <span>{actionError || error}</span>
-              <button
-                className="icon-button"
-                aria-label="Dismiss error"
-                onClick={() => {
-                  setActionError('');
-                  void refresh();
+          </>
+        ) : null}
+        {workspaceV2 ? (
+          <WorkspaceNavigation
+            workspaceId={operator.id}
+            accountName={operator.name}
+            accountDetail={accountDetail}
+            workspaceSwitch={workspaceSelect}
+            refreshing={refreshing}
+            onRefresh={() => void refresh()}
+            signingOut={Boolean(busy)}
+            onSignOut={signOut}
+            paused={snapshot ? snapshot.paused : null}
+            pausing={Boolean(busy)}
+            onTogglePause={() => {
+              if (!snapshot) return;
+              void action(
+                'pause',
+                () => api('/api/workspace/pause', { paused: !snapshot.paused }),
+                snapshot.paused
+                  ? 'Workspace resumed.'
+                  : 'Workspace paused. No new work starts until you resume.',
+              );
+            }}
+            view={pageContent ? null : view}
+            unreadMessages={inboxes.total}
+            onView={changeView}
+            showElric={elric === 'activity' || elric === 'setup'}
+            mobileOpen={mobileNav}
+            onClose={closeNavigation}
+          />
+        ) : (
+          <>
+            <p className="nav-label">Workspace</p>
+            <nav aria-label="Workspace">
+              <a
+                className="nav-item"
+                href="/rooms"
+                onClick={(event) => {
+                  if (event.metaKey || event.ctrlKey || event.shiftKey || event.button) return;
+                  event.preventDefault();
+                  navigate('/rooms');
                 }}
               >
-                <X size={15} />
-              </button>
-            </div>
-          ) : null}
-          {snapshot?.paused ? (
-            <div className="pause-banner">
-              <Pause size={16} aria-hidden="true" />
-              <span>
-                <strong>Workspace paused.</strong> No new work starts. Agents on your own computers
-                may keep running, but their results wait until you resume.
-              </span>
-              <button
-                className="button secondary compact"
-                onClick={() =>
-                  void action(
-                    'resume',
-                    () => api('/api/workspace/pause', { paused: false }),
-                    'Workspace resumed.',
-                  )
-                }
-                disabled={Boolean(busy)}
+                <DoorOpen size={18} strokeWidth={1.6} aria-hidden="true" />
+                <span>Rooms</span>
+              </a>
+              {shownNavigation.map((item) => (
+                <button
+                  key={item.id}
+                  className={`nav-item ${view === item.id ? 'active' : ''} ${item.id === 'connect' ? 'nav-connect' : ''}`}
+                  aria-current={view === item.id ? 'page' : undefined}
+                  aria-describedby={
+                    item.id === 'jobs' && activeJobs.length + reviewJobs.length
+                      ? 'exchange-count'
+                      : undefined
+                  }
+                  onClick={() => {
+                    if (item.id === 'elric' && elric === 'setup') navigate('/elric');
+                    else changeView(item.id);
+                  }}
+                >
+                  <item.icon size={18} strokeWidth={1.6} aria-hidden="true" />
+                  <span>{item.label}</span>
+                  {item.id === 'messages' && inboxes.total ? (
+                    <span className="nav-count" aria-label={unreadMessagesLabel(inboxes.total)}>
+                      {inboxes.total}
+                    </span>
+                  ) : null}
+                  {item.id === 'jobs' && activeJobs.length + reviewJobs.length ? (
+                    <>
+                      <span className="nav-count" aria-hidden="true">
+                        {activeJobs.length + reviewJobs.length}
+                      </span>
+                      <span id="exchange-count" className="visually-hidden" aria-hidden="true">
+                        {activeJobs.length} open, {reviewJobs.length} to review
+                      </span>
+                    </>
+                  ) : null}
+                </button>
+              ))}
+            </nav>
+            <div className="sidebar-note">
+              <AgentGlyph agent={{ capability: 'research' }} />
+              <h3>Work with your AI.</h3>
+              <p>Invite it into a room, or add an agent of your own.</p>
+              <a
+                className="text-link"
+                href={INVITE_ROOMS_PATH}
+                onClick={(event) => {
+                  if (event.metaKey || event.ctrlKey || event.shiftKey || event.button) return;
+                  event.preventDefault();
+                  navigate(INVITE_ROOMS_PATH);
+                }}
               >
-                Resume workspace
-                <Play size={14} />
+                Invite your AI
+                <ArrowUpRight size={14} />
+              </a>
+              <button className="text-link" onClick={() => setDialog({ kind: 'create' })}>
+                Add an agent
+                <ArrowUpRight size={14} />
               </button>
             </div>
-          ) : null}
-          {view === 'connect' ? (
-            <ConnectAI signedIn onOpenAgents={() => changeView('agents')} />
-          ) : !snapshot ? (
-            <div className="loading-panel" role="status">
-              <LoaderCircle className="spin" />
-              <p>Loading your agents…</p>
-            </div>
-          ) : (
-            <>
-              {view === 'network' ? (
-                <>
-                  <div className="stats-grid">
-                    <Stat
-                      label="Agents online"
-                      value={snapshot.stats.reachable}
-                      icon={<Radio size={17} />}
-                      detail={`${snapshot.stats.registered} in your workspace`}
-                    />
-                    <Stat
-                      label="Work in progress"
-                      value={activeJobs.length}
-                      icon={<Scale size={17} />}
-                      detail={`${reviewJobs.length} waiting for your review`}
-                    />
-                    <Stat
-                      label="Accepted results"
-                      value={snapshot.stats.accepted}
-                      icon={<CheckCheck size={17} />}
-                      detail="Accepted by you, demos included"
-                    />
-                    <Stat
-                      label="Connections"
-                      value={snapshot.connections.length}
-                      icon={<Link2 size={17} />}
-                      detail="One-way routes you allowed"
-                    />
-                  </div>
-                  <div className="network-layout">
-                    <section className="panel network-panel" aria-labelledby="circle-title">
-                      <div className="panel-heading">
-                        <div className="panel-title">
-                          <h2 id="circle-title">Agent map</h2>
-                          <span className="small-tag">Private</span>
-                        </div>
-                        <div className="graph-tools">
-                          <button
-                            className="icon-button"
-                            onClick={() => setDialog({ kind: 'connection' })}
-                            disabled={!hasAgents}
-                            aria-label="Add connection"
-                          >
-                            <Link2 size={16} />
-                          </button>
-                          <button
-                            className="icon-button"
-                            aria-label="View all agents"
-                            onClick={() => changeView('agents')}
-                          >
-                            <ArrowUpRight size={17} />
-                          </button>
-                        </div>
-                      </div>
-                      {snapshot.agents.some((agent) => !agent.revokedAt) ? (
-                        <CityCircle
-                          agents={snapshot.agents}
-                          connections={snapshot.connections}
-                          selectedId={selected?.id || null}
-                          onSelect={openAgent}
-                          fresh={fresh}
-                          labels={(agent) => ({
-                            name:
-                              agent.name.length > 18 ? `${agent.name.slice(0, 17)}…` : agent.name,
-                            detail: `${capabilityLabels[agent.capability]}${agent.isDemo ? ' · demo' : ''}`,
-                            aria: `${agent.name}, ${agent.pausedAt ? 'paused' : agent.status}, ${capabilityLabels[agent.capability]}. ${creatorLabel(agent, maybeName)}. View agent.`,
-                          })}
-                        />
-                      ) : (
-                        <div className="graph-empty">
-                          <CourtIllustration />
-                          <p>Start with one agent.</p>
-                          <span>Add an agent, connect your AI, or start the demo.</span>
-                        </div>
-                      )}
-                      <div className="graph-legend">
-                        <span>
-                          <AgentGlyph agent={{ capability: 'research' }} size="small" /> Research
-                        </span>
-                        <span>
-                          <AgentGlyph agent={{ capability: 'extract' }} size="small" /> Extraction
-                        </span>
-                        <span>
-                          <AgentGlyph agent={{ capability: 'verify' }} size="small" /> Verification
-                        </span>
-                        <span>
-                          <span className="legend-line" aria-hidden="true" />
-                          Connection
-                        </span>
-                        <span className="graph-limit">
-                          {snapshot.agents.filter((agent) => !agent.revokedAt).length > 24
-                            ? 'First 24 agents shown'
-                            : 'Inner rings: created by another agent · Seal: created by an AI'}
-                        </span>
-                      </div>
-                      <div className="network-footer">
-                        <span>
-                          <ShieldCheck size={14} aria-hidden="true" />
-                          Online means the agent checked in during the last 90 seconds.
-                        </span>
-                      </div>
-                    </section>
-                    <section className="panel activity-panel" aria-labelledby="activity-title">
-                      <div className="panel-heading">
-                        <div className="panel-title">
-                          <Activity size={16} aria-hidden="true" />
-                          <h2 id="activity-title">Recent activity</h2>
-                        </div>
-                      </div>
-                      <EventList
-                        snapshot={snapshot}
-                        limit={5}
-                        compact
-                        onJob={(id) => setDialog({ kind: 'result', id })}
-                      />
-                      <div className="panel-bottom">
-                        <TextLink onClick={() => changeView('activity')}>All activity</TextLink>
-                      </div>
-                    </section>
-                  </div>
-                  <div className="lower-layout">
-                    <section className="panel roster-panel">
-                      <SectionHeading
-                        eyebrow="Agents"
-                        title="Your agents"
-                        action={<TextLink onClick={() => changeView('agents')}>View all</TextLink>}
-                      />
-                      {snapshot.agents.length ? (
-                        <AgentRows
-                          agents={snapshot.agents.slice(0, 4)}
-                          onSelect={openAgent}
-                          fresh={fresh}
-                        />
-                      ) : (
-                        <div className="first-agents">
-                          <div className="stacked-glyphs" aria-hidden="true">
-                            <AgentGlyph agent={{ capability: 'research' }} />
-                            <AgentGlyph agent={{ capability: 'extract' }} />
-                            <AgentGlyph agent={{ capability: 'verify' }} />
-                          </div>
-                          <div>
-                            <h3>Meet your first collaborators.</h3>
-                            <p>Start three demo agents and watch a task move between them.</p>
-                            <span className="field-note">Scripted demo. No AI model is used.</span>
-                          </div>
-                          <button
-                            className="button secondary"
-                            disabled={Boolean(busy)}
-                            onClick={() =>
-                              void action(
-                                'demo',
-                                () => api('/api/demo/start', {}),
-                                'The three demo agents are ready. Send them some work to begin.',
-                              )
-                            }
-                          >
-                            <Play size={14} />
-                            {busy === 'demo' ? 'Starting…' : 'Start the demo'}
-                          </button>
-                        </div>
-                      )}
-                    </section>
-                    <section className="next-step-panel" aria-labelledby="next-step-title">
-                      <p className="eyebrow">Next step</p>
-                      <h2 id="next-step-title">Bring your AI in.</h2>
-                      <p>
-                        Connect ChatGPT, Claude, Cursor or Codex once. Your AI can join rooms, plan
-                        teams and create agents; you make the decisions.
-                      </p>
-                      <button className="button primary" onClick={() => changeView('connect')}>
-                        <Plug size={16} />
-                        Connect your AI
-                      </button>
-                    </section>
-                  </div>
-                </>
-              ) : null}
-              {view === 'agents' ? (
-                <section className="panel" aria-label="Agents">
-                  <div className="list-toolbar">
-                    <div className="filter-label">
-                      <Layers3 size={16} aria-hidden="true" />
-                      All agents<span>{snapshot.agents.length}</span>
-                    </div>
-                    <label className="search-field">
-                      <Search size={16} aria-hidden="true" />
-                      <input
-                        aria-label="Search agents"
-                        placeholder="Search agents…"
-                        value={query}
-                        onChange={(event) => setQuery(event.target.value)}
-                      />
-                    </label>
-                  </div>
-                  {agents.length ? (
-                    <div className="agent-card-grid">
-                      {agents.map((agent) => (
-                        <AgentCard
-                          key={agent.id}
-                          agent={agent}
-                          transmuting={fresh.has(agent.id)}
-                          parentName={
-                            agent.parentAgentId ? maybeName(agent.parentAgentId) : undefined
-                          }
-                          provenance={creatorLabel(agent, maybeName)}
-                          onOpen={() => openAgent(agent.id)}
-                        />
-                      ))}
-                    </div>
-                  ) : (
-                    <EmptyState title={query ? 'No matching agents' : 'Add your first agent'}>
-                      {query
-                        ? 'Try a different name or capability.'
-                        : 'Start from a template, connect your AI, or run an agent on your own computer.'}
-                    </EmptyState>
-                  )}
-                  <div className="list-panel-footer">
-                    <span>Demo agents follow a script. No AI model is used.</span>
+          </>
+        )}
+        {!workspaceV2 ? accountControls : null}
+      </aside>
+      <div className="workspace-content">
+        {/* Messages' own pill already names the page on a phone: the top row shows only ☰. */}
+        <AppHeader
+          title={headerTitle}
+          showTitle={!(workspaceV2 && !pageContent && (view === 'messages' || view === 'agents'))}
+          onOpenNavigation={() => setMobileNav(true)}
+        />
+        {pageContent ? (
+          <PageArea page={pageTitle}>{pageContent}</PageArea>
+        ) : (
+          <main
+            id="main-content"
+            tabIndex={-1}
+            className={`main-content${advancedV2 ? ' adv2' : ''}`}
+            data-adv2-view={advancedV2 ? view : undefined}
+          >
+            {/* Settings sections and Messages (its floating top bar) render their own header. */}
+            {settingsSection ||
+            (workspaceV2 && (view === 'messages' || view === 'agents')) ? null : (
+              <div className="page-heading">
+                <div>
+                  {/* The calm canvas (Workspace v3) has no breadcrumb label above the title;
+                      Elric keeps its header for its own design track. */}
+                  {!workspaceV2 || view === 'elric' ? (
+                    <p className="page-kicker">
+                      Central City / {kind === 'ai' ? 'AI workspace' : 'Private workspace'}
+                    </p>
+                  ) : null}
+                  {/* The Elric view shows nothing until the account may use it (no flash). */}
+                  {view !== 'elric' || elricOn ? (
+                    <>
+                      <h1>{heading.title}</h1>
+                      <p>{heading.lede}</p>
+                    </>
+                  ) : null}
+                </div>
+                <div className="page-actions">
+                  {view === 'connections' ? (
                     <button
-                      className="text-link"
-                      disabled={Boolean(busy)}
-                      onClick={() =>
-                        void action(
-                          'demo',
-                          () => api('/api/demo/start', {}),
-                          'The demo agents are ready.',
-                        )
-                      }
+                      className="button primary"
+                      onClick={() => setDialog({ kind: 'connection' })}
+                      disabled={!hasAgents}
                     >
-                      Start the demo
-                      <Play size={13} />
+                      <Plus size={16} />
+                      New connection
                     </button>
-                  </div>
-                  <ClaimAgents
+                  ) : view === 'jobs' ? (
+                    <button
+                      className="button primary"
+                      onClick={() => setDialog({ kind: 'job' })}
+                      disabled={!hasAgents || snapshot?.paused}
+                    >
+                      <Plus size={16} />
+                      Send work
+                    </button>
+                  ) : view === 'collaborations' ||
+                    view === 'messages' ||
+                    view === 'assistants' ||
+                    view === 'elric' ||
+                    view === 'connect' ||
+                    (workspaceV2 &&
+                      (view === 'data' || view === 'activity' || view === 'agents')) ? null : (
+                    <>
+                      <button className="button secondary" onClick={() => changeView('jobs')}>
+                        <Scale size={16} />
+                        Exchanges
+                      </button>
+                      <button
+                        className="button primary"
+                        onClick={() => setDialog({ kind: 'create' })}
+                      >
+                        <Plus size={16} />
+                        Add agent
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+            {error || actionError ? (
+              <div className="error-banner" role="alert">
+                <CircleHelp size={17} aria-hidden="true" />
+                <span>{actionError || error}</span>
+                <button
+                  className="icon-button"
+                  aria-label="Dismiss error"
+                  onClick={() => {
+                    setActionError('');
+                    void refresh();
+                  }}
+                >
+                  <X size={15} />
+                </button>
+              </div>
+            ) : null}
+            {snapshot?.paused ? (
+              <div className="pause-banner">
+                <Pause size={16} aria-hidden="true" />
+                <span>
+                  <strong>Workspace paused.</strong> No new work starts. Agents on your own
+                  computers may keep running, but their results wait until you resume.
+                </span>
+                <button
+                  className="button secondary compact"
+                  onClick={() =>
+                    void action(
+                      'resume',
+                      () => api('/api/workspace/pause', { paused: false }),
+                      'Workspace resumed.',
+                    )
+                  }
+                  disabled={Boolean(busy)}
+                >
+                  Resume workspace
+                  <Play size={14} />
+                </button>
+              </div>
+            ) : null}
+            {settingsSection ? (
+              <SettingsLayout
+                section={settingsSection}
+                onSection={(next) =>
+                  next === 'account' ? navigate('/settings/account') : changeView(next)
+                }
+              >
+                {settingsSection === 'data' ? (
+                  <DataExport operatorId={operator.id} />
+                ) : settingsSection === 'activity' ? (
+                  <ActivityLog
+                    snapshot={snapshot}
+                    refreshing={refreshing}
+                    error={error}
+                    onRefresh={refresh}
+                    onJob={(id) => setDialog({ kind: 'result', id })}
+                    onExport={() => changeView('data')}
+                  />
+                ) : (
+                  <>
+                    {kind === 'ai' ? <WorkspaceKeys workspaceName={operator.name} /> : null}
+                    <AssistantAccess key={operator.id} onConnect={() => changeView('connect')} />
+                  </>
+                )}
+              </SettingsLayout>
+            ) : view === 'connect' ? (
+              <ConnectAIApp
+                key={operator.id}
+                onOpenAgents={() => {
+                  changeView('agents');
+                  setClaimRequested(true);
+                }}
+                onOpenConnectedApps={() => changeView('assistants')}
+                connectedAppsLabel={workspaceV2 ? 'Settings → Connected apps' : 'Connected AI apps'}
+              />
+            ) : !snapshot ? (
+              <div className="loading-panel" role="status">
+                <LoaderCircle className="spin" />
+                <p>Loading your agents…</p>
+              </div>
+            ) : (
+              <>
+                {view === 'network' && workspaceV2 ? (
+                  <NetworkMap
+                    agents={snapshot.agents}
+                    connections={snapshot.connections}
+                    onOpenAgent={(id) => showAgent(id)}
+                    onOpenPermissions={() => changeView('connections')}
+                    onOpenAgents={() => changeView('agents')}
+                  />
+                ) : view === 'network' ? (
+                  <>
+                    <div className="stats-grid">
+                      <Stat
+                        label="Agents online"
+                        value={snapshot.stats.reachable}
+                        icon={<Radio size={17} />}
+                        detail={`${snapshot.stats.registered} in your workspace`}
+                      />
+                      <Stat
+                        label="Work in progress"
+                        value={activeJobs.length}
+                        icon={<Scale size={17} />}
+                        detail={`${reviewJobs.length} waiting for your review`}
+                      />
+                      <Stat
+                        label="Accepted results"
+                        value={snapshot.stats.accepted}
+                        icon={<CheckCheck size={17} />}
+                        detail="Accepted by you, CC agents included"
+                      />
+                      <Stat
+                        label="Connections"
+                        value={snapshot.connections.length}
+                        icon={<Link2 size={17} />}
+                        detail="One-way routes you allowed"
+                      />
+                    </div>
+                    {/* Workspace v2 Network map shows only the counts and the map; agents, activity and
+                        connecting your AI each have their own page. */}
+                    <div className={workspaceV2 ? 'network-layout map-only' : 'network-layout'}>
+                      <section className="panel network-panel" aria-labelledby="circle-title">
+                        <div className="panel-heading">
+                          <div className="panel-title">
+                            <h2 id="circle-title">Agent map</h2>
+                            <span className="small-tag">Private</span>
+                          </div>
+                          <div className="graph-tools">
+                            <button
+                              className="icon-button"
+                              onClick={() => setDialog({ kind: 'connection' })}
+                              disabled={!hasAgents}
+                              aria-label="Add connection"
+                            >
+                              <Link2 size={16} />
+                            </button>
+                            <button
+                              className="icon-button"
+                              aria-label="View all agents"
+                              onClick={() => changeView('agents')}
+                            >
+                              <ArrowUpRight size={17} />
+                            </button>
+                          </div>
+                        </div>
+                        {snapshot.agents.some((agent) => !agent.revokedAt) ? (
+                          <CityCircle
+                            agents={snapshot.agents}
+                            connections={snapshot.connections}
+                            selectedId={selected?.id || null}
+                            onSelect={openAgent}
+                            fresh={fresh}
+                            labels={(agent) => ({
+                              name:
+                                agent.name.length > 18 ? `${agent.name.slice(0, 17)}…` : agent.name,
+                              detail: `${capabilityLabels[agent.capability]}${agent.isDemo ? ' · demo' : ''}`,
+                              aria: `${agent.name}, ${agent.pausedAt ? 'paused' : agent.status}, ${capabilityLabels[agent.capability]}. ${creatorLabel(agent, maybeName)}. View agent.`,
+                            })}
+                          />
+                        ) : (
+                          <div className="graph-empty" role={workspaceV2 ? 'status' : undefined}>
+                            <CourtIllustration />
+                            <p>Start with one agent.</p>
+                            <span>
+                              Add an agent, connect your AI, or generate your first CC agents.
+                            </span>
+                          </div>
+                        )}
+                        <div className="graph-legend">
+                          <span>
+                            <AgentGlyph agent={{ capability: 'research' }} size="small" /> Research
+                          </span>
+                          <span>
+                            <AgentGlyph agent={{ capability: 'extract' }} size="small" /> Extraction
+                          </span>
+                          <span>
+                            <AgentGlyph agent={{ capability: 'verify' }} size="small" />{' '}
+                            Verification
+                          </span>
+                          <span>
+                            <span className="legend-line" aria-hidden="true" />
+                            Connection
+                          </span>
+                          <span className="graph-limit">
+                            {snapshot.agents.filter((agent) => !agent.revokedAt).length > 24
+                              ? 'First 24 agents shown'
+                              : 'Inner rings: created by another agent · Seal: created by an AI'}
+                          </span>
+                        </div>
+                        <div className="network-footer">
+                          <span>
+                            <ShieldCheck size={14} aria-hidden="true" />
+                            Online means the agent checked in during the last 90 seconds.
+                          </span>
+                        </div>
+                      </section>
+                      {workspaceV2 ? null : (
+                        <section className="panel activity-panel" aria-labelledby="activity-title">
+                          <div className="panel-heading">
+                            <div className="panel-title">
+                              <Activity size={16} aria-hidden="true" />
+                              <h2 id="activity-title">Recent activity</h2>
+                            </div>
+                          </div>
+                          <EventList
+                            snapshot={snapshot}
+                            limit={5}
+                            compact
+                            onJob={(id) => setDialog({ kind: 'result', id })}
+                          />
+                          <div className="panel-bottom">
+                            <TextLink onClick={() => changeView('activity')}>All activity</TextLink>
+                          </div>
+                        </section>
+                      )}
+                    </div>
+                    {workspaceV2 ? null : (
+                      <div className="lower-layout">
+                        <section className="panel roster-panel">
+                          <SectionHeading
+                            eyebrow="Agents"
+                            title="Your agents"
+                            action={
+                              <TextLink onClick={() => changeView('agents')}>View all</TextLink>
+                            }
+                          />
+                          {snapshot.agents.length ? (
+                            <AgentRows
+                              agents={snapshot.agents.slice(0, 4)}
+                              onSelect={openAgent}
+                              fresh={fresh}
+                            />
+                          ) : (
+                            <div className="first-agents">
+                              <div className="stacked-glyphs" aria-hidden="true">
+                                <AgentGlyph agent={{ capability: 'research' }} />
+                                <AgentGlyph agent={{ capability: 'extract' }} />
+                                <AgentGlyph agent={{ capability: 'verify' }} />
+                              </div>
+                              <div>
+                                <h3>Meet your first collaborators.</h3>
+                                <p>Adds 3 example agents. Watch a task move between them.</p>
+                                <span className="field-note">Scripted. No AI model is used.</span>
+                              </div>
+                              <button
+                                className="button secondary"
+                                disabled={Boolean(busy)}
+                                onClick={() =>
+                                  void action(
+                                    'demo',
+                                    () => api('/api/demo/start', {}),
+                                    'The three CC agents are ready. Send them some work to begin.',
+                                  )
+                                }
+                              >
+                                <Play size={14} />
+                                {busy === 'demo' ? 'Generating…' : 'Generate your first CC agents'}
+                              </button>
+                            </div>
+                          )}
+                        </section>
+                        <section className="next-step-panel" aria-labelledby="next-step-title">
+                          <p className="eyebrow">Next step</p>
+                          <h2 id="next-step-title">Bring your AI in.</h2>
+                          <p>
+                            Connect ChatGPT, Claude, Cursor or Codex once. Your AI can join rooms,
+                            plan teams and create agents; you make the decisions.
+                          </p>
+                          <button className="button primary" onClick={() => changeView('connect')}>
+                            <Plug size={16} />
+                            Connect your AI
+                          </button>
+                        </section>
+                      </div>
+                    )}
+                  </>
+                ) : null}
+                {view === 'agents' && workspaceV2 ? (
+                  <MyAgentsV2
+                    snapshot={snapshot}
                     busy={Boolean(busy)}
-                    onClaim={(token) =>
-                      token.startsWith('ccwclaim_')
-                        ? action(
-                            'claim',
-                            async () => {
-                              await api('/api/workspaces/claim', { claim_token: token });
-                              onWorkspacesChanged();
-                            },
-                            'AI workspace claimed. You now co-own it; switch to it from the menu at the top left.',
-                          )
-                        : action(
-                            'claim',
-                            () => api('/api/agents/claim', { claim_token: token }),
-                            'The agents are now in your workspace.',
-                          )
+                    run={action}
+                    onChanged={() => void refresh()}
+                    dialogOpen={dialog !== null}
+                    onAddAgent={() => setDialog({ kind: 'create' })}
+                    onExchanges={() => changeView('jobs')}
+                    elricAgentId={elricAgentId}
+                    elricStatus={elricStatus}
+                    onElricStatus={setElricStatus}
+                    onOpenElric={(place) => {
+                      if (place === 'activity') return changeView('elric');
+                      // Elric's chat: a page change inside the workspace, as from the sidebar.
+                      markInAppChange();
+                      navigate('/elric');
+                    }}
+                    onOpenRoom={(id) => {
+                      // An agent's private chat: its room's page, as from the sidebar.
+                      markInAppChange();
+                      navigate('/rooms/' + encodeURIComponent(id));
+                    }}
+                    claimForm={claimAgentsFor}
+                    claimRequested={claimRequested}
+                    onClaimOpened={() => setClaimRequested(false)}
+                    agentRequested={agentRequested}
+                    onAgentOpened={() => setAgentRequested(null)}
+                    onTryExamples={() =>
+                      void action(
+                        'demo',
+                        () => api('/api/demo/start', {}),
+                        'The CC agents are ready.',
+                      )
                     }
                   />
-                </section>
-              ) : null}
-              {view === 'collaborations' ? (
-                <Workflows snapshot={snapshot} refresh={refresh} />
-              ) : null}
-              {view === 'messages' ? (
-                <MessagesView
-                  snapshot={snapshot}
-                  unread={inboxes.unread}
-                  onOpenAgent={openAgent}
-                  onSummaryChanged={() => void inboxes.refresh()}
-                />
-              ) : null}
-              {view === 'elric' && elricOn ? (
-                <Suspense fallback={null}>
-                  <ElricActivity />
-                </Suspense>
-              ) : null}
-              {view === 'assistants' ? (
-                <>
-                  {kind === 'ai' ? <WorkspaceKeys workspaceName={operator.name} /> : null}
-                  <AssistantAccess key={operator.id} onConnect={() => changeView('connect')} />
-                </>
-              ) : null}
-              {view === 'connections' ? (
-                <>
-                  <section className="panel" aria-label="Connections">
+                ) : view === 'agents' ? (
+                  <section className="panel" aria-label="Agents">
                     <div className="list-toolbar">
                       <div className="filter-label">
-                        <Link2 size={16} aria-hidden="true" />
-                        Connections<span>{snapshot.connections.length}</span>
+                        <Layers3 size={16} aria-hidden="true" />
+                        All agents<span>{snapshot.agents.length}</span>
                       </div>
-                      <span className="muted small">
-                        A connection lets one agent send work to another. It shares no tools or
-                        passwords.
-                      </span>
+                      <label className="search-field">
+                        <Search size={16} aria-hidden="true" />
+                        <input
+                          aria-label="Search agents"
+                          placeholder="Search agents…"
+                          value={query}
+                          onChange={(event) => setQuery(event.target.value)}
+                        />
+                      </label>
                     </div>
-                    {snapshot.connections.length ? (
-                      <div className="connection-list">
-                        {snapshot.connections.map((connection) => {
-                          const from = snapshot.agents.find(
-                            (agent) => agent.id === connection.fromAgentId,
-                          );
-                          const to = snapshot.agents.find(
-                            (agent) => agent.id === connection.toAgentId,
-                          );
-                          return (
-                            <div className="connection-row" key={connection.id}>
-                              <div className="connection-path">
-                                <span>
-                                  {from ? <AgentGlyph agent={from} /> : null}
-                                  <strong>{nameOf(connection.fromAgentId)}</strong>
-                                </span>
-                                <svg className="route-arc" viewBox="0 0 64 24" aria-hidden="true">
-                                  <path d="M4 18 Q32 -2 58 16" />
-                                  <path d="M52 11 L58 16 L51 19" />
-                                </svg>
-                                <span className="visually-hidden">sends work to</span>
-                                <span>
-                                  {to ? <AgentGlyph agent={to} /> : null}
-                                  <strong>{nameOf(connection.toAgentId)}</strong>
-                                </span>
-                              </div>
-                              <span className="connection-capability">
-                                {to ? capabilityLabels[to.capability] : ''}
-                              </span>
-                              <div className="row-actions">
-                                <button
-                                  className="button secondary compact"
-                                  disabled={snapshot.paused}
-                                  onClick={() =>
-                                    setDialog({ kind: 'job', connectionId: connection.id })
-                                  }
-                                >
-                                  Send work
-                                  <ArrowUpRight size={14} />
-                                </button>
-                                <button
-                                  className="icon-button danger-text"
-                                  disabled={Boolean(busy)}
-                                  aria-label={`Remove connection from ${nameOf(connection.fromAgentId)} to ${nameOf(connection.toAgentId)}`}
-                                  onClick={() =>
-                                    void action(
-                                      connection.id,
-                                      () => api(`/api/connections/${connection.id}`, {}, 'DELETE'),
-                                      'Connection removed. No new work can be sent this way.',
-                                    )
-                                  }
-                                >
-                                  <Unplug size={16} />
-                                </button>
-                              </div>
-                            </div>
-                          );
-                        })}
+                    {agents.length ? (
+                      <div className="agent-card-grid">
+                        {agents.map((agent) => (
+                          <AgentCard
+                            key={agent.id}
+                            agent={agent}
+                            transmuting={fresh.has(agent.id)}
+                            parentName={
+                              agent.parentAgentId ? maybeName(agent.parentAgentId) : undefined
+                            }
+                            provenance={creatorLabel(agent, maybeName)}
+                            onOpen={() => openAgent(agent.id)}
+                          />
+                        ))}
                       </div>
                     ) : (
+                      <EmptyState title={query ? 'No matching agents' : 'Add your first agent'}>
+                        {query
+                          ? 'Try a different name or capability.'
+                          : 'Start from a template, connect your AI, or run an agent on your own computer.'}
+                      </EmptyState>
+                    )}
+                    {agentsFooter}
+                  </section>
+                ) : null}
+                {view === 'collaborations' ? (
+                  <Workflows snapshot={snapshot} refresh={refresh} v2={workspaceV2} />
+                ) : null}
+                {view === 'messages' ? (
+                  <MessagesView
+                    snapshot={snapshot}
+                    unread={inboxes.unread}
+                    onOpenAgent={(id) => showAgent(id, 'messages')}
+                    onSummaryChanged={() => void inboxes.refresh()}
+                    direct={direct}
+                    onOpenConnections={() => changeView('connections')}
+                  />
+                ) : null}
+                {view === 'elric' && elricOn ? (
+                  <Suspense fallback={null}>
+                    <ElricActivity />
+                  </Suspense>
+                ) : null}
+                {view === 'assistants' ? (
+                  <>
+                    {kind === 'ai' ? <WorkspaceKeys workspaceName={operator.name} /> : null}
+                    <AssistantAccess key={operator.id} onConnect={() => changeView('connect')} />
+                  </>
+                ) : null}
+                {view === 'connections' ? (
+                  <>
+                    <section className="panel" aria-label="Connections">
+                      <div className="list-toolbar">
+                        <div className="filter-label">
+                          <Link2 size={16} aria-hidden="true" />
+                          Connections<span>{snapshot.connections.length}</span>
+                        </div>
+                        <span className="muted small">
+                          A connection lets one agent send work to another. It shares no tools or
+                          passwords.
+                        </span>
+                      </div>
+                      {snapshot.connections.length ? (
+                        <div className="connection-list">
+                          {snapshot.connections.map((connection) => {
+                            const from = snapshot.agents.find(
+                              (agent) => agent.id === connection.fromAgentId,
+                            );
+                            const to = snapshot.agents.find(
+                              (agent) => agent.id === connection.toAgentId,
+                            );
+                            return (
+                              <div className="connection-row" key={connection.id}>
+                                <div className="connection-path">
+                                  <span>
+                                    {from ? <AgentGlyph agent={from} /> : null}
+                                    <strong>{nameOf(connection.fromAgentId)}</strong>
+                                  </span>
+                                  <svg className="route-arc" viewBox="0 0 64 24" aria-hidden="true">
+                                    <path d="M4 18 Q32 -2 58 16" />
+                                    <path d="M52 11 L58 16 L51 19" />
+                                  </svg>
+                                  <span className="visually-hidden">sends work to</span>
+                                  <span>
+                                    {to ? <AgentGlyph agent={to} /> : null}
+                                    <strong>{nameOf(connection.toAgentId)}</strong>
+                                  </span>
+                                </div>
+                                <span className="connection-capability">
+                                  {to ? capabilityLabels[to.capability] : ''}
+                                </span>
+                                <div className="row-actions">
+                                  <button
+                                    className="button secondary compact"
+                                    disabled={snapshot.paused}
+                                    onClick={() =>
+                                      setDialog({ kind: 'job', connectionId: connection.id })
+                                    }
+                                  >
+                                    Send work
+                                    <ArrowUpRight size={14} />
+                                  </button>
+                                  <button
+                                    className="icon-button danger-text"
+                                    disabled={Boolean(busy)}
+                                    aria-label={`Remove connection from ${nameOf(connection.fromAgentId)} to ${nameOf(connection.toAgentId)}`}
+                                    onClick={() =>
+                                      void action(
+                                        connection.id,
+                                        () =>
+                                          api(`/api/connections/${connection.id}`, {}, 'DELETE'),
+                                        'Connection removed. No new work can be sent this way.',
+                                      )
+                                    }
+                                  >
+                                    <Unplug size={16} />
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <EmptyState
+                          icon={<Link2 size={25} />}
+                          title="Connect two agents"
+                          live={workspaceV2}
+                          action={
+                            <button
+                              className="button primary"
+                              disabled={!hasAgents}
+                              onClick={() => setDialog({ kind: 'connection' })}
+                            >
+                              <Plus size={15} />
+                              New connection
+                            </button>
+                          }
+                        >
+                          Choose which agent asks and which one does the work. Work only travels in
+                          the direction you allow.
+                        </EmptyState>
+                      )}
+                    </section>
+                    <CrossWorkspaceConnections
+                      agents={snapshot.agents}
+                      onChanged={() => void refresh()}
+                    />
+                  </>
+                ) : null}
+                {view === 'jobs' ? (
+                  <ExchangeLedger
+                    snapshot={snapshot}
+                    nameOf={nameOf}
+                    onOpen={(id) => setDialog({ kind: 'result', id })}
+                    empty={
                       <EmptyState
-                        icon={<Link2 size={25} />}
-                        title="Connect two agents"
+                        icon={<ExchangeCircle state="requested" />}
+                        title="No exchanges yet"
                         action={
                           <button
                             className="button primary"
-                            disabled={!hasAgents}
-                            onClick={() => setDialog({ kind: 'connection' })}
+                            disabled={!hasAgents || snapshot.paused}
+                            onClick={() => setDialog({ kind: 'job' })}
                           >
                             <Plus size={15} />
-                            New connection
+                            Send work
                           </button>
                         }
                       >
-                        Choose which agent asks and which one does the work. Work only travels in
-                        the direction you allow.
+                        Send some text from one connected agent to another. Check what comes back,
+                        then decide whether to accept it.
                       </EmptyState>
-                    )}
-                  </section>
-                  <CrossWorkspaceConnections
-                    agents={snapshot.agents}
-                    onChanged={() => void refresh()}
+                    }
                   />
-                </>
-              ) : null}
-              {view === 'jobs' ? (
-                <ExchangeLedger
-                  snapshot={snapshot}
-                  nameOf={nameOf}
-                  onOpen={(id) => setDialog({ kind: 'result', id })}
-                  empty={
-                    <EmptyState
-                      icon={<ExchangeCircle state="requested" />}
-                      title="No exchanges yet"
-                      action={
-                        <button
-                          className="button primary"
-                          disabled={!hasAgents || snapshot.paused}
-                          onClick={() => setDialog({ kind: 'job' })}
-                        >
-                          <Plus size={15} />
-                          Send work
-                        </button>
-                      }
-                    >
-                      Send some text from one connected agent to another. Check what comes back,
-                      then decide whether to accept it.
-                    </EmptyState>
-                  }
-                />
-              ) : null}
-              {view === 'activity' ? (
-                <section className="panel full-activity" aria-label="Activity">
-                  <div className="list-toolbar">
-                    <div className="filter-label">
-                      <Activity size={16} aria-hidden="true" />
-                      Activity<span>{snapshot.events.length}</span>
+                ) : null}
+                {view === 'activity' ? (
+                  <section className="panel full-activity" aria-label="Activity">
+                    <div className="list-toolbar">
+                      <div className="filter-label">
+                        <Activity size={16} aria-hidden="true" />
+                        Activity<span>{snapshot.events.length}</span>
+                      </div>
+                      <span className="muted small">
+                        The latest 100 events · only you can see them
+                      </span>
                     </div>
-                    <span className="muted small">
-                      The latest 100 events · only you can see them
-                    </span>
-                  </div>
-                  <EventList
-                    snapshot={snapshot}
-                    onJob={(id) => setDialog({ kind: 'result', id })}
-                  />
-                </section>
-              ) : null}
-            </>
-          )}
-          {snapshot ? (
-            <footer className="workspace-footer">
-              <span>
-                <CityMark small />
-                Central City<span className="footer-slash">/</span>Workspace
-              </span>
-              <a href="/downtown">Downtown · Open Source</a>
-              <button className="workspace-pause" onClick={() => setDialog({ kind: 'export' })}>
-                <Download size={13} /> Export workspace
-              </button>
-              <button
-                className={`workspace-pause ${snapshot.paused ? 'is-paused' : ''}`}
-                disabled={Boolean(busy)}
-                onClick={() =>
-                  void action(
-                    'pause',
-                    () => api('/api/workspace/pause', { paused: !snapshot.paused }),
-                    snapshot.paused
-                      ? 'Workspace resumed.'
-                      : 'Workspace paused. No new work starts until you resume.',
-                  )
-                }
-              >
-                <span className="status-dot" aria-hidden="true" />
-                {snapshot.paused ? 'Workspace paused' : 'Workspace running'}
-                {snapshot.paused ? <Play size={12} /> : <Pause size={12} />}
-              </button>
-            </footer>
-          ) : null}
-        </main>
+                    <EventList
+                      snapshot={snapshot}
+                      onJob={(id) => setDialog({ kind: 'result', id })}
+                    />
+                  </section>
+                ) : null}
+              </>
+            )}
+          </main>
+        )}
       </div>
       <div className="visually-hidden" aria-live="polite">
         {announcement}
@@ -1054,13 +1442,14 @@ function Console({
           </div>
         ) : null}
       </div>
-      {dialog?.kind === 'export' ? (
-        <ExportWorkspace onClose={() => setDialog(null)} operatorId={operator.id} />
-      ) : dialog && snapshot ? (
+      {dialog && snapshot ? (
         <Dialogs
           dialog={dialog}
+          workspaceV2={workspaceV2}
+          onView={changeView}
           snapshot={snapshot}
           setDialog={setDialog}
+          onShowAgent={showAgent}
           onChanged={async (message) => {
             await refresh();
             if (message) notify(message);
@@ -1068,66 +1457,6 @@ function Console({
         />
       ) : null}
     </div>
-  );
-}
-
-function ExportWorkspace({ onClose, operatorId }: { onClose: () => void; operatorId: string }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const [downloaded, setDownloaded] = useState(false);
-  async function download() {
-    if (busy) return;
-    setBusy(true);
-    setError('');
-    try {
-      const data = await api<WorkspaceExport>('/api/workspace/export');
-      if (data.operator.id !== operatorId)
-        throw new Error('You signed in as someone else. Reload the page.');
-      const url = URL.createObjectURL(
-        new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }),
-      );
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `central-city-workspace-${data.exportedAt.slice(0, 10)}.json`;
-      document.body.append(link);
-      link.click();
-      link.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      setDownloaded(true);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'The export could not be downloaded.');
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <Modal
-      title="Download your workspace."
-      subtitle="A private copy of your records, as one file."
-      onClose={onClose}
-    >
-      <div className="export-content">
-        <p>The file contains your agents, connections, exchanges, results and activity.</p>
-        <div className="info-note">
-          It includes up to 1,000 exchanges and 1,000 activity events. What you sent and got back
-          may contain private information, so keep the file somewhere safe.
-        </div>
-        <p className="muted small">
-          Passwords and access tokens are never included. The file is for your records; it can't be
-          imported back. Downloading deletes nothing.
-        </p>
-        {error ? (
-          <p className="form-error" role="alert">
-            {error}
-          </p>
-        ) : null}
-        {downloaded ? <p role="status">Your download has started.</p> : null}
-        <button className="button primary" onClick={() => void download()} disabled={busy}>
-          {busy ? <LoaderCircle size={16} className="spin" /> : <Download size={16} />}
-          {busy ? 'Preparing your file…' : 'Download'}
-        </button>
-      </div>
-    </Modal>
   );
 }
 
@@ -1141,23 +1470,42 @@ const CLAIM_CODE = /ccw?claim_[A-Za-z0-9_-]{43}/;
 /** Claims agents an AI created without an account, from the claim link it gave the person. */
 function ClaimAgents({
   busy,
+  error = '',
   onClaim,
 }: {
   busy: boolean;
+  /** A failed claim, shown with the form (in a sheet the page's banner is hidden). */
+  error?: string;
   onClaim: (token: string) => Promise<void>;
 }) {
   const [token, setToken] = useState(
     () => /^#claim=(ccw?claim_[A-Za-z0-9_-]{43})$/.exec(window.location.hash)?.[1] ?? '',
   );
-  useEffect(() => {
-    // Keep the one-time token out of the address bar and history once it has been read.
-    if (window.location.hash.startsWith('#claim='))
-      window.history.replaceState(null, '', window.location.pathname + window.location.search);
-  }, []);
   const [preview, setPreview] = useState<{ token: string; data: ClaimPreview } | null>(null);
   const tokenRef = useRef(token);
   tokenRef.current = token;
   const [previewError, setPreviewError] = useState('');
+  const workspaceV2 = useWorkspaceV2();
+  useEffect(() => {
+    const consumeClaim = () => {
+      if (!window.location.hash.startsWith('#claim=')) return;
+      const value = /^#claim=(ccw?claim_[A-Za-z0-9_-]{43})$/.exec(window.location.hash)?.[1] ?? '';
+      tokenRef.current = value;
+      setToken(value);
+      setPreview(null);
+      setPreviewError('');
+      // Keep the one-time token out of the address and history after reading it.
+      window.history.replaceState(
+        window.history.state,
+        '',
+        window.location.pathname + window.location.search,
+      );
+    };
+    consumeClaim();
+    if (!workspaceV2) return;
+    window.addEventListener('hashchange', consumeClaim);
+    return () => window.removeEventListener('hashchange', consumeClaim);
+  }, [workspaceV2]);
   async function submit(event: FormEvent) {
     event.preventDefault();
     // People paste the whole claim link their AI gave them; the one-time code is inside it.
@@ -1175,9 +1523,10 @@ function ClaimAgents({
         if (codeFromPaste(tokenRef.current, CLAIM_CODE) === value)
           setPreview({ token: value, data });
       } catch (err) {
-        setPreviewError(
-          err instanceof Error ? err.message : 'This claim link could not be checked.',
-        );
+        if (codeFromPaste(tokenRef.current, CLAIM_CODE) === value)
+          setPreviewError(
+            err instanceof Error ? err.message : 'This claim link could not be checked.',
+          );
       }
       return;
     }
@@ -1195,7 +1544,7 @@ function ClaimAgents({
             id="claim-token"
             autoComplete="off"
             spellCheck={false}
-            placeholder="Paste the claim link your AI gave you"
+            placeholder="Paste the claim link"
             value={token}
             onChange={(event) => {
               setToken(event.target.value);
@@ -1208,9 +1557,9 @@ function ClaimAgents({
               : 'Claim'}
           </button>
         </div>
-        {previewError ? (
+        {previewError || error ? (
           <p className="form-error" role="alert">
-            {previewError}
+            {previewError || error}
           </p>
         ) : null}
         {preview && preview.token === codeFromPaste(token, CLAIM_CODE) ? (
@@ -1313,7 +1662,7 @@ function AgentCard({
       <div className="agent-card-tags">
         <span className="small-tag">{capabilityLabels[agent.capability]}</span>
         {agent.isDemo ? (
-          <span className="small-tag demo">Demo</span>
+          <span className="small-tag demo">CC</span>
         ) : (
           <span className="small-tag">Your own</span>
         )}
@@ -1367,7 +1716,7 @@ function AgentRows({
             <span>{capabilityLabels[agent.capability]}</span>
           </span>
           {agent.isDemo ? (
-            <span className="small-tag demo">Demo</span>
+            <span className="small-tag demo">CC</span>
           ) : aiCreated(agent) ? (
             <span className="small-tag ai">AI-created</span>
           ) : (
@@ -1452,7 +1801,7 @@ function ExchangeLedger({
                   </strong>
                   <span>
                     {nameOf(job.requesterId)} · {budgetLabel(job)}
-                    {job.isDemo ? <span className="small-tag demo">Demo</span> : null}
+                    {job.isDemo ? <span className="small-tag demo">CC</span> : null}
                   </span>
                 </span>
                 <span className="exchange-side returned">
@@ -1531,13 +1880,20 @@ function EventList({
 
 function Dialogs({
   dialog,
+  workspaceV2,
+  onView,
   snapshot,
   setDialog,
+  onShowAgent,
   onChanged,
 }: {
-  dialog: Exclude<Dialog, null | { kind: 'export' }>;
+  dialog: Exclude<Dialog, null>;
+  workspaceV2: boolean;
+  onView: (view: View) => void;
   snapshot: Snapshot;
   setDialog: (dialog: Dialog) => void;
+  /** Shows an agent: in My agents' pane (Workspace v2), else in its dialog. */
+  onShowAgent: (id: string) => void;
   onChanged: (message?: string) => Promise<void>;
 }) {
   const close = () => setDialog(null);
@@ -1547,7 +1903,12 @@ function Dialogs({
         onClose={close}
         onCreate={async (agent, token) => {
           await onChanged(`${agent.name} added to your workspace.`);
-          setDialog(token ? { kind: 'token', agent, token } : { kind: 'agent', id: agent.id });
+          // An agent you run yourself shows its token once; a template agent opens at once.
+          if (token) setDialog({ kind: 'token', agent, token });
+          else {
+            close();
+            onShowAgent(agent.id);
+          }
         }}
       />
     );
@@ -1688,6 +2049,23 @@ function Dialogs({
         key={agent.id}
         agent={agent}
         snapshot={snapshot}
+        inspection={
+          workspaceV2 ? (
+            <AgentInspectionTabs
+              agent={agent}
+              snapshot={snapshot}
+              onOpenJob={(id) => setDialog({ kind: 'result', id })}
+              onManageConnections={() => {
+                close();
+                onView('connections');
+              }}
+              onConnectedApps={() => {
+                close();
+                onView('assistants');
+              }}
+            />
+          ) : null
+        }
         onClose={close}
         onChanged={onChanged}
         onRotated={async (updatedAgent, token) => {
@@ -1720,6 +2098,7 @@ function CreateAgent({
 }) {
   const [mode, setMode] = useState<'hosted' | 'external'>('hosted');
   const [capability, setCapability] = useState<Capability>('research');
+  const [visibility, setVisibility] = useState<'private' | 'public'>('private');
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [busy, setBusy] = useState(false);
@@ -1734,6 +2113,8 @@ function CreateAgent({
         description: description.trim(),
         capability,
         mode,
+        // Only template agents get a manifest and card, so only they carry a visibility.
+        ...(mode === 'hosted' ? { visibility } : {}),
       });
       await onCreate(result.agent, result.token);
     } catch (err) {
@@ -1761,7 +2142,7 @@ function CreateAgent({
           >
             <Sparkles size={21} />
             <strong>Use a template</strong>
-            <span>A free demo that runs here</span>
+            <span>Free CC agents that run here</span>
           </button>
           <button
             disabled={busy}
@@ -1819,6 +2200,29 @@ function CreateAgent({
             })}
           </div>
         </fieldset>
+        {mode === 'hosted' ? (
+          <fieldset className="capability-fieldset">
+            <legend>Who can see it</legend>
+            <div className="capability-picker visibility-picker">
+              {(['private', 'public'] as const).map((value) => (
+                <label key={value} className={visibility === value ? 'selected' : ''}>
+                  <input
+                    disabled={busy}
+                    type="radio"
+                    name="visibility"
+                    value={value}
+                    checked={visibility === value}
+                    onChange={() => setVisibility(value)}
+                  />
+                  <strong>{value === 'private' ? 'Private' : 'Public'}</strong>
+                </label>
+              ))}
+            </div>
+            <p className="field-hint">
+              Public agents get a public profile and can be listed in agent explorers.
+            </p>
+          </fieldset>
+        ) : null}
         <div className="info-note">
           <CircleHelp size={17} />
           <p>
@@ -2023,8 +2427,8 @@ function JobForm({
           <div className="info-note">
             <CircleHelp size={18} />
             <p>
-              You need two online agents and a connection between them. Start the demo, or connect
-              your own agents first.
+              You need two online agents and a connection between them. Generate your first CC
+              agents, or connect your own agents first.
             </p>
           </div>
         ) : null}
@@ -2082,7 +2486,7 @@ function JobForm({
           <p>
             {provider?.mode === 'external'
               ? 'Review the result before accepting it. Your agent runs on your own computer, so any costs are yours; Central City never moves money.'
-              : 'Review the result before accepting it. Demo agents are free: no AI model, no tools, no payments.'}
+              : 'Review the result before accepting it. CC agents are free: no AI model, no tools, no payments.'}
           </p>
         </div>
         <FormError error={error} />
@@ -2101,12 +2505,14 @@ function JobForm({
 function AgentDetail({
   agent,
   snapshot,
+  inspection,
   onClose,
   onChanged,
   onRotated,
 }: {
   agent: Agent;
   snapshot: Snapshot;
+  inspection?: ReactNode;
   onClose: () => void;
   onChanged: (message?: string) => Promise<void>;
   onRotated: (agent: Agent, token: string) => Promise<void>;
@@ -2169,10 +2575,11 @@ function AgentDetail({
           <AgentGlyph agent={agent} size="large" />
           <Status value={agent.pausedAt ? 'paused' : agent.status} />
           <span className={`small-tag ${agent.isDemo ? 'demo' : ''}`}>
-            {agent.isDemo ? 'Demo' : 'Runs on your computer'}
+            {agent.isDemo ? 'CC' : 'Runs on your computer'}
           </span>
           {aiCreated(agent) ? <span className="small-tag ai">AI-created</span> : null}
         </div>
+        {inspection}
         <dl className="detail-list lineage-list">
           <div>
             <dt>Origin</dt>
@@ -2237,8 +2644,7 @@ function AgentDetail({
           <div className="info-note">
             <Sparkles size={18} />
             <p>
-              This demo agent works on the text you give it. It follows a script; no AI model is
-              used.
+              This CC agent works on the text you give it. It follows a script; no AI model is used.
             </p>
           </div>
         ) : (
@@ -2356,7 +2762,7 @@ function JobDetail({
             <span className={`exchange-state state-${state}`}>{exchangeLabels[state]}</span>
             <div className="job-detail-tags">
               {job.isDemo ? (
-                <span className="small-tag demo">Demo</span>
+                <span className="small-tag demo">CC</span>
               ) : (
                 <span className="small-tag">Your own agent</span>
               )}

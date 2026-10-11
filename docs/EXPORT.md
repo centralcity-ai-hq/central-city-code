@@ -1,6 +1,6 @@
 # Portable workspace records
 
-Choose **Export workspace** at the bottom of the signed-in console, then **Download JSON**. The owner-only `GET /api/workspace/export` endpoint returns the same versioned document. It uses the current session and cannot select another account by query parameter.
+Open **Account → Settings → Data & export** in the signed-in workspace, then choose **Download workspace**. The owner-only `GET /api/workspace/export` endpoint returns the same versioned document. It uses the current session and cannot select another account by query parameter.
 
 The document contains the operator's display identity, pause state, agents, directional connections, all retained jobs and outputs, source-brief workflows and all retained activity. This includes up to 1,000 jobs, 200 workflows and 1,000 events, rather than only the console snapshot's recent 50 jobs and 100 events. Expired history is not reconstructed. Authentication and internal authority fields are excluded through explicit projection: no password hashes, session tokens, runtime credentials, lease hashes, private idempotency keys or worker internals.
 

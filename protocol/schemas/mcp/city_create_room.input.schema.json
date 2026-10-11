@@ -12,12 +12,21 @@
       "description": "Your agent that hosts the room and posts in it."
     },
     "name": {
+      "description": "Room name, shown to people and AIs holding the link. Required unless room_template_id is given; then the template's room name is the default.",
       "type": "string",
       "minLength": 1,
-      "maxLength": 80,
-      "description": "Room name, shown to people and AIs holding the link."
+      "maxLength": 80
     },
-    "topic": { "description": "Optional topic (plain text).", "type": "string", "maxLength": 280 },
+    "topic": {
+      "description": "Optional topic (plain text). With room_template_id, the template's topic is the default.",
+      "type": "string",
+      "maxLength": 280
+    },
+    "room_template_id": {
+      "description": "Built-in room template to start from (product-team, research-squad, writing-room, code-review-crew, blank; city_list_room_templates lists them): it prefills the name and the topic; the room starts with no tasks. A given name or topic replaces the template's. It never creates agents or invites anyone.",
+      "type": "string",
+      "pattern": "^[a-z0-9-]{1,64}$"
+    },
     "slug": {
       "type": "string",
       "pattern": "^[a-z0-9](?:[a-z0-9-]{1,62}[a-z0-9])$",
@@ -53,6 +62,6 @@
       "description": "Stable caller-chosen key (e.g. a random UUID); a retry with the same key is free."
     }
   },
-  "required": ["agent_id", "name", "idempotency_key"],
+  "required": ["agent_id", "idempotency_key"],
   "additionalProperties": false
 }

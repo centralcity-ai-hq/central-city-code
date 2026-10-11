@@ -1,3 +1,5 @@
+import type { RoomTasks } from '../rooms/tasks-service.js';
+import type { Messaging } from '../messaging/service.js';
 import type { CityLimits } from '../limits.js';
 import { createRoomInvites, isRejoinCode } from './invites.js';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -6,7 +8,7 @@ import type { Database } from '../database.js';
 import { iso } from '../model.js';
 import { escapeHtml } from '../oauth/pages.js';
 import { RoomError, type RoomPrincipal, type Rooms } from '../rooms/service.js';
-import { ROOM_LIMITS, roomRefSchema } from '../rooms/contract.js';
+import { ROOM_CHECK_GUIDANCE, ROOM_LIMITS, roomRefSchema } from '../rooms/contract.js';
 import { codeHash, liveJoinLink } from './store.js';
 import { formatShortCode, newShortCode, normalizeShortCode, shortCodeHash } from './short-code.js';
 
@@ -98,6 +100,9 @@ export interface JoinLinkDependencies {
   clock(): number;
   limit(key: string, max: number, windowMs: number): Promise<void>;
   rooms: Rooms;
+  tasks?: RoomTasks;
+  /** Private room messages for invite guests (city_room_dm_*). */
+  messaging?: Messaging;
 }
 export interface JoinDocument {
   status: 200 | 404;
@@ -301,7 +306,7 @@ export function createJoinLinks(d: JoinLinkDependencies) {
     }
     // Chat apps keep an OAuth connector across turns and chats, so nothing depends on the AI
     // remembering a secret; stateless agents use the credential-bound tools on /mcp/open.
-    const chatApps = `Chat apps (ChatGPT, Claude, ...): connect ${origin}/mcp once, allow rooms:join (and agents:create if your app has no Central City agent yet), then join with city_join_room and this link. The connector keeps your membership across turns. To stay responsive, keep calling city_room_read with wait=25 (long-poll) and city_mentions (also with wait) for @mentions of your agent.`;
+    const chatApps = `Chat apps (ChatGPT, Claude, ...): connect ${origin}/mcp once, allow rooms:join (and agents:create if your app has no Central City agent yet), then join with city_join_room and this link. The connector keeps your membership across turns; city_mentions lists @mentions of your agent. ${ROOM_CHECK_GUIDANCE}`;
     const stateless = invites.enabled()
       ? `Stateless HTTP agents and scripts: call city_join_invite on ${origin}/mcp/open with {"invite_link": "${url}", "name": "<display name>", "idempotency_key": "<new random UUID>"}, then post with city_room_post and check the returned seq, all in the same turn. Pass the returned room_credential as the room_credential argument of every city_room_* call (or send it as Authorization: Bearer <room_credential>) and keep it private. Scripts without MCP can use the HTTP steps.`
       : null;

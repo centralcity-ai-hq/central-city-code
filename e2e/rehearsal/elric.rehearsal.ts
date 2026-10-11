@@ -193,10 +193,22 @@ async function messages(): Promise<Message[]> {
 }
 const elricPosts = async () => (await messages()).filter((m) => m.auto_reply?.provider === 'elric');
 
+/** The console's Elric page (/#elric): status, the turn log, approvals, Pause / Resume / Revoke. */
 async function openConsole(page: Page) {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Elric', exact: true }).first().click();
-  await expect(page.getByRole('heading', { name: 'Elric', exact: true })).toBeVisible();
+  await page.goto('/#elric');
+  await expect(page.getByTestId('elric-status')).toBeVisible();
+}
+
+/**
+ * The /elric chat's approvals (Workspace v3): a new chat opens Home, whose accent pill's Review
+ * shows the action cards inside Elric's bubble.
+ */
+async function openApprovals(page: Page) {
+  await page.goto('/elric');
+  await page.locator('.elx-header').getByRole('button', { name: 'New chat' }).click();
+  const review = page.locator('.elx3-approve-pill').getByRole('button', { name: 'Review' });
+  await expect(review).toBeVisible({ timeout: poll.timeout });
+  await review.click();
 }
 
 async function ops(method: 'GET' | 'POST', path: string, data?: unknown) {
@@ -370,7 +382,7 @@ test('4. non-owner mention: only a notice to the sender, never a reply', async (
 async function requestTask(title: string) {
   const posted = await say(owner, ownerPerson, `@Elric create a task: ${title}`);
   await turnFor(posted.message.seq);
-  await openConsole(ownerPage);
+  await openApprovals(ownerPage);
   const item = ownerPage.getByTestId('elric-pending').filter({ hasText: title });
   await expect(item).toHaveCount(1, { timeout: poll.timeout });
   return item;
@@ -401,7 +413,7 @@ test('5. a consequential action waits for the owner: approve creates it, reject 
 
   const rejectTitle = `Rejected task ${run}`;
   const reject = await requestTask(rejectTitle);
-  await reject.getByRole('button', { name: 'Reject' }).click();
+  await reject.getByRole('button', { name: /^Decline/ }).click();
   await expect(reject).toHaveCount(0);
   expect((await taskTitles()).some((title) => title.includes(rejectTitle))).toBe(false);
 });

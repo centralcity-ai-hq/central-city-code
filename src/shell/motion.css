@@ -1,0 +1,222 @@
+/*
+ * Motion and touch, motion system v1 (the --motion-* tokens live in tokens.css). One system for
+ * how things answer a finger and how they come and go: presses sink at once and spring back,
+ * things decelerate in (--motion-ease-out) and leave 30 to 40% faster (--motion-ease-in), and
+ * only transform, opacity and grid rows animate. Under prefers-reduced-motion the duration
+ * tokens are 0ms and every animation here is off (the bottom of this file).
+ */
+
+/* Touch: no flash on tap (the press states below replace it; :focus-visible keeps its ring),
+   and no double-tap-to-zoom wait on controls. */
+html {
+  -webkit-tap-highlight-color: transparent;
+}
+a,
+button,
+summary,
+label,
+select,
+[role='button'] {
+  touch-action: manipulation;
+}
+
+/* Press: buttons sink to 0.97, link cards to 0.99; rows and list links darken. */
+.button:active:not(:disabled),
+.btn:active,
+.icon-button:active:not(:disabled),
+.theme-toggle-btn:active {
+  scale: 0.97;
+}
+.docs-index li {
+  transition: scale var(--motion-duration-fast) var(--motion-ease-spring);
+}
+.docs-index li:has(> a:active) {
+  scale: 0.99;
+}
+.cc-header-menu nav a:active,
+.cc-menu-group-button:active,
+.cc-footer-column summary:active,
+.cc-footer-column a:active {
+  background: var(--bg-surface-active);
+}
+.cc-menu-group-button,
+.cc-footer-column summary,
+.cc-footer-column a {
+  transition: background-color var(--motion-duration-fast) var(--motion-ease-standard);
+}
+
+/* The phone menu (PublicHeader): fades in over 200 ms while it glides 4 px down over 240 ms,
+   its rows a beat apart; closed, it leaves in 140 ms (PublicHeader keeps it mounted that long). */
+.cc-header-menu,
+.cc-header-menu > nav > *,
+.cc-header-menu > .cc-header-menu-theme {
+  animation:
+    cc-fade-in 200ms var(--motion-ease-out) both,
+    cc-glide-down var(--motion-duration-normal) var(--motion-ease-out) both;
+}
+.cc-header-menu > nav > :nth-child(2) {
+  animation-delay: 15ms;
+}
+.cc-header-menu > nav > :nth-child(3) {
+  animation-delay: 30ms;
+}
+.cc-header-menu > nav > :nth-child(4) {
+  animation-delay: 45ms;
+}
+.cc-header-menu > nav > :nth-child(n + 5),
+.cc-header-menu > .cc-header-menu-theme {
+  animation-delay: 60ms;
+}
+.cc-header-menu[data-state='closing'] {
+  animation: cc-menu-out 140ms var(--motion-ease-in) both;
+  pointer-events: none;
+}
+.cc-header-menu[data-state='closing'] > nav > *,
+.cc-header-menu[data-state='closing'] > .cc-header-menu-theme {
+  animation: none;
+}
+@keyframes cc-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes cc-glide-down {
+  from {
+    transform: translateY(-4px);
+  }
+}
+@keyframes cc-menu-out {
+  to {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+/* The menu button's icon turns as it flips between the menu and close icons. */
+.cc-header-menu-button svg {
+  animation: cc-icon-in var(--motion-duration-instant) var(--motion-ease-out);
+}
+@keyframes cc-icon-in {
+  from {
+    opacity: 0;
+    rotate: -45deg;
+  }
+}
+
+/* Collapse: a section's height eases open in 250 ms and shut in 180 ms (grid rows 0fr to 1fr).
+   Closed, it is visibility: hidden once the motion ends, so its links leave the tab order and
+   the accessibility tree exactly as with the hidden attribute. */
+.cc-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  visibility: hidden;
+  transition:
+    grid-template-rows var(--motion-duration-exit) var(--motion-ease-in),
+    visibility 0s linear var(--motion-duration-exit);
+}
+.cc-collapse[data-open] {
+  grid-template-rows: 1fr;
+  visibility: visible;
+  transition:
+    grid-template-rows calc(var(--motion-duration-normal) + 10ms) var(--motion-ease-out),
+    visibility 0s;
+}
+.cc-collapse > * {
+  min-height: 0;
+  overflow: hidden;
+  /* Room for the links' focus rings inside the clip, without moving anything. */
+  margin: -4px;
+  padding: 4px;
+  opacity: 0;
+  transition: opacity var(--motion-duration-exit) var(--motion-ease-in);
+}
+.cc-collapse[data-open] > * {
+  opacity: 1;
+  transition: opacity var(--motion-duration-normal) var(--motion-ease-out) 40ms;
+}
+
+/* "Opening Central City" shows only if a screen takes a while: a fast load or page change goes
+   straight to the page instead of flashing the splash for a moment. */
+.boot-screen {
+  animation: cc-fade-in var(--motion-duration-normal) var(--motion-ease-out) 400ms both;
+}
+
+/* Page changes inside the app (shell/pageNavigation.ts): the old page stays until the new one is
+   ready, fades out in 120 ms, and the new one fades in over 240 ms with a 4 px glide; the header
+   stays put. */
+.cc-header {
+  view-transition-name: cc-header;
+}
+::view-transition-old(root) {
+  animation: cc-page-out 120ms var(--motion-ease-in) both;
+}
+::view-transition-new(root) {
+  animation: cc-page-in var(--motion-duration-normal) var(--motion-ease-out) both;
+}
+@keyframes cc-page-out {
+  to {
+    opacity: 0;
+  }
+}
+@keyframes cc-page-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+/* Room sheets and the phone drawer's backdrop come in instead of appearing: the backdrop fades
+   in over 240 ms; a sheet rises from the bottom on a phone (280 ms) or settles in on wider
+   screens (240 ms). */
+.rm-backdrop,
+.rm-drawer-backdrop {
+  animation: cc-fade-in var(--motion-duration-normal) ease;
+}
+.rm-backdrop > .rm-sheet {
+  animation: cc-pop-in var(--motion-duration-normal) var(--motion-ease-out);
+}
+@keyframes cc-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+}
+@media (max-width: 899px) {
+  .rm-backdrop > .rm-sheet {
+    animation-name: cc-sheet-up;
+    animation-duration: var(--motion-duration-enter);
+  }
+}
+@keyframes cc-sheet-up {
+  from {
+    transform: translateY(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cc-header-menu,
+  .cc-header-menu > nav > *,
+  .cc-header-menu > .cc-header-menu-theme,
+  .cc-header-menu-button svg,
+  .boot-screen,
+  .rm-backdrop,
+  .rm-drawer-backdrop,
+  .rm-backdrop > .rm-sheet,
+  ::view-transition-old(root),
+  ::view-transition-new(root),
+  ::view-transition-group(*) {
+    animation: none !important;
+  }
+  .cc-collapse,
+  .cc-collapse > *,
+  .cc-collapse[data-open],
+  .cc-collapse[data-open] > * {
+    transition: none;
+  }
+  .button:active:not(:disabled),
+  .btn:active,
+  .icon-button:active:not(:disabled),
+  .theme-toggle-btn:active,
+  .docs-index li:has(> a:active) {
+    scale: none;
+  }
+}

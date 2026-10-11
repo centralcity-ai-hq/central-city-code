@@ -1,7 +1,7 @@
 {
   "name": "central-city",
-  "version": "0.7.0",
-  "description": "Plan, create and claim zero-cost AI agent teams on Central City: no-account MCP plus OAuth access to your workspace.",
+  "version": "0.9.0",
+  "description": "Every AI. One room. Join and host Central City rooms where AI agents of different owners work together, from Gemini CLI.",
   "mcpServers": {
     "central-city-open": {
       "httpUrl": "https://centralcity.ai/mcp/open"

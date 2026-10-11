@@ -1,0 +1,246 @@
+/*
+ * ElricSkeleton: the Workspace v3 dashboard's frame (elric-v3.css) without its content, so
+ * nothing moves when the chat arrives: the floating top bar (10% smaller than the room's: Elric's
+ * pill, Manage Elric, New chat; the Chats chip under 900px), the 250px chats column from 900px up
+ * and the floating composer. Tokens: elric-tokens.css. Part of the main bundle, so it shows
+ * before the dashboard's chunk arrives.
+ */
+.elx-skel {
+  --elx-skel-bar-px: calc(var(--elx3-bar) * var(--ws-px));
+  --elx-skel-chip-h: calc(44 * var(--elx-skel-bar-px));
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    'bar bar'
+    'side main'
+    'side dock';
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  background: linear-gradient(180deg, var(--bg-page) 0%, var(--bg-page-2) 100%);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: calc(15 * var(--ws-type-px));
+  line-height: 1.5;
+}
+.elx-skel[data-embedded='true'] {
+  height: 100%;
+  min-height: 0;
+}
+.elx-skel-header {
+  grid-area: bar;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: calc(8 * var(--elx-skel-bar-px));
+  min-width: 0;
+  padding: calc(18 * var(--elx-skel-bar-px)) calc(20 * var(--elx-skel-bar-px))
+    calc(10 * var(--elx-skel-bar-px));
+}
+.elx-skel-chip.elx-skel-home {
+  width: var(--elx-skel-chip-h);
+  padding: 0;
+}
+.elx-skel-title {
+  display: flex;
+  align-items: center;
+  gap: calc(10 * var(--elx-skel-bar-px));
+  min-width: 0;
+  min-height: var(--elx-skel-chip-h);
+  box-sizing: border-box;
+  padding: calc(6 * var(--elx-skel-bar-px)) calc(14 * var(--elx-skel-bar-px))
+    calc(6 * var(--elx-skel-bar-px)) calc(8 * var(--elx-skel-bar-px));
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-surface-elevated);
+  box-shadow: var(--shadow-float-sm);
+}
+.elx-skel-title .elx3-mark-sm {
+  width: calc(28 * var(--elx-skel-bar-px));
+  height: calc(28 * var(--elx-skel-bar-px));
+  border-radius: calc(8 * var(--elx-skel-bar-px));
+}
+.elx-skel-title h1 {
+  margin: 0;
+  font: 600 calc(17 * var(--elx3-bar) * var(--ws-type-px)) / 1.3 var(--font-sans);
+  letter-spacing: -0.01em;
+}
+.elx-skel-tag {
+  display: inline-flex;
+  align-items: center;
+  height: calc(20 * var(--ws-px));
+  padding: 0 calc(7 * var(--ws-px));
+  border: 1px solid var(--accent-border);
+  border-radius: calc(7 * var(--ws-px));
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+  font: 600 max(11px, calc(11.5 * var(--ws-type-px))) / 1 var(--font-sans);
+  white-space: nowrap;
+}
+.elx-skel-chip,
+.elx-skel-new {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: calc(7 * var(--elx-skel-bar-px));
+  box-sizing: border-box;
+  height: var(--elx-skel-chip-h);
+  min-width: var(--elx-skel-chip-h);
+  padding: 0 calc(14 * var(--elx-skel-bar-px));
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-surface-elevated);
+  color: var(--text-primary);
+  font: 600 calc(14 * var(--elx3-bar) * var(--ws-type-px)) / 1 var(--font-sans);
+  white-space: nowrap;
+}
+.elx-skel-icon {
+  width: calc(17 * var(--elx-skel-bar-px));
+  height: calc(17 * var(--elx-skel-bar-px));
+}
+.elx-skel-new {
+  padding: 0 calc(18 * var(--elx-skel-bar-px));
+  border-color: transparent;
+  background: var(--primary);
+  color: var(--on-primary);
+}
+.elx-skel-toggle {
+  display: none;
+  width: var(--elx-skel-chip-h);
+  padding: 0;
+}
+.elx-skel-toggle svg {
+  color: var(--text-primary);
+}
+.elx-skel-side {
+  display: none;
+}
+.elx-skel-label-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.elx-skel-dock {
+  grid-area: dock;
+  padding: 0 calc(40 * var(--ws-px)) max(calc(24 * var(--ws-px)), env(safe-area-inset-bottom));
+}
+/* The composer at rest: the 46px field plus the 48px tool row, inside 10px padding. */
+.elx-skel-composer {
+  box-sizing: border-box;
+  max-width: calc(820 * var(--ws-px));
+  height: calc(116 * var(--ws-px));
+  margin: 0 auto;
+  border: 1px solid var(--border);
+  border-radius: calc(24 * var(--ws-px));
+  background: var(--bg-surface-elevated);
+  box-shadow: var(--shadow-elevated);
+}
+/* The placeholders appear only when the wait is noticeable, then softly. */
+.elx-skel-bar {
+  animation: elx-skel-in 200ms ease-out 150ms both;
+}
+.elx-skel-bar {
+  display: block;
+  width: 70%;
+  height: calc(14 * var(--ws-px));
+  margin: calc(12 * var(--ws-px)) calc(12 * var(--ws-px));
+  border-radius: 7px;
+  background: var(--bg-inset);
+}
+.elx-skel-bar.is-label {
+  width: 28%;
+  height: calc(10 * var(--ws-px));
+  margin-top: calc(8 * var(--ws-px));
+}
+.elx-skel-bar.is-wide {
+  width: 82%;
+}
+.elx-skel-bar.is-short {
+  width: 52%;
+}
+@media (min-width: 900px) {
+  .elx-skel-side {
+    display: block;
+    grid-area: side;
+    box-sizing: border-box;
+    width: calc(250 * var(--ws-px));
+    padding: calc(6 * var(--ws-px)) calc(12 * var(--ws-px));
+    border-right: 1px solid var(--border);
+  }
+}
+@media (max-width: 1100px) {
+  .elx-skel-dock {
+    padding-left: calc(24 * var(--ws-px));
+    padding-right: calc(24 * var(--ws-px));
+  }
+}
+@media (max-width: 899px) {
+  .elx-skel-toggle {
+    display: inline-flex;
+  }
+}
+@media (max-width: 640px) {
+  .elx-skel-header {
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+    padding: calc(12 * var(--ws-px)) calc(16 * var(--ws-px)) calc(8 * var(--ws-px));
+  }
+  .elx-skel-title {
+    flex: 1 1 auto;
+    margin-right: auto;
+  }
+  .elx-skel-label {
+    display: none;
+  }
+  .elx-skel-chip,
+  .elx-skel-new {
+    width: var(--elx-skel-chip-h);
+    padding: 0;
+  }
+  .elx-skel-dock {
+    padding: 0 calc(12 * var(--ws-px)) max(calc(14 * var(--ws-px)), env(safe-area-inset-bottom));
+  }
+}
+@media (max-width: 380px) {
+  .elx-skel-title .elx3-mark-sm {
+    display: none;
+  }
+  .elx-skel-title {
+    padding-left: calc(14 * var(--ws-px));
+  }
+}
+@media (max-width: 640px), (pointer: coarse) {
+  .elx-skel {
+    --elx-skel-chip-h: 44px;
+  }
+}
+@keyframes elx-skel-in {
+  from {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .elx-skel-bar {
+    animation: none;
+  }
+}
+/* The workspace's ☰ chip, where the dashboard shows it (elric-v3.css, elric-tokens.css). */
+.elx-skel-chip.elx3-menu {
+  display: none;
+  width: var(--elx-skel-chip-h);
+  padding: 0;
+  cursor: pointer;
+}
+@media (max-width: 899px) {
+  [data-workspace='v2'] .elx-skel-chip.elx3-menu {
+    display: inline-flex;
+  }
+}

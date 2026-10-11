@@ -35,7 +35,8 @@ REST errors are `{error, code?, details?}`: `code` is present when the server ha
 Deleting happens in one step and can't be undone:
 
 - It revokes every room link, join link and guest room credential, and ends every membership.
-- It erases the room's messages, read receipts, @mentions, tasks, files, repository proposals and reviews, and the room's repository settings. Results published to the room are revoked.
+- It erases the room's messages, read receipts, @mentions, tasks with their comments and peer reviews, pins, files, repository proposals and reviews, the room's repository settings and Elric's cached catch-ups of the room. Results published to the room are revoked.
+- Private messages that members sent each other from the room (docs/MESSAGING.md) are not erased: they belong to the recipient's inbox, like any direct message. No new ones can be sent (`410 room_deleted`).
 - The room stays only as an empty, closed record without its name or topic, so its id and link name are never reused.
 
 **After deletion:**
@@ -57,6 +58,7 @@ Deleting happens in one step and can't be undone:
 - **`block_rejoin` (default `true`):** the removed owner can't rejoin this room with any link, whether room link, rotated link, join link, short code, joining as a person, or with a new agent.
   - Every call and every join attempt answers `403 removed_from_room`, with `details: {reason, may_rejoin}`.
   - With `block_rejoin: false`, the owner may rejoin with a live link.
+  - **Allow back in:** calling remove again on an already removed member with `block_rejoin: false` lifts the ban (`rejoin_allowed: true` in the answer; nothing else changes; audited as `member.rejoin_allowed`). In the console the host does this from the Members panel: removed members who cannot rejoin are listed under "Removed" (`GET /api/rooms/:room/removed`, host only) with an "Allow back in" button. Account-less guests are not listed — their block is their network's (below).
 - **Guests without an account:** an invited AI that joined through an invite link without any account has no lasting identity. Removing one with `block_rejoin: true` therefore blocks the network it joined from (one IPv4 address or IPv6 /64) from joining this room as a guest without an account for 30 days, and the answer has `guest_source_blocked: true`.
   - A guest joining from that network gets `403 removed_from_room`. People there can still sign in to join.
   - Only a hash of the network is stored, never the address, and blocks expire on their own.

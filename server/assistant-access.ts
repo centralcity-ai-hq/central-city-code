@@ -32,6 +32,13 @@ import {
   type RoomTaskToolName,
 } from './rooms/tasks-tools.js';
 import type { RoomTasks } from './rooms/tasks-service.js';
+import type { RoomPins } from './rooms/pins.js';
+import {
+  ROOM_PIN_TOOLS,
+  ROOM_PIN_TOOL_SCOPES,
+  runRoomPinTool,
+  type RoomPinToolName,
+} from './rooms/pins-tools.js';
 import {
   ROOM_REPO_TOOLS,
   ROOM_REPO_TOOL_SCOPES,
@@ -40,6 +47,14 @@ import {
   type RoomRepoToolName,
 } from './rooms/repos/tools.js';
 import type { RoomRepos } from './rooms/repos/service.js';
+import {
+  AGENT_PAY_TOOLS,
+  AGENT_PAY_TOOL_SCOPES,
+  agentPayEnabled,
+  runAgentPayTool,
+  type AgentPayToolName,
+} from './base/payments/agent-pay-tools.js';
+import type { AgentPayService } from './base/payments/agent-pay.js';
 import { WAKE_TOOLS, roomReadWaitToolInput, type WakeToolName } from './wake/contract.js';
 import { idleKeys, type Wake } from './wake/service.js';
 import { RESULT_TOOLS, type ResultToolName } from './results/contract.js';
@@ -162,12 +177,19 @@ interface Dependencies {
   rooms: Rooms;
   /** Room tasks (docs/ROOM_TASKS.md); the tools are behind CITY_ROOM_TASKS=1. */
   tasks: RoomTasks;
+  /** Room pins and the handoff brief (docs/ROOMS.md "Pins and the handoff brief"). */
+  pins: RoomPins;
   /** Room repos (docs/ROOM_REPOS.md); the tools are behind CITY_ROOM_REPOS=1. */
   repos: RoomRepos;
   /** Mentions, long-poll and wake-up webhooks (docs/WAKE.md). */
   wake: Wake;
   /** Published results, city_ask and reuse reports (docs/ANSWERS.md). */
   results: Results;
+  /**
+   * Base Pay P2c: agents pay other Central City agents on their own (base/payments/agent-pay.ts);
+   * the tools are behind CITY_BASE_WALLET=1 and CITY_BASE_AGENT_PAY=1.
+   */
+  agentPay?: AgentPayService;
 }
 
 export const ASSISTANT_TOOL_SCOPES = {
@@ -197,6 +219,7 @@ export const ASSISTANT_TOOL_SCOPES = {
   city_revoke_connection: 'connections:create',
   // Rooms (F4 §0, docs/ROOMS.md): participating and hosting are separate authority.
   city_create_room: 'rooms:host',
+  city_list_room_templates: 'rooms:host',
   city_room_link: 'rooms:host',
   city_join_room: 'rooms:join',
   city_room_post: 'rooms:join',
@@ -205,7 +228,11 @@ export const ASSISTANT_TOOL_SCOPES = {
   city_room_remove: 'rooms:host',
   city_room_close: 'rooms:host',
   city_room_leave: 'rooms:join',
+  city_room_search: 'rooms:join',
+  city_room_overview: 'rooms:join',
   city_room_update: 'rooms:host',
+  // Room pins and the handoff brief: the same scope as posting (rooms:join).
+  ...ROOM_PIN_TOOL_SCOPES,
   // Room tasks: rooms:join; host-only actions are enforced in the service.
   ...ROOM_TASK_TOOL_SCOPES,
   // Room repos: reads need rooms:join; bind/unbind need rooms:apply, and the
@@ -222,6 +249,8 @@ export const ASSISTANT_TOOL_SCOPES = {
   city_unpublish_result: 'results:publish',
   city_ask: 'results:read',
   city_report_reuse: 'results:read',
+  // Base Pay P2c: pay, never a default scope; the owner's consent per agent is checked as well.
+  ...AGENT_PAY_TOOL_SCOPES,
 } as const satisfies Record<string, AssistantScope>;
 export type AssistantToolName = keyof typeof ASSISTANT_TOOL_SCOPES;
 export type GrantValues = z.infer<typeof grantSchema>;
@@ -584,6 +613,8 @@ export async function registerAssistantAccess(
       return connectionTool(identity, tool, body);
     if ((ROOM_TOOLS as readonly string[]).includes(tool))
       return roomTool(identity, tool as RoomToolName, body, context);
+    if ((ROOM_PIN_TOOLS as readonly string[]).includes(tool))
+      return pinTool(identity, tool as RoomPinToolName, body, context);
     if ((ROOM_TASK_TOOLS as readonly string[]).includes(tool)) {
       if (!roomTasksEnabled(process.env)) d.fail(404, 'Assistant tool not found.');
       return taskTool(identity, tool as RoomTaskToolName, body, context);
@@ -594,6 +625,10 @@ export async function registerAssistantAccess(
     }
     if ((RESULT_TOOLS as readonly string[]).includes(tool))
       return resultTool(identity, tool as ResultToolName, body, context);
+    if ((AGENT_PAY_TOOLS as readonly string[]).includes(tool)) {
+      if (!agentPayEnabled(process.env) || !d.agentPay) d.fail(404, 'Assistant tool not found.');
+      return payTool(identity, tool as AgentPayToolName, body);
+    }
     if (tool === 'city_create_job' || tool === 'city_get_job' || tool === 'city_cancel_job') {
       const remote = await remoteJobTool(identity, tool, body);
       if (remote !== undefined) return remote;
@@ -906,7 +941,8 @@ export async function registerAssistantAccess(
         () => d.messaging.readInbox(principal, agent_id, { ...query, start: 'acked' }, guard),
         (page: InboxPage) => idleKeys('inbox', agent_id, page, page.messages.length),
         undefined,
-        { owner: identity.operatorId },
+        { owner: identity.operatorId, agent: agent_id },
+        true,
       );
     }
     const { agent_id, seq } = ackInboxToolInput.parse(body);
@@ -975,6 +1011,7 @@ export async function registerAssistantAccess(
         d.fail(403, 'Joining with a new agent also needs agents:create.');
     };
     if (tool === 'city_create_room') return d.rooms.create(principal, body, guard);
+    if (tool === 'city_list_room_templates') return d.rooms.templates(principal, body, guard);
     if (tool === 'city_room_link') return d.rooms.link(principal, body, guard);
     if (tool === 'city_join_room') return d.rooms.join(principal, body, guard);
     if (tool === 'city_room_post') return d.rooms.post(principal, body, guard);
@@ -985,18 +1022,28 @@ export async function registerAssistantAccess(
         messages: unknown[];
         latest_seq: number;
         next_since: number;
+        handoff_brief?: string;
       };
       return d.wake.longPoll(
         wait,
-        () => d.rooms.read(principal, query, guard) as Promise<Page>,
-        (page) => idleKeys('room', page.room.id, page, page.messages.length),
+        // The MCP read is the one that may carry the handoff brief (docs/ROOMS.md).
+        () => d.rooms.read({ ...principal, handoffBrief: true }, query, guard) as Promise<Page>,
+        // A first read's handoff brief counts as news: the long-poll answers at once with it.
+        (page) =>
+          idleKeys('room', page.room.id, page, page.messages.length + (page.handoff_brief ? 1 : 0)),
         undefined,
-        { owner: identity.operatorId },
+        // The reading agent is resolved inside the room read; the grant (or key) is the one
+        // client session, so it carries the per-client wait budget — one bucket per room, so a
+        // connector may poll its rooms in parallel.
+        { owner: identity.operatorId, grant: identity.grantId, room: query.room_id },
+        true,
       );
     }
     if (tool === 'city_room_members') return d.rooms.members(principal, body, guard);
     if (tool === 'city_room_remove') return d.rooms.remove(principal, body, guard);
     if (tool === 'city_room_leave') return d.rooms.leave(principal, body, guard);
+    if (tool === 'city_room_search') return d.rooms.search(principal, body, guard);
+    if (tool === 'city_room_overview') return d.rooms.overview(principal, body, guard);
     if (tool === 'city_room_update') return d.rooms.update(principal, body, guard);
     return d.rooms.close(principal, body, guard);
   }
@@ -1021,6 +1068,28 @@ export async function registerAssistantAccess(
     const guard = guardFor(identity, tool);
     await d.db.transaction((tx) => guard(tx, Date.now()));
     return runRoomTaskTool(d.tasks, tool, body, principal);
+  }
+  /**
+   * Room pin and brief tools: like the task tools, the service runs its own transactions, so the
+   * current grant or key is rechecked in a small transaction first.
+   */
+  async function pinTool(
+    identity: GrantIdentity,
+    tool: RoomPinToolName,
+    body: unknown,
+    context: ToolContext,
+  ): Promise<unknown> {
+    const principal = {
+      operatorId: identity.operatorId,
+      actor:
+        identity.keyHash !== undefined
+          ? `workspace key ${identity.grantId}`
+          : `assistant grant ${identity.grantId}`,
+      origin: context.origin,
+    };
+    const guard = guardFor(identity, tool);
+    await d.db.transaction((tx) => guard(tx, Date.now()));
+    return runRoomPinTool(d.pins, tool, body, principal);
   }
   /**
    * Room repo tools: like the task tools, the service runs its own transactions
@@ -1068,6 +1137,30 @@ export async function registerAssistantAccess(
     if (tool === 'city_unpublish_result') return d.results.unpublish(principal, body, guard);
     if (tool === 'city_ask') return d.results.ask(principal, body, guard);
     return d.results.report(principal, body, guard);
+  }
+  /**
+   * Base Pay P2c tools: the payment runs its own transactions and reads Base between them, so no
+   * workspace lock is held. The current grant or key (rotation, revocation, expiry, the pay scope)
+   * is rechecked here first, and the payment rechecks it the same way before it is reserved, before
+   * it is signed and right before its first broadcast (revalidate).
+   */
+  async function payTool(
+    identity: GrantIdentity,
+    tool: AgentPayToolName,
+    body: unknown,
+  ): Promise<unknown> {
+    const guard = guardFor(identity, tool);
+    const revalidate = () => d.db.transaction((tx) => guard(tx, Date.now()));
+    await revalidate();
+    if (tool === 'city_pay') await d.limit(`agent-pay:${identity.grantId}`, 20, 60_000);
+    return runAgentPayTool(d.agentPay!, tool, body, {
+      workspaceId: identity.operatorId,
+      actor:
+        identity.keyHash !== undefined
+          ? `workspace key ${identity.grantId}`
+          : `assistant grant ${identity.grantId}`,
+      revalidate,
+    });
   }
   function authority(identity: GrantIdentity) {
     return async (tx: Tx, time: number) => (await loadAuthority(tx, identity, time)).scopes;

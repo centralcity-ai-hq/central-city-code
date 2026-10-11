@@ -16,8 +16,13 @@ import { ROOM_CODE_TABLES } from './rooms/repos/schema.js';
 import { RESULT_TABLES } from './results/schema.js';
 import { ELRIC_TABLES } from './elric/schema.js';
 import { GOOGLE_TABLES } from './google/schema.js';
+import { EMAIL_TABLES } from './email/schema.js';
+import { BASE_TABLES } from './base/schema.js';
 import { ELRIC_ERASE_TABLES } from './elric/erase.js';
 import { ELRIC_DRAFT_TABLES } from './elric/draft.js';
+import { ELRIC_TITLE_TABLES } from './elric/titles.js';
+import { ELRIC_CATCH_UP_TABLES } from './elric/catch-up-schema.js';
+import { TASK_REVIEW_TABLES } from './rooms/task-reviews-schema.js';
 
 /** Tables added by migrations 5-7 (server/migrations.ts). */
 /** Migrations 11-12 (server/workspaces, server/connections): never part of a backup. */
@@ -177,6 +182,11 @@ const workspace = z
             depth: z.number().int().min(0).max(16).optional(),
             rootSponsor: z.string().max(128).optional(),
             claimedAt: date.optional(),
+            credentialHint: z
+              .string()
+              .regex(/^[A-Za-z0-9_-]{4}$/)
+              .optional(),
+            visibility: z.enum(['private', 'public']).optional(),
           })
           .strict(),
       )
@@ -426,9 +436,13 @@ export async function backupDatabase(dataPath: string, backupPath: string) {
         )
       ).rows
         .map((row) => row.table_name)
-        // Migration 28 public_stats is derived (recomputed from workspaces): recognized on top of
-        // any schema and never exported, so it never decides whether a schema is supported.
-        .filter((name) => name !== 'public_stats');
+        // Migration 28 public_stats, migration 59 counted_agent_ids and migration 64 room_counts
+        // are derived (recomputed from workspaces, room members and tasks): recognized on top of any schema and never exported, so they never
+        // decide whether a schema is supported.
+        .filter(
+          (name) =>
+            name !== 'public_stats' && name !== 'counted_agent_ids' && name !== 'room_counts',
+        );
       const legacyTables = ['credentials', 'operators', 'replay_nonces', 'sessions', 'workspaces'];
       // Assistant grants and mutation receipts are authority, not recovery data.
       // Recognize the complete upgraded schema while exporting neither table.
@@ -500,13 +514,22 @@ export async function backupDatabase(dataPath: string, backupPath: string) {
         throw new Error('Unsupported database schema; no backup was written.');
       // Migrations 24/30 (room tasks, docs/ROOM_TASKS.md) may sit on top of any schema that has
       // rooms: both tables or none, recognized and never exported, like the rooms they belong to
-      // (no claim comes back).
+      // (no claim comes back). Migration 54 (task stages) only adds columns to rooms and room_tasks,
+      // so this check accepts it unchanged.
       const roomTaskTables = ['room_task_events', 'room_tasks'];
       const roomTasks = roomTaskTables.filter((name) => tables.includes(name));
       if (
         roomTasks.length &&
         (roomTasks.length !== roomTaskTables.length || !tables.includes('room_members'))
       )
+        throw new Error('Unsupported database schema; no backup was written.');
+      // Migration 56 (peer review of room tasks) comes only on top of the room task tables:
+      // recognized and never exported, like the tasks themselves.
+      if (TASK_REVIEW_TABLES.some((name) => tables.includes(name)) && !roomTasks.length)
+        throw new Error('Unsupported database schema; no backup was written.');
+      // Migration 57 (task comments) comes only on top of the room task tables: recognized and
+      // never exported, like the tasks they belong to.
+      if (tables.includes('room_task_comments') && !roomTasks.length)
         throw new Error('Unsupported database schema; no backup was written.');
       // Migration 23 (room repos, proposals, reviews and evidence; docs/ROOM_REPOS.md)
       // may sit on top of any schema that has rooms: all of its tables or none, recognized and
@@ -521,6 +544,23 @@ export async function backupDatabase(dataPath: string, backupPath: string) {
       // of any schema that has rooms: recognized and never exported, so a restore brings no
       // block back (they expire within 30 days anyway).
       if (tables.includes('room_guest_blocks') && !tables.includes('room_members'))
+        throw new Error('Unsupported database schema; no backup was written.');
+      // Migration 68 (room pins and the handoff brief ledger, docs/ROOMS.md) may sit on top of any
+      // schema that has rooms: both tables or none, recognized and never exported, like the
+      // messages and tasks the pins point at.
+      const roomPinTables = ['room_briefs', 'room_pins'];
+      const roomPins = roomPinTables.filter((name) => tables.includes(name));
+      if (
+        roomPins.length &&
+        (roomPins.length !== roomPinTables.length || !tables.includes('room_members'))
+      )
+        throw new Error('Unsupported database schema; no backup was written.');
+      // Migration 70 (conversation_hidden, docs/MESSAGING.md) comes only on top of messaging:
+      // per-person "hidden from my list" marks, recognized and never exported like the messages.
+      if (tables.includes('conversation_hidden') && !tables.includes('messages'))
+        throw new Error('Unsupported database schema; no backup was written.');
+      // Migration 73 (conversation_reads) likewise: per-owner read marks, never exported.
+      if (tables.includes('conversation_reads') && !tables.includes('messages'))
         throw new Error('Unsupported database schema; no backup was written.');
       // Migration 39 (Elric, docs/ELRIC.md) may sit on top of any schema that has rooms: all of its
       // tables or none, recognized and never exported (no allowance, turn or pending action comes
@@ -546,18 +586,54 @@ export async function backupDatabase(dataPath: string, backupPath: string) {
       // recognized and never exported.
       if (ELRIC_DRAFT_TABLES.some((name) => tables.includes(name)) && !elric.length)
         throw new Error('Unsupported database schema; no backup was written.');
+      // Migration 52 (anonymous conversation-title cost totals) comes only on top of Elric's
+      // tables: recognized and never exported.
+      if (ELRIC_TITLE_TABLES.some((name) => tables.includes(name)) && !elric.length)
+        throw new Error('Unsupported database schema; no backup was written.');
+      // Migration 66 (cached room catch-ups) comes only on top of Elric's tables: a cache,
+      // recognized and never exported.
+      if (ELRIC_CATCH_UP_TABLES.some((name) => tables.includes(name)) && !elric.length)
+        throw new Error('Unsupported database schema; no backup was written.');
+      // Migration 71 (dismissed "Needs you" items, docs/ROOMS.md) may sit on top of any schema
+      // that has rooms: recognized and never exported (a restore shows the items again).
+      const needsYouTables = ['needs_you_dismissed'];
+      if (needsYouTables.some((name) => tables.includes(name)) && !tables.includes('room_members'))
+        throw new Error('Unsupported database schema; no backup was written.');
+      // Migration 75 (messages each agent sent, a counter kept by a trigger on room_messages) may sit
+      // on top of any schema that has rooms: both tables or none, recognized and never exported (a
+      // restore starts the counts again; the backfill script recounts history).
+      const messageCountTables = ['agent_message_counts', 'agent_message_counts_meta'];
+      const messageCounts = messageCountTables.filter((name) => tables.includes(name));
+      if (
+        messageCounts.length &&
+        (messageCounts.length !== messageCountTables.length || !tables.includes('room_members'))
+      )
+        throw new Error('Unsupported database schema; no backup was written.');
       const optional: readonly string[] = [
         ...RESPONDER_TABLES,
         ...RESPONDER_EXECUTION_TABLES,
         ...COUNT_LOG_TABLES,
         ...COUNT_LOG_PENDING_TABLES,
         ...roomTaskTables,
+        ...TASK_REVIEW_TABLES,
+        'room_task_comments',
         ...ROOM_CODE_TABLES,
         'room_guest_blocks',
+        'conversation_hidden',
+        'conversation_reads',
+        ...messageCountTables,
+        ...roomPinTables,
         ...ELRIC_TABLES,
         ...GOOGLE_TABLES,
+        // Migration 76 (email outbox, newsletter consent): recognized, never exported.
+        ...EMAIL_TABLES,
+        // Migration 78 (Base agent wallets): recognized, never exported.
+        ...BASE_TABLES,
         ...ELRIC_ERASE_TABLES,
         ...ELRIC_DRAFT_TABLES,
+        ...ELRIC_TITLE_TABLES,
+        ...ELRIC_CATCH_UP_TABLES,
+        ...needsYouTables,
       ];
       const core = tables.filter((name) => !optional.includes(name));
       if (

@@ -2,6 +2,8 @@ import { lazy, Suspense, useState, type FormEvent } from 'react';
 import { LoaderCircle } from 'lucide-react';
 import type { Operator } from '../shared/types';
 import { api } from './api';
+import { NEWSLETTER_HINT, NEWSLETTER_LABEL } from '../shared/newsletter';
+import { HeroVideo, TEAM_LABEL, TEAM_POSTER, TEAM_VIDEO } from './landing/HeroVideo';
 import { PublicFooter } from './shell/PublicFooter';
 import { PublicHeader } from './shell/PublicHeader';
 import { LINKS } from './shell/links';
@@ -38,6 +40,11 @@ export function Auth({
   const [register, setRegister] = useState(initialRegister);
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
+  // The newsletter opt-in (Sign up only): unticked by default and never required. Password
+  // accounts have no address, so ticking it asks for one; unticked, none is collected.
+  const [newsletter, setNewsletter] = useState(false);
+  const [email, setEmail] = useState('');
+  const open = register && newsletter;
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   async function submit(event: FormEvent) {
@@ -47,7 +54,11 @@ export function Auth({
     try {
       const result = await api<{ operator: Operator }>(
         `/api/auth/${register ? 'register' : 'login'}`,
-        { name: name.trim(), password },
+        {
+          name: name.trim(),
+          password,
+          ...(register && newsletter ? { newsletter: true, email: email.trim() } : {}),
+        },
       );
       onSuccess(result.operator, { registered: register });
     } catch (err) {
@@ -65,22 +76,12 @@ export function Auth({
       <PublicHeader current="signin" />
       <main id="main-content" tabIndex={-1} className="auth-v8">
         <div className="auth-v8-grid">
-          <section className="auth-v8-intro" aria-label="Central City">
-            <p className="auth-v8-eyebrow">Your city, your control</p>
-            <p className="auth-v8-display">Independent intelligence. Common ground.</p>
-            <p className="auth-v8-lead">
-              Own the agents your AI creates, decide which rooms they join, and revoke any access at
-              any time.
-            </p>
-            <ul className="auth-v8-points">
-              <li>No email address needed; your password is stored only as a salted hash.</li>
-              <li>
-                Your AI apps get only the permissions you approve, and you can revoke them at any
-                time.
-              </li>
-              <li>A public agent count you can verify in your own browser.</li>
-            </ul>
-          </section>
+          {/* The product video: five AIs and Elric code together (shown from 1024 px up). */}
+          <div className="auth-v8-media">
+            <div className="auth-v8-frame">
+              <HeroVideo src={TEAM_VIDEO} poster={TEAM_POSTER} label={TEAM_LABEL} />
+            </div>
+          </div>
 
           <section className="auth-v8-card" aria-labelledby="auth-title">
             <div className="auth-v8-tabs" role="tablist" aria-label="Account">
@@ -112,7 +113,7 @@ export function Auth({
                 moves when switching. */}
             <div className="auth-v8-swap">
               <p className={`auth-v8-sub${register ? '' : ' is-ghost'}`} aria-hidden={!register}>
-                It takes a minute. Then invite your AI into a room and work together.
+                Takes a few seconds. Then invite your AI into a room and work together.
               </p>
               <p className={`auth-v8-sub${register ? ' is-ghost' : ''}`} aria-hidden={register}>
                 Sign in to see your rooms and agents.
@@ -152,6 +153,55 @@ export function Auth({
                   placeholder={register ? 'At least 12 characters' : 'Your password'}
                 />
               </label>
+              {/* The newsletter opt-in. Kept in Sign in too (hidden), so switching tabs never changes
+                  the card height; ticking it (a user action) grows the card. */}
+              <div
+                className={`auth-v8-newsletter${register ? '' : ' is-ghost'}`}
+                aria-hidden={!register}
+              >
+                <label className="auth-v8-check">
+                  <input
+                    type="checkbox"
+                    checked={newsletter}
+                    disabled={!register}
+                    onChange={(event) => setNewsletter(event.target.checked)}
+                  />
+                  <span>{NEWSLETTER_LABEL}</span>
+                </label>
+                {/* Collapsed by default (no reserved space); ticking expands it (grid rows
+                    0fr → 1fr, src/auth.css). The field stays mounted so it collapses smoothly. */}
+                <div
+                  className={`auth-v8-reveal${open ? ' is-open' : ''}`}
+                  aria-hidden={!open}
+                  inert={!open}
+                >
+                  <div className="auth-v8-reveal-inner">
+                    <div className="auth-v8-newsletter-email">
+                      <label>
+                        <span className="auth-v8-newsletter-label">
+                          Email
+                          <span className="auth-v8-note" id="newsletter-hint" role="status">
+                            {NEWSLETTER_HINT}
+                          </span>
+                        </span>
+                        <input
+                          type="email"
+                          name="email"
+                          autoComplete="email"
+                          inputMode="email"
+                          value={email}
+                          onChange={(event) => setEmail(event.target.value)}
+                          required={register && newsletter}
+                          disabled={!register || !newsletter}
+                          maxLength={254}
+                          placeholder="you@example.com"
+                          aria-describedby="newsletter-hint"
+                        />
+                      </label>
+                    </div>
+                  </div>
+                </div>
+              </div>
               {/* Kept in Sign in too (hidden) so both modes have the same height. */}
               <p className={`auth-v8-note${register ? '' : ' is-ghost'}`} aria-hidden={!register}>
                 Use a unique password with at least 12 characters. By creating an account, you agree

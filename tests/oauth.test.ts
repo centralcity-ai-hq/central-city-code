@@ -62,6 +62,7 @@ test('discovery metadata advertises OAuth 2.1, CIMD, DCR and the /mcp resource',
       'agents:wake',
       'results:read',
       'results:publish',
+      'pay',
     ]);
   }
   const as = (

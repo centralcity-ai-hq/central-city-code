@@ -1,75 +1,23 @@
 import { Component, type ReactNode } from 'react';
 import { LoaderCircle } from 'lucide-react';
 import { CityMark } from '../brand';
+import {
+  chunkReloadAvailable,
+  isChunkLoadError,
+  reloadAfterChunkFailure,
+  requestChunkReload,
+} from './chunkReload';
+import { releasePrerendered } from './prerendered';
 import './shell.css';
 
-const reloadKey = 'cc.chunkReload';
+export { isChunkLoadError } from './chunkReload';
 
 /**
- * Reloads allowed for chunk failures before the error shows, and the wait before each one.
- * One is not enough right after a deploy: while the production alias moves to the new build,
- * the edge can answer the reloaded page from one build and its chunk from the other, so the
- * first reload can miss too (production logs, 29 Sep 11:29 UTC: four deploys in two minutes).
- */
-const RELOAD_DELAYS_MS = [0, 1000, 3000];
-/** Reloads older than this belong to an earlier incident, not to this one. */
-const RELOAD_WINDOW_MS = 60_000;
-
-/** A failed dynamic import: after a deploy, the old chunk names no longer exist. */
-export function isChunkLoadError(error: unknown) {
-  const message = error instanceof Error ? `${error.name} ${error.message}` : String(error);
-  return /Failed to fetch dynamically imported module|Importing a module script failed|error loading dynamically imported module|ChunkLoadError/i.test(
-    message,
-  );
-}
-
-/**
- * How many chunk reloads this tab made in the current incident (sessionStorage `n@firstAt`).
- * Pure read; null when storage is unavailable (then the page never reloads by itself).
- */
-function reloadsSoFar(now = Date.now()): number | null {
-  try {
-    const [count, first] = (window.sessionStorage.getItem(reloadKey) ?? '').split('@').map(Number);
-    if (!count || !first || now - first > RELOAD_WINDOW_MS) return 0;
-    return count;
-  } catch {
-    return null;
-  }
-}
-
-/** Schedules the next reload; false when the budget is spent or storage is unavailable. */
-function reloadAgain() {
-  const count = reloadsSoFar();
-  if (count === null || count >= RELOAD_DELAYS_MS.length) return false;
-  try {
-    const first =
-      count === 0 ? Date.now() : Number(window.sessionStorage.getItem(reloadKey)?.split('@')[1]);
-    window.sessionStorage.setItem(reloadKey, `${count + 1}@${first}`);
-  } catch {
-    return false;
-  }
-  window.setTimeout(() => window.location.reload(), RELOAD_DELAYS_MS[count]);
-  return true;
-}
-
-/** Clears the reload guard once a page has rendered, so a later deploy can reload again. */
-export function markRendered() {
-  try {
-    window.sessionStorage.removeItem(reloadKey);
-  } catch {
-    // Storage unavailable: the guard simply never set.
-  }
-}
-
-/**
- * Error boundary. A chunk-load failure reloads the page (up to three times
- * within a minute, guarded in sessionStorage) and keeps the loading state on screen meanwhile;
- * anything else, or a chunk failure after those reloads, shows "Something went wrong" with Retry
- * and the error code and time under Details.
- *
- * Reported: signing in right after a deploy showed "Something went wrong." before
- * the page loaded. The one reload allowed then could land on the old build's chunk again (see
- * RELOAD_DELAYS_MS), and the error page stayed until "Try again" was pressed.
+ * Error boundary. A chunk-load failure (a deploy replaced the chunk this tab still refers to)
+ * reloads the page with the shared guard in src/shell/chunkReload.ts (up to three reloads within
+ * a minute, never a loop) and says a new version is loading meanwhile. Anything else, or a chunk
+ * failure after those reloads, shows "Something went wrong" with a Reload (Try again for a render
+ * error) button and the error code and time under Details.
  */
 export class ErrorBoundary extends Component<
   { children: ReactNode },
@@ -79,15 +27,15 @@ export class ErrorBoundary extends Component<
 
   static getDerivedStateFromError(error: unknown) {
     // Decided before the first fallback render, so the error copy never shows while a reload
-    // is still to come (pure: only reads the reload count).
-    const count = reloadsSoFar();
-    const reloading = isChunkLoadError(error) && count !== null && count < RELOAD_DELAYS_MS.length;
+    // is still to come (pure: only reads the guard).
+    const reloading = isChunkLoadError(error) && chunkReloadAvailable();
     return { error, at: new Date(), reloading };
   }
 
   componentDidCatch(error: unknown) {
+    releasePrerendered();
     if (!isChunkLoadError(error) || !this.state.reloading) return;
-    if (!reloadAgain()) this.setState({ reloading: false });
+    if (!requestChunkReload(error)) this.setState({ reloading: false });
   }
 
   render() {
@@ -99,12 +47,13 @@ export class ErrorBoundary extends Component<
           <CityMark />
           <p className="boot-title">Central City</p>
           <p>
-            <LoaderCircle className="spin" size={15} aria-hidden="true" />
-            Opening Central City
+            <LoaderCircle className="spin" size={15} aria-hidden="true" />A new version of Central
+            City is available. Reloading…
           </p>
         </div>
       );
-    const code = isChunkLoadError(error) ? 'chunk_load_failed' : 'render_failed';
+    const chunk = isChunkLoadError(error);
+    const code = chunk ? 'chunk_load_failed' : 'render_failed';
     return (
       <main id="main-content" tabIndex={-1} className="public-main cc-state-page">
         <section className="cc-state" role="alert" aria-labelledby="error-title">
@@ -113,9 +62,9 @@ export class ErrorBoundary extends Component<
           <button
             type="button"
             className="button primary large"
-            onClick={() => window.location.reload()}
+            onClick={() => (chunk ? reloadAfterChunkFailure(error) : window.location.reload())}
           >
-            Try again
+            {chunk ? 'Reload' : 'Try again'}
           </button>
           <details className="cc-state-details">
             <summary>Details</summary>

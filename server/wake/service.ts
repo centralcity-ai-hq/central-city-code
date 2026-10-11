@@ -75,17 +75,29 @@ export interface WakeOptions {
   /** Webhook delivery attempts before a wake-up is dropped (default 6). */
   webhookAttempts?: number;
   /** Shared-store (rate limiter) budgets per owner and per source address, per minute. */
-  rateLimits?: { streamOpensPerMinute?: number; waitsPerMinute?: number };
+  rateLimits?: {
+    streamOpensPerMinute?: number;
+    waitsPerMinute?: number;
+    waitsPerMinutePerAgent?: number;
+  };
+  /** Tests only: shrink the burst-settle window of waiting tool reads (WAKE_LIMITS.waitSettleMs). */
+  settleMs?: number;
 }
 /** Who pays for a waiting read or a stream open: the owner and, for HTTP, the source address. */
 export interface WaitCharge {
   owner: string;
   source?: string;
+  /** Waiting tool reads only: the agent being polled, when the caller names it (inbox, mentions). */
+  agent?: string;
+  /** Waiting room tool reads only: the connector grant or key — the agent is known only inside the read. */
+  grant?: string;
+  /** Waiting room tool reads only: the room, so one connector may poll several rooms. */
+  room?: string;
 }
 export interface WakeDependencies extends WakeOptions {
   db: Database;
   clock: () => number;
-  limit(key: string, max: number, windowMs: number): Promise<void>;
+  limit(key: string, max: number, windowMs: number, message?: string): Promise<void>;
   /** Webhook root keys, current first (webhooks.ts wakeKeys: CITY_WAKE_SECRET or an HKDF subkey). */
   keys: WebhookKey[];
   /** Local mode retries failed webhooks on a timer; hosted mode retries on later activity. */
@@ -129,7 +141,7 @@ export const kindsFor = (scopes: readonly string[]) =>
         ...(scopes.includes('rooms:join') ? ['room'] : []),
       ];
 const at = (value: string | number | null) => (value === null ? null : iso(Number(value)));
-/** The scheduled drain's absolute budget: well inside api/index.ts maxDuration (30 s). */
+/** The scheduled drain's absolute budget: well inside the api/index.js maxDuration (60 s). */
 export const CRON_DRAIN_BUDGET_MS = 25_000;
 
 /** Runs a promise past the response on Vercel Fluid (waitUntil), else just in the background. */
@@ -166,6 +178,12 @@ export interface Wake {
     watch: (result: T) => WakeKey[] | null,
     signal?: AbortSignal,
     charge?: WaitCharge,
+    /**
+     * Tool reads (MCP) pass true: when news wakes the wait, a burst gets a short settle window
+     * (options.settleMs, default WAKE_LIMITS.waitSettleMs) to arrive as one page — one client
+     * turn — instead of one turn per message. Browser (REST) reads answer at once.
+     */
+    settle?: boolean,
   ): Promise<T>;
   /** Charges the shared limiter (before any transaction) for a waiting read or a stream open. */
   charge(kind: 'wait' | 'stream', who: WaitCharge): Promise<void>;
@@ -547,17 +565,39 @@ export function createWake(d: WakeDependencies): Wake {
     watch: (result: T) => WakeKey[] | null,
     signal?: AbortSignal,
     who?: WaitCharge,
+    settle?: boolean,
   ): Promise<T> {
-    if (waitSeconds && who) await charge('wait', who);
+    // The first read runs the permission check; charging after it means a caller without
+    // access (the read 404s) never touches the agent's or grant's wait budget. Charge only
+    // when nothing was found: a wait that is charged after a successful read can 429 after
+    // the read already advanced the caller's cursor, and those messages would be lost.
     let result = await read();
     if (!waitSeconds) return result;
+    const empty = watch(result) !== null;
+    if (who && empty) await charge('wait', who);
     const deadline = Date.now() + waitSeconds * 1000;
+    const settleMs = settle ? (d.settleMs ?? WAKE_LIMITS.waitSettleMs) : 0;
     kick();
     for (;;) {
       const keys = watch(result);
       const remaining = deadline - Date.now();
       if (!keys || remaining <= 0 || signal?.aborted) return result;
       if (!(await hub.wait(keys, remaining, signal))) return result;
+      // News woke the wait: a burst often follows within seconds. Give it a moment to settle and
+      // collect it into this one answer, bounded by the caller's deadline; a disconnect ends it.
+      const quiet = Math.min(settleMs, deadline - Date.now());
+      if (quiet > 0 && !signal?.aborted)
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(() => {
+            signal?.removeEventListener('abort', done);
+            resolve();
+          }, quiet);
+          function done() {
+            clearTimeout(timer);
+            resolve();
+          }
+          signal?.addEventListener('abort', done, { once: true });
+        });
       result = await read();
     }
   }
@@ -565,11 +605,27 @@ export function createWake(d: WakeDependencies): Wake {
   const budgets = {
     stream: d.rateLimits?.streamOpensPerMinute ?? WAKE_LIMITS.streamOpensPerMinute,
     wait: d.rateLimits?.waitsPerMinute ?? WAKE_LIMITS.waitsPerMinute,
+    waitPerAgent: d.rateLimits?.waitsPerMinutePerAgent ?? WAKE_LIMITS.waitsPerMinutePerAgent,
   };
   /** Shared across instances (the hosted limiter is PostgreSQL); never inside a transaction. */
   async function charge(kind: 'wait' | 'stream', who: WaitCharge): Promise<void> {
     await d.limit(`wake-${kind}-owner:${who.owner}`, budgets[kind], 60_000);
     if (who.source) await d.limit(`wake-${kind}-ip:${who.source}`, budgets[kind], 60_000);
+    // The per-agent (or per-connector-grant) bucket bounds one looping tool client
+    // independently of the owner's whole fleet; REST waits answer per message and stay on the
+    // owner budget alone, and reads without wait are never charged. A room bucket is per room,
+    // so one connector may poll its rooms in parallel. The 429 names the remedy: stop polling.
+    const stop =
+      'Waiting reads are limited for this client. Stop polling this wait; check again when your user asks or after a long gap.';
+    if (kind === 'wait' && who.agent)
+      await d.limit(`wake-wait-agent:${who.agent}`, budgets.waitPerAgent, 60_000, stop);
+    if (kind === 'wait' && who.grant)
+      await d.limit(
+        `wake-wait-grant:${who.grant}:${who.room ?? ''}`,
+        budgets.waitPerAgent,
+        60_000,
+        stop,
+      );
   }
 
   async function executeTool(
@@ -585,7 +641,8 @@ export function createWake(d: WakeDependencies): Wake {
         () => mentions(p, agent_id, query, guard),
         (page) => idleKeys('mention', page.agent_id, page, page.mentions.length),
         undefined,
-        { owner: p.operatorId },
+        { owner: p.operatorId, agent: agent_id },
+        true,
       );
     }
     if (tool === 'city_ack_mentions') {

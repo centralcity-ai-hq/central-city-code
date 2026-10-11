@@ -1,15 +1,21 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowUp, Moon, Sun, X } from 'lucide-react';
+import { ArrowUp, Moon, Sun } from 'lucide-react';
 import { api } from '../api';
 import { CityMark, useTheme } from '../brand';
 import { ELRIC_AI_TAG, ELRIC_NAME } from '../../shared/elric-copy';
+import { usePageTitle } from '../shell/usePageTitle';
+import { PAGE_TITLES } from '../../shared/page-titles';
+import { MascotPeek } from './ElricMascot';
+import { clearPendingDraft, readPendingDraft, savePendingDraft } from './pendingDraft';
 import './dashboard.css';
 
 /**
  * /elric for a signed-out visitor (design mockup v2): Elric's clean chat screen,
- * "What can I help with?", a composer and four everyday suggestions. Typing, sending or a
- * suggestion opens one sheet: "Log in or sign up to talk to Elric" (Continue with Google when the
- * server offers it, then Log in and Sign up for free). Nothing is sent anywhere before sign-in.
+ * "What can I help with?", a composer and four everyday suggestions (a suggestion fills the
+ * composer). Send with text turns the Send button into "Continue with Google" and shows one quiet
+ * line under the composer: "Elric needs a Google account (18+)." with Not now. The typed
+ * message stays in this tab only (pendingDraft.ts) and is back in the composer after sign-in;
+ * nothing is sent anywhere first.
  */
 const SUGGESTIONS: Array<[string, string]> = [
   ['Invite ChatGPT to a room', 'step by step'],
@@ -19,123 +25,6 @@ const SUGGESTIONS: Array<[string, string]> = [
 ];
 
 export type AuthMode = 'signin' | 'register';
-
-function AuthSheet({
-  google,
-  onAuth,
-  onClose,
-}: {
-  google: boolean;
-  onAuth: (mode: AuthMode) => void;
-  onClose: () => void;
-}) {
-  const sheet = useRef<HTMLDivElement>(null);
-  const [error, setError] = useState('');
-  useEffect(() => {
-    const opener = document.activeElement as HTMLElement | null;
-    sheet.current?.querySelector<HTMLElement>('button[data-first]')?.focus();
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
-      if (event.key !== 'Tab' || !sheet.current) return;
-      // Keep focus inside the sheet.
-      const items = Array.from(
-        sheet.current.querySelectorAll<HTMLElement>('button, a[href]'),
-      ).filter((item) => !item.hasAttribute('disabled'));
-      const first = items[0];
-      const last = items.at(-1);
-      if (!first || !last) return;
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('keydown', onKey);
-      opener?.focus?.();
-    };
-  }, [onClose]);
-
-  async function continueWithGoogle() {
-    setError('');
-    try {
-      const { url } = await api<{ url: string }>('/api/auth/google/start', {
-        intent: 'signin',
-        // Back to the chat after Google (the server allows only known paths: shared/return-path.ts).
-        next: '/elric',
-      });
-      window.location.assign(url);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Google sign-in is not available right now.');
-    }
-  }
-
-  return (
-    <div className="elx-scrim elx-auth-scrim" onClick={onClose}>
-      <div
-        ref={sheet}
-        className="elx-sheet elx-auth-sheet"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="elx-auth-title"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <button
-          type="button"
-          className="elx-icon elx-sheet-close"
-          aria-label="Close"
-          onClick={onClose}
-        >
-          <X size={18} strokeWidth={1.75} aria-hidden="true" />
-        </button>
-        <span className="elx-sheet-mark" aria-hidden="true">
-          <CityMark />
-        </span>
-        <h2 id="elx-auth-title">Log in or sign up to talk to Elric</h2>
-        <p>Sign in to chat with Elric and use your Central City rooms.</p>
-        <div className="elx-auth-actions">
-          {google ? (
-            <button
-              type="button"
-              className="elx-auth-button elx-auth-google"
-              data-first=""
-              onClick={() => void continueWithGoogle()}
-            >
-              Continue with Google
-            </button>
-          ) : null}
-          <button
-            type="button"
-            className="elx-auth-button elx-auth-primary"
-            {...(google ? {} : { 'data-first': '' })}
-            onClick={() => onAuth('signin')}
-          >
-            Log in
-          </button>
-          <button
-            type="button"
-            className="elx-auth-button elx-auth-secondary"
-            onClick={() => onAuth('register')}
-          >
-            Sign up for free
-          </button>
-        </div>
-        {error ? (
-          <p className="elx-auth-error" role="alert">
-            {error}
-          </p>
-        ) : null}
-        <p className="elx-auth-legal">
-          By continuing, you agree to Central City’s <a href="/terms">Terms of Service</a> and{' '}
-          <a href="/privacy">Privacy Policy</a>.
-        </p>
-      </div>
-    </div>
-  );
-}
 
 /** Light/dark with a plain moon or sun (the stroked icons, never one that reads as a spinner). */
 function ThemeButton() {
@@ -157,10 +46,29 @@ function ThemeButton() {
   );
 }
 
+/** Google's "G" as one shape in the current text colour (no new colours). */
+function GoogleMark() {
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false">
+      <path
+        fill="currentColor"
+        d="M12.48 10.92v3.28h7.84c-.24 1.84-.853 3.187-1.787 4.133-1.147 1.147-2.933 2.4-6.053 2.4-4.827 0-8.6-3.893-8.6-8.72s3.773-8.72 8.6-8.72c2.6 0 4.507 1.027 5.907 2.347l2.307-2.307C18.747 1.44 16.133 0 12.48 0 5.867 0 .307 5.387.307 12s5.56 12 12.173 12c3.573 0 6.267-1.173 8.373-3.36 2.16-2.16 2.84-5.213 2.84-7.667 0-.76-.053-1.467-.173-2.053H12.48z"
+      />
+    </svg>
+  );
+}
+
 export function ElricSignedOut({ onAuth }: { onAuth: (mode: AuthMode) => void }) {
-  const [sheet, setSheet] = useState(false);
-  const [draft, setDraft] = useState('');
+  usePageTitle(PAGE_TITLES['/elric']);
+  // After Send with text: the Send button is "Continue with Google" and the hint line shows.
+  const [gate, setGate] = useState(false);
+  // A message typed before (e.g. back from Google without signing in) is still here.
+  const [draft, setDraft] = useState(readPendingDraft);
   const [google, setGoogle] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const input = useRef<HTMLTextAreaElement>(null);
+  const button = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     let live = true;
     // Continue with Google only when the server has it on (like the sign-in page).
@@ -171,7 +79,49 @@ export function ElricSignedOut({ onAuth }: { onAuth: (mode: AuthMode) => void })
       live = false;
     };
   }, []);
-  const open = () => setSheet(true);
+  // Send never leaves the page: it keeps the draft (this tab only) and turns into the sign-in step.
+  const send = () => {
+    if (!draft.trim()) {
+      input.current?.focus();
+      return;
+    }
+    savePendingDraft(draft);
+    setError('');
+    setGate(true);
+    // The same button, now "Continue with Google": focus moves to it.
+    window.requestAnimationFrame(() => button.current?.focus());
+  };
+  const restore = () => {
+    if (!gate) return;
+    setGate(false);
+    setError('');
+  };
+  const notNow = () => {
+    clearPendingDraft();
+    restore();
+    input.current?.focus();
+  };
+  const auth = (mode: AuthMode) => {
+    savePendingDraft(draft);
+    onAuth(mode);
+  };
+  async function continueWithGoogle() {
+    if (busy) return;
+    setError('');
+    setBusy(true);
+    savePendingDraft(draft);
+    try {
+      const { url } = await api<{ url: string }>('/api/auth/google/start', {
+        intent: 'signin',
+        // Back to the chat after Google (the server allows only known paths: shared/return-path.ts).
+        next: '/elric',
+      });
+      window.location.assign(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Google sign-in is not available right now.');
+      setBusy(false);
+    }
+  }
 
   return (
     <div className="elx elx-out">
@@ -182,12 +132,13 @@ export function ElricSignedOut({ onAuth }: { onAuth: (mode: AuthMode) => void })
         <div className="elx-title">
           <h1 className="elx-out-brand">{ELRIC_NAME}</h1>
           <span className="elx-tag">{ELRIC_AI_TAG}</span>
+          <MascotPeek />
         </div>
         <div className="elx-actions">
-          <button type="button" className="elx-link-button" onClick={() => onAuth('signin')}>
+          <button type="button" className="elx-link-button" onClick={() => auth('signin')}>
             Log in
           </button>
-          <button type="button" className="elx-pill" onClick={() => onAuth('register')}>
+          <button type="button" className="elx-pill" onClick={() => auth('register')}>
             Sign up for free
           </button>
           <ThemeButton />
@@ -204,35 +155,78 @@ export function ElricSignedOut({ onAuth }: { onAuth: (mode: AuthMode) => void })
             className="elx-composer elx-out-composer"
             onSubmit={(event) => {
               event.preventDefault();
-              open();
+              send();
             }}
           >
             <textarea
+              ref={input}
               rows={2}
               value={draft}
+              maxLength={4000}
               placeholder="Message Elric"
               aria-label="Message Elric"
+              onFocus={restore}
               onChange={(event) => {
                 setDraft(event.target.value);
-                if (event.target.value.trim()) open();
+                restore();
               }}
               onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
+                if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
                   event.preventDefault();
-                  open();
+                  send();
                 }
               }}
             />
-            <button type="submit" className="elx-send" aria-label="Send">
-              <ArrowUp size={18} strokeWidth={2} aria-hidden="true" />
+            {/* One button: Send, or after Send the sign-in step (its width eases between them). */}
+            <button
+              ref={button}
+              type={gate ? 'button' : 'submit'}
+              className={`elx-send${gate ? ' is-signin' : ''}`}
+              aria-label={gate ? undefined : 'Send'}
+              disabled={gate && busy}
+              onClick={
+                gate ? () => (google ? void continueWithGoogle() : auth('signin')) : undefined
+              }
+            >
+              {gate ? (
+                <span className="elx-send-label">
+                  {google ? <GoogleMark /> : null}
+                  {google ? 'Continue with Google' : 'Log in'}
+                </span>
+              ) : (
+                <ArrowUp size={18} strokeWidth={2} aria-hidden="true" />
+              )}
             </button>
           </form>
+          <div className="elx-out-gate" aria-live="polite" data-testid="elric-signin-hint">
+            {gate ? (
+              <p className="elx-meta">
+                Elric needs a Google account (18+).{' '}
+                <button type="button" className="elx-out-notnow" onClick={notNow}>
+                  Not now
+                </button>
+              </p>
+            ) : null}
+            {gate && error ? (
+              <p className="elx-meta elx-auth-error" role="alert">
+                {error}
+              </p>
+            ) : null}
+          </div>
           <p className="elx-meta elx-out-note">
             Elric can make mistakes. Check important information.
           </p>
           <div className="elx-out-cards">
             {SUGGESTIONS.map(([title, line]) => (
-              <button key={title} type="button" className="elx-out-card" onClick={open}>
+              <button
+                key={title}
+                type="button"
+                className="elx-out-card"
+                onClick={() => {
+                  setDraft(title);
+                  input.current?.focus();
+                }}
+              >
                 <span>{title}</span>
                 <span className="elx-meta">{line}</span>
               </button>
@@ -240,8 +234,6 @@ export function ElricSignedOut({ onAuth }: { onAuth: (mode: AuthMode) => void })
           </div>
         </div>
       </main>
-
-      {sheet ? <AuthSheet google={google} onAuth={onAuth} onClose={() => setSheet(false)} /> : null}
     </div>
   );
 }

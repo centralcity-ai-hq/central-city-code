@@ -11,9 +11,9 @@
   --elx-hover: rgba(0, 0, 0, 0.05);
   --elx-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 16px rgba(0, 0, 0, 0.06);
   --elx-disabled: #d7d7d7;
-  --elx-header-h: 56px;
+  --elx-header-h: calc(56 * var(--ws-px));
   /* The composer's height, measured in ElricDashboard (ResizeObserver); this is the fallback. */
-  --elx-dock-h: 112px;
+  --elx-dock-h: calc(112 * var(--ws-px));
   min-height: 100vh;
   min-height: 100dvh;
   display: flex;
@@ -28,8 +28,8 @@
     Inter,
     system-ui,
     sans-serif;
-  font-size: 14px;
-  line-height: 20px;
+  font-size: calc(14 * var(--ws-type-px));
+  line-height: calc(20 * var(--ws-type-px));
   -webkit-font-smoothing: antialiased;
 }
 :root[data-theme='dark'] .elx {
@@ -47,7 +47,7 @@
   width: 100%;
   max-width: 768px;
   margin: 0 auto;
-  padding: 0 16px;
+  padding: 0 calc(16 * var(--ws-px));
   box-sizing: border-box;
 }
 
@@ -59,8 +59,8 @@
   height: var(--elx-header-h);
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 16px;
+  gap: calc(12 * var(--ws-px));
+  padding: 0 calc(16 * var(--ws-px));
   background: var(--elx-bg);
   border-bottom: 1px solid var(--elx-line);
 }
@@ -71,24 +71,24 @@
 .elx-title {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: calc(8 * var(--ws-px));
   min-width: 0;
   flex: 1;
 }
 .elx-title h1 {
   margin: 0;
-  font-size: 20px;
-  line-height: 28px;
+  font-size: calc(20 * var(--ws-type-px));
+  line-height: calc(28 * var(--ws-type-px));
   font-weight: 600;
 }
 .elx-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: calc(8 * var(--ws-px));
 }
 .elx-icon {
-  width: 36px;
-  height: 36px;
+  width: calc(36 * var(--ws-px));
+  height: calc(36 * var(--ws-px));
   flex: none;
   display: inline-grid;
   place-items: center;
@@ -107,8 +107,8 @@
   cursor: default;
 }
 .elx-avatar {
-  width: 32px;
-  height: 32px;
+  width: calc(32 * var(--ws-px));
+  height: calc(32 * var(--ws-px));
   display: inline-grid;
   place-items: center;
   border-radius: 9999px;
@@ -121,12 +121,12 @@
 /* Thread: replies are plain text; bottom padding = the composer, so nothing hides behind it. */
 .elx-main {
   flex: 1;
-  padding: 24px 0 calc(var(--elx-dock-h) + 24px);
+  padding: calc(24 * var(--ws-px)) 0 calc(var(--elx-dock-h) + calc(24 * var(--ws-px)));
 }
 .elx-thread {
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: calc(24 * var(--ws-px));
 }
 .elx-turn-you {
   display: flex;
@@ -135,18 +135,18 @@
 .elx-bubble {
   max-width: 70%;
   margin: 0;
-  padding: 10px 16px;
+  padding: calc(10 * var(--ws-px)) calc(16 * var(--ws-px));
   border-radius: 18px;
   background: var(--elx-bubble);
-  font-size: 16px;
-  line-height: 28px;
+  font-size: calc(16 * var(--ws-type-px));
+  line-height: calc(28 * var(--ws-type-px));
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 .elx-reply,
 .elx-plain {
-  font-size: 16px;
-  line-height: 28px;
+  font-size: calc(16 * var(--ws-type-px));
+  line-height: calc(28 * var(--ws-type-px));
   overflow-wrap: anywhere;
 }
 .elx-plain {
@@ -154,17 +154,17 @@
   white-space: pre-wrap;
 }
 .elx-reply p {
-  margin: 0 0 12px;
+  margin: 0 0 calc(12 * var(--ws-px));
 }
 .elx-reply > :last-child,
 .elx-reply p:last-child {
   margin-bottom: 0;
 }
 .elx-meta {
-  margin: 4px 0 0;
+  margin: calc(4 * var(--ws-px)) 0 0;
   color: var(--elx-muted);
-  font-size: 13px;
-  line-height: 18px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  line-height: calc(18 * var(--ws-type-px));
 }
 .elx-link {
   align-self: center;
@@ -176,33 +176,33 @@
 }
 /* A proposed action: Elric only proposes; the owner approves or rejects. */
 .elx-card {
-  padding: 16px;
+  padding: calc(16 * var(--ws-px));
   border: 1px solid var(--elx-line);
   border-radius: 16px;
 }
 .elx-card-label {
   margin: 0;
   color: var(--elx-muted);
-  font-size: 13px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
 }
 .elx-card-title {
-  margin: 4px 0 0;
-  font-size: 16px;
-  line-height: 28px;
+  margin: calc(4 * var(--ws-px)) 0 0;
+  font-size: calc(16 * var(--ws-type-px));
+  line-height: calc(28 * var(--ws-type-px));
 }
 .elx-card-actions {
   display: flex;
-  gap: 8px;
-  margin-top: 12px;
+  gap: calc(8 * var(--ws-px));
+  margin-top: calc(12 * var(--ws-px));
 }
 .elx-primary,
 .elx-secondary {
-  height: 36px;
+  height: calc(36 * var(--ws-px));
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  padding: 0 16px;
+  gap: calc(6 * var(--ws-px));
+  padding: 0 calc(16 * var(--ws-px));
   border-radius: 9999px;
   font: inherit;
   font-weight: 500;
@@ -225,20 +225,20 @@
   color: var(--elx-text);
 }
 
-/* Empty state: one line, three chips. */
+/* Empty state: one calm line and four starters (2x2 on desktop, one column on a phone). */
 .elx-empty {
   min-height: 50vh;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 16px;
+  gap: calc(16 * var(--ws-px));
   text-align: center;
 }
 .elx-empty h2 {
   margin: 0;
-  font-size: 20px;
-  line-height: 28px;
+  font-size: calc(20 * var(--ws-type-px));
+  line-height: calc(28 * var(--ws-type-px));
   font-weight: 600;
 }
 .elx-empty p {
@@ -246,23 +246,36 @@
   color: var(--elx-muted);
 }
 .elx-chips {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: calc(12 * var(--ws-px));
+  width: 100%;
+  max-width: 760px;
 }
 .elx-chip {
-  height: 36px;
-  padding: 0 14px;
+  min-height: calc(48 * var(--ws-px));
+  padding: calc(12 * var(--ws-px)) calc(16 * var(--ws-px));
   border: 1px solid var(--elx-line);
-  border-radius: 9999px;
+  border-radius: 12px;
   background: transparent;
   color: var(--elx-text);
   font: inherit;
+  line-height: calc(20 * var(--ws-type-px));
+  text-align: left;
   cursor: pointer;
 }
 .elx-chip:hover {
   background: var(--elx-hover);
+}
+.elx-chip:focus-visible {
+  outline: 2px solid var(--primary, #0066ff);
+  outline-offset: 2px;
+}
+@media (max-width: 640px) {
+  .elx-chips {
+    grid-template-columns: 1fr;
+    gap: calc(10 * var(--ws-px));
+  }
 }
 
 /* Composer: fixed at the bottom of the column. */
@@ -271,14 +284,14 @@
   left: 0;
   right: 0;
   bottom: 0;
-  padding: 8px 0 max(16px, env(safe-area-inset-bottom));
+  padding: calc(8 * var(--ws-px)) 0 max(calc(16 * var(--ws-px)), env(safe-area-inset-bottom));
   background: linear-gradient(to bottom, transparent, var(--elx-bg) 24px);
 }
 .elx-composer {
   display: flex;
   align-items: flex-end;
-  gap: 4px;
-  padding: 8px;
+  gap: calc(4 * var(--ws-px));
+  padding: calc(8 * var(--ws-px));
   border: 1px solid var(--elx-line);
   border-radius: 26px;
   background: var(--elx-bg);
@@ -287,24 +300,24 @@
 .elx-composer textarea {
   flex: 1;
   min-width: 0;
-  min-height: 36px;
-  max-height: 200px;
-  padding: 4px 4px;
+  min-height: calc(36 * var(--ws-px));
+  max-height: calc(200 * var(--ws-px));
+  padding: calc(4 * var(--ws-px)) calc(4 * var(--ws-px));
   border: 0;
   outline: none;
   resize: none;
   background: transparent;
   color: var(--elx-text);
   font: inherit;
-  font-size: 16px;
-  line-height: 28px;
+  font-size: calc(16 * var(--ws-type-px));
+  line-height: calc(28 * var(--ws-type-px));
 }
 .elx-composer textarea::placeholder {
   color: var(--elx-muted);
 }
 .elx-send {
-  width: 32px;
-  height: 32px;
+  width: calc(32 * var(--ws-px));
+  height: calc(32 * var(--ws-px));
   margin: 2px;
   flex: none;
   display: inline-grid;
@@ -325,11 +338,11 @@
   align-items: center;
   gap: 2px;
   max-width: 40%;
-  padding: 0 4px 0 10px;
-  height: 28px;
+  padding: 0 calc(4 * var(--ws-px)) 0 calc(10 * var(--ws-px));
+  height: calc(28 * var(--ws-px));
   border-radius: 9999px;
   background: var(--elx-bubble);
-  font-size: 13px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -337,8 +350,8 @@
 .elx-target button {
   display: inline-grid;
   place-items: center;
-  width: 22px;
-  height: 22px;
+  width: calc(22 * var(--ws-px));
+  height: calc(22 * var(--ws-px));
   border: 0;
   border-radius: 9999px;
   background: none;
@@ -346,12 +359,12 @@
   cursor: pointer;
 }
 .elx-notice {
-  margin: 0 0 8px;
-  padding: 8px 12px;
+  margin: 0 0 calc(8 * var(--ws-px));
+  padding: calc(8 * var(--ws-px)) calc(12 * var(--ws-px));
   border-radius: 10px;
   background: var(--elx-bubble);
   color: var(--elx-muted);
-  font-size: 13px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
 }
 .elx-notice.is-error {
   color: #c62828;
@@ -360,8 +373,8 @@
   color: #ff8a80;
 }
 .elx-picker {
-  margin-bottom: 8px;
-  padding: 6px;
+  margin-bottom: calc(8 * var(--ws-px));
+  padding: calc(6 * var(--ws-px));
   border: 1px solid var(--elx-line);
   border-radius: 16px;
   background: var(--elx-bg);
@@ -369,16 +382,16 @@
 }
 .elx-picker > .elx-meta {
   margin: 0;
-  padding: 8px 10px;
+  padding: calc(8 * var(--ws-px)) calc(10 * var(--ws-px));
 }
 .elx-option {
   width: 100%;
-  min-height: 36px;
+  min-height: calc(36 * var(--ws-px));
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 0 10px;
+  gap: calc(8 * var(--ws-px));
+  padding: 0 calc(10 * var(--ws-px));
   border: 0;
   border-radius: 10px;
   background: none;
@@ -421,18 +434,32 @@
 .elx-byline {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: calc(6 * var(--ws-px));
 }
 .elx-tag {
-  padding: 0 6px;
+  padding: 0 calc(6 * var(--ws-px));
   border: 1px solid var(--elx-line);
   border-radius: 9999px;
-  font-size: 13px;
-  line-height: 18px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  line-height: calc(18 * var(--ws-type-px));
 }
 
 .elx-notice a {
   color: inherit;
+}
+
+/* Phones and touch screens: the header's New chat and settings, and Link Google, are 44px
+   touch targets (WORKSPACE_V3.md §1.5). */
+@media (max-width: 640px), (pointer: coarse) {
+  .elx-icon,
+  .elx-avatar {
+    width: 44px;
+    height: 44px;
+  }
+  .elx-primary,
+  .elx-secondary {
+    height: 44px;
+  }
 }
 
 /* Elric's profile/about sheet: the same scrim in both themes, never fully black. */
@@ -450,14 +477,14 @@
   z-index: 20;
   display: grid;
   place-items: center;
-  padding: 16px;
+  padding: calc(16 * var(--ws-px));
   background: rgba(0, 0, 0, 0.4);
 }
 .elx-sheet {
   width: 100%;
-  max-width: 360px;
+  max-width: calc(360 * var(--ws-px));
   box-sizing: border-box;
-  padding: 24px;
+  padding: calc(24 * var(--ws-px));
   border-radius: 16px;
   background: var(--elx-bg);
   box-shadow: var(--elx-shadow);
@@ -465,16 +492,16 @@
 }
 .elx-sheet h2 {
   margin: 0;
-  font-size: 18px;
-  line-height: 24px;
+  font-size: calc(18 * var(--ws-type-px));
+  line-height: calc(24 * var(--ws-type-px));
   font-weight: 600;
 }
 .elx-sheet p {
-  margin: 8px 0 20px;
+  margin: calc(8 * var(--ws-px)) 0 calc(20 * var(--ws-px));
   color: var(--elx-muted);
 }
 .elx-sheet .elx-primary {
-  min-width: 120px;
+  min-width: calc(120 * var(--ws-px));
 }
 @media (max-width: 480px) {
   .elx-scrim {
@@ -499,13 +526,13 @@
 /* Signed-out /elric (mockup v2): the hero, composer, four suggestions and the auth sheet. */
 .elx-out-brand {
   margin: 0;
-  font-size: 20px;
-  line-height: 28px;
+  font-size: calc(20 * var(--ws-type-px));
+  line-height: calc(28 * var(--ws-type-px));
   font-weight: 600;
 }
 .elx-link-button {
-  height: 36px;
-  padding: 0 12px;
+  height: calc(36 * var(--ws-px));
+  padding: 0 calc(12 * var(--ws-px));
   border: 0;
   border-radius: 9999px;
   background: none;
@@ -518,8 +545,8 @@
   background: var(--elx-hover);
 }
 .elx-pill {
-  height: 36px;
-  padding: 0 16px;
+  height: calc(36 * var(--ws-px));
+  padding: 0 calc(16 * var(--ws-px));
   border: 0;
   border-radius: 9999px;
   background: var(--elx-text);
@@ -533,7 +560,7 @@
   flex: 1;
   display: grid;
   place-items: center;
-  padding: 24px 16px 48px;
+  padding: calc(24 * var(--ws-px)) calc(16 * var(--ws-px)) calc(48 * var(--ws-px));
 }
 .elx-out-hero {
   width: 100%;
@@ -541,31 +568,29 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 16px;
+  gap: calc(16 * var(--ws-px));
 }
 .elx-out-hero h2 {
-  margin: 0 0 8px;
-  font-size: 32px;
-  line-height: 40px;
+  margin: 0 0 calc(8 * var(--ws-px));
+  font-size: calc(32 * var(--ws-type-px));
+  line-height: calc(40 * var(--ws-type-px));
   font-weight: 600;
   letter-spacing: -0.02em;
   text-align: center;
 }
+/* The Central City mark on its own, on the page background: no tile, border or fill. */
 .elx-sheet-mark {
   display: inline-grid;
   place-items: center;
-  width: 48px;
-  height: 48px;
-  border: 1px solid var(--elx-line);
-  border-radius: 14px;
-  background: var(--elx-bubble);
+  width: calc(48 * var(--ws-px));
+  height: calc(48 * var(--ws-px));
 }
 .elx-out-composer {
   width: 100%;
   box-sizing: border-box;
 }
 .elx-out-composer textarea {
-  min-height: 56px;
+  min-height: calc(56 * var(--ws-px));
 }
 .elx-out-note {
   margin: 0;
@@ -575,13 +600,13 @@
   width: 100%;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: calc(12 * var(--ws-px));
 }
 .elx-out-card {
   display: grid;
   gap: 2px;
-  min-height: 64px;
-  padding: 12px 16px;
+  min-height: calc(64 * var(--ws-px));
+  padding: calc(12 * var(--ws-px)) calc(16 * var(--ws-px));
   border: 1px solid var(--elx-line);
   border-radius: 16px;
   background: var(--elx-bubble);
@@ -597,68 +622,60 @@
   margin: 0;
 }
 
-.elx-auth-scrim {
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-}
-.elx-auth-sheet {
-  position: relative;
-  max-width: 420px;
-  padding: 32px 28px 24px;
-  border-radius: 24px;
-}
-.elx-auth-sheet h2 {
-  margin-top: 16px;
-}
-.elx-auth-sheet > p {
-  margin: 8px 0 20px;
-}
-.elx-sheet-close {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-}
-.elx-auth-actions {
-  display: grid;
-  gap: 10px;
-}
-.elx-auth-button {
-  height: 48px;
-  border-radius: 9999px;
+/* Signed out, after Send: the Send button eases into "Continue with Google" (same colours),
+   and one quiet line under the composer says why, with Not now. No card, no box. */
+.elx-out-composer .elx-send {
+  width: auto;
+  min-width: calc(32 * var(--ws-px));
+  max-width: calc(32 * var(--ws-px));
+  overflow: hidden;
   font: inherit;
-  font-size: 16px;
+  transition:
+    max-width 200ms ease,
+    padding 200ms ease;
+}
+.elx-out-composer .elx-send.is-signin {
+  max-width: calc(240 * var(--ws-px));
+  padding: 0 calc(14 * var(--ws-px));
+  font-size: calc(14 * var(--ws-type-px));
   font-weight: 600;
+  white-space: nowrap;
+}
+.elx-send-label {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+}
+.elx-out-gate {
+  width: 100%;
+  text-align: center;
+}
+.elx-out-gate p {
+  margin: 0;
+}
+.elx-out-notnow {
+  padding: 2px calc(4 * var(--ws-px));
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
   cursor: pointer;
 }
-.elx-auth-google {
-  border: 1px solid var(--elx-line);
-  background: var(--elx-bg);
+.elx-out-notnow:hover {
   color: var(--elx-text);
 }
-.elx-auth-primary {
-  border: 0;
-  background: var(--elx-text);
-  color: var(--elx-bg);
-}
-.elx-auth-secondary {
-  border: 1px solid var(--elx-line);
-  background: var(--elx-bubble);
-  color: var(--elx-text);
+@media (prefers-reduced-motion: reduce) {
+  .elx-out-composer .elx-send {
+    transition: none;
+  }
 }
 .elx-auth-error {
-  margin: 12px 0 0;
+  margin: calc(12 * var(--ws-px)) 0 0;
   color: #c62828;
 }
 :root[data-theme='dark'] .elx-auth-error {
   color: #ff8a80;
-}
-.elx-auth-legal {
-  margin: 20px 0 0 !important;
-  font-size: 13px;
-  color: var(--elx-muted);
-}
-.elx-auth-legal a {
-  color: inherit;
 }
 
 /* Signed in without Elric yet: one inline date of birth (18+), then the chat. */
@@ -666,36 +683,113 @@
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
-  gap: 8px;
+  gap: calc(8 * var(--ws-px));
   width: 100%;
-  max-width: 360px;
+  max-width: calc(360 * var(--ws-px));
 }
 .elx-setup input {
   flex: 1;
   min-width: 0;
-  height: 40px;
-  padding: 0 12px;
+  height: calc(40 * var(--ws-px));
+  padding: 0 calc(12 * var(--ws-px));
   border: 1px solid var(--elx-line);
   border-radius: 10px;
   background: var(--elx-bg);
   color: var(--elx-text);
   font: inherit;
-  font-size: 16px;
+  font-size: calc(16 * var(--ws-type-px));
+}
+
+/* A missing step (Google link or date of birth): why, the one action, then fixed examples. */
+.elx-gate {
+  justify-content: flex-start;
+  padding: calc(32 * var(--ws-px)) 0 calc(48 * var(--ws-px));
+}
+.elx-gate-kept {
+  margin: 0;
+}
+.elx-examples {
+  width: 100%;
+  max-width: calc(560 * var(--ws-px));
+  display: grid;
+  gap: calc(12 * var(--ws-px));
+  margin-top: calc(16 * var(--ws-px));
+  text-align: left;
+}
+.elx-examples h3 {
+  margin: 0;
+  font-size: calc(14 * var(--ws-type-px));
+  line-height: calc(20 * var(--ws-type-px));
+  font-weight: 600;
+  color: var(--elx-muted);
+}
+.elx-example {
+  display: grid;
+  gap: calc(8 * var(--ws-px));
+  margin: 0;
+  padding: calc(12 * var(--ws-px)) calc(16 * var(--ws-px)) calc(16 * var(--ws-px));
+  border: 1px solid var(--elx-line);
+  border-radius: 16px;
+}
+.elx-example figcaption {
+  display: flex;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+  color: var(--elx-muted);
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  line-height: calc(18 * var(--ws-type-px));
+}
+.elx-example-tag {
+  padding: 1px calc(8 * var(--ws-px));
+  border: 1px solid var(--elx-line);
+  border-radius: 9999px;
+  color: var(--elx-text);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: calc(18 * var(--ws-type-px));
+}
+.elx .elx-example-ask {
+  justify-self: end;
+  max-width: 85%;
+  margin: 0;
+  padding: calc(8 * var(--ws-px)) calc(14 * var(--ws-px));
+  border-radius: 18px;
+  background: var(--elx-bubble);
+  color: var(--elx-text);
+}
+.elx-example-answer {
+  max-width: 92%;
+}
+.elx .elx-example-answer p,
+.elx .elx-example-answer ul {
+  margin: 0;
+  color: var(--elx-text);
+}
+.elx-example-answer ul {
+  padding-left: calc(20 * var(--ws-px));
+}
+.elx .elx-example-answer .elx-example-approval {
+  display: grid;
+  gap: 2px;
+  margin-top: calc(8 * var(--ws-px));
+  padding: calc(10 * var(--ws-px)) calc(12 * var(--ws-px));
+  border: 1px solid var(--elx-line);
+  border-radius: 12px;
 }
 
 @media (max-width: 640px) {
   .elx-out-header .elx-link-button {
-    padding: 0 8px;
+    padding: 0 calc(8 * var(--ws-px));
   }
   .elx-out-header .elx-pill {
-    padding: 0 12px;
+    padding: 0 calc(12 * var(--ws-px));
   }
   .elx-out-header .elx-home {
     display: none;
   }
   .elx-out-hero h2 {
-    font-size: 26px;
-    line-height: 32px;
+    font-size: calc(26 * var(--ws-type-px));
+    line-height: calc(32 * var(--ws-type-px));
   }
   .elx-out-cards {
     grid-template-columns: 1fr;
@@ -703,14 +797,317 @@
   .elx-out-card:nth-child(n + 3) {
     display: none;
   }
-  /* A bottom sheet on phones. */
-  .elx-auth-scrim {
-    place-items: end center;
-    padding: 0;
+}
+
+/*
+ * Embedded in the workspace shell (the workspace preview, ElricDashboard `embedded`): the
+ * dashboard fills the page area beside the workspace navigation, under its top bar. Layout
+ * containment makes it the containing block of its fixed parts (the chat list, the composer,
+ * the sheets), so they sit within the page area instead of over the navigation; the thread
+ * scrolls itself, so the window never does.
+ */
+.elx[data-embedded='true'] {
+  height: 100%;
+  min-height: 0;
+  contain: layout;
+  overflow: hidden;
+}
+.elx[data-embedded='true'] .elx-main {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+/* The workspace navigation already leads home and to the workspace. */
+.elx[data-embedded='true'] .elx-home,
+.elx[data-embedded='true'] .elx-side-workspace {
+  display: none;
+}
+
+/* Chat history (F16): a left column on wide screens, a drawer on phones. */
+.elx {
+  --elx-side-w: calc(260 * var(--ws-px));
+}
+.elx-side {
+  position: fixed;
+  top: var(--elx-header-h);
+  bottom: 0;
+  left: 0;
+  z-index: 15;
+  width: var(--elx-side-w);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: calc(8 * var(--ws-px));
+  padding: calc(12 * var(--ws-px)) calc(8 * var(--ws-px));
+  overflow-y: auto;
+  border-right: 1px solid var(--elx-line);
+  background: var(--elx-bg);
+}
+.elx-side-new {
+  display: flex;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+  min-height: calc(40 * var(--ws-px));
+  padding: 0 calc(10 * var(--ws-px));
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: var(--elx-text);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+.elx-side-workspace {
+  display: flex;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+  min-height: calc(40 * var(--ws-px));
+  margin-top: auto;
+  padding: 0 calc(10 * var(--ws-px));
+  border-radius: 10px;
+  color: var(--elx-text);
+  font-weight: 500;
+  text-decoration: none;
+}
+.elx-side-new:hover,
+.elx-side-workspace:hover,
+.elx-side-chat:hover {
+  background: var(--elx-hover);
+}
+.elx-side-list {
+  display: grid;
+  /* One column no wider than the sidebar: a long title ellipsizes instead of widening every row
+     and pushing each chat's More button out of view. */
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.elx-side-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.elx-side-chat {
+  flex: 1;
+  min-width: 0;
+  min-height: calc(36 * var(--ws-px));
+  padding: 0 calc(10 * var(--ws-px));
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: var(--elx-text);
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.elx-side-chat[aria-current='page'] {
+  background: var(--elx-bubble);
+  font-weight: 600;
+}
+.elx-side-more {
+  width: calc(32 * var(--ws-px));
+  height: calc(32 * var(--ws-px));
+}
+.elx-side-menu {
+  position: absolute;
+  top: calc(34 * var(--ws-px));
+  right: calc(4 * var(--ws-px));
+  z-index: 2;
+  display: grid;
+  min-width: calc(140 * var(--ws-px));
+  padding: calc(4 * var(--ws-px));
+  border: 1px solid var(--elx-line);
+  border-radius: 10px;
+  background: var(--elx-bg);
+  box-shadow: var(--elx-shadow);
+}
+.elx-side-menu button {
+  min-height: calc(36 * var(--ws-px));
+  padding: 0 calc(10 * var(--ws-px));
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--elx-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.elx-side-menu button:hover {
+  background: var(--elx-hover);
+}
+.elx-side-rename {
+  display: flex;
+  flex: 1;
+  gap: calc(4 * var(--ws-px));
+}
+.elx-side-rename input {
+  flex: 1;
+  min-width: 0;
+  height: calc(34 * var(--ws-px));
+  padding: 0 calc(8 * var(--ws-px));
+  border: 1px solid var(--elx-line);
+  border-radius: 8px;
+  background: var(--elx-bg);
+  color: var(--elx-text);
+  font: inherit;
+}
+.elx-side-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(6 * var(--ws-px));
+  padding: calc(6 * var(--ws-px)) calc(10 * var(--ws-px));
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+}
+.elx-side-danger {
+  border: 0;
+  background: none;
+  color: #c62828;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+:root[data-theme='dark'] .elx-side-danger {
+  color: #ff8a80;
+}
+.elx-side-scrim {
+  display: none;
+}
+.elx-side-toggle {
+  display: none;
+}
+@media (min-width: 900px) {
+  .elx.has-side .elx-main,
+  .elx.has-side .elx-dock {
+    margin-left: var(--elx-side-w);
   }
-  .elx-auth-sheet {
-    max-width: none;
-    border-radius: 24px 24px 0 0;
-    padding-bottom: max(24px, env(safe-area-inset-bottom));
+  .elx.has-side .elx-dock {
+    left: var(--elx-side-w);
+    margin-left: 0;
+  }
+}
+@media (max-width: 899px) {
+  .elx-side-toggle {
+    display: inline-grid;
+  }
+  .elx-side {
+    top: 0;
+    z-index: 30;
+    width: min(300px, 85vw);
+    transform: translateX(-100%);
+    transition: transform 200ms ease;
+    visibility: hidden;
+  }
+  .elx-side[data-open='true'] {
+    transform: none;
+    visibility: visible;
+  }
+  .elx-side-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 25;
+    background: rgba(0, 0, 0, 0.4);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .elx-side {
+    transition: none;
+  }
+}
+
+/*
+ * The Elric mascot (ElricMascot.tsx): decorative line drawings. In the header he lies on the
+ * bottom border right of the wordmark: the anchor holds his width in the title row, the drawing is
+ * absolutely placed against the (sticky, so positioned) header, so nothing else moves.
+ */
+.elx-mascot {
+  display: block;
+  pointer-events: none;
+  user-select: none;
+  /* White fill inside the drawing melts into the surface beneath it. */
+  mix-blend-mode: multiply;
+}
+:root[data-theme='dark'] .elx-mascot {
+  filter: invert(1);
+  mix-blend-mode: screen;
+  opacity: 0.9;
+}
+.elx-mascot-anchor {
+  flex: none;
+  width: calc(23 * var(--ws-px));
+  height: calc(24 * var(--ws-px));
+  margin-left: calc(4 * var(--ws-px));
+  pointer-events: none;
+}
+.elx-mascot-peek {
+  position: absolute;
+  bottom: -1px;
+  width: calc(23 * var(--ws-px));
+  height: calc(24 * var(--ws-px));
+}
+.elx-mascot-anchor[data-room='none'] .elx-mascot-peek {
+  visibility: hidden;
+}
+.elx-notice.is-limit {
+  display: flex;
+  align-items: center;
+  gap: calc(12 * var(--ws-px));
+}
+.elx-mascot-rest {
+  flex: none;
+  width: calc(67 * var(--ws-px));
+  height: calc(38 * var(--ws-px));
+}
+/* Narrow phones, signed out: two buttons and the theme toggle; tighter gaps keep him clear. */
+@media (max-width: 400px) {
+  .elx-out-header {
+    gap: calc(6 * var(--ws-px));
+  }
+  .elx-out-header .elx-actions {
+    gap: calc(4 * var(--ws-px));
+  }
+  .elx-out-header .elx-title {
+    gap: calc(6 * var(--ws-px));
+  }
+  .elx-out-header .elx-link-button {
+    padding: 0 calc(6 * var(--ws-px));
+  }
+  .elx-out-header .elx-pill {
+    padding: 0 calc(10 * var(--ws-px));
+  }
+  .elx-out-header .elx-mascot-anchor {
+    margin-left: 0;
+  }
+}
+
+/*
+ * Arriving: the chat settles in over its skeleton (ElricSkeleton, the same frame) with a short
+ * fade and a 4px rise; the header and the frame do not move. Only after the skeleton was seen
+ * (data-arrive); none with reduced motion.
+ */
+.elx[data-arrive='true'] .elx-main > .elx-column,
+.elx[data-arrive='true'] .elx-side-new,
+.elx[data-arrive='true'] .elx-side-list,
+.elx[data-arrive='true'] .elx-dock > .elx-column {
+  animation: elx-arrive 180ms ease-out both;
+}
+@keyframes elx-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .elx[data-arrive='true'] .elx-main > .elx-column,
+  .elx[data-arrive='true'] .elx-side-new,
+  .elx[data-arrive='true'] .elx-side-list,
+  .elx[data-arrive='true'] .elx-dock > .elx-column {
+    animation: none;
   }
 }

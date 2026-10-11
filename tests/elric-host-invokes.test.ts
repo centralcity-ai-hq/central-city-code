@@ -56,7 +56,7 @@ test('the owner posting as host from the console invokes Elric; the host agent o
   const other = await f.account('Other host');
   const otherDesk = await f.agent(other, 'Other desk');
   const otherRoom = await f.room(other, otherDesk, 'Other room');
-  await f.joinAgent(owner, otherRoom, elricId);
+  await f.joinAgent(owner, otherRoom, elricId, { legacy: true });
   await f.say(other, otherRoom, '@Elric do something', otherDesk);
   await f.elric.drain();
   assert.equal(f.adapterCalls(), calls);

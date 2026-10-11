@@ -1,3 +1,4 @@
+import { memberSaysMigration } from './member-says.js';
 import { registerMigration, type Migration } from '../migrations.js';
 import { registerMemberActivityMigration } from './member-status.js';
 import { registerRoomPeopleMigration } from './person.js';
@@ -12,6 +13,8 @@ import {
   registerRoomNotificationMuteMigration,
   registerRoomManagementMigration,
 } from './management-schema.js';
+import { registerRoomMessageSearchMigration } from './search-schema.js';
+import { registerRoomDirectMessagesMigration } from '../messaging/room-direct.js';
 
 /**
  * Migration 13 `rooms` (Rooms; the ROOMS-SEC-001 threat model; docs/ROOMS.md).
@@ -101,6 +104,90 @@ CREATE INDEX IF NOT EXISTS room_events_room ON room_events(room_id, created_at);
 `,
 };
 
+/**
+ * Migration 58 `room_templates`: the built-in room template a room was created from
+ * (shared/room-templates.ts). Both columns are null for rooms created without one; the catalog
+ * lives in code, so there is no template table and no foreign key.
+ */
+export const roomTemplatesMigration: Migration = {
+  version: 58,
+  name: 'room_templates',
+  sql: `
+ALTER TABLE rooms ADD COLUMN IF NOT EXISTS template_id text;
+ALTER TABLE rooms ADD COLUMN IF NOT EXISTS template_version text;
+`,
+};
+
+/**
+ * Migration 62 `room_member_name_keys`: indexed mention keys per member, so an @mention in a big
+ * room loads only the members it can match (server/wake/hooks.ts roomPosted) instead of every
+ * member. name_key and slug_key are nameKeyOf and slugOf (server/wake/mentions.ts) of the
+ * member's display name: the agent's name in its owner's workspace, or a person's display_name.
+ * They are computed in the application (Unicode NFKC folding), so SQL only ever clears them:
+ * NULL means "not known", and a member with NULL keys is always a candidate. Triggers clear them
+ * (and bump name_rev) whenever the source name can have changed, so a non-NULL key is never
+ * stale; roomPosted fills NULL keys of active members, guarded by name_rev. No backfill is
+ * needed: existing rows start NULL and are filled by the first @mention in their room.
+ */
+export const roomMemberNameKeysMigration: Migration = {
+  version: 62,
+  name: 'room_member_name_keys',
+  sql: `
+ALTER TABLE room_members ADD COLUMN IF NOT EXISTS name_key text;
+ALTER TABLE room_members ADD COLUMN IF NOT EXISTS slug_key text;
+ALTER TABLE room_members ADD COLUMN IF NOT EXISTS name_rev integer NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS room_members_name_key ON room_members(room_id, name_key);
+CREATE INDEX IF NOT EXISTS room_members_slug_key ON room_members(room_id, slug_key);
+CREATE INDEX IF NOT EXISTS room_members_id_key ON room_members(room_id, lower(agent_id));
+CREATE OR REPLACE FUNCTION room_members_name_keys_reset() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  NEW.name_key := NULL;
+  NEW.slug_key := NULL;
+  NEW.name_rev := OLD.name_rev + 1;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS room_members_name_keys_reset ON room_members;
+CREATE TRIGGER room_members_name_keys_reset BEFORE UPDATE ON room_members FOR EACH ROW
+  WHEN (OLD.display_name IS DISTINCT FROM NEW.display_name OR OLD.kind IS DISTINCT FROM NEW.kind
+    OR OLD.owner_id IS DISTINCT FROM NEW.owner_id)
+  EXECUTE FUNCTION room_members_name_keys_reset();
+CREATE OR REPLACE FUNCTION workspaces_agent_names_reset() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  before jsonb := CASE WHEN jsonb_typeof(OLD.data->'agents') = 'array' THEN OLD.data->'agents' ELSE '[]'::jsonb END;
+  after jsonb := CASE WHEN jsonb_typeof(NEW.data->'agents') = 'array' THEN NEW.data->'agents' ELSE '[]'::jsonb END;
+BEGIN
+  IF (SELECT jsonb_object_agg(COALESCE(a->>'id', ''), a->'name') FROM jsonb_array_elements(before) a)
+     IS DISTINCT FROM
+     (SELECT jsonb_object_agg(COALESCE(a->>'id', ''), a->'name') FROM jsonb_array_elements(after) a) THEN
+    UPDATE room_members SET name_key = NULL, slug_key = NULL, name_rev = name_rev + 1
+      WHERE owner_id = NEW.operator_id AND kind = 'agent';
+  END IF;
+  RETURN NULL;
+END $$;
+DROP TRIGGER IF EXISTS workspaces_agent_names_reset ON workspaces;
+CREATE TRIGGER workspaces_agent_names_reset AFTER UPDATE ON workspaces FOR EACH ROW
+  WHEN (OLD.data->'agents' IS DISTINCT FROM NEW.data->'agents')
+  EXECUTE FUNCTION workspaces_agent_names_reset();
+`,
+};
+
+/**
+ * Migration 69 `room_member_name_key_prefix`: "starts with" indexes for the members search
+ * (service.ts memberSearch, `name_key LIKE 'ann%'`). A plain btree on text serves LIKE prefixes
+ * only under the C collation; with any other database collation the planner cannot use the
+ * migration 62 indexes for them. text_pattern_ops compares byte-wise whatever the collation, so
+ * these serve the prefix match everywhere (and equality too). Migration 62's indexes stay for the
+ * @mention lookups.
+ */
+export const roomMemberNameKeyPrefixMigration: Migration = {
+  version: 69,
+  name: 'room_member_name_key_prefix',
+  sql: `
+CREATE INDEX IF NOT EXISTS room_members_name_key_prefix ON room_members(room_id, name_key text_pattern_ops);
+CREATE INDEX IF NOT EXISTS room_members_slug_key_prefix ON room_members(room_id, slug_key text_pattern_ops);
+`,
+};
+
 /** Idempotent; call before runMigrations (after the cross-connections migration). */
 export function registerRoomsMigration(): void {
   registerMigration(roomsMigration);
@@ -123,4 +210,17 @@ export function registerRoomsMigration(): void {
   registerRoomGuestBlocksMigration();
   // 38: a member mutes a room's wake-ups for itself (management-schema.ts).
   registerRoomNotificationMuteMigration();
+  // 55: full-text search inside a room (generated tsvector + GIN index; search-schema.ts).
+  registerRoomMessageSearchMigration();
+  // 58: the built-in room template a room started from (shared/room-templates.ts).
+  registerMigration(roomTemplatesMigration);
+  // 62: indexed mention keys per member (server/wake/hooks.ts roomPosted).
+  registerMigration(roomMemberNameKeysMigration);
+  // 63: private messages between room members (messages.room_id, rooms.members_may_dm;
+  // server/messaging/room-direct.ts).
+  registerRoomDirectMessagesMigration();
+  // 65: AI self-reported status (says) and the host's bulk "Mute all AIs" (member-says.ts).
+  registerMigration(memberSaysMigration);
+  // 69: collation-proof "starts with" indexes for the members search (service.ts memberSearch).
+  registerMigration(roomMemberNameKeyPrefixMigration);
 }

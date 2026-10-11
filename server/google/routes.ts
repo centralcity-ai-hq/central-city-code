@@ -302,7 +302,10 @@ export function registerGoogleSignInRoutes(app: FastifyInstance, d: GoogleSignIn
 
   app.post('/api/auth/google/start', async (request, reply) => {
     const oauth = available();
-    await limit(`google-start:${clientAddressKey(request.ip)}`, GOOGLE_LIMITS.startsPerAddress);
+    await limit(
+      `google-start:${clientAddressKey(request.ip)}`,
+      d.options?.addressLimits?.startsPerAddress ?? GOOGLE_LIMITS.startsPerAddress,
+    );
     const { intent, next: requestedNext } = startInput.parse(request.body ?? {});
     // Only an allowlisted relative path; anything else is dropped (never an open redirect).
     const next = intent === 'signin' ? safeReturnPath(requestedNext) : null;
@@ -377,7 +380,7 @@ export function registerGoogleSignInRoutes(app: FastifyInstance, d: GoogleSignIn
     const oauth = available();
     await limit(
       `google-callback:${clientAddressKey(request.ip)}`,
-      GOOGLE_LIMITS.callbacksPerAddress,
+      d.options?.addressLimits?.callbacksPerAddress ?? GOOGLE_LIMITS.callbacksPerAddress,
     );
     const binder = request.cookies[GOOGLE_FLOW_COOKIE];
     // Checked again here: a changed cookie can only pick another allowlisted path.

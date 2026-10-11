@@ -1,0 +1,1430 @@
+/*
+ * Elric, Workspace v3 (docs/design/WORKSPACE_V3_ELRIC_AGENTS.md §1; mockup:
+ * docs/design/workspace-v3-elric-agents.html). The signed-in /elric page: a floating top bar 10%
+ * smaller than the room's, the chats column, the minimal Home, the rooms' bubbles with action
+ * cards inside Elric's, the floating composer, the first-visit card and the sheets.
+ *
+ * Every rule is scoped to .elx3 (the signed-in dashboard; the signed-out page keeps dashboard.css)
+ * and loaded after dashboard.css, so these win over its equal-weight rules. Tokens:
+ * elric-tokens.css. Sizes: every length is calc(N * var(--ws-px)) and every font size
+ * calc(N * var(--ws-type-px)), so the workspace's 90% density applies on wide screens; phones and
+ * touch screens keep 44px targets and 16px fields (src/shell/tokens.css). Top-bar lengths are also
+ * times --elx3-bar (0.9). Motion: 150–250 ms ease-out, the Home orb's slow halo, the arrival fade;
+ * all of it off under prefers-reduced-motion. No orange or amber anywhere.
+ */
+
+/* ---------------------------------------------------------------- frame */
+
+.elx.elx3 {
+  --elx3-ease: var(--motion-ease-out, cubic-bezier(0.16, 1, 0.3, 1));
+  --elx3-col: calc(820 * var(--ws-px));
+  --elx3-pad: calc(56 * var(--ws-px));
+  --elx3-bar-px: calc(var(--elx3-bar) * var(--ws-px));
+  --elx3-bar-type: calc(var(--elx3-bar) * var(--ws-type-px));
+  --elx3-chip-h: calc(44 * var(--elx3-bar-px));
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    'bar bar'
+    'side main'
+    'side dock';
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+  contain: layout;
+  background: linear-gradient(180deg, var(--bg-page) 0%, var(--bg-page-2) 100%);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: calc(15 * var(--ws-type-px));
+  line-height: 1.5;
+}
+.elx.elx3[data-embedded='true'] {
+  height: 100%;
+}
+.elx3 [hidden] {
+  display: none !important;
+}
+.elx.elx3 :focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.elx.elx3 .elx-composer textarea:focus-visible {
+  outline: none;
+}
+
+/* ---------------------------------------------------------------- top bar (§1 Layout) */
+
+.elx.elx3 .elx-header.elx3-topbar {
+  grid-area: bar;
+  position: relative;
+  top: auto;
+  z-index: 3;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: calc(8 * var(--elx3-bar-px));
+  height: auto;
+  min-width: 0;
+  padding: calc(18 * var(--elx3-bar-px)) calc(20 * var(--elx3-bar-px)) calc(10 * var(--elx3-bar-px));
+  border: 0;
+  background: transparent;
+}
+/* The pill: Elric's avatar, the name (opens the about sheet), "built in", the live line. */
+.elx3 .elx3-pill {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: calc(10 * var(--elx3-bar-px));
+  min-width: 0;
+  min-height: var(--elx3-chip-h);
+  padding: calc(6 * var(--elx3-bar-px)) calc(14 * var(--elx3-bar-px)) calc(6 * var(--elx3-bar-px))
+    calc(8 * var(--elx3-bar-px));
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-surface-elevated);
+  box-shadow: var(--shadow-float-sm);
+}
+.elx3 .elx3-pill .elx3-mark-sm {
+  width: calc(28 * var(--elx3-bar-px));
+  height: calc(28 * var(--elx3-bar-px));
+  border-radius: calc(8 * var(--elx3-bar-px));
+}
+.elx3 .elx3-pill h1 {
+  margin: 0;
+  min-width: 0;
+  font: 600 calc(17 * var(--elx3-bar-type)) / 1.3 var(--font-sans);
+  letter-spacing: -0.01em;
+}
+.elx3 .elx-name {
+  display: block;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: calc(6 * var(--ws-px));
+  background: none;
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+.elx3 .elx3-pill .elx-tag,
+.elx3 .elx-byline .elx-tag {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  height: calc(20 * var(--ws-px));
+  padding: 0 calc(7 * var(--ws-px));
+  border: 1px solid var(--accent-border);
+  border-radius: calc(7 * var(--ws-px));
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+  font: 600 max(11px, calc(11.5 * var(--ws-type-px))) / 1 var(--font-sans);
+  white-space: nowrap;
+}
+.elx3 .elx3-live {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(6 * var(--ws-px));
+  color: var(--text-muted);
+  font-size: max(12px, calc(13 * var(--elx3-bar-type)));
+  font-weight: 600;
+  white-space: nowrap;
+  animation: elx3-fade 200ms var(--elx3-ease) both;
+}
+.elx3 .elx3-live[data-live] {
+  color: var(--status-live);
+}
+.elx3 .elx3-live i {
+  width: calc(8 * var(--ws-px));
+  height: calc(8 * var(--ws-px));
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+.elx3 .elx3-live[data-live] i {
+  background: var(--status-live);
+  box-shadow: 0 0 0 calc(4 * var(--ws-px)) color-mix(in srgb, var(--status-live) 18%, transparent);
+}
+.elx3 .elx3-actions {
+  display: contents;
+}
+.elx3 .elx3-chip,
+.elx3 .elx3-new {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: calc(7 * var(--elx3-bar-px));
+  height: var(--elx3-chip-h);
+  min-width: var(--elx3-chip-h);
+  padding: 0 calc(14 * var(--elx3-bar-px));
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-surface-elevated);
+  color: var(--text-primary);
+  font: 600 calc(14 * var(--elx3-bar-type)) / 1 var(--font-sans);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color 150ms var(--elx3-ease),
+    background-color 150ms var(--elx3-ease);
+}
+.elx3 .elx3-chip:hover,
+.elx3 .elx3-chip[aria-expanded='true'] {
+  border-color: var(--accent-border);
+}
+.elx3 .elx3-chip[aria-expanded='true'] {
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+.elx3 .elx3-chip svg {
+  color: var(--text-muted);
+}
+.elx3 .elx3-new {
+  padding: 0 calc(18 * var(--elx3-bar-px));
+  border-color: transparent;
+  background: var(--primary);
+  color: var(--on-primary);
+  box-shadow: 0 calc(10 * var(--elx3-bar-px)) calc(24 * var(--elx3-bar-px))
+    color-mix(in srgb, var(--primary) 28%, transparent);
+}
+.elx3 .elx3-new:hover {
+  background: var(--primary-hover);
+}
+/* On wide screens the New chat button is words only (the mockup); the icon is for phones. */
+.elx3 .elx3-new svg {
+  display: none;
+}
+/* Standalone only: the round home chip (the workspace shell leads home otherwise). */
+.elx3 .elx3-chip.elx3-home-link {
+  width: var(--elx3-chip-h);
+  padding: 0;
+}
+/* The Chats chip: only where the chats column is a drawer (under 900px). */
+.elx3 .elx3-chip.elx-side-toggle {
+  display: none;
+  width: var(--elx3-chip-h);
+  padding: 0;
+}
+.elx3 .elx3-chip.elx-side-toggle svg {
+  color: var(--text-primary);
+}
+/* The workspace's ☰ chip: in the Workspace v3 shell under 900px, where the shell's own ☰ row
+   steps aside so the phone has one top bar (elric-tokens.css). */
+.elx3 .elx3-chip.elx3-menu {
+  display: none;
+  width: var(--elx3-chip-h);
+  padding: 0;
+}
+.elx3 .elx3-chip.elx3-menu svg {
+  color: var(--text-primary);
+}
+@media (max-width: 899px) {
+  [data-workspace='v2'] .elx3 .elx3-chip.elx3-menu {
+    display: inline-flex;
+  }
+}
+
+/* ---------------------------------------------------------------- chats column */
+
+.elx.elx3 .elx-side {
+  grid-area: side;
+  position: relative;
+  top: auto;
+  bottom: auto;
+  left: auto;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: calc(2 * var(--ws-px));
+  width: var(--elx3-side-w);
+  min-height: 0;
+  padding: calc(6 * var(--ws-px)) calc(12 * var(--ws-px)) calc(16 * var(--ws-px));
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  background: transparent;
+}
+.elx3 .elx3-side-label {
+  margin: 0;
+  padding: calc(4 * var(--ws-px)) calc(12 * var(--ws-px)) calc(6 * var(--ws-px));
+  color: var(--text-muted);
+  font: 600 max(11px, calc(11.5 * var(--ws-type-px))) / 1.4 var(--font-sans);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.elx3 .elx-side-list {
+  gap: calc(2 * var(--ws-px));
+}
+.elx3 .elx-side-item {
+  position: relative;
+  border-radius: calc(12 * var(--ws-px));
+}
+.elx3 .elx-side-chat {
+  min-height: calc(38 * var(--ws-px));
+  padding: 0 calc(36 * var(--ws-px)) 0 calc(12 * var(--ws-px));
+  border-radius: calc(12 * var(--ws-px));
+  color: var(--text-muted);
+  font-size: calc(14 * var(--ws-type-px));
+  font-weight: 500;
+  transition:
+    background-color 150ms var(--elx3-ease),
+    color 150ms var(--elx3-ease);
+}
+.elx3 .elx-side-chat:hover {
+  background: var(--bg-inset);
+  color: var(--text-primary);
+}
+.elx3 .elx-side-chat[aria-current='page'] {
+  background: var(--accent-subtle);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+/* The ⋯ button sits over the row's right end, shown on hover or focus (always on touch). */
+.elx3 .elx-side-more {
+  position: absolute;
+  top: 50%;
+  right: calc(3 * var(--ws-px));
+  width: calc(32 * var(--ws-px));
+  height: calc(32 * var(--ws-px));
+  border-radius: calc(9 * var(--ws-px));
+  color: var(--text-muted);
+  opacity: 0;
+  transform: translateY(-50%);
+  transition: opacity 150ms var(--elx3-ease);
+}
+.elx3 .elx-side-item:hover .elx-side-more,
+.elx3 .elx-side-item:focus-within .elx-side-more,
+.elx3 .elx-side-more[aria-expanded='true'] {
+  opacity: 1;
+}
+.elx3 .elx-side-more:hover {
+  background: var(--bg-surface-elevated);
+}
+.elx3 .elx-side-menu {
+  top: calc(100% + 2px);
+  right: 0;
+  z-index: 4;
+  min-width: calc(160 * var(--ws-px));
+  padding: calc(6 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(16 * var(--ws-px));
+  background: var(--bg-surface-elevated);
+  box-shadow: var(--shadow-elevated);
+}
+.elx3 .elx-side-menu button {
+  min-height: calc(38 * var(--ws-px));
+  padding: 0 calc(10 * var(--ws-px));
+  border-radius: calc(10 * var(--ws-px));
+  color: var(--text-primary);
+  font-size: calc(14 * var(--ws-type-px));
+  font-weight: 500;
+}
+.elx3 .elx-side-menu button:hover {
+  background: var(--bg-inset);
+}
+.elx3 .elx-side-menu button.is-danger {
+  color: var(--status-danger);
+}
+.elx3 .elx3-side-note {
+  margin: calc(10 * var(--ws-px)) 0 0;
+  padding: 0 calc(12 * var(--ws-px));
+  color: var(--text-muted);
+  font-size: max(12px, calc(12.5 * var(--ws-type-px)));
+}
+.elx3 .elx-side-workspace {
+  color: var(--text-primary);
+}
+
+/* ---------------------------------------------------------------- thread */
+
+.elx.elx3 .elx-main {
+  grid-area: main;
+  min-height: 0;
+  margin: 0;
+  padding: calc(8 * var(--ws-px)) 0 calc(20 * var(--ws-px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+/* The chats column has its own grid track here. dashboard.css's has-side offsets (a fixed column,
+   pre-v3) must never apply: its rule weighs the same as ours and wins when its file loads later,
+   which in-app navigation does (the page opened shifted right until a reload). */
+.elx.elx3.has-side .elx-main,
+.elx.elx3.has-side .elx-dock {
+  margin-left: 0;
+  left: auto;
+}
+.elx.elx3 .elx-main > .elx-column {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+.elx3 .elx-column {
+  max-width: calc(var(--elx3-col) + 2 * var(--elx3-pad));
+  padding: 0 var(--elx3-pad);
+}
+.elx3 .elx-thread {
+  gap: calc(20 * var(--ws-px));
+  padding-top: calc(4 * var(--ws-px));
+}
+.elx3 .elx3-msg {
+  display: flex;
+  align-items: flex-start;
+  gap: calc(14 * var(--ws-px));
+  max-width: var(--elx3-col);
+  min-width: 0;
+}
+/* A message that arrives while the page is open: an 8px rise and a fade (history never moves). */
+.elx3 [data-arrived],
+.elx3 .elx3-msg[role='group'],
+.elx3 .elx3-thinking {
+  animation: elx3-rise 220ms var(--elx3-ease) both;
+}
+.elx3 .elx3-msg:focus-visible {
+  outline-offset: 4px;
+  border-radius: calc(12 * var(--ws-px));
+}
+.elx3 .elx3-msg[data-continued] {
+  margin-top: calc(-12 * var(--ws-px));
+}
+.elx3 .elx3-av-space {
+  flex: none;
+  width: calc(40 * var(--ws-px));
+}
+.elx3 .elx3-msg-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+}
+.elx3 .elx3-meta {
+  display: flex;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+  margin-bottom: calc(6 * var(--ws-px));
+}
+.elx3 .elx3-meta time {
+  color: var(--text-muted);
+  font-size: max(12px, calc(12.5 * var(--ws-type-px)));
+  font-variant-numeric: tabular-nums;
+}
+.elx3 .elx-byline {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+  margin: 0;
+  color: var(--text-primary);
+  font-size: calc(14.5 * var(--ws-type-px));
+  line-height: 1.3;
+}
+.elx3 .elx-byline .elx3-name {
+  font-weight: 600;
+}
+.elx3 .elx3-automated {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+.elx3 .elx3-bubble {
+  max-width: 100%;
+  padding: calc(13 * var(--ws-px)) calc(19 * var(--ws-px));
+  border-radius: calc(22 * var(--ws-px));
+  border-top-left-radius: calc(6 * var(--ws-px));
+  background: var(--bg-inset);
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.elx3 .elx-reply,
+.elx3 .elx-plain {
+  font-size: calc(16.5 * var(--ws-type-px));
+  line-height: 1.6;
+}
+/* The person's own messages: right-aligned accent bubbles, white text, the time under them. */
+.elx3 .elx-turn-you {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+.elx3 .elx-bubble {
+  max-width: min(78%, var(--elx3-col));
+  padding: calc(13 * var(--ws-px)) calc(19 * var(--ws-px));
+  border-radius: calc(22 * var(--ws-px));
+  border-top-right-radius: calc(6 * var(--ws-px));
+  background: var(--primary);
+  color: var(--on-primary);
+  font-size: calc(16.5 * var(--ws-type-px));
+  line-height: 1.6;
+}
+.elx3 .elx3-time {
+  margin-top: calc(5 * var(--ws-px));
+  color: var(--text-muted);
+  font-size: max(12px, calc(12.5 * var(--ws-type-px)));
+  font-variant-numeric: tabular-nums;
+}
+.elx3 .elx-link {
+  color: var(--text-muted);
+  font-size: calc(14 * var(--ws-type-px));
+}
+/* Thinking: the dots in Elric's place, beside its avatar. */
+.elx3 .elx3-thinking {
+  display: flex;
+  gap: calc(14 * var(--ws-px));
+  align-items: flex-start;
+}
+.elx3 .elx3-thinking .cc-thinking {
+  gap: calc(4 * var(--ws-px));
+}
+.elx3 .elx3-thinking .cc-thinking-name {
+  font-size: calc(14.5 * var(--ws-type-px));
+}
+
+/* Action cards inside Elric's bubble (§1 Chat). */
+.elx3 .elx3-cards {
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+  gap: calc(10 * var(--ws-px));
+  padding: calc(12 * var(--ws-px));
+}
+.elx3 .elx3-action {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: calc(10 * var(--ws-px));
+  padding: calc(14 * var(--ws-px)) calc(16 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(18 * var(--ws-px));
+  background: var(--bg-surface-elevated);
+}
+.elx3 .elx3-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(12 * var(--ws-px));
+}
+.elx3 .elx3-action-title {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: calc(15 * var(--ws-type-px));
+  font-weight: 600;
+  line-height: 1.45;
+}
+.elx3 .elx3-action .elx-meta {
+  margin: calc(-4 * var(--ws-px)) 0 0;
+  color: var(--text-muted);
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+}
+.elx3 .elx3-action-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(8 * var(--ws-px));
+  margin: 0;
+}
+
+/* Status pills: done (green), waiting (accent), idle (grey). */
+.elx3 .elx3-status {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(7 * var(--ws-px));
+  padding: calc(4 * var(--ws-px)) calc(12 * var(--ws-px));
+  border-radius: 999px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  font-weight: 600;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+.elx3 .elx3-status i {
+  width: calc(7 * var(--ws-px));
+  height: calc(7 * var(--ws-px));
+  border-radius: 50%;
+  background: currentColor;
+}
+.elx3 .elx3-status.is-ok {
+  background: var(--status-live-bg);
+  color: var(--status-live);
+}
+.elx3 .elx3-status.is-pending {
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+.elx3 .elx3-status.is-idle {
+  background: var(--bg-inset);
+  color: var(--text-muted);
+}
+
+/* ---------------------------------------------------------------- buttons */
+
+.elx3 .elx3-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(8 * var(--ws-px));
+  height: calc(42 * var(--ws-px));
+  padding: 0 calc(18 * var(--ws-px));
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font: 600 calc(14 * var(--ws-type-px)) / 1 var(--font-sans);
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 150ms var(--elx3-ease),
+    border-color 150ms var(--elx3-ease);
+}
+.elx3 .elx3-btn.is-sm {
+  height: calc(34 * var(--ws-px));
+  padding: 0 calc(14 * var(--ws-px));
+  font-size: calc(13 * var(--ws-type-px));
+}
+.elx3 .elx3-btn.is-primary {
+  background: var(--primary);
+  color: var(--on-primary);
+  box-shadow: 0 calc(10 * var(--ws-px)) calc(24 * var(--ws-px))
+    color-mix(in srgb, var(--primary) 28%, transparent);
+}
+.elx3 .elx3-btn.is-primary:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+.elx3 .elx3-btn.is-ghost {
+  border-color: var(--border);
+  background: var(--bg-surface-elevated);
+  color: var(--text-primary);
+}
+.elx3 .elx3-btn.is-ghost:hover:not(:disabled) {
+  border-color: var(--accent-border);
+}
+.elx3 .elx3-btn.is-danger {
+  background: var(--status-danger);
+  color: #ffffff;
+}
+:root[data-theme='dark'] .elx3 .elx3-btn.is-danger {
+  background: #dc2626;
+}
+.elx3 .elx3-btn:disabled {
+  cursor: default;
+  opacity: 0.55;
+  box-shadow: none;
+}
+
+/* ---------------------------------------------------------------- Home (§1 Home) */
+
+.elx.elx3 .elx3-home {
+  flex: 1;
+  justify-content: center;
+  gap: calc(18 * var(--ws-px));
+  min-height: 0;
+  padding: calc(24 * var(--ws-px)) 0 calc(40 * var(--ws-px));
+}
+.elx.elx3 .elx3-home h2 {
+  margin: 0;
+  color: var(--text-primary);
+  font: 600 calc(34 * var(--ws-type-px)) / 1.15 var(--font-sans);
+  letter-spacing: -0.035em;
+  text-wrap: balance;
+}
+/* One small accent pill while approvals wait: "N actions waiting for you · Review". */
+.elx3 .elx3-approve-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(10 * var(--ws-px));
+  min-height: calc(36 * var(--ws-px));
+  margin: 0;
+  padding: calc(4 * var(--ws-px)) calc(4 * var(--ws-px)) calc(4 * var(--ws-px))
+    calc(14 * var(--ws-px));
+  border: 1px solid var(--accent-border);
+  border-radius: 999px;
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+  font-size: calc(13.5 * var(--ws-type-px));
+  font-weight: 600;
+}
+.elx3 .elx3-approve-pill button {
+  min-height: calc(32 * var(--ws-px));
+  padding: 0 calc(14 * var(--ws-px));
+  border: 0;
+  border-radius: 999px;
+  background: var(--primary);
+  color: var(--on-primary);
+  font: 600 calc(13 * var(--ws-type-px)) / 1 var(--font-sans);
+  cursor: pointer;
+}
+.elx3 .elx3-approve-pill button:hover {
+  background: var(--primary-hover);
+}
+/* Three suggestions above the composer: muted pills that fill the message box. */
+.elx.elx3 .elx-chips.elx3-sugs {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: calc(8 * var(--ws-px));
+  max-width: none;
+  margin: 0 0 calc(14 * var(--ws-px));
+}
+.elx.elx3 .elx-chip {
+  min-height: calc(36 * var(--ws-px));
+  max-width: 100%;
+  padding: calc(6 * var(--ws-px)) calc(16 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-surface-elevated);
+  color: var(--text-muted);
+  font-size: calc(13.5 * var(--ws-type-px));
+  font-weight: 500;
+  line-height: 1.35;
+  text-align: center;
+  transition:
+    color 150ms var(--elx3-ease),
+    border-color 150ms var(--elx3-ease);
+}
+.elx.elx3 .elx-chip:hover {
+  border-color: var(--accent-border);
+  background: var(--bg-surface-elevated);
+  color: var(--text-primary);
+}
+
+/* ---------------------------------------------------------------- composer (§4.4) */
+
+.elx.elx3 .elx-dock {
+  grid-area: dock;
+  position: relative;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  z-index: 2;
+  margin: 0;
+  padding: 0 0 max(calc(24 * var(--ws-px)), env(safe-area-inset-bottom));
+  background: none;
+}
+.elx.elx3 .elx-dock > .elx-column {
+  max-width: calc(var(--elx3-col) + 2 * calc(40 * var(--ws-px)));
+  padding: 0 calc(40 * var(--ws-px));
+}
+.elx.elx3 .elx-composer {
+  display: block;
+  padding: calc(10 * var(--ws-px)) calc(10 * var(--ws-px)) calc(10 * var(--ws-px))
+    calc(20 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(24 * var(--ws-px));
+  background: var(--bg-surface-elevated);
+  box-shadow: var(--shadow-elevated);
+  transition: border-color 150ms var(--elx3-ease);
+}
+.elx.elx3 .elx-composer:focus-within {
+  border-color: var(--accent-border);
+}
+.elx.elx3 .elx-composer textarea {
+  display: block;
+  width: 100%;
+  min-height: calc(46 * var(--ws-px));
+  max-height: calc(200 * var(--ws-px));
+  padding: calc(8 * var(--ws-px)) 0;
+  color: var(--text-primary);
+  font-size: calc(16 * var(--ws-type-px));
+  line-height: 1.5;
+}
+.elx.elx3 .elx-composer textarea::placeholder {
+  color: var(--text-muted);
+}
+.elx.elx3 .elx-composer textarea:disabled {
+  cursor: not-allowed;
+}
+.elx3 .elx3-tools {
+  display: flex;
+  align-items: center;
+  gap: calc(6 * var(--ws-px));
+}
+.elx3 .elx3-grow {
+  flex: 1;
+}
+/* The context pill: "Here" (answer in this chat) or the room Elric is asked in. */
+.elx3 .elx3-context {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+  min-width: 0;
+  max-width: 60%;
+  height: calc(34 * var(--ws-px));
+  padding: 0 calc(10 * var(--ws-px)) 0 calc(5 * var(--ws-px));
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: var(--bg-inset);
+  color: var(--text-primary);
+  font: 600 calc(13 * var(--ws-type-px)) / 1 var(--font-sans);
+  cursor: pointer;
+  transition: border-color 150ms var(--elx3-ease);
+}
+.elx3 .elx3-context:hover,
+.elx3 .elx3-context[aria-expanded='true'] {
+  border-color: var(--accent-border);
+}
+.elx3 .elx3-context.is-on {
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+.elx3 .elx3-context-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.elx3 .elx3-context svg {
+  flex: none;
+}
+.elx3 .elx3-unset {
+  display: inline-grid;
+  place-items: center;
+  width: calc(32 * var(--ws-px));
+  height: calc(32 * var(--ws-px));
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.elx3 .elx3-unset:hover {
+  background: var(--bg-inset);
+}
+/* Send: the accent fill with a white arrow in both themes; disabled is the same fill, faded. */
+.elx.elx3 .elx-send {
+  width: calc(48 * var(--ws-px));
+  height: calc(48 * var(--ws-px));
+  margin: 0;
+  border-radius: calc(15 * var(--ws-px));
+  background: var(--accent);
+  color: var(--accent-contrast);
+  opacity: 1;
+  transition:
+    background-color 150ms var(--elx3-ease),
+    opacity 150ms var(--elx3-ease);
+}
+.elx.elx3 .elx-send:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 86%, #000000);
+}
+.elx.elx3 .elx-send:disabled {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  opacity: 0.45;
+}
+/* The rooms Elric can be asked in, floating over the composer. */
+.elx.elx3 .elx-picker {
+  margin-bottom: calc(10 * var(--ws-px));
+  padding: calc(6 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(16 * var(--ws-px));
+  background: var(--bg-surface-elevated);
+  box-shadow: var(--shadow-elevated);
+}
+.elx.elx3 .elx-option {
+  min-height: calc(40 * var(--ws-px));
+  border-radius: calc(10 * var(--ws-px));
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.elx.elx3 .elx-option:hover:not(:disabled) {
+  background: var(--bg-inset);
+}
+.elx.elx3 .elx-option:disabled {
+  color: var(--text-muted);
+}
+.elx.elx3 .elx-option .elx-meta,
+.elx.elx3 .elx-picker > .elx-meta {
+  color: var(--text-muted);
+}
+/* Notices over the composer: paused, an error, today's limit. */
+.elx.elx3 .elx-notice {
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 auto calc(10 * var(--ws-px));
+  padding: calc(8 * var(--ws-px)) calc(16 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(16 * var(--ws-px));
+  background: var(--bg-surface-elevated);
+  color: var(--text-muted);
+  font-size: max(12px, calc(13.5 * var(--ws-type-px)));
+  text-align: center;
+}
+.elx.elx3 .elx-notice.is-error {
+  border-color: color-mix(in srgb, var(--status-danger) 35%, transparent);
+  color: var(--status-danger);
+}
+.elx.elx3 .elx-notice.is-limit {
+  text-align: left;
+}
+.elx3 .elx-retry {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-text);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+/* ---------------------------------------------------------------- first visit (§1) */
+
+.elx.elx3 .elx3-gate {
+  /* Centred in the page, horizontally and vertically (auto margins in the flex column). */
+  justify-content: center;
+  gap: calc(14 * var(--ws-px));
+  width: 100%;
+  max-width: calc(520 * var(--ws-px));
+  min-height: 0;
+  margin: auto;
+  padding: calc(32 * var(--ws-px)) 0 calc(48 * var(--ws-px));
+}
+/* The welcome emblem: the orb at 72px (Home keeps its 52px orb). */
+.elx.elx3 .elx3-gate > .elx3-mark-orb {
+  width: calc(72 * var(--ws-px));
+  height: calc(72 * var(--ws-px));
+  border-radius: calc(22 * var(--ws-px));
+}
+.elx.elx3 .elx3-gate :is(h1, h2) {
+  margin: calc(4 * var(--ws-px)) 0 0;
+  color: var(--text-primary);
+  font: 600 calc(30 * var(--ws-type-px)) / 1.2 var(--font-sans);
+  letter-spacing: -0.03em;
+}
+.elx.elx3 .elx3-gate > p {
+  margin: 0;
+  color: var(--text-muted);
+}
+.elx3 .elx3-gate-lead {
+  max-width: 46ch;
+  text-wrap: pretty;
+}
+.elx3 .elx3-steps {
+  display: flex;
+  flex-direction: column;
+  gap: calc(14 * var(--ws-px));
+  width: 100%;
+  margin: calc(4 * var(--ws-px)) 0 0;
+  padding: calc(20 * var(--ws-px)) calc(22 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(22 * var(--ws-px));
+  background: var(--bg-surface-elevated);
+  box-shadow: var(--shadow-float-sm);
+  list-style: none;
+  text-align: left;
+}
+.elx3 .elx3-step {
+  display: flex;
+  align-items: center;
+  gap: calc(14 * var(--ws-px));
+}
+.elx3 .elx3-step-n {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: calc(28 * var(--ws-px));
+  height: calc(28 * var(--ws-px));
+  border-radius: 50%;
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+  font-size: calc(13 * var(--ws-type-px));
+  font-weight: 700;
+}
+.elx3 .elx3-step[data-done] .elx3-step-n {
+  background: var(--status-live-bg);
+  color: var(--status-live);
+}
+.elx3 .elx3-step-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+.elx3 .elx3-step-text b {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.elx3 .elx3-step-text small {
+  color: var(--text-muted);
+  font-size: max(12px, calc(13.5 * var(--ws-type-px)));
+}
+.elx.elx3 .elx3-gate .elx-gate-kept,
+.elx.elx3 .elx3-gate .elx-auth-error {
+  margin: 0;
+}
+.elx.elx3 .elx-auth-error,
+.elx3 .elx3-sheet-error {
+  color: var(--status-danger);
+}
+.elx.elx3 .elx-examples {
+  max-width: 100%;
+  margin-top: calc(18 * var(--ws-px));
+}
+.elx.elx3 .elx-examples h3,
+.elx.elx3 .elx-example figcaption {
+  color: var(--text-muted);
+}
+.elx.elx3 .elx-example {
+  border-color: var(--border);
+  border-radius: calc(18 * var(--ws-px));
+  background: var(--bg-surface-elevated);
+}
+.elx.elx3 .elx-example-tag {
+  border-color: var(--border);
+  color: var(--text-primary);
+}
+.elx.elx3 .elx-example-ask {
+  background: var(--bg-inset);
+  color: var(--text-primary);
+}
+.elx.elx3 .elx-example-answer .elx-example-approval {
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
+}
+.elx.elx3 .elx-example-approval .elx-card-label {
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+/* ---------------------------------------------------------------- sheets (§4.6) */
+
+.elx3 .elx3-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: calc(20 * var(--ws-px));
+  background: var(--elx3-scrim);
+  animation: elx3-fade 180ms var(--elx3-ease) both;
+}
+.elx3 .elx3-sheet {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: calc(14 * var(--ws-px));
+  width: min(calc(520 * var(--ws-px)), 100%);
+  max-height: 90%;
+  overflow-y: auto;
+  padding: calc(22 * var(--ws-px)) calc(24 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(22 * var(--ws-px));
+  background: var(--bg-surface-elevated);
+  box-shadow: var(--shadow-elevated);
+  color: var(--text-primary);
+  text-align: left;
+  animation: elx3-sheet-in 240ms var(--elx3-ease) both;
+}
+.elx3 .elx3-sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(12 * var(--ws-px));
+}
+.elx3 .elx3-sheet-head h2 {
+  margin: 0;
+  font: 600 calc(18 * var(--ws-type-px)) / 1.3 var(--font-sans);
+  letter-spacing: -0.01em;
+}
+.elx3 .elx3-x {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: calc(32 * var(--ws-px));
+  height: calc(32 * var(--ws-px));
+  border: 0;
+  border-radius: 50%;
+  background: var(--bg-inset);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.elx3 .elx3-x:hover {
+  color: var(--text-primary);
+}
+.elx3 .elx3-sheet-text {
+  margin: 0;
+  color: var(--text-muted);
+}
+.elx3 .elx3-sheet-error {
+  margin: 0;
+}
+.elx3 .elx3-sheet-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: calc(8 * var(--ws-px));
+  margin-top: calc(4 * var(--ws-px));
+}
+.elx3 .elx3-sheet-facts {
+  display: inline-flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: calc(6 * var(--ws-px));
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: max(12px, calc(13.5 * var(--ws-type-px)));
+}
+.elx3 .elx3-sheet-facts svg {
+  color: var(--status-live);
+}
+.elx3 .elx3-manage .elx3-sheet-facts {
+  flex-basis: 100%;
+}
+.elx3 .elx3-sheet-status {
+  margin: calc(-6 * var(--ws-px)) 0 0;
+}
+.elx3 :is(.elx3-rename, .elx3-dob) {
+  display: flex;
+  flex-direction: column;
+  gap: calc(12 * var(--ws-px));
+}
+.elx3 :is(.elx3-rename, .elx3-dob) input {
+  box-sizing: border-box;
+  width: 100%;
+  height: calc(44 * var(--ws-px));
+  padding: 0 calc(14 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(14 * var(--ws-px));
+  background: var(--bg-inset);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: calc(16 * var(--ws-type-px));
+  color-scheme: inherit;
+}
+.elx3 :is(.elx3-rename, .elx3-dob) input:focus-visible {
+  border-color: var(--accent-border);
+}
+/* Manage Elric: rows with a switch, today's allowance. */
+.elx3 .elx3-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.elx3 .elx3-list > * + * {
+  border-top: 1px solid var(--border);
+}
+.elx3 .elx3-row {
+  display: flex;
+  align-items: center;
+  gap: calc(14 * var(--ws-px));
+  padding: calc(14 * var(--ws-px)) calc(2 * var(--ws-px));
+}
+.elx3 .elx3-row-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: calc(2 * var(--ws-px));
+  min-width: 0;
+  font-weight: 500;
+}
+.elx3 .elx3-row-text small {
+  color: var(--text-muted);
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  font-weight: 400;
+}
+.elx3 .elx3-switch {
+  position: relative;
+  flex: none;
+  width: calc(42 * var(--ws-px));
+  height: calc(24 * var(--ws-px));
+  padding: 0;
+  border: 0;
+  border-radius: calc(12 * var(--ws-px));
+  /* Off: a muted track that still reaches 3:1 against the sheet (non-text contrast). */
+  background: color-mix(in srgb, var(--text-muted) 75%, var(--bg-surface-elevated));
+  cursor: pointer;
+  transition: background-color 200ms var(--elx3-ease);
+}
+.elx3 .elx3-switch::after {
+  content: '';
+  position: absolute;
+  top: calc(3 * var(--ws-px));
+  left: calc(3 * var(--ws-px));
+  width: calc(18 * var(--ws-px));
+  height: calc(18 * var(--ws-px));
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: transform 200ms var(--elx3-ease);
+}
+.elx3 .elx3-switch[aria-checked='true'] {
+  background: var(--primary);
+}
+.elx3 .elx3-switch[aria-checked='true']::after {
+  transform: translateX(calc(18 * var(--ws-px)));
+}
+/* The switch row: the label (its text) and the switch are one target, 44px and up. */
+.elx3 .elx3-row-switch {
+  min-height: 44px;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.elx3 .elx3-row-switch .elx3-row-text {
+  align-self: stretch;
+  min-height: 44px;
+  padding: calc(14 * var(--ws-px)) 0;
+  justify-content: center;
+  cursor: pointer;
+}
+.elx3 .elx3-switch[aria-disabled='true'],
+.elx3 .elx3-btn[aria-disabled='true'] {
+  cursor: progress;
+  opacity: 0.7;
+}
+.elx3 .elx3-switch:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.elx3 .elx3-usage {
+  align-items: flex-start;
+}
+.elx3 .elx3-usage dl {
+  display: grid;
+  gap: calc(6 * var(--ws-px));
+  min-width: calc(190 * var(--ws-px));
+  margin: 0;
+}
+.elx3 .elx3-usage dl > div {
+  display: grid;
+  grid-template-columns: calc(78 * var(--ws-px)) 1fr;
+  align-items: center;
+  gap: calc(10 * var(--ws-px));
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+}
+.elx3 .elx3-usage dt {
+  color: var(--text-muted);
+}
+.elx3 .elx3-usage dd {
+  display: flex;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+.elx3 .elx3-meter {
+  display: block;
+  flex: 1;
+  height: calc(6 * var(--ws-px));
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--bg-inset);
+}
+.elx3 .elx3-meter > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+.elx3 .elx3-meter[data-full] > span {
+  background: var(--status-danger);
+}
+
+/* ---------------------------------------------------------------- motion */
+
+@keyframes elx3-fade {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes elx3-rise {
+  from {
+    opacity: 0;
+    transform: translateY(calc(8 * var(--ws-px)));
+  }
+}
+@keyframes elx3-sheet-in {
+  from {
+    opacity: 0;
+    transform: translateY(calc(8 * var(--ws-px))) scale(0.985);
+  }
+}
+/* History arrives at once: only new messages rise in (the thread is already there on load). */
+.elx.elx3[data-arrive='true'] .elx-main > .elx-column,
+.elx.elx3[data-arrive='true'] .elx-side-list,
+.elx.elx3[data-arrive='true'] .elx-dock > .elx-column {
+  animation: elx-arrive 180ms ease-out both;
+}
+
+/* ---------------------------------------------------------------- narrow screens */
+
+@media (max-width: 1100px) {
+  .elx.elx3 {
+    --elx3-pad: calc(32 * var(--ws-px));
+  }
+  .elx.elx3 .elx-dock > .elx-column {
+    padding: 0 calc(24 * var(--ws-px));
+  }
+}
+@media (max-width: 899px) {
+  .elx3 .elx3-chip.elx-side-toggle {
+    display: inline-flex;
+  }
+  .elx.elx3 .elx-side {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 30;
+    width: min(300px, 85vw);
+    padding-top: calc(16 * var(--ws-px));
+    border-right: 1px solid var(--border);
+    background: var(--bg-surface-elevated);
+    box-shadow: var(--shadow-elevated);
+  }
+  .elx.elx3 .elx-side-scrim {
+    background: var(--elx3-scrim);
+  }
+  .elx3 .elx3-live {
+    display: none;
+  }
+}
+@media (max-width: 640px) {
+  .elx.elx3 {
+    --elx3-pad: calc(16 * var(--ws-px));
+  }
+  .elx.elx3 .elx-header.elx3-topbar {
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+    padding: calc(12 * var(--ws-px)) calc(16 * var(--ws-px)) calc(8 * var(--ws-px));
+  }
+  .elx3 .elx3-pill {
+    flex: 1 1 auto;
+    margin-right: auto;
+  }
+  /* Manage Elric and New chat become round icon chips (their names stay for screen readers). */
+  .elx3 .elx3-chip-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .elx3 .elx3-chip,
+  .elx3 .elx3-new {
+    width: var(--elx3-chip-h);
+    padding: 0;
+  }
+  .elx3 .elx3-new svg {
+    display: block;
+  }
+  .elx3 .elx3-new {
+    box-shadow: none;
+  }
+  .elx3 .elx-bubble {
+    max-width: 88%;
+  }
+  .elx.elx3 .elx-dock > .elx-column {
+    padding: 0 calc(12 * var(--ws-px));
+  }
+  .elx.elx3 .elx-dock {
+    padding-bottom: max(calc(14 * var(--ws-px)), env(safe-area-inset-bottom));
+  }
+  .elx.elx3 .elx3-home h2 {
+    font-size: calc(28 * var(--ws-type-px));
+  }
+  .elx3 .elx3-msg {
+    gap: calc(10 * var(--ws-px));
+  }
+  .elx3 .elx3-msg > .elx3-av-space {
+    width: calc(32 * var(--ws-px));
+  }
+  .elx3 .elx3-msg > .elx3-mark {
+    width: calc(32 * var(--ws-px));
+    height: calc(32 * var(--ws-px));
+    border-radius: calc(9 * var(--ws-px));
+  }
+  .elx3 .elx3-steps {
+    padding: calc(16 * var(--ws-px));
+  }
+  .elx3 .elx3-step {
+    flex-wrap: wrap;
+  }
+  .elx3 .elx3-step > :last-child {
+    margin-left: calc(42 * var(--ws-px));
+  }
+  .elx3 .elx3-usage {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .elx3 .elx3-scrim {
+    place-items: end center;
+    padding: calc(12 * var(--ws-px));
+  }
+}
+@media (max-width: 380px) {
+  .elx3 .elx3-pill .elx3-mark-sm {
+    display: none;
+  }
+  .elx3 .elx3-pill {
+    padding-left: calc(14 * var(--ws-px));
+  }
+}
+/* Phones and touch screens: 44px targets everywhere (the bar's 10% too). */
+@media (max-width: 640px), (pointer: coarse) {
+  .elx.elx3 {
+    --elx3-chip-h: 44px;
+  }
+  .elx3 .elx3-btn,
+  .elx3 .elx3-btn.is-sm,
+  .elx.elx3 .elx-chip,
+  .elx3 .elx3-approve-pill button,
+  .elx3 .elx3-context,
+  .elx.elx3 .elx-option,
+  .elx3 .elx-side-chat,
+  .elx3 .elx-side-menu button {
+    min-height: 44px;
+  }
+  .elx3 .elx3-btn.is-sm {
+    height: 44px;
+  }
+  .elx3 .elx3-context {
+    height: 44px;
+  }
+  /* The name in the pill (opens the about sheet): a 44px target that does not grow the pill;
+     the negative margins give back the extra size, so the text stays where it was. */
+  .elx3 .elx3-pill .elx-name {
+    display: flex;
+    align-items: center;
+    min-width: 44px;
+    min-height: 44px;
+    margin: -8px -8px;
+    padding: 0 8px;
+  }
+  .elx3 .elx3-approve-pill {
+    min-height: 52px;
+  }
+  .elx3 .elx-side-more,
+  .elx3 .elx3-x,
+  .elx3 .elx3-unset {
+    width: 44px;
+    height: 44px;
+  }
+  .elx3 .elx-side-chat {
+    padding-right: 48px;
+  }
+  .elx3 .elx-side-more {
+    opacity: 1;
+  }
+  .elx3 .elx3-switch {
+    width: 50px;
+    height: 30px;
+    border-radius: 15px;
+  }
+  .elx3 .elx3-switch::after {
+    width: 24px;
+    height: 24px;
+  }
+  .elx3 .elx3-switch[aria-checked='true']::after {
+    transform: translateX(20px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .elx3 *,
+  .elx3 *::before,
+  .elx3 *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

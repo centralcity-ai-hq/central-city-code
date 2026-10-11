@@ -42,6 +42,8 @@ import {
   joinRoomToolInput,
   roomCloseToolInput,
   roomLeaveToolInput,
+  roomSearchToolInput,
+  roomOverviewToolInput,
   roomUpdateToolInput,
   roomLinkToolInput,
   roomMembersToolInput,
@@ -88,6 +90,7 @@ export const agentMessageMirror = z.object({
   reply_to: z.string().uuid().nullable(),
   parts: z.array(messagePartSchema),
   created_at: z.iso.datetime(),
+  room_id: z.string().nullable().optional(),
 });
 /** One inbox page (`InboxPage` in server/messaging/contract.ts). */
 export const inboxPageMirror = z.object({
@@ -450,6 +453,18 @@ export const PROTOCOL_SCHEMAS: ProtocolSchemaEntry[] = [
     title: 'city_room_leave input',
     source: 'server/rooms/contract.ts roomLeaveToolInput',
     schema: roomLeaveToolInput,
+  },
+  {
+    file: 'mcp/city_room_search.input.schema.json',
+    title: 'city_room_search input',
+    source: 'server/rooms/contract.ts roomSearchToolInput',
+    schema: roomSearchToolInput,
+  },
+  {
+    file: 'mcp/city_room_overview.input.schema.json',
+    title: 'city_room_overview input',
+    source: 'server/rooms/contract.ts roomOverviewToolInput',
+    schema: roomOverviewToolInput,
   },
   {
     file: 'mcp/city_room_update.input.schema.json',

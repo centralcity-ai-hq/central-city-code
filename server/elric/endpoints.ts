@@ -9,6 +9,7 @@ import {
   type ModelAdapter,
 } from './adapter.js';
 import { ELRIC_CONFIG } from './config.js';
+import { TITLE_SYSTEM_PROMPT } from './titles.js';
 import { elricAnthropicModels, elricAnthropicSelected } from './anthropic.js';
 
 /**
@@ -158,13 +159,19 @@ export function elricMockModels(env: Env = process.env, hosted = false): ElricMo
  * The CITY_ELRIC_MOCK model, deterministic: when the owner's message (the trigger) says
  * "create a task: <title>" and room_task_create is offered, the first step asks for
  * room_task_create {room_id: <the invoking room>, title: <title>}; every other step, including
- * the one after the tool result, answers "Mock reply.".
+ * the one after the tool result, answers "Mock reply.". A conversation-title call (titles.ts)
+ * answers the user's words in sentence case: only the first letter is raised, the rest stays as
+ * written ("which phone is better, iPhone 12 or 16?" -> "Which phone is better, iPhone 12 or 16?").
  */
 export function e2eMockAdapter(model: string): ModelAdapter {
   const inner = new MockAdapter(model);
   return {
     model,
     async complete(request) {
+      if (request.system === TITLE_SYSTEM_PROMPT) {
+        inner.push({ text: mockTitle(request.messages[0]?.content) });
+        return inner.complete(request);
+      }
       const offered = request.tools?.some((tool) => tool.name === 'room_task_create') ?? false;
       const answeredTool = request.messages.some((message) => message.role === 'tool');
       const prompt = request.messages.find((message) => message.role === 'user')?.content ?? '';
@@ -181,13 +188,47 @@ export function e2eMockAdapter(model: string): ModelAdapter {
         }
         inner.push({ text: shown });
       }
+      // "stream slowly": a model-like stream, a few words every 100 ms for about 4 s (e2e).
+      if (!task && request.onText && /stream slowly/i.test(triggerText(prompt) ?? '')) {
+        let shown = '';
+        for (const chunk of E2E_SLOW_STREAM_CHUNKS) {
+          shown += chunk;
+          request.onText(shown);
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        inner.push({ text: shown });
+      }
       return inner.complete(request);
     },
   };
 }
 
+/** The CITY_ELRIC_MOCK title: the user's words of the title request, in sentence case. */
+function mockTitle(content: unknown): string {
+  try {
+    const data = JSON.parse(String(content).split('\n')[1] ?? '') as { user?: unknown };
+    return String(data.user ?? '').replace(/^\p{Ll}/u, (letter) => letter.toUpperCase());
+  } catch {
+    return '';
+  }
+}
+
 /** The CITY_ELRIC_MOCK streamed answer, in its three chunks. */
 export const E2E_STREAM_CHUNKS = ['Streaming reply, ', 'part two, ', 'part three.'];
+
+/** The CITY_ELRIC_MOCK slow answer ("stream slowly"): paragraphs and a list, in 40 chunks. */
+export const E2E_SLOW_STREAM_TEXT =
+  'Here is a calm answer that arrives a few words at a time, the way a real model writes. ' +
+  'It keeps going for a while so the reveal can be measured.\n\n' +
+  'A second paragraph follows, with **some bold words** and a short list:\n\n' +
+  '- the first point\n- the second point\n- the third point, which ends the answer.';
+export const E2E_SLOW_STREAM_CHUNKS: readonly string[] = (() => {
+  const size = Math.ceil(E2E_SLOW_STREAM_TEXT.length / 40);
+  const chunks: string[] = [];
+  for (let i = 0; i < E2E_SLOW_STREAM_TEXT.length; i += size)
+    chunks.push(E2E_SLOW_STREAM_TEXT.slice(i, i + size));
+  return chunks;
+})();
 
 /** The text of the trigger message (the one Elric answers), or null. */
 function triggerText(prompt: string): string | null {
@@ -211,10 +252,10 @@ function taskRequest(prompt: string): { room_id: string; title: string } | null 
   const lines = prompt.split('\n');
   let roomId: string | null = null;
   try {
-    const header = lines.find((line) => line.startsWith('Room (untrusted labels): '));
-    const parsed = header
-      ? (JSON.parse(header.slice('Room (untrusted labels): '.length)) as { room_id?: unknown })
-      : null;
+    const header = lines
+      .map((line) => /^(?:Room|Chat) \(untrusted labels\): (.*)$/.exec(line)?.[1])
+      .find((rest) => rest !== undefined);
+    const parsed = header ? (JSON.parse(header) as { room_id?: unknown }) : null;
     roomId = typeof parsed?.room_id === 'string' ? parsed.room_id : null;
   } catch {
     roomId = null;

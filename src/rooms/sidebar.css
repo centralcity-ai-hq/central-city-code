@@ -19,7 +19,7 @@
    ========================================================================== */
 
 .rm-sidebar {
-  width: 260px;
+  width: calc(260 * var(--ws-px));
   background-color: var(--bg-surface, var(--surface-sunken, #f8fafc));
   border-right: 1px solid var(--border, #e2e8f0);
   display: flex;
@@ -33,29 +33,29 @@
   overflow: hidden;
   user-select: none;
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
   line-height: 1.5;
 }
 
 .rm-sidebar.collapsed {
-  width: 64px;
+  width: calc(64 * var(--ws-px));
 }
 
 /* Sidebar Header */
 .rm-sidebar-header {
-  padding: 12px 14px;
+  padding: calc(12 * var(--ws-px)) calc(14 * var(--ws-px));
   display: flex;
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid var(--border-subtle, #edf2f7);
-  min-height: 56px;
+  min-height: calc(56 * var(--ws-px));
   flex-shrink: 0;
 }
 
 .rm-sidebar-brand-wrap {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: calc(10 * var(--ws-px));
   min-width: 0;
   cursor: default;
   background: none;
@@ -66,15 +66,15 @@
 }
 
 .rm-sidebar-brand-mark {
-  width: 28px;
-  height: 28px;
+  width: calc(28 * var(--ws-px));
+  height: calc(28 * var(--ws-px));
   border-radius: var(--radius-s, 6px);
   flex-shrink: 0;
   object-fit: contain;
 }
 
 .rm-sidebar-brand-text {
-  font-size: 15px;
+  font-size: calc(15 * var(--ws-type-px));
   font-weight: 700;
   color: var(--text-primary, #090d16);
   white-space: nowrap;
@@ -86,10 +86,10 @@
 }
 
 .rm-sidebar.collapsed .rm-sidebar-header {
-  padding: 12px 0;
+  padding: calc(12 * var(--ws-px)) 0;
   justify-content: center;
   align-items: center;
-  min-height: 56px;
+  min-height: calc(56 * var(--ws-px));
 }
 
 .rm-sidebar.collapsed .rm-sidebar-brand-wrap {
@@ -99,8 +99,8 @@
 }
 
 .rm-sidebar-collapse-btn {
-  width: 30px;
-  height: 30px;
+  width: calc(30 * var(--ws-px));
+  height: calc(30 * var(--ws-px));
   border-radius: var(--radius-s, 6px);
   display: flex;
   align-items: center;
@@ -124,16 +124,17 @@
 
 /* Workspace and Room list: the prominent links at the top of the sidebar */
 .rm-sidebar-nav-action {
-  margin: 10px 12px 4px 12px;
-  padding: 8px 12px;
+  margin: calc(10 * var(--ws-px)) calc(12 * var(--ws-px)) calc(4 * var(--ws-px))
+    calc(12 * var(--ws-px));
+  padding: calc(8 * var(--ws-px)) calc(12 * var(--ws-px));
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: calc(10 * var(--ws-px));
   border-radius: var(--radius-s, 6px);
   background-color: var(--bg-surface-elevated, var(--surface, #ffffff));
   border: 1px solid var(--border, #e2e8f0);
   color: var(--text-primary, #0f172a);
-  font-size: 13px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
   font-weight: 500;
   text-decoration: none;
   transition: all 0.15s ease;
@@ -155,10 +156,10 @@
 }
 
 .rm-sidebar.collapsed .rm-sidebar-nav-action {
-  padding: 8px 0;
+  padding: calc(8 * var(--ws-px)) 0;
   justify-content: center;
-  margin: 8px auto 4px auto;
-  width: 44px;
+  margin: calc(8 * var(--ws-px)) auto calc(4 * var(--ws-px)) auto;
+  width: calc(44 * var(--ws-px));
 }
 
 .rm-sidebar.collapsed .rm-sidebar-nav-action span {
@@ -174,14 +175,15 @@
 /* Quick Actions (New room, Join room) */
 .rm-sidebar-actions-row {
   display: flex;
-  gap: 8px;
-  padding: 6px 12px 10px 12px;
+  gap: calc(8 * var(--ws-px));
+  padding: calc(6 * var(--ws-px)) calc(12 * var(--ws-px)) calc(10 * var(--ws-px))
+    calc(12 * var(--ws-px));
   flex-shrink: 0;
 }
 
 .rm-sidebar.collapsed .rm-sidebar-actions-row {
   flex-direction: column;
-  padding: 4px 8px;
+  padding: calc(4 * var(--ws-px)) calc(8 * var(--ws-px));
   align-items: center;
 }
 
@@ -190,11 +192,11 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  height: 32px;
-  min-height: 32px;
+  gap: calc(6 * var(--ws-px));
+  height: calc(32 * var(--ws-px));
+  min-height: calc(32 * var(--ws-px));
   border-radius: var(--radius-s, 6px);
-  font-size: 12.5px;
+  font-size: max(12px, calc(12.5 * var(--ws-type-px)));
   font-weight: 500;
   background-color: var(--bg-surface-elevated, var(--surface, #ffffff));
   border: 1px solid var(--border, #e2e8f0);
@@ -202,7 +204,7 @@
   cursor: pointer;
   transition: all 0.15s ease;
   white-space: nowrap;
-  padding: 0 8px;
+  padding: 0 calc(8 * var(--ws-px));
 }
 
 .rm-sidebar-act-btn:hover {
@@ -224,9 +226,9 @@
 }
 
 .rm-sidebar.collapsed .rm-sidebar-act-btn {
-  width: 40px;
-  height: 40px;
-  min-height: 40px;
+  width: calc(40 * var(--ws-px));
+  height: calc(40 * var(--ws-px));
+  min-height: calc(40 * var(--ws-px));
   flex: none;
   padding: 0;
 }
@@ -240,10 +242,10 @@
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 0 8px 12px 8px;
+  padding: 0 calc(8 * var(--ws-px)) calc(12 * var(--ws-px)) calc(8 * var(--ws-px));
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: calc(16 * var(--ws-px));
 }
 
 .rm-sidebar-room-group {
@@ -258,7 +260,7 @@
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: var(--text-muted, #64748b);
-  padding: 4px 8px;
+  padding: calc(4 * var(--ws-px)) calc(8 * var(--ws-px));
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -283,7 +285,7 @@
 .rm-group-header-title {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: calc(6 * var(--ws-px));
 }
 
 .rm-chevron {
@@ -298,16 +300,16 @@
 .rm-sidebar-room-item {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 7px 10px;
+  gap: calc(10 * var(--ws-px));
+  padding: calc(7 * var(--ws-px)) calc(10 * var(--ws-px));
   border-radius: var(--radius-s, 6px);
   color: var(--text-secondary, #334155);
   text-decoration: none;
-  font-size: 13px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
   font-weight: 500;
   transition: all 0.12s ease;
   position: relative;
-  min-height: 34px;
+  min-height: calc(34 * var(--ws-px));
   box-sizing: border-box;
 }
 
@@ -329,8 +331,8 @@
   content: '';
   position: absolute;
   left: 0;
-  top: 6px;
-  bottom: 6px;
+  top: calc(6 * var(--ws-px));
+  bottom: calc(6 * var(--ws-px));
   width: 3px;
   background-color: var(--accent, #2563eb);
   border-radius: 0 var(--radius-xs, 4px) var(--radius-xs, 4px) 0;
@@ -346,8 +348,8 @@
 
 .rm-sidebar.collapsed .rm-sidebar-room-item {
   justify-content: center;
-  padding: 8px 0;
-  width: 44px;
+  padding: calc(8 * var(--ws-px)) 0;
+  width: calc(44 * var(--ws-px));
   margin: 0 auto;
 }
 
@@ -356,8 +358,8 @@
 }
 
 .rm-room-item-dot {
-  width: 7px;
-  height: 7px;
+  width: calc(7 * var(--ws-px));
+  height: calc(7 * var(--ws-px));
   border-radius: 9999px;
   background-color: var(--status-live, #059669);
   flex-shrink: 0;
@@ -368,22 +370,37 @@
   opacity: 0.6;
 }
 
+/* One column that never grows past the sidebar: a long room name used to widen the grid track,
+   pushing the row (and its unread badge) under the sidebar's edge. */
+.rm-sidebar .rm-rooms {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* Up to two whole lines, then an ellipsis; the full name is the row's title. */
 .rm-room-item-name {
   flex: 1;
-  white-space: nowrap;
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  line-height: 1.35;
   overflow: hidden;
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .rm-room-item-badge {
   font-size: 11px;
   font-weight: 600;
-  padding: 1px 6px;
+  padding: 1px calc(6 * var(--ws-px));
   border-radius: 9999px;
   background-color: var(--accent-text, #0055d6);
   color: var(--text-inverse, #ffffff);
   flex-shrink: 0;
   line-height: 1.4;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .rm-closed-rooms-list {
@@ -393,17 +410,18 @@
 }
 
 .rm-no-rooms {
-  padding: 12px 10px;
-  font-size: 13px;
+  padding: calc(12 * var(--ws-px)) calc(10 * var(--ws-px));
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
 }
 
 /* Sidebar Bottom Footer */
 .rm-sidebar-footer {
   border-top: 1px solid var(--border-subtle, #edf2f7);
-  padding: 10px 10px 12px 10px;
+  padding: calc(10 * var(--ws-px)) calc(10 * var(--ws-px)) calc(12 * var(--ws-px))
+    calc(10 * var(--ws-px));
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: calc(4 * var(--ws-px));
   background-color: var(--bg-surface, var(--surface-sunken, #f8fafc));
   flex-shrink: 0;
 }
@@ -411,11 +429,11 @@
 .rm-sidebar-footer-link {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 7px 10px;
+  gap: calc(10 * var(--ws-px));
+  padding: calc(7 * var(--ws-px)) calc(10 * var(--ws-px));
   border-radius: var(--radius-s, 6px);
   color: var(--text-secondary, #334155);
-  font-size: 13px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
   font-weight: 500;
   text-decoration: none;
   transition: all 0.12s ease;
@@ -436,8 +454,8 @@
 
 .rm-sidebar.collapsed .rm-sidebar-footer-link {
   justify-content: center;
-  padding: 8px 0;
-  width: 44px;
+  padding: calc(8 * var(--ws-px)) 0;
+  width: calc(44 * var(--ws-px));
   margin: 0 auto;
 }
 
@@ -448,9 +466,9 @@
 .rm-sidebar-profile-card {
   display: flex;
   align-items: center;
-  padding: 8px 12px;
+  padding: calc(8 * var(--ws-px)) calc(12 * var(--ws-px));
   border-radius: var(--radius-s, 6px);
-  margin-top: 4px;
+  margin-top: calc(4 * var(--ws-px));
   background-color: var(--bg-surface-elevated, var(--surface, #ffffff));
   border: 1px solid var(--border, #e2e8f0);
 }
@@ -463,7 +481,7 @@
 /* Account card: name plus a small chevron; in the collapsed rail an icon button opens the
    same menu. */
 .rm-profile-menu-button {
-  gap: 8px;
+  gap: calc(8 * var(--ws-px));
 }
 .rm-profile-menu-button .rm-profile-card-name {
   flex: 1;
@@ -483,9 +501,9 @@
   position: relative;
 }
 .rm-sidebar.collapsed .rm-profile-menu-button {
-  width: 44px;
-  height: 44px;
-  margin: 4px auto 0;
+  width: calc(44 * var(--ws-px));
+  height: calc(44 * var(--ws-px));
+  margin: calc(4 * var(--ws-px)) auto 0;
   padding: 0;
   justify-content: center;
 }
@@ -499,11 +517,11 @@
 .rm-sidebar.collapsed .rm-profile-menu-list {
   right: auto;
   width: max-content;
-  min-width: 140px;
+  min-width: calc(140 * var(--ws-px));
 }
 
 .rm-profile-card-name {
-  font-size: 13px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
   font-weight: 500;
   color: var(--text-primary, #0f172a);
   white-space: nowrap;
@@ -522,24 +540,24 @@
   width: 100%;
   max-width: 760px;
   margin: 0 auto;
-  padding: 40px 32px 48px;
+  padding: calc(40 * var(--ws-px)) calc(32 * var(--ws-px)) calc(48 * var(--ws-px));
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: calc(24 * var(--ws-px));
 }
 
 .rm-overview-head {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: calc(12 * var(--ws-px));
 }
 
 .rm-overview-head h1 {
   flex: 1;
   margin: 0;
-  font-size: 22px;
+  font-size: calc(22 * var(--ws-type-px));
   font-weight: 600;
   letter-spacing: -0.3px;
   color: var(--text-primary, #09090b);
@@ -562,12 +580,12 @@
 .rm-overview-room {
   display: flex;
   align-items: center;
-  gap: 12px;
-  min-height: 48px;
-  padding: 10px 16px;
+  gap: calc(12 * var(--ws-px));
+  min-height: calc(48 * var(--ws-px));
+  padding: calc(10 * var(--ws-px)) calc(16 * var(--ws-px));
   color: var(--text-primary, #09090b);
   text-decoration: none;
-  font-size: 14px;
+  font-size: calc(14 * var(--ws-type-px));
 }
 
 .rm-overview-room:hover {
@@ -603,15 +621,15 @@
 }
 
 .rm-overview-empty {
-  padding: 32px 24px;
+  padding: calc(32 * var(--ws-px)) calc(24 * var(--ws-px));
   border: 1px dashed var(--border, #e4e4e7);
   border-radius: var(--radius-m, 10px);
   text-align: center;
 }
 
 .rm-overview-empty h2 {
-  margin: 0 0 6px;
-  font-size: 15px;
+  margin: 0 0 calc(6 * var(--ws-px));
+  font-size: calc(15 * var(--ws-type-px));
   font-weight: 600;
   color: var(--text-primary, #09090b);
 }
@@ -619,7 +637,15 @@
 .rm-overview-empty p {
   margin: 0 auto;
   max-width: 42ch;
-  font-size: 13px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+}
+
+.rm-overview-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
 }
 
 /* ==========================================================================
@@ -640,11 +666,13 @@
     /* No shadow while off-canvas: it would show as a strip on the left edge. */
     box-shadow: none;
     transform: translateX(-100%);
-    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    /* Motion v1: slides out in 190 ms, in (below) in 260 ms; none under reduced motion. */
+    transition: transform calc(var(--motion-duration-exit) + 10ms) var(--motion-ease-in);
   }
 
   .rm-sidebar.open {
     transform: translateX(0);
+    transition: transform calc(var(--motion-duration-enter) - 20ms) var(--motion-ease-out);
     box-shadow: var(--shadow-floating, 0 20px 25px -5px rgba(15, 23, 42, 0.1));
   }
 
@@ -667,7 +695,7 @@
   .rm-sidebar.collapsed .rm-sidebar-footer-link {
     width: auto;
     justify-content: flex-start;
-    padding: 7px 10px;
+    padding: calc(7 * var(--ws-px)) calc(10 * var(--ws-px));
     margin: 0;
   }
 
@@ -680,12 +708,12 @@
   }
 
   .rm-overview {
-    padding: 12px 16px 32px;
-    gap: 16px;
+    padding: calc(12 * var(--ws-px)) calc(16 * var(--ws-px)) calc(32 * var(--ws-px));
+    gap: calc(16 * var(--ws-px));
   }
 
   .rm-overview-head h1 {
-    font-size: 18px;
+    font-size: calc(18 * var(--ws-type-px));
   }
 
   .rm-drawer-backdrop {
@@ -719,13 +747,13 @@
 }
 .rm-profile-menu-list {
   position: absolute;
-  bottom: calc(100% + 6px);
+  bottom: calc(100% + calc(6 * var(--ws-px)));
   left: 0;
   right: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 4px;
+  padding: calc(4 * var(--ws-px));
   background: var(--bg-surface-elevated, var(--surface));
   border: 1px solid var(--border);
   border-radius: var(--radius-m, 8px);
@@ -735,15 +763,15 @@
 .rm-profile-menu-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-height: 36px;
-  padding: 0 10px;
+  gap: calc(8 * var(--ws-px));
+  min-height: calc(36 * var(--ws-px));
+  padding: 0 calc(10 * var(--ws-px));
   border: 0;
   border-radius: var(--radius-s, 6px);
   background: none;
   color: var(--text-primary);
   font: inherit;
-  font-size: 13px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
   text-decoration: none;
   cursor: pointer;
 }
@@ -769,8 +797,8 @@
     display: flex;
     width: 100%;
     height: auto;
-    margin: 4px 0 0;
-    padding: 8px 12px;
+    margin: calc(4 * var(--ws-px)) 0 0;
+    padding: calc(8 * var(--ws-px)) calc(12 * var(--ws-px));
     justify-content: flex-start;
   }
   .rm-sidebar.collapsed .rm-profile-menu-button .rm-profile-card-name {
@@ -786,4 +814,17 @@
     right: 0;
     width: auto;
   }
+}
+
+/* Embedded in an app shell: fill the shell's content area instead of the whole viewport.
+   The shell sizes its own wrapper; it never overrides .rm-app. */
+.rm-app[data-embedded='true'] {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+/* In the workspace shell the room list lives in the shell's sidebar (WORKSPACE_V3.md §3), so
+   the rooms app has one column. */
+.rm-app[data-sidebar='shell'] {
+  grid-template-columns: minmax(0, 1fr);
 }

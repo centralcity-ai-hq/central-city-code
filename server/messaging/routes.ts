@@ -1,7 +1,14 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Operator } from '../../shared/types.js';
-import { MESSAGE_LIMITS, contextIdSchema, sendBodySchema, type InboxPage } from './contract.js';
+import {
+  MESSAGE_LIMITS,
+  contextIdSchema,
+  messagePartsSchema,
+  sendBodySchema,
+  sendFields,
+  type InboxPage,
+} from './contract.js';
 import type { Messaging } from './service.js';
 
 export interface MessagingRouteDependencies {
@@ -59,7 +66,7 @@ const agentParams = z.object({ id: z.string().uuid() }).strict();
  * the authenticated agent is always the sender or inbox).
  */
 export function registerMessagingRoutes(app: FastifyInstance, d: MessagingRouteDependencies): void {
-  const owned = (operator: Operator) => ({ operatorId: operator.id });
+  const owned = (operator: Operator) => ({ operatorId: operator.id, console: true });
   const waiting = (
     request: FastifyRequest,
     operatorId: string,
@@ -121,6 +128,65 @@ export function registerMessagingRoutes(app: FastifyInstance, d: MessagingRouteD
     const { id } = agentParams.parse(request.params);
     const { seq } = ackBody.parse(request.body);
     return d.messaging.ack(owned(operator), id, seq);
+  });
+
+  // Private messages between room members (room-direct.ts). The console opens the pair's one
+  // thread, then writes as its person or one of its AIs in that room.
+  const roomParam = z.object({ room: sendFields.room_id.unwrap() }).strict();
+  const memberId = z.string().uuid();
+  app.post('/api/rooms/:room/direct', async (request) => {
+    const operator = await d.owner(request);
+    const { room } = roomParam.parse(request.params);
+    const { to, from } = z
+      .object({ to: memberId, from: memberId.optional() })
+      .strict()
+      .parse(request.body ?? {});
+    return d.messaging.openDirect(owned(operator), room, from, to);
+  });
+  app.post('/api/messages/direct/:contextId/read', async (request) => {
+    const operator = await d.owner(request);
+    const { contextId } = z.object({ contextId: contextIdSchema }).strict().parse(request.params);
+    return d.messaging.readDirect(owned(operator), contextId);
+  });
+  // "Delete conversation": hides the thread from this person's Messages only (migration 70).
+  app.post('/api/messages/conversations/:contextId/hide', async (request) => {
+    const operator = await d.owner(request);
+    const { contextId } = z.object({ contextId: contextIdSchema }).strict().parse(request.params);
+    z.object({})
+      .strict()
+      .parse(request.body ?? {});
+    return d.messaging.hideConversation(owned(operator), contextId);
+  });
+  // Who New message can start a private message with: members of the caller's rooms.
+  app.get('/api/messages/recipients', async (request) => {
+    const operator = await d.owner(request);
+    z.object({})
+      .strict()
+      .parse(request.query ?? {});
+    return d.messaging.recipients(operator.id);
+  });
+  app.post('/api/rooms/:room/direct/messages', async (request, reply) => {
+    const operator = await d.owner(request);
+    const { room } = roomParam.parse(request.params);
+    const { from, to, ...body } = z
+      .object({
+        from: memberId,
+        to: memberId,
+        text: sendFields.text,
+        parts: messagePartsSchema.optional(),
+        reply_to: z.string().uuid().optional(),
+        idempotency_key: sendFields.idempotency_key,
+      })
+      .strict()
+      .refine((value) => (value.text === undefined) !== (value.parts === undefined), {
+        message: 'Pass exactly one of text or parts.',
+      })
+      .parse(request.body ?? {});
+    return reply
+      .code(201)
+      .send(
+        await d.messaging.send(owned(operator), from, { ...body, to_agent_id: to, room_id: room }),
+      );
   });
 
   app.post('/api/runtime/messages', async (request, reply) => {

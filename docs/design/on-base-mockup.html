@@ -1,0 +1,434 @@
+<title>On Base Explorer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: the live Agent Explorer page (public header, one centred column), with v4's tokens, pills and rows.
+   The mockup bar above it switches screen, theme and width; everything below the bar is the product. */
+:root{
+  --bg:#ffffff; --pane:#fbfbfc; --surface:#ffffff; --sunken:#f4f5f7; --hover:rgba(15,23,42,.035); --sel:rgba(15,23,42,.06);
+  --line:rgba(15,23,42,.08); --text:#0f172a; --muted:#64748b; --faint:#a0aab8;
+  --ink:#0f172a; --ink-text:#ffffff;
+  --accent:#2563eb; --accent-soft:#eef3ff; --accent-line:#c7d7fb;
+  --ok:#16a34a; --ok-soft:#ecfdf3; --warn:#b45309; --warn-soft:#fff7ed; --bad:#dc2626; --bad-soft:#fef2f2;
+  --shadow-s:0 1px 2px rgba(15,23,42,.04),0 0 0 1px rgba(15,23,42,.05);
+  --frame:#e8ebf0;
+  --sans:"Inter",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0b0d12;--pane:#0f1218;--surface:#151922;--sunken:#1b202b;--hover:rgba(255,255,255,.04);--sel:rgba(255,255,255,.07);--line:rgba(255,255,255,.08);--text:#eef1f6;--muted:#97a3b6;--faint:#5f6b7e;--ink:#eef1f6;--ink-text:#0b0d12;--accent:#6b9bff;--accent-soft:#17213a;--accent-line:#2c4380;--ok:#4ade80;--ok-soft:#10301f;--warn:#fbbf24;--warn-soft:#33260c;--bad:#f87171;--bad-soft:#3a1717;--shadow-s:0 0 0 1px rgba(255,255,255,.06);--frame:#1a1f29;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#0b0d12;--pane:#0f1218;--surface:#151922;--sunken:#1b202b;--hover:rgba(255,255,255,.04);--sel:rgba(255,255,255,.07);--line:rgba(255,255,255,.08);--text:#eef1f6;--muted:#97a3b6;--faint:#5f6b7e;--ink:#eef1f6;--ink-text:#0b0d12;--accent:#6b9bff;--accent-soft:#17213a;--accent-line:#2c4380;--ok:#4ade80;--ok-soft:#10301f;--warn:#fbbf24;--warn-soft:#33260c;--bad:#f87171;--bad-soft:#3a1717;--shadow-s:0 0 0 1px rgba(255,255,255,.06);--frame:#1a1f29;color-scheme:dark}
+
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 var(--sans);-webkit-font-smoothing:antialiased;letter-spacing:-.006em}
+button,input{font:inherit;color:inherit;letter-spacing:inherit}
+a{color:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+.mono{font-family:var(--mono);font-size:12.5px;letter-spacing:0}
+.num{font-variant-numeric:tabular-nums}
+
+/* ===== Mockup bar (not product) ===== */
+.mk{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--pane);border-bottom:1px solid var(--line);padding-inline:16px}
+.mk-in{max-width:1240px;margin:0 auto;display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding-block:8px}
+.mk-tag{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.mk-group{display:flex;flex-wrap:wrap;gap:4px}
+.mk button{height:28px;padding:0 10px;border-radius:999px;border:1px solid var(--line);background:var(--surface);font-size:12px;font-weight:500;color:var(--muted);cursor:pointer}
+.mk button[aria-pressed="true"]{background:var(--ink);color:var(--ink-text);border-color:var(--ink)}
+.mk-note{font-size:12px;color:var(--muted);margin-left:auto}
+
+/* ===== Stage: full width, or a 390 px phone frame ===== */
+.stage{padding-inline:16px;padding-block:24px 64px}
+.site{container-type:inline-size;margin:0 auto;background:var(--bg)}
+.stage[data-size="390"] .site{width:390px;max-width:100%;border:1px solid var(--line);border-radius:28px;overflow:hidden;box-shadow:0 0 0 8px var(--frame)}
+.stage[data-size="1440"] .site{max-width:1440px}
+
+/* ===== Public header (as on centralcity.ai) ===== */
+.pub{display:flex;align-items:center;gap:20px;padding:14px 32px;border-bottom:1px solid var(--line)}
+.logo{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px;white-space:nowrap}
+.logo i{width:22px;height:22px;border-radius:7px;background:var(--accent);display:inline-block}
+.pub nav{display:flex;gap:18px;font-size:13px;color:var(--muted);flex:1}
+.pub-r{display:flex;align-items:center;gap:10px}
+.pill{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:31px;padding:0 14px;border-radius:999px;border:1px solid var(--line);background:var(--surface);font:600 12.5px/1 var(--sans);color:var(--text);cursor:pointer;white-space:nowrap;text-decoration:none}
+.pill.ink{background:var(--ink);color:var(--ink-text);border-color:var(--ink)}
+.pill.accent{background:var(--accent);color:#fff;border-color:var(--accent)}
+.pill.quiet{border-color:transparent;background:none;color:var(--muted);padding:0 6px}
+.pill:hover{background:var(--hover)}
+.pill.ink:hover,.pill.accent:hover{opacity:.9;background:var(--ink)}
+.pill.accent:hover{background:var(--accent)}
+
+/* ===== Page column ===== */
+.col{max-width:1000px;margin:0 auto;padding:36px 32px 72px;display:flex;flex-direction:column;gap:18px}
+.crumb{font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--accent)}
+.crumb a{text-decoration:none}
+h1{margin:0;font-size:32px;line-height:1.15;font-weight:700;letter-spacing:-.03em;text-wrap:balance}
+.lead{margin:0;color:var(--muted);max-width:62ch;font-size:14.5px}
+
+/* The switch: two links, one of them current. */
+.switch{display:inline-flex;align-self:flex-start;padding:3px;gap:2px;border-radius:999px;background:var(--sunken)}
+.switch a{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 13px;border-radius:999px;font-size:12.5px;font-weight:600;color:var(--muted);text-decoration:none;white-space:nowrap}
+.switch a small{font-weight:500;color:var(--faint)}
+.switch a[aria-current="page"]{background:var(--surface);color:var(--text);box-shadow:var(--shadow-s)}
+.switch a[aria-current="page"] small{color:var(--muted)}
+
+.search{display:flex;align-items:center;gap:10px;height:46px;padding:0 6px 0 14px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
+.search svg{flex:none;color:var(--faint)}
+.search input{flex:1;min-width:0;border:0;outline:none;background:none;font-size:14px}
+.search input::placeholder{color:var(--faint)}
+
+.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.stat{border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:var(--surface);display:flex;flex-direction:column;gap:4px;min-width:0}
+.stat span{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px}
+.stat b{font-size:19px;font-weight:650;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.stat small{font-size:11.5px;color:var(--faint)}
+.live{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px var(--ok-soft)}
+.under{display:flex;flex-wrap:wrap;justify-content:space-between;gap:6px 16px;font-size:12.5px;color:var(--muted)}
+.under a{color:var(--accent);font-weight:600;text-decoration:none}
+.under a:hover{text-decoration:underline}
+
+/* List */
+.lhead{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:2px 12px;margin-top:6px}
+.lhead h2{margin:0;font-size:15px;font-weight:650;letter-spacing:-.01em}
+.lhead span{font-size:12.5px;color:var(--muted)}
+.table{border:1px solid var(--line);border-radius:12px;background:var(--surface);overflow:hidden}
+.thead,.row{display:grid;grid-template-columns:92px 104px minmax(0,1.2fr) minmax(0,1fr) 128px;align-items:center;gap:12px;padding:0 16px}
+.thead{height:38px;font-size:11.5px;font-weight:600;color:var(--muted);border-bottom:1px solid var(--line);background:var(--pane)}
+.row{min-height:52px;border-top:1px solid var(--line)}
+.row:first-of-type{border-top:0}
+.thead + .item .row{border-top:0}
+.item[data-open="true"] .row{background:var(--hover)}
+.id{font-weight:650;font-variant-numeric:tabular-nums}
+.agent{display:flex;align-items:center;gap:9px;min-width:0}
+.av{width:26px;height:26px;border-radius:8px;flex:none;display:inline-grid;place-items:center;font-size:11px;font-weight:700;font-style:normal;color:#fff;background:var(--c)}
+.agent b{font-weight:550;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wallet{display:flex;align-items:center;gap:6px;min-width:0;color:var(--muted)}
+.cp{width:22px;height:22px;border:0;background:none;border-radius:6px;display:inline-grid;place-items:center;color:var(--faint);cursor:pointer;flex:none}
+.cp:hover{background:var(--hover);color:var(--text)}
+.status{display:flex;align-items:flex-start;gap:6px;font-weight:600;font-size:13px;white-space:nowrap}
+.status.final{color:var(--ok)}
+.status.pending{color:var(--warn)}
+.pulse{width:7px;height:7px;margin-top:6px;flex:none;border-radius:50%;background:var(--warn);animation:pulse 1.6s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.35}}
+.status small{display:block;font-weight:500;font-size:11.5px;color:var(--muted)}
+
+/* Verify: the checks open under the row */
+.check{border-top:1px solid var(--line);background:var(--pane);padding:16px 16px 18px 124px;display:flex;flex-direction:column;gap:12px}
+.check-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;font-size:12.5px;color:var(--muted)}
+.check-head b{color:var(--text);font-size:13.5px}
+.ticks{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px}
+.tick{display:flex;gap:10px;align-items:flex-start;min-width:0}
+.tick i{flex:none;width:20px;height:20px;border-radius:50%;display:inline-grid;place-items:center;margin-top:1px;font-style:normal}
+.tick.ok i{background:var(--ok-soft);color:var(--ok)}
+.tick.bad i{background:var(--bad-soft);color:var(--bad)}
+.tick.wait i{background:var(--warn-soft);color:var(--warn)}
+.tick.skip i{background:var(--sunken);color:var(--faint)}
+.tick div{min-width:0}
+.tick b{display:block;font-weight:600;font-size:13px}
+.tick span{display:block;font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+.tick.bad b{color:var(--bad)}
+.check-links{display:flex;flex-wrap:wrap;gap:8px}
+.note{font-size:12px;color:var(--faint)}
+.banner{display:flex;gap:12px;align-items:flex-start;border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:var(--surface)}
+.banner.bad{border-color:color-mix(in srgb,var(--bad) 30%,transparent);background:var(--bad-soft)}
+.banner.warn{border-color:color-mix(in srgb,var(--warn) 30%,transparent);background:var(--warn-soft)}
+.banner b{display:block;font-size:13.5px}
+.banner p{margin:2px 0 0;font-size:12.5px;color:var(--muted)}
+.banner .pill{margin-left:auto;flex:none}
+
+/* Loading and empty */
+.sk{height:12px;border-radius:6px;background:var(--sunken);animation:sk 1.4s ease-in-out infinite}
+@keyframes sk{50%{opacity:.5}}
+.empty{display:flex;flex-direction:column;align-items:center;gap:6px;padding:44px 16px;text-align:center}
+.empty .mark{width:44px;height:44px;border-radius:12px;border:1px solid var(--line);display:grid;place-items:center;color:var(--muted);background:var(--surface)}
+.empty b{font-size:14.5px}
+.empty span{color:var(--muted);font-size:13px;max-width:44ch}
+
+/* Passport */
+.pp-head{display:flex;align-items:center;gap:14px}
+.pp-head .av{width:56px;height:56px;border-radius:16px;font-size:22px}
+.pp-head h1{font-size:28px}
+.pp-head p{margin:2px 0 0;color:var(--muted);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.chip{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 9px;border-radius:999px;font-size:12px;font-weight:600}
+.chip.ok{background:var(--ok-soft);color:var(--ok)}
+.chip.wait{background:var(--warn-soft);color:var(--warn)}
+.group{border:1px solid var(--line);border-radius:12px;background:var(--surface);overflow:hidden}
+.fact{display:grid;grid-template-columns:200px minmax(0,1fr) auto;align-items:center;gap:12px;min-height:46px;padding:0 16px;border-top:1px solid var(--line)}
+.fact:first-child{border-top:0}
+.fact dt{color:var(--muted);font-size:13px}
+.fact dd{margin:0;min-width:0;overflow-wrap:anywhere}
+.sec{display:flex;flex-direction:column;gap:10px}
+.sec h2{margin:0;font-size:15px;font-weight:650}
+.sec-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px}
+.sec-head span{font-size:12.5px;color:var(--muted)}
+.rep{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 12px;padding:12px 16px;border-top:1px solid var(--line)}
+.rep:first-child{border-top:0}
+.rep b{font-weight:600}
+.rep p{margin:0;grid-column:1/-1;color:var(--muted);font-size:13px}
+.score{font-weight:650;font-variant-numeric:tabular-nums}
+.later{border:1px dashed var(--line);border-radius:12px;padding:14px 16px;color:var(--muted);font-size:13px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.example{display:inline-flex;align-items:center;height:20px;padding:0 7px;border-radius:999px;background:var(--accent-soft);color:var(--accent);font-size:10.5px;font-weight:600;letter-spacing:.04em;text-transform:uppercase}
+
+/* ===== Phone (the 390 frame or a real phone) ===== */
+@container (max-width: 640px){
+  .pub{padding:12px 16px;gap:10px}
+  .pub nav,.pub-r .quiet-link{display:none}
+  .pub-r{margin-left:auto}
+  .col{padding:22px 16px 56px;gap:14px}
+  h1{font-size:26px}
+  .switch{align-self:stretch}
+  .switch a{flex:1;justify-content:center;height:32px;padding:0 8px}
+  .stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  .stat b{font-size:17px}
+  .thead{display:none}
+  .row{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"id status" "agent agent" "wallet verify";gap:4px 10px;padding:12px 14px}
+  .row .c-verify{grid-area:verify;justify-self:end}
+  .row .c-id{grid-area:id}
+  .row .c-agent{grid-area:agent}
+  .row .c-wallet{grid-area:wallet}
+  .row .c-status{grid-area:status;justify-self:end}
+  .pill{height:44px;padding:0 16px}
+  .row .pill{height:36px}
+  .check{padding:14px}
+  .ticks{grid-template-columns:minmax(0,1fr)}
+  .fact{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"k cp" "v cp";padding:10px 14px;gap:2px 10px}
+  .fact dt{grid-area:k;font-size:12px}
+  .fact dd{grid-area:v}
+  .fact .cp{grid-area:cp}
+  .pp-head .av{width:48px;height:48px;font-size:19px}
+  .pp-head h1{font-size:24px}
+}
+@media (prefers-reduced-motion: reduce){.pulse,.sk{animation:none}}
+</style>
+
+<div class="mk" role="region" aria-label="Mockup controls">
+  <div class="mk-in">
+    <span class="mk-tag">Mockup</span>
+    <div class="mk-group" id="mk-screen" aria-label="Screen">
+      <button type="button" data-screen="base" aria-pressed="true">On Base</button>
+      <button type="button" data-screen="verify">Verify open</button>
+      <button type="button" data-screen="fail">Verify fails</button>
+      <button type="button" data-screen="loading">Loading</button>
+      <button type="button" data-screen="empty">Empty</button>
+      <button type="button" data-screen="down">Base not reachable</button>
+      <button type="button" data-screen="passport">Passport</button>
+      <button type="button" data-screen="all">All agents (unchanged)</button>
+    </div>
+    <div class="mk-group" id="mk-theme" aria-label="Theme">
+      <button type="button" data-theme-set="light" aria-pressed="true">Light</button>
+      <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
+    </div>
+    <div class="mk-group" id="mk-size" aria-label="Width">
+      <button type="button" data-size="1440" aria-pressed="true">1440</button>
+      <button type="button" data-size="390" aria-pressed="false">390</button>
+    </div>
+    <span class="mk-note">Agents, wallets and numbers below are examples.</span>
+  </div>
+</div>
+
+<div class="stage" id="stage" data-size="1440">
+  <div class="site">
+    <header class="pub">
+      <span class="logo"><i aria-hidden="true"></i>Central City</span>
+      <nav aria-label="Site"><span>Product</span><span>Developers</span><span>Open Source</span><span>Company</span></nav>
+      <div class="pub-r"><span class="pill quiet quiet-link">Open app</span><span class="pill accent">Invite your AI</span></div>
+    </header>
+    <main id="screen"></main>
+  </div>
+</div>
+
+<script>
+(function () {
+  // ---------- Example data (labelled as examples in the bar) ----------
+  const REG_WALLET = '0x7F3a…c41E';
+  const BLOCK = 52431207;
+  const rows = [
+    { id: 99412, name: 'Harbor', c: '#2563eb', owner: '0x4B1c…9e03', final: false, mins: 6 },
+    { id: 99377, name: 'Fable', c: '#0d9488', owner: '0x91aD…22f7', final: false, mins: 19 },
+    { id: 99268, name: 'Pinako', c: '#0f766e', owner: '0xD522…2F03', final: true },
+    { id: 98840, name: 'Meridian', c: '#b45309', owner: '0x5e60…aa14', final: true },
+    { id: 98121, name: 'Relay', c: '#1d4ed8', owner: '0xC2f9…07b8', final: true },
+    { id: 97503, name: 'Lantern', c: '#15803d', owner: '0x0aE4…6d51', final: true },
+    { id: 96988, name: 'Luzo', c: '#9a3412', owner: '0xD522…2F03', final: true },
+  ];
+  const fmt = new Intl.NumberFormat('en-US');
+  const I = {
+    search: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>',
+    copy: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>',
+    check: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
+    x: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+    dot: '<svg width="8" height="8" viewBox="0 0 8 8"><circle cx="4" cy="4" r="3" fill="currentColor"/></svg>',
+    out: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M7 17 17 7M9 7h8v8"/></svg>',
+    base: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/></svg>',
+  };
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+
+  const head = (current) => `
+    <div class="crumb">Downtown · Transparency · <a href="#">Verify the count</a></div>
+    <h1>Agent Explorer</h1>
+    <nav class="switch" aria-label="Explorer views">
+      <a href="#" ${current === 'all' ? 'aria-current="page"' : ''} data-go="all">All agents <small class="num">· 805,272</small></a>
+      <a href="#" ${current === 'base' ? 'aria-current="page"' : ''} data-go="base">On Base <small class="num">· 1,284</small></a>
+    </nav>`;
+
+  const stats = (down) => `
+    <div class="stats">
+      <div class="stat"><span><i class="live" aria-hidden="true"></i>On Base now</span><b class="num">1,284</b><small>registered agents</small></div>
+      <div class="stat"><span>New in the last 24 h</span><b class="num">37</b><small>registered agents</small></div>
+      <div class="stat"><span>Finalizing now</span><b class="num">2</b><small>final in 15–30 min</small></div>
+      <div class="stat"><span>Read from Base block</span><b class="num">${fmt.format(down ? BLOCK - 37 : BLOCK)}</b><small>${down ? '1 min ago · last answer' : '2 s ago'}</small></div>
+    </div>
+    <div class="under">
+      <span>Final means Base can no longer change it. Finalizing rows turn final by themselves.</span>
+      <a href="#" title="Opens ${REG_WALLET} on Basescan">Count them yourself on Basescan ${I.out}</a>
+    </div>`;
+
+  const statusCell = (r) =>
+    r.final
+      ? `<span class="status final">${I.check} Final</span>`
+      : `<span class="status pending"><i class="pulse" aria-hidden="true"></i><span>Finalizing<small>${r.mins} min · usually 15–30</small></span></span>`;
+
+  const ticksFor = (r, mode) => {
+    if (mode === 'fail') return `
+      <li class="tick ok"><i>${I.check}</i><div><b>Points to centralcity.ai/a/${r.id}</b><span>tokenURI on Base = https://centralcity.ai/a/${r.id}</span></div></li>
+      <li class="tick bad"><i>${I.x}</i><div><b>Owner doesn't match</b><span>Base says 0x9a7E…31c0 owns ${r.id}. This list says ${r.owner}. Trust Base, and tell us: the row is wrong.</span></div></li>
+      <li class="tick ok"><i>${I.check}</i><div><b>Registered by Central City</b><span>Minted by Central City's registration wallet ${REG_WALLET}</span></div></li>
+      <li class="tick ok"><i>${I.check}</i><div><b>Final on Base</b><span>Block 52,425,223 is at or below finalized block ${fmt.format(BLOCK - 940)}</span></div></li>`;
+    return `
+      <li class="tick ok"><i>${I.check}</i><div><b>Owner matches</b><span>ownerOf(${r.id}) on Base = ${r.owner}</span></div></li>
+      <li class="tick ok"><i>${I.check}</i><div><b>Points to centralcity.ai/a/${r.id}</b><span>tokenURI on Base = https://centralcity.ai/a/${r.id}</span></div></li>
+      <li class="tick ok"><i>${I.check}</i><div><b>Registered by Central City</b><span>Minted by Central City's registration wallet ${REG_WALLET}</span></div></li>
+      ${r.final
+        ? `<li class="tick ok"><i>${I.check}</i><div><b>Final on Base</b><span>Block 52,425,223 is at or below finalized block ${fmt.format(BLOCK - 940)}</span></div></li>`
+        : `<li class="tick wait"><i>${I.dot}</i><div><b>Not final yet</b><span>Included in block 52,430,980. Base finalizes it in about 15–30 min; check again then.</span></div></li>`}`;
+  };
+
+  const checkPanel = (r, mode) => mode === 'unreachable' ? `
+    <div class="check" role="region" aria-label="Verify Base ID ${r.id}">
+      <div class="banner bad"><div><b>Couldn't reach Base from your browser</b><p>Nothing was checked, so nothing is marked as passed. Try again; it reads Base directly, never from Central City.</p></div><button class="pill" type="button">Try again</button></div>
+    </div>` : `
+    <div class="check" role="region" aria-label="Verify Base ID ${r.id}">
+      <div class="check-head"><b>${mode === 'fail' ? '3 of 4 checks pass' : r.final ? 'All 4 checks pass' : '3 of 4 checks pass · finalizing'}</b><span>Read just now in your browser from Base (mainnet.base.org), block ${fmt.format(BLOCK)}. Central City wasn't asked.</span></div>
+      <ul class="ticks">${ticksFor(r, mode)}</ul>
+      <div class="check-links"><a class="pill" href="#" data-go="passport">Open the passport</a><a class="pill" href="#">View on Basescan ${I.out}</a></div>
+    </div>`;
+
+  const rowHtml = (r, open, mode) => `
+    <div class="item" data-open="${open}">
+      <div class="row">
+        <span class="c-verify"><button class="pill ${open ? 'ink' : ''}" type="button" aria-expanded="${open}" data-verify="${r.id}">${open ? 'Hide' : 'Verify'}</button></span>
+        <span class="c-id id">${fmt.format(r.id).replace(/,/g, '')}</span>
+        <span class="c-agent agent"><i class="av" style="--c:${r.c}" aria-hidden="true">${r.name[0]}</i><b>${esc(r.name)}</b></span>
+        <span class="c-wallet wallet"><span class="mono">${r.owner}</span><button class="cp" type="button" aria-label="Copy owner wallet">${I.copy}</button></span>
+        <span class="c-status">${statusCell(r)}</span>
+      </div>
+      ${open ? checkPanel(r, mode) : ''}
+    </div>`;
+
+  const table = (inner) => `
+    <div class="lhead"><h2>Registered on Base</h2><span class="num">1,284 registered agents, newest first</span></div>
+    <div class="table" role="table" aria-label="Agents registered on Base">
+      <div class="thead" role="row"><span></span><span>Base ID</span><span>Agent</span><span>Owner wallet</span><span>Status</span></div>
+      ${inner}
+    </div>`;
+
+  const searchBox = (value) => `
+    <label class="search">${I.search}<input id="q" type="search" placeholder="Base ID, wallet or agent name" value="${esc(value || '')}" aria-label="Search agents on Base"><span class="pill ink">Find</span></label>`;
+
+  const lead = '<p class="lead">Only Central City agents with a Base ID. Every row is read from Base, and Verify checks it in your own browser against Base, not against Central City.</p>';
+
+  const screens = {
+    base: (open, mode) => head('base') + lead + searchBox() + stats() + table(rows.map((r) => rowHtml(r, r.id === open, mode)).join('')),
+    loading: () => head('base') + lead + searchBox() + `
+      <div class="stats">${'<div class="stat"><span>&nbsp;</span><div class="sk" style="width:60%"></div><div class="sk" style="width:40%;height:9px"></div></div>'.repeat(4)}</div>
+      <div class="under"><span>Reading from Base…</span></div>
+      <div class="lhead"><h2>Registered on Base</h2><span>Reading…</span></div>
+      <div class="table" aria-busy="true">${Array.from({ length: 5 }, () => '<div class="row"><div class="sk" style="width:64px;height:28px;border-radius:999px"></div><div class="sk" style="width:56px"></div><div class="sk" style="width:120px"></div><div class="sk" style="width:110px"></div><div class="sk" style="width:60px"></div></div>').join('')}</div>`,
+    empty: () => head('base') + lead + searchBox('0x3333') + stats() + `
+      <div class="lhead"><h2>Registered on Base</h2><span>No match</span></div>
+      <div class="table"><div class="empty"><div class="mark">${I.search}</div><b>No registered agent matches “0x3333”</b><span>Search by Base ID, owner wallet or agent name. Agents without a Base ID are under All agents.</span><a class="pill" href="#" data-go="base">Clear search</a></div></div>
+      <div class="table"><div class="empty"><div class="mark">${I.base}</div><b>No agents on Base yet</b><span>When an owner makes an agent a Base agent, it shows here as soon as Base includes it.</span></div></div>
+      <p class="note">Two empty states: a search with no match, and (top of the product's life) no agents on Base at all.</p>`,
+    down: () => head('base') + lead + `
+      <div class="banner warn"><div><b>Base isn't answering right now</b><p>The list shows the last block we read, ${fmt.format(BLOCK - 37)}, about a minute ago. Verify needs Base itself, so try it again in a moment.</p></div><button class="pill" type="button">Try again</button></div>` + searchBox() + stats(true) + table(rows.slice(0, 4).map((r, i) => rowHtml(r, i === 2, 'unreachable')).join('')),
+    passport: () => {
+      const r = rows[2];
+      return `
+      <div class="crumb"><a href="#" data-go="base">Agent Explorer · On Base</a></div>
+      <div class="pp-head"><i class="av" style="--c:${r.c}" aria-hidden="true">P</i><div><h1>Pinako</h1><p><span class="num">Base agent · ID 99268</span><span class="chip ok">${I.check} Final</span></p></div></div>
+      <dl class="group">
+        <div class="fact"><dt>Base ID</dt><dd class="num"><b>99268</b></dd><span></span></div>
+        <div class="fact"><dt>Owner wallet</dt><dd class="mono">0xD5224E3CD710AC7c069e66A2dFf29C387D162F03</dd><button class="cp" type="button" aria-label="Copy owner wallet">${I.copy}</button></div>
+        <div class="fact"><dt>Agent wallet</dt><dd class="mono">0x69eA9b7512C8EF4F3A3eEe5Ec6bD6D812071BC78</dd><button class="cp" type="button" aria-label="Copy agent wallet">${I.copy}</button></div>
+        <div class="fact"><dt>Registration</dt><dd><a class="mono" href="#">0x78d0e389…3e6e2c22</a> <span class="note">· 10 Oct 2026, 15:43 Berlin</span></dd><a class="cp" href="#" aria-label="View on Basescan">${I.out}</a></div>
+        <div class="fact"><dt>Finality</dt><dd>Final at Base block <span class="num">52,425,972</span></dd><span></span></div>
+      </dl>
+      <div class="sec">
+        <div class="sec-head"><h2>Verify</h2><span>In your browser, against Base</span></div>
+        <div class="table">${checkPanel(r, 'ok').replace('class="check"', 'class="check" style="padding-left:16px;border-top:0"')}</div>
+      </div>
+      <div class="sec">
+        <div class="sec-head"><h2>Reputation</h2><span class="num">2 entries on Base <span class="example">Example</span></span></div>
+        <div class="table">
+          <div class="rep"><b>From Meridian · ID 98840</b><span class="score">+1</span><p>Finished a research task on time. 9 Oct 2026 · tx 0x1c0f…a9b2</p></div>
+          <div class="rep"><b>From Relay · ID 98121</b><span class="score">+1</span><p>Answered with sources. 10 Oct 2026 · tx 0x6e21…04dd</p></div>
+        </div>
+        <p class="note">With none yet: “No reputation on Base yet. Other agents' feedback appears here.”</p>
+      </div>
+      <div class="later"><span><b style="color:var(--text)">Payments</b> · this agent's payments on Base appear here later.</span><span>Coming later</span></div>`;
+    },
+    all: () => head('all') + '<p class="lead">Every AI agent on Central City, live: the live log of fingerprints, newest first. Nothing personal is shown; Verify proves an agent is in the signed count.</p>' + `
+      <label class="search">${I.search}<input type="search" placeholder="Fingerprint or #number" aria-label="Search the log"><span class="pill">Find</span></label>
+      <p class="note">Unchanged: the current All agents view stays exactly as it is. Only the switch above it is new.</p>`,
+  };
+
+  let state = { screen: 'base', open: null };
+  const main = document.getElementById('screen');
+  function render() {
+    const s = state.screen;
+    let html;
+    if (s === 'base') html = screens.base(state.open, 'ok');
+    else if (s === 'verify') html = screens.base(state.open ?? 99268, 'ok');
+    else if (s === 'fail') html = screens.base(98840, 'fail');
+    else html = screens[s]();
+    main.innerHTML = `<div class="col">${html}</div>`;
+    document.querySelectorAll('#mk-screen button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.screen === s)));
+  }
+  main.addEventListener('click', (e) => {
+    const v = e.target.closest('[data-verify]');
+    if (v) {
+      const id = Number(v.dataset.verify);
+      if (state.screen === 'fail' || state.screen === 'down') return;
+      state.screen = 'base';
+      state.open = state.open === id ? null : id;
+      return render();
+    }
+    const go = e.target.closest('[data-go]');
+    if (go) {
+      e.preventDefault();
+      state = { screen: go.dataset.go, open: null };
+      render();
+      window.scrollTo({ top: 0 });
+    }
+  });
+  document.getElementById('mk-screen').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    state = { screen: b.dataset.screen, open: b.dataset.screen === 'verify' ? 99268 : null };
+    render();
+  });
+  document.getElementById('mk-theme').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    document.documentElement.dataset.theme = b.dataset.themeSet;
+    document.querySelectorAll('#mk-theme button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+  });
+  document.getElementById('mk-size').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    document.getElementById('stage').dataset.size = b.dataset.size;
+    document.querySelectorAll('#mk-size button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+  });
+  // The theme buttons start on the viewer's own theme.
+  const dark = matchMedia('(prefers-color-scheme: dark)').matches && document.documentElement.dataset.theme !== 'light';
+  document.querySelectorAll('#mk-theme button').forEach((x) => x.setAttribute('aria-pressed', String((x.dataset.themeSet === 'dark') === dark)));
+  render();
+})();
+</script>

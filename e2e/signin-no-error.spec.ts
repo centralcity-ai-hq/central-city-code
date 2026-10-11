@@ -74,7 +74,8 @@ test('sign up → Overview shows no error text on the way', async ({ page }) => 
   await page.getByRole('button', { name: 'Create account', exact: true }).click();
   await expect(page).toHaveURL(/\/$/);
   await expect(
-    page.getByRole('heading', { level: 1, name: 'Everything, at a glance.' }),
+    // The Overview is the Network map in the workspace.
+    page.getByRole('heading', { level: 1, name: 'Network map' }),
   ).toBeVisible({ timeout: 20_000 });
   await page.waitForLoadState('networkidle');
   expect(await errorText(page)).toEqual([]);
@@ -113,10 +114,15 @@ for (const misses of [1, 2]) {
       // A document request of the main frame is a reload (pushState navigations make none).
       if (request.isNavigationRequest() && request.frame() === page.mainFrame()) loads += 1;
     });
-    let missing = 0;
+    // The chunks made to fail, per page load. With Smart Rooms v2 the rooms page asks for both
+    // App and RoomsShell in one load, so a load misses one or both of them.
+    const missedPerLoad = new Map<number, Set<string>>();
     await page.route(/\/assets\/(RoomsShell|App)-[^/]+\.js$/, async (route) => {
       if (loads >= misses) return route.continue();
-      missing += 1;
+      const chunk = /\/assets\/(RoomsShell|App)-/.exec(route.request().url())![1];
+      const missed = missedPerLoad.get(loads) ?? new Set<string>();
+      missed.add(chunk);
+      missedPerLoad.set(loads, missed);
       return route.fulfill({ status: 404, contentType: 'text/html', body: 'Not found' });
     });
     await signIn(page, name);
@@ -128,7 +134,12 @@ for (const misses of [1, 2]) {
     // Includes everything shown before each reload (the record lives in sessionStorage).
     expect(await errorText(page)).toEqual([]);
     await expect(page.getByRole('heading', { name: 'No rooms yet' })).toBeVisible();
-    expect(missing).toBe(misses);
+    // Exactly the first `misses` loads missed a chunk, each at most App and RoomsShell once.
+    expect([...missedPerLoad.keys()]).toEqual([...Array(misses).keys()]);
+    for (const missed of missedPerLoad.values()) {
+      expect(missed.size).toBeGreaterThanOrEqual(1);
+      expect(missed.size).toBeLessThanOrEqual(2);
+    }
     expect(loads).toBe(misses);
   });
 }
@@ -149,7 +160,7 @@ test('a chunk that stays missing ends in the error page after three reloads, not
   await expect(page.getByRole('heading', { level: 1, name: 'Something went wrong.' })).toBeVisible({
     timeout: 20_000,
   });
-  await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Reload' })).toBeVisible();
   await page.waitForTimeout(1500);
   expect(loads).toBe(3);
 });

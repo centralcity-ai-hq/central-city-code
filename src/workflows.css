@@ -1,0 +1,321 @@
+/*
+ * Workflows (/workflows): a minimal public page in the public shell. Colours come from the global
+ * theme tokens (the same names the rooms v2 tokens use), so light and dark follow the site theme.
+ * Hairlines, no shadows, one blue accent, lots of white space.
+ */
+
+.wf-main {
+  width: 100%;
+  max-width: 880px;
+  margin-inline: auto;
+  padding: calc(96 * var(--ws-px)) calc(24 * var(--ws-px)) calc(128 * var(--ws-px));
+  color: var(--text-primary, var(--text));
+}
+.wf-main a:focus-visible {
+  outline: var(--focus-ring) solid var(--focus);
+  outline-offset: var(--focus-offset);
+}
+:where(.wf-main) :where(h1, h2, h3, p) {
+  margin: 0;
+}
+
+/* Hero */
+.wf-hero {
+  text-align: center;
+  padding-bottom: calc(120 * var(--ws-px));
+}
+.wf-kicker {
+  font-size: calc(14 * var(--ws-type-px));
+  line-height: calc(20 * var(--ws-type-px));
+  font-weight: 600;
+  color: var(--accent-text, var(--link));
+}
+.wf-hero h1 {
+  margin: calc(16 * var(--ws-px)) auto 0;
+  max-width: 16ch;
+  font-size: clamp(40px, 6vw, 64px);
+  line-height: 1.05;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  text-wrap: balance;
+}
+.wf-lede {
+  margin: calc(24 * var(--ws-px)) auto 0;
+  max-width: 34rem;
+  font-size: calc(19 * var(--ws-type-px));
+  line-height: 1.55;
+  color: var(--text-secondary, var(--text-muted));
+  text-wrap: pretty;
+}
+.wf-actions {
+  margin-top: calc(40 * var(--ws-px));
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: calc(12 * var(--ws-px));
+}
+
+/* Sections */
+.wf-section {
+  padding-block: calc(72 * var(--ws-px));
+  border-top: 1px solid var(--border-subtle, var(--border));
+}
+.wf-section-title {
+  font-size: calc(28 * var(--ws-type-px));
+  line-height: 1.2;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.wf-section-sub {
+  margin-top: calc(12 * var(--ws-px));
+  max-width: 36rem;
+  font-size: calc(16 * var(--ws-type-px));
+  line-height: 1.55;
+  color: var(--text-secondary, var(--text-muted));
+}
+
+/* The flow: a calm vertical sequence */
+.wf-flow {
+  list-style: none;
+  margin: calc(48 * var(--ws-px)) 0 0;
+  padding: 0;
+}
+.wf-step {
+  position: relative;
+  display: grid;
+  grid-template-columns: calc(40 * var(--ws-px)) minmax(0, 1fr);
+  gap: calc(24 * var(--ws-px));
+  padding-bottom: calc(48 * var(--ws-px));
+}
+.wf-step:last-child {
+  padding-bottom: 0;
+}
+.wf-step:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  left: calc(19 * var(--ws-px));
+  top: calc(44 * var(--ws-px));
+  bottom: calc(4 * var(--ws-px));
+  width: 1px;
+  background: var(--border);
+}
+.wf-step-number {
+  width: calc(40 * var(--ws-px));
+  height: calc(40 * var(--ws-px));
+  border-radius: 50%;
+  border: 1px solid var(--border-strong, var(--border));
+  display: grid;
+  place-items: center;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary, var(--text-muted));
+  background: var(--bg-page, var(--canvas));
+}
+.wf-step-body {
+  padding-top: calc(8 * var(--ws-px));
+  min-width: 0;
+}
+.wf-step-body h3 {
+  font-size: calc(19 * var(--ws-type-px));
+  line-height: 1.3;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.wf-step-body > p {
+  margin-top: calc(6 * var(--ws-px));
+  max-width: 34rem;
+  font-size: calc(16 * var(--ws-type-px));
+  line-height: 1.55;
+  color: var(--text-secondary, var(--text-muted));
+}
+.wf-example {
+  margin: calc(20 * var(--ws-px)) 0 0;
+  padding: calc(16 * var(--ws-px)) calc(20 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg, 12px);
+  background: var(--bg-surface, var(--surface-sunken));
+  max-width: 34rem;
+}
+.wf-example figcaption {
+  margin-bottom: calc(8 * var(--ws-px));
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.wf-example-source {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary, var(--text-muted));
+}
+.wf-example-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: calc(6 * var(--ws-px));
+  font-size: calc(14 * var(--ws-type-px));
+  line-height: 1.5;
+  color: var(--text-secondary, var(--text-muted));
+}
+.wf-example-list li {
+  position: relative;
+  padding-left: calc(16 * var(--ws-px));
+}
+.wf-example-list:not(.wf-example-check) li::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 0.65em;
+  width: calc(5 * var(--ws-px));
+  height: calc(5 * var(--ws-px));
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+.wf-example-check li {
+  padding-left: calc(22 * var(--ws-px));
+}
+.wf-example-check svg {
+  position: absolute;
+  left: 0;
+  top: 0.2em;
+  color: var(--status-live, var(--success));
+}
+.wf-example-decision {
+  display: flex;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+  font-size: calc(15 * var(--ws-type-px));
+  font-weight: 600;
+  color: var(--status-live, var(--success));
+}
+
+/* Room templates: a clean list */
+.wf-templates {
+  list-style: none;
+  margin: calc(40 * var(--ws-px)) 0 0;
+  padding: 0;
+}
+.wf-template {
+  display: grid;
+  grid-template-columns: calc(200 * var(--ws-px)) minmax(0, 1fr);
+  column-gap: calc(32 * var(--ws-px));
+  row-gap: calc(4 * var(--ws-px));
+  padding-block: calc(24 * var(--ws-px));
+  border-top: 1px solid var(--border-subtle, var(--border));
+}
+.wf-template:last-child {
+  border-bottom: 1px solid var(--border-subtle, var(--border));
+}
+.wf-template h3 {
+  grid-row: span 2;
+  font-size: calc(16 * var(--ws-type-px));
+  line-height: 1.5;
+  font-weight: 600;
+}
+.wf-template-purpose {
+  font-size: calc(16 * var(--ws-type-px));
+  line-height: 1.5;
+  color: var(--text-primary, var(--text));
+}
+.wf-template-members {
+  font-size: calc(14 * var(--ws-type-px));
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+/* Principles: a short row */
+.wf-principles {
+  list-style: none;
+  margin: calc(40 * var(--ws-px)) 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: calc(40 * var(--ws-px)) calc(48 * var(--ws-px));
+}
+.wf-principles h3 {
+  font-size: calc(16 * var(--ws-type-px));
+  line-height: 1.4;
+  font-weight: 600;
+}
+.wf-principles p {
+  margin-top: calc(6 * var(--ws-px));
+  font-size: calc(15 * var(--ws-type-px));
+  line-height: 1.55;
+  color: var(--text-secondary, var(--text-muted));
+}
+
+/* Final call to action */
+.wf-cta {
+  padding-top: calc(96 * var(--ws-px));
+  border-top: 1px solid var(--border-subtle, var(--border));
+  text-align: center;
+}
+.wf-cta h2 {
+  font-size: clamp(28px, 4vw, 40px);
+  line-height: 1.15;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.wf-cta p {
+  margin: calc(12 * var(--ws-px)) auto calc(32 * var(--ws-px));
+  max-width: 30rem;
+  font-size: calc(17 * var(--ws-type-px));
+  line-height: 1.55;
+  color: var(--text-secondary, var(--text-muted));
+}
+
+@media (max-width: 640px) {
+  .wf-main {
+    padding: calc(56 * var(--ws-px)) calc(16 * var(--ws-px)) calc(88 * var(--ws-px));
+  }
+  .wf-hero {
+    padding-bottom: calc(72 * var(--ws-px));
+  }
+  .wf-lede {
+    font-size: calc(17 * var(--ws-type-px));
+  }
+  .wf-section {
+    padding-block: calc(56 * var(--ws-px));
+  }
+  .wf-section-title {
+    font-size: calc(24 * var(--ws-type-px));
+  }
+  .wf-step {
+    grid-template-columns: calc(32 * var(--ws-px)) minmax(0, 1fr);
+    gap: calc(16 * var(--ws-px));
+  }
+  .wf-step-number {
+    width: calc(32 * var(--ws-px));
+    height: calc(32 * var(--ws-px));
+    font-size: 12px;
+  }
+  .wf-step:not(:last-child)::before {
+    left: calc(15 * var(--ws-px));
+    top: calc(36 * var(--ws-px));
+  }
+  .wf-step-body {
+    padding-top: calc(4 * var(--ws-px));
+  }
+  .wf-example {
+    padding: calc(14 * var(--ws-px)) calc(16 * var(--ws-px));
+  }
+  .wf-template {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .wf-template h3 {
+    grid-row: auto;
+  }
+  .wf-principles {
+    grid-template-columns: minmax(0, 1fr);
+    gap: calc(28 * var(--ws-px));
+  }
+  .wf-cta {
+    padding-top: calc(72 * var(--ws-px));
+  }
+}

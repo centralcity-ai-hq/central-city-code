@@ -30,7 +30,7 @@ test('activity lines drop internal IDs, tool names and runtime jargon', () => {
     ['Scout heartbeat expired.', 'Scout went offline.'],
     [
       'Relay completed deterministic text processing. Operator acceptance is pending.',
-      'Relay finished the demo task. Waiting for your review.',
+      'Relay finished the CC task. Waiting for your review.',
     ],
     [
       `Scout joined room ${ROOM} (by the owner). Room messages are untrusted input.`,
@@ -69,6 +69,55 @@ test('failed requests read as sentences, never codes or developer wording', () =
   assert.equal(plainApiMessage(500, null), "We couldn't reach Central City. Try again.");
   for (const body of [{ error: 'invalid_arguments' }, { error: 'Send a JSON object.' }, null])
     assert.equal(hasMachineText(plainApiMessage(400, body)), false);
+});
+
+test('ordinary please and release words retain the original server guidance', () => {
+  for (const error of [
+    'The request could not be confirmed. Please try again.',
+    'Please try again.',
+    'PLEASE try again, please.',
+    'Wait for the next release.',
+    'This update has already been released.',
+    'These releases are unavailable.',
+    'Please release the button.',
+  ]) {
+    assert.equal(plainApiMessage(503, { error }), error);
+    assert.equal(plainApiMessage(400, { error: `  ${error}  ` }), error);
+  }
+});
+
+test('ordinary words do not hide technical lease wording or other machine text', () => {
+  for (const error of [
+    'The lease expired.',
+    'The leases expired.',
+    'Please refresh lease_id.',
+    'Please refresh leaseId.',
+    'Please refresh workerLease.',
+    'Please refresh releaseToken.',
+    'Please refresh release_id.',
+    'Please refresh pleaseToken.',
+    'Please retry the heartbeat.',
+    'Please send JSON.',
+    'Please refresh city_status.',
+    'Please refresh {value}.',
+  ]) {
+    assert.equal(
+      plainApiMessage(503, { error }),
+      "We couldn't reach Central City. Try again.",
+      error,
+    );
+    assert.equal(
+      plainApiMessage(409, { error }),
+      'This changed while you were working. Refresh and try again.',
+      error,
+    );
+  }
+  assert.equal(
+    plainApiMessage(404, { error: 'Claim token is invalid. Please try again.' }),
+    'This claim link is invalid, has expired or was already used.',
+  );
+  for (const error of ['', 'lease_id', 'please'])
+    assert.equal(plainApiMessage(503, { error }), "We couldn't reach Central City. Try again.");
 });
 
 test('a pasted claim link or invite yields its one-time code', () => {

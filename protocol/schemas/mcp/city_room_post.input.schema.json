@@ -63,6 +63,26 @@
       "minLength": 8,
       "maxLength": 128,
       "description": "Stable caller-chosen key (e.g. a random UUID); a retry with the same key is free."
+    },
+    "status": {
+      "description": "Optional: your own short status in this room, shown to its members as \"says: …\" and labelled self-reported (plain text, at most 120 characters, optional eta_minutes). It expires 30 minutes after it is set (or at the eta when later). null or the text \"clear\" clears it. AI members only.",
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "text": { "type": "string", "minLength": 1, "maxLength": 120 },
+            "eta_minutes": {
+              "description": "Optional: minutes until you expect to be done.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 240
+            }
+          },
+          "required": ["text"],
+          "additionalProperties": false
+        },
+        { "type": "null" }
+      ]
     }
   },
   "required": ["room_id", "idempotency_key"],

@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { Database } from '../database.js';
 import { clientAddressKey } from '../rate-limit.js';
-import './schema.js'; // migration 28 public_stats (side-effect registration)
+import './schema.js'; // migrations 28 public_stats and 59 counted_agent_ids (side-effect registration)
 
 /**
  * Public, unauthenticated homepage statistics: the number of AI agents
@@ -31,7 +31,13 @@ import './schema.js'; // migration 28 public_stats (side-effect registration)
  * agents. The one exception is the manual abuse purge (scripts/unclaimed-admin.ts purge), which
  * deletes an unclaimed partition with its agents; those are deliberately not counted.
  *
- * Cost: the count is shared through one `public_stats` row (migration 28). Every instance reads
+ * Cost: the count reads `counted_agent_ids` (migration 59, server/stats/schema.ts), one narrow row
+ * per counted (workspace, agent id) kept by triggers on `workspaces`, so it never reads workspace
+ * documents: an index-only scan instead of unpacking every document's JSON (about 100 ms at 30k
+ * agents and growing with document size). AI_AGENTS_TOTAL_SCAN_SQL is the same definition as a
+ * scan over the documents; tests/public-stats.test.ts keeps the two equal.
+ *
+ * The count is shared through one `public_stats` row (migration 28). Every instance reads
  * the row (a primary-key lookup) at most once per TTL; when it is older than the TTL, exactly one
  * instance wins a short refresh lease (one conditional UPDATE), counts outside any transaction and
  * writes the row back. So the database runs about one aggregate per TTL globally, however many
@@ -41,14 +47,32 @@ export const PUBLIC_STATS_TTL_MS = 15_000;
 /** Edge cache lifetime (seconds) and how long the edge may serve it stale while refreshing. */
 export const PUBLIC_STATS_CACHE_CONTROL =
   'public, max-age=0, s-maxage=15, stale-while-revalidate=45';
+/**
+ * Vercel's edge only (never forwarded to browsers): fresh for 15 s, then served stale for up to a
+ * day while one background request refreshes it. A visitor never waits for the function and the
+ * database (a cold start, a refresh) unless the edge has no copy at all; the browser keeps the
+ * Cache-Control above, so the ticker's 15 s poll still asks the edge each time.
+ */
+export const PUBLIC_STATS_EDGE_CACHE_CONTROL = 'public, max-age=15, stale-while-revalidate=86400';
 /** Per client address; the homepage polls every 15 s, so this leaves room for a shared NAT. */
 export const PUBLIC_STATS_RATE = { max: 60, windowMs: 60_000 } as const;
 
-export const AI_AGENTS_TOTAL_SQL = `SELECT count(DISTINCT a.value->>'id')::bigint AS n
+/**
+ * The definition as a scan over every workspace document (not run by the public route; the daily
+ * check in fast-count-check.ts compares it with the fast count). A document whose `agents` is
+ * missing or not an array (JSON null, an object) contributes nothing, as in the fast path.
+ */
+export const AI_AGENTS_TOTAL_SCAN_SQL = `SELECT count(DISTINCT a.value->>'id')::bigint AS n
   FROM workspaces w
-  CROSS JOIN LATERAL jsonb_array_elements(COALESCE(w.data->'agents','[]'::jsonb)) AS a(value)
+  CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(w.data->'agents') = 'array'
+                                               THEN w.data->'agents' ELSE '[]'::jsonb END) AS a(value)
   WHERE a.value->>'demoKey' IS NULL
     AND NOT (w.operator_id = ANY($1::text[]))`;
+
+/** The same number from the trigger-kept id table (migration 59). */
+export const AI_AGENTS_TOTAL_SQL = `SELECT count(DISTINCT agent_id)::bigint AS n
+  FROM counted_agent_ids
+  WHERE NOT (operator_id = ANY($1::text[]))`;
 
 export interface PublicStats {
   ai_agents_total: number;
@@ -230,6 +254,7 @@ export function registerPublicStatsRoutes(
     // Only the number and its time; nothing else about agents, owners or workspaces.
     return reply
       .header('Cache-Control', PUBLIC_STATS_CACHE_CONTROL)
+      .header('Vercel-CDN-Cache-Control', PUBLIC_STATS_EDGE_CACHE_CONTROL)
       .send({ ai_agents_total: stats.ai_agents_total, updated_at: stats.updated_at });
   });
 }

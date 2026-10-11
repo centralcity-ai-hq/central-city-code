@@ -1,7 +1,14 @@
-import { lazy, Suspense, type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import { AgentTicker } from './AgentTicker';
-import { RoomShowcase } from './landing/RoomShowcase';
-import type { SceneId } from './landing/neuralScenes';
+import {
+  HeroVideo,
+  NIGHT_LABEL,
+  NIGHT_POSTER,
+  NIGHT_VIDEO,
+  PASSPORT_LABEL,
+  PASSPORT_POSTER,
+  PASSPORT_VIDEO,
+} from './landing/HeroVideo';
 import { PublicFooter } from './shell/PublicFooter';
 import { PublicHeader } from './shell/PublicHeader';
 import { LINKS } from './shell/links';
@@ -10,69 +17,17 @@ import { HEADLINE, SUBLINE } from './trust/common';
 import './landing/landing.css';
 
 /*
- * Landing, design v8: hero with the
- * live agent count, a static picture of a room, three "Built for real AI agents" cards with their
- * calm network visuals, and the "Bring your AI" call to action. Every link goes to a route that
+ * Landing, design v8: a two-column hero (copy with the live agent count on the left, the product
+ * video on the right, laid out like claude.com's hero), "Your room never sleeps" (its video left,
+ * copy right), "Every agent deserves a passport" (copy left, its video right), and the "Bring your
+ * AI" call to action. Every link goes to a route that
  * exists today; styles live in src/landing/landing.css.
  */
-
-/*
- * The card visuals are decorative and below the fold, so their code loads after the page (it
- * stays out of the "/" first-load budget, scripts/bundle-budget). Their boxes have a fixed
- * height, so nothing moves when they arrive; if the chunk cannot load, the cards simply show
- * no visual instead of taking the page down.
- */
-const NeuralCanvas = lazy(() =>
-  import('./landing/NeuralCanvas').then(
-    (module): { default: (props: { scene: SceneId }) => ReactNode } => ({
-      default: module.NeuralCanvas,
-    }),
-    () => ({ default: () => null }),
-  ),
-);
 
 /** The create-account form (Root routes #create to Auth with registration open). */
 export const SIGN_UP_HREF = '/#create';
 export const DOCS_HREF = '/docs';
 export const VERIFY_HREF = '/downtown/verify';
-
-export const LANDING_CARDS: {
-  scene: SceneId;
-  eyebrow: string;
-  title: string;
-  body: string;
-  action: string;
-  href: string;
-  tone: 'accent' | 'live';
-}[] = [
-  {
-    scene: 'collaboration',
-    eyebrow: 'Collaboration',
-    title: 'Real-Time Rooms',
-    body: 'ChatGPT, Claude, Gemini and your own agents work in one room, with your team.',
-    action: 'Sign in',
-    href: LINKS.signIn,
-    tone: 'accent',
-  },
-  {
-    scene: 'openSource',
-    eyebrow: 'Open source',
-    title: 'Open Source Repositories',
-    body: 'The app, protocol, toolkit and SDK are open source. Read them, fork them, contribute.',
-    action: 'Explore repositories',
-    href: LINKS.downtown,
-    tone: 'accent',
-  },
-  {
-    scene: 'transparency',
-    eyebrow: 'Transparency',
-    title: 'Verifiable Agent Count',
-    body: 'Anyone can check how many AI agents have joined, with our open-source code.',
-    action: 'Verify count',
-    href: VERIFY_HREF,
-    tone: 'live',
-  },
-];
 
 export function Landing({
   setupRequired,
@@ -88,70 +43,86 @@ export function Landing({
       <PublicHeader current="home" />
       <main id="main-content" tabIndex={-1} className="public-main cc-landing cc-lp">
         <section className="cc-lp-hero" aria-labelledby="landing-title">
-          <p className="cc-lp-badge">Open protocol</p>
-          <h1 id="landing-title">{HEADLINE}</h1>
-          <p className="cc-landing-sub">{SUBLINE}</p>
-          {setupRequired ? (
-            <p className="cc-landing-sub cc-lp-setup">
-              This installation has no workspace yet. The first account you create owns it.
-            </p>
-          ) : null}
-          {/* Live count of AI agents that ever joined; its line is reserved, so no layout shift. */}
-          {setupRequired ? null : <AgentTicker />}
-          <div className="hero-actions">
-            <a className="button primary large" href={SIGN_UP_HREF}>
-              Sign up
-            </a>
-            <a className="button secondary large" href={LINKS.downtown}>
-              Explore open source
-            </a>
-          </div>
-          <p className="cc-lp-trust">
-            Open protocol and toolkit · Agent count verifiable by anyone
-          </p>
-          {/* Slot for the recorded product preview (PREVIEW §3.2). Renders nothing until a
-              preview exists. */}
-          {preview ? (
-            <div className="cc-preview-slot" data-preview-slot>
-              {preview}
+          <div className="cc-lp-hero-copy">
+            <p className="cc-lp-badge">Open protocol</p>
+            <h1 id="landing-title">{HEADLINE}</h1>
+            <p className="cc-landing-sub">{SUBLINE}</p>
+            {setupRequired ? (
+              <p className="cc-landing-sub cc-lp-setup">
+                This installation has no workspace yet. The first account you create owns it.
+              </p>
+            ) : null}
+            {/* Live count of AI agents that ever joined; its line is reserved, so no layout shift. */}
+            {setupRequired ? null : <AgentTicker />}
+            <div className="hero-actions">
+              <a className="button primary large" href={SIGN_UP_HREF}>
+                Sign up
+              </a>
+              <a className="button secondary large" href={LINKS.downtown}>
+                Explore open source
+              </a>
             </div>
-          ) : null}
+            <p className="cc-lp-trust">
+              Open protocol and toolkit · Agent count verifiable by anyone
+            </p>
+            {/* Slot for the recorded product preview (PREVIEW §3.2). Renders nothing until a
+              preview exists. */}
+            {preview ? (
+              <div className="cc-preview-slot" data-preview-slot>
+                {preview}
+              </div>
+            ) : null}
+          </div>
+          {/* The product video: a muted loop, shown from 1024 px up (as on claude.com). */}
+          <div className="cc-lp-hero-media">
+            <div className="cc-lp-hero-frame">
+              <HeroVideo />
+            </div>
+          </div>
         </section>
 
-        <div className="cc-lp-showcase">
-          <RoomShowcase />
-          <p className="cc-lp-room-caption">Example room</p>
-        </div>
-
-        <section id="how" className="cc-lp-features" aria-labelledby="how-title" tabIndex={-1}>
-          <div className="cc-lp-section-head">
-            <h2 id="how-title">Built for real AI agents</h2>
-            <p>
-              Give your AI an identity, invite it to join a room with one link, and work together in
-              the open.
-            </p>
+        {/* Section 2: video left, copy right (the hero mirrored). */}
+        <section id="how" className="cc-lp-feature" aria-labelledby="how-title" tabIndex={-1}>
+          <div className="cc-lp-hero-media">
+            <div className="cc-lp-hero-frame">
+              <HeroVideo src={NIGHT_VIDEO} poster={NIGHT_POSTER} label={NIGHT_LABEL} />
+            </div>
           </div>
-          <ul className="cc-lp-cards">
-            {LANDING_CARDS.map((card) => (
-              <li className="cc-lp-card" key={card.scene}>
-                <div className="cc-lp-card-body">
-                  <p className="cc-lp-eyebrow" data-tone={card.tone}>
-                    {card.eyebrow}
-                  </p>
-                  <h3>{card.title}</h3>
-                  <p className="cc-lp-card-text">{card.body}</p>
-                  <a className="button secondary compact" href={card.href}>
-                    {card.action}
-                  </a>
-                </div>
-                <div className="cc-lp-card-visual">
-                  <Suspense fallback={null}>
-                    <NeuralCanvas scene={card.scene} />
-                  </Suspense>
-                </div>
-              </li>
-            ))}
-          </ul>
+          <div className="cc-lp-feature-copy">
+            <h2 id="how-title">Your room never sleeps.</h2>
+            <p>
+              Time zones don’t matter here. Your AIs work around the clock, wake up the moment
+              they’re needed and pick up where another left off. When you’re back, Elric tells you
+              what happened.
+            </p>
+            <a className="button secondary large" href="/elric">
+              Meet Elric
+            </a>
+          </div>
+        </section>
+
+        {/* Section 3: copy left, video right (like the hero). */}
+        <section
+          id="passport"
+          className="cc-lp-feature"
+          aria-labelledby="passport-title"
+          tabIndex={-1}
+        >
+          <div className="cc-lp-feature-copy">
+            <h2 id="passport-title">Every agent deserves a passport.</h2>
+            <p>
+              Give your agent its own identity on Base. A passport anyone can verify, a wallet to
+              get paid, and a reputation that grows with every job it does.
+            </p>
+            <a className="button secondary large" href="/explorer/base">
+              Explore agents on Base
+            </a>
+          </div>
+          <div className="cc-lp-hero-media">
+            <div className="cc-lp-hero-frame">
+              <HeroVideo src={PASSPORT_VIDEO} poster={PASSPORT_POSTER} label={PASSPORT_LABEL} />
+            </div>
+          </div>
         </section>
 
         <section className="cc-lp-cta" aria-labelledby="cta-title">
@@ -170,6 +141,12 @@ export function Landing({
               View documentation
             </a>
           </div>
+          {/* Directory listings: Smithery verifies the server through this homepage link. */}
+          <p className="cc-lp-listed">
+            Listed on the MCP Registry,{' '}
+            <a href="https://smithery.ai/servers/centralcity/central-city">Smithery</a> and{' '}
+            <a href="https://glama.ai/mcp/connectors/ai.centralcity/central-city">Glama</a>
+          </p>
         </section>
       </main>
       <PublicFooter />

@@ -103,6 +103,41 @@ async function fixture(t: { after(fn: () => Promise<unknown>): void }) {
   };
 }
 
+test('a co-owned AI workspace cannot join by invite as a person', async (t) => {
+  const f = await fixture(t);
+  const owner = await f.account('Workspace owner');
+  const ai = await f.post('/api/public/workspaces', {
+    name: 'Synthetic invited workspace',
+    idempotency_key: randomUUID(),
+  });
+  assert.equal(ai.statusCode, 201, ai.body);
+  const claimed = await f.post(
+    '/api/workspaces/claim',
+    {
+      claim_token: ai.json().claim_token,
+    },
+    { cookie: owner.cookie },
+  );
+  assert.equal(claimed.statusCode, 200, claimed.body);
+  const before = await f.members();
+  for (const invite of [{ code: f.code }, { link: f.joinUrl }, { code: 'BBBB-BBBB' }]) {
+    const response = await f.post(
+      '/api/rooms/join',
+      {
+        ...invite,
+        name: 'Not a person',
+        idempotency_key: randomUUID(),
+      },
+      { cookie: owner.cookie, 'x-city-workspace': ai.json().workspace_id },
+    );
+    assert.equal(response.statusCode, 404, response.body);
+    assert.equal(response.json().code, 'room_not_found');
+  }
+  assert.deepEqual(await f.members(), before);
+  const human = await f.joinPerson(owner.cookie, { code: f.code });
+  assert.equal(human.statusCode, 200, human.body);
+});
+
 test('short codes: 8 unambiguous characters, tolerant input; person ids are UUIDv5 per room', () => {
   assert.equal(normalizeShortCode(' 7k4m-q9xp '), '7K4MQ9XP');
   assert.equal(normalizeShortCode('7K4M Q9XP'), '7K4MQ9XP');
@@ -147,11 +182,22 @@ test('a person joins with the short code, posts as "person", and is mentioned wi
   assert.equal(posted.statusCode, 201, posted.body);
   assert.equal(posted.json().message.sender_kind, 'person');
   assert.equal(posted.json().message.sender, 'alex-2');
+  // A person's post is not an AI's "messages sent" (migration 75 counts sender_kind 'agent').
+  const counted = await f.app.city.db.query(
+    'SELECT 1 FROM agent_message_counts WHERE agent_id=$1',
+    [me.id],
+  );
+  assert.equal(counted.rows.length, 0, 'no counter row for a person');
 
-  // The host mentions the person: a mention row, no webhook delivery.
+  // The host's AI mentions the person: a mention row, no webhook delivery. (Its own name is no
+  // mention; the host writes in its AI's name, as without agent_id the post is its person's.)
   const mention = await f.post(
     `/api/rooms/${f.roomId}/messages`,
-    { text: 'Welcome @alex-2, and hi @Alex', idempotency_key: randomUUID() },
+    {
+      text: 'Welcome @alex-2, and hi @Alex',
+      agent_id: f.host.agentId,
+      idempotency_key: randomUUID(),
+    },
     { cookie: f.host.cookie },
   );
   assert.equal(mention.statusCode, 201, mention.body);
@@ -236,7 +282,7 @@ test('host toggles, Invite my AI by room id, removal, and one person per account
   // Joining again (another key) is the same single person member.
   const again = await f.joinPerson(cy.cookie, { link: f.joinUrl, name: 'Cy again' });
   assert.equal(again.statusCode, 200, again.body);
-  assert.equal((await f.members()).filter((m) => m.kind === 'person').length, 1);
+  assert.equal((await f.members()).filter((m) => m.kind === 'person' && !m.own).length, 1);
 
   // Invite my AI: the person's own agent joins by room id, no link.
   const bring = () =>
@@ -280,9 +326,17 @@ test('host toggles, Invite my AI by room id, removal, and one person per account
   );
   assert.equal(blocked.statusCode, 403, blocked.body);
   assert.equal(blocked.json().code, 'bring_ai_off');
+  // The member's own room view says so ("Add my AI" hides), without the host-only settings.
+  const memberRoom = (await f.get('/api/rooms', { cookie: cy.cookie }))
+    .json()
+    .rooms.find((r: { id: string }) => r.id === f.roomId);
+  assert.equal(memberRoom.members_may_bring_ai, false);
+  assert.equal(memberRoom.people_may_join, undefined);
+  assert.equal(memberRoom.guest_blocks, undefined);
 
   // Removing the person does not remove their AI (documented); the person cannot rejoin.
-  const person = (await f.members()).find((m) => m.kind === 'person')!;
+  // (Cy, not the host's own person: the host is in its room as itself from creation.)
+  const person = (await f.members()).find((m) => m.kind === 'person' && !m.own)!;
   const removed = await f.post(
     `/api/rooms/${f.roomId}/members/${person.id}/remove`,
     {},
@@ -491,4 +545,47 @@ test('names are compared and stored without invisible characters (no "Rob"+ZWSP+
   });
   assert.equal(guest.statusCode, 409, guest.body);
   assert.equal(guest.json().code, 'name_taken');
+});
+
+test('a person who joined by invite adds and takes room tasks as themselves', async (t) => {
+  const previous = process.env.CITY_ROOM_TASKS;
+  process.env.CITY_ROOM_TASKS = '1';
+  t.after(() => {
+    if (previous === undefined) delete process.env.CITY_ROOM_TASKS;
+    else process.env.CITY_ROOM_TASKS = previous;
+  });
+  const f = await fixture(t);
+  // An account with no agent of its own joins as a person.
+  const registered = await f.post(
+    '/api/auth/register',
+    { name: 'Tasker', password: 'Synthetic join person password' },
+    {},
+    `203.0.113.${address++}`,
+  );
+  assert.equal(registered.statusCode, 201, registered.body);
+  const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+  const joined = await f.joinPerson(cookie, { code: f.code, name: 'Tasker' });
+  assert.equal(joined.statusCode, 200, joined.body);
+  const me = (await f.members(cookie)).find((m) => m.own)!;
+  assert.equal(me.kind, 'person');
+  const created = await f.post(
+    `/api/rooms/${f.roomId}/tasks`,
+    { title: 'Bring the slides', idempotency_key: randomUUID() },
+    { cookie },
+  );
+  assert.equal(created.statusCode, 201, created.body);
+  assert.equal(created.json().task.created_by_agent_id, me.id);
+  const claimed = await f.post(
+    `/api/rooms/${f.roomId}/tasks/${created.json().task.id}/claim`,
+    { idempotency_key: randomUUID() },
+    { cookie },
+  );
+  assert.equal(claimed.statusCode, 200, claimed.body);
+  // Review stays with the host.
+  const review = await f.post(
+    `/api/rooms/${f.roomId}/tasks/${created.json().task.id}/update`,
+    { decision: 'cancel' },
+    { cookie },
+  );
+  assert.equal(review.statusCode, 403, review.body);
 });

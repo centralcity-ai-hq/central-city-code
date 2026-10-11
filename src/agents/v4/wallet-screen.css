@@ -1,0 +1,884 @@
+/*
+ * An agent's Wallet in its pane (docs/design/base-wallet-mockup.html, approved 10 Oct 2026): the
+ * pane's own tokens and pills; one number, hairlines, quiet lines. Motion lives in
+ * src/base/wallet/visual.
+ */
+.w4-hero {
+  display: flex;
+  flex-direction: column;
+  gap: calc(4 * var(--ws-px));
+}
+.w4-eyebrow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: calc(4 * var(--ws-px)) calc(12 * var(--ws-px));
+  margin: 0;
+  color: var(--ap4-muted);
+  font-size: calc(12 * var(--ws-type-px));
+  font-weight: 500;
+}
+.w4-net {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(6 * var(--ws-px));
+  color: var(--ap4-faint);
+  font-weight: 400;
+}
+.w4-net::before {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #d97706;
+  content: '';
+}
+/* On Base itself (real USDC) the dot is Base's blue, not the test network's amber. */
+.w4-net.live::before {
+  background: #0052ff;
+}
+.w4-amount {
+  display: flex;
+  align-items: baseline;
+  gap: calc(6 * var(--ws-px));
+  margin-top: calc(2 * var(--ws-px));
+}
+.w4-big {
+  color: var(--ap4-text);
+  font-size: calc(38 * var(--ws-type-px));
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.038em;
+  line-height: 1.05;
+}
+.w4-unit {
+  color: var(--ap4-muted);
+  font-size: calc(13 * var(--ws-type-px));
+  font-weight: 500;
+}
+.w4-sub {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(4 * var(--ws-px)) calc(12 * var(--ws-px));
+  min-height: calc(18 * var(--ws-px));
+  margin: 0;
+  color: var(--ap4-muted);
+  font-size: calc(12 * var(--ws-type-px));
+  font-variant-numeric: tabular-nums;
+}
+.w4-read {
+  color: var(--ap4-faint);
+}
+.w4-scrub {
+  color: var(--ap4-text);
+  font-weight: 500;
+}
+.w4-hint {
+  margin: 0;
+  color: var(--ap4-faint);
+  font-size: calc(12 * var(--ws-type-px));
+  line-height: 1.5;
+}
+.w4-caution {
+  margin: 0;
+  color: var(--ap4-muted);
+  font-size: calc(13 * var(--ws-type-px));
+  line-height: 1.5;
+}
+.w4-caution b {
+  color: var(--ap4-text);
+  font-weight: 500;
+}
+.w4-section {
+  margin: calc(4 * var(--ws-px)) 0 calc(-10 * var(--ws-px));
+  color: var(--ap4-muted);
+  font-size: calc(12 * var(--ws-type-px));
+  font-weight: 500;
+}
+.w4-row-sub {
+  display: block;
+  overflow-wrap: anywhere;
+  color: var(--ap4-muted);
+  font-size: calc(12 * var(--ws-type-px));
+  font-weight: 400;
+}
+/* An incoming payment's state in words: received at Base's safe head, or final */
+.w4-row-state {
+  display: block;
+  color: var(--ap4-text);
+  font-size: calc(12.5 * var(--ws-type-px));
+  font-weight: 500;
+}
+.w4-amt {
+  color: var(--ap4-text);
+  font-size: calc(13.5 * var(--ws-type-px));
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.w4-amt.in {
+  color: var(--ap4-ok);
+}
+.w4-mono {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  letter-spacing: 0;
+}
+.w4-copy {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: calc(6 * var(--ws-px));
+  height: calc(28 * var(--ws-px));
+  padding: 0 calc(10 * var(--ws-px));
+  border: 0;
+  border-radius: 999px;
+  background: var(--ap4-sunken);
+  color: var(--ap4-text);
+  font: 500 calc(12.5 * var(--ws-type-px)) / 1 var(--font-sans);
+  cursor: pointer;
+}
+.w4-address {
+  display: flex;
+  align-items: flex-start;
+  gap: calc(8 * var(--ws-px));
+}
+.w4-address .w4-mono {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--ap4-text);
+  font-size: calc(14 * var(--ws-type-px));
+  line-height: 1.6;
+}
+
+/* The wallet key steps */
+.w4-steps {
+  display: flex;
+  flex-direction: column;
+  gap: calc(18 * var(--ws-px));
+}
+.w4-progress {
+  display: flex;
+  gap: calc(6 * var(--ws-px));
+}
+.w4-progress i {
+  width: calc(28 * var(--ws-px));
+  height: 3px;
+  border-radius: 999px;
+  background: var(--ap4-line);
+}
+.w4-progress i.on {
+  background: var(--ap4-ink);
+}
+.w4-lead {
+  max-width: 46ch;
+  margin: 0;
+  color: var(--ap4-muted);
+  font-size: calc(14 * var(--ws-type-px));
+  line-height: 1.55;
+}
+.w4-points {
+  display: flex;
+  flex-direction: column;
+  gap: calc(14 * var(--ws-px));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.w4-points li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.w4-points b {
+  font-weight: 500;
+}
+.w4-points span {
+  color: var(--ap4-muted);
+  font-size: calc(13 * var(--ws-type-px));
+}
+.w4-field {
+  display: flex;
+  flex-direction: column;
+  gap: calc(8 * var(--ws-px));
+  font-size: calc(13 * var(--ws-type-px));
+  font-weight: 500;
+}
+.w4-field input,
+.w4-field textarea {
+  height: 44px;
+  padding: 0 calc(14 * var(--ws-px));
+  border: 1px solid var(--ap4-line);
+  border-radius: calc(12 * var(--ws-px));
+  outline: none;
+  background: var(--ap4-surface);
+  color: var(--ap4-text);
+  font: 400 15px / 1 var(--font-sans);
+}
+/* The backup key: 16 groups of 4 wrap over a few lines. */
+.w4-field textarea {
+  height: auto;
+  padding: calc(10 * var(--ws-px)) calc(14 * var(--ws-px));
+  line-height: 1.5;
+  resize: none;
+}
+.w4-field input.w4-mono,
+.w4-field textarea.w4-mono {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 14px;
+}
+.w4-field textarea:focus-visible,
+.w4-field input:focus-visible {
+  border-color: transparent;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ap4-ink) 25%, transparent);
+}
+.w4-field small {
+  margin-top: -4px;
+  color: var(--ap4-faint);
+  font-size: calc(12 * var(--ws-type-px));
+  font-weight: 400;
+}
+/* Under an unlock form: a forgotten password, quieter than the form's own button. */
+.w4-forgot {
+  color: var(--ap4-muted);
+  font-size: calc(12.5 * var(--ws-type-px));
+  font-weight: 450;
+}
+.w4-forgot:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+/* What a restore or a password change just did, on the screen the owner came back to. */
+.w4-done {
+  margin: 0 0 calc(10 * var(--ws-px));
+  color: var(--ap4-ok);
+  font-size: calc(13 * var(--ws-type-px));
+  font-weight: 500;
+}
+.w4-error {
+  margin: 0;
+  color: var(--ap4-bad);
+  font-size: calc(12.5 * var(--ws-type-px));
+}
+.w4-check {
+  display: flex;
+  align-items: flex-start;
+  gap: calc(10 * var(--ws-px));
+  font-size: calc(14 * var(--ws-type-px));
+  line-height: 1.45;
+}
+.w4-check input {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  margin: 1px 0 0;
+  accent-color: var(--ap4-ink);
+}
+.w4-check.off {
+  opacity: 0.4;
+}
+.ap4-btn.w4-wide {
+  width: 100%;
+  height: 44px;
+}
+
+/* Withdraw (W2): the token switch, the steps on Base, the explorer link */
+.w4-seg {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: calc(4 * var(--ws-px));
+  padding: calc(4 * var(--ws-px));
+  border-radius: calc(12 * var(--ws-px));
+  background: var(--ap4-surface);
+  box-shadow: inset 0 0 0 1px var(--ap4-line);
+}
+.w4-seg button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-height: 44px;
+  padding: calc(6 * var(--ws-px)) calc(12 * var(--ws-px));
+  border: 0;
+  border-radius: calc(9 * var(--ws-px));
+  background: transparent;
+  color: var(--ap4-muted);
+  font: 500 calc(14 * var(--ws-type-px)) / 1.2 var(--font-sans);
+  cursor: pointer;
+}
+.w4-seg button small {
+  color: var(--ap4-faint);
+  font-size: calc(12 * var(--ws-type-px));
+  font-variant-numeric: tabular-nums;
+}
+.w4-seg button[aria-checked='true'] {
+  background: var(--ap4-text);
+  color: var(--ap4-surface);
+}
+.w4-seg button[aria-checked='true'] small {
+  color: color-mix(in srgb, var(--ap4-surface) 70%, transparent);
+}
+.w4-seg button:focus-visible {
+  outline: 2px solid var(--ap4-ink);
+  outline-offset: 2px;
+}
+.w4-status {
+  display: flex;
+  flex-direction: column;
+  gap: calc(10 * var(--ws-px));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.w4-status li {
+  display: flex;
+  align-items: center;
+  gap: calc(10 * var(--ws-px));
+  color: var(--ap4-faint);
+  font-size: calc(14 * var(--ws-type-px));
+}
+.w4-status li::before {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--ap4-line);
+  content: '';
+}
+.w4-status li[data-done] {
+  color: var(--ap4-text);
+}
+.w4-status li[data-done]::before {
+  background: var(--ap4-ok);
+}
+/* Sent at Base's safe head, or final: the state in words above the steps */
+.w4-sent-head {
+  margin: 0;
+  color: var(--ap4-text);
+  font-size: calc(16 * var(--ws-type-px));
+  font-weight: 500;
+}
+/* Released operations, each a quiet line until final */
+.w4-sent-lines {
+  display: flex;
+  flex-direction: column;
+  gap: calc(4 * var(--ws-px));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--ap4-faint);
+  font-size: calc(12 * var(--ws-type-px));
+  font-variant-numeric: tabular-nums;
+}
+.w4-sent-lines li[data-phase='final'] {
+  color: var(--ap4-muted);
+}
+/* History (lanes): every operation on its way, a line each, newest first, under the form */
+.w4-history {
+  display: flex;
+  flex-direction: column;
+  gap: calc(14 * var(--ws-px));
+}
+.w4-history-lines {
+  display: flex;
+  flex-direction: column;
+  gap: calc(6 * var(--ws-px));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--ap4-muted);
+  font-size: calc(13 * var(--ws-type-px));
+  font-variant-numeric: tabular-nums;
+}
+.w4-hline {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: calc(10 * var(--ws-px));
+}
+.w4-history-lines li[data-phase='final'] {
+  color: var(--ap4-text);
+}
+.w4-history-lines li[data-phase='failed'],
+.w4-history-lines li[data-phase='expired'] {
+  color: var(--ap4-faint);
+}
+.w4-hcancel {
+  margin-top: calc(8 * var(--ws-px));
+}
+.w4-link {
+  align-self: flex-start;
+  color: var(--ap4-ink);
+  font-size: calc(13 * var(--ws-type-px));
+}
+
+/* Spending limit (W3): the limit, Central City's calendar count, Base's period */
+.w4-seg.w4-seg3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.w4-seg.w4-seg3 button {
+  align-items: center;
+  justify-content: center;
+}
+.w4-limit {
+  display: flex;
+  flex-direction: column;
+  gap: calc(6 * var(--ws-px));
+  padding: calc(14 * var(--ws-px)) calc(16 * var(--ws-px));
+  border-radius: calc(12 * var(--ws-px));
+  background: var(--ap4-surface);
+  box-shadow: var(--ap4-shadow-s);
+}
+.w4-limit-cap {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 calc(6 * var(--ws-px));
+  margin: 0;
+  color: var(--ap4-muted);
+  font-size: calc(14 * var(--ws-type-px));
+  font-weight: 500;
+}
+.w4-limit-cap b {
+  color: var(--ap4-text);
+  font-size: calc(22 * var(--ws-type-px));
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+}
+/* What Base enforces is the point of the card: muted, not faint. */
+.w4-limit .w4-hint {
+  color: var(--ap4-muted);
+  font-size: calc(13 * var(--ws-type-px));
+}
+.w4-limit .w4-limit-cap + .w4-hint,
+.w4-limit .w4-limit-cap + .w4-caution {
+  margin-top: calc(-2 * var(--ws-px));
+}
+.w4-state {
+  display: flex;
+  align-items: baseline;
+  gap: calc(8 * var(--ws-px));
+  margin: calc(4 * var(--ws-px)) 0 0;
+  color: var(--ap4-text);
+  font-size: calc(13 * var(--ws-type-px));
+  line-height: 1.45;
+}
+.w4-state::before {
+  position: relative;
+  top: -1px;
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--ap4-faint);
+  content: '';
+}
+.w4-state[data-state='approved']::before {
+  background: var(--ap4-ok);
+}
+.w4-state[data-state='revoke_pending']::before {
+  background: #d97706;
+}
+.w4-state[data-state='revoked']::before {
+  background: var(--ap4-bad);
+}
+.w4-usage {
+  display: flex;
+  flex-direction: column;
+  gap: calc(8 * var(--ws-px));
+}
+.w4-usage p {
+  margin: 0;
+  color: var(--ap4-muted);
+  font-size: calc(13 * var(--ws-type-px));
+  font-variant-numeric: tabular-nums;
+  line-height: 1.45;
+}
+.w4-bar {
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--ap4-line);
+}
+.w4-bar i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--ap4-ink);
+}
+.w4-bar i[data-full] {
+  background: var(--ap4-bad);
+}
+.w4-facts {
+  display: flex;
+  flex-direction: column;
+  gap: calc(6 * var(--ws-px));
+  margin: 0;
+  padding: 0 0 0 calc(16 * var(--ws-px));
+  color: var(--ap4-muted);
+  font-size: calc(13 * var(--ws-type-px));
+  line-height: 1.5;
+}
+/* Pay (docs/design/base-pay-mockup.html): the recipient, verified on Base; what is checked. */
+.w4-slot:empty {
+  display: none;
+}
+.w4-vcard {
+  display: flex;
+  flex-direction: column;
+  gap: calc(10 * var(--ws-px));
+  padding: calc(14 * var(--ws-px));
+  border: 1px solid var(--ap4-line);
+  border-radius: calc(14 * var(--ws-px));
+  background: var(--ap4-surface);
+}
+.w4-vtop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(8 * var(--ws-px));
+  color: var(--ap4-ok);
+  font-size: calc(12.5 * var(--ws-type-px));
+  font-weight: 500;
+}
+.w4-textbtn {
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: var(--ap4-ink);
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.w4-vmain {
+  display: flex;
+  align-items: center;
+  gap: calc(12 * var(--ws-px));
+  min-width: 0;
+}
+.w4-av {
+  display: grid;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--ap4-line);
+  color: var(--ap4-text);
+  font-weight: 600;
+}
+.w4-who {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.35;
+}
+.w4-who b {
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.w4-who small {
+  color: var(--ap4-muted);
+  font-size: calc(12 * var(--ws-type-px));
+}
+.w4-vid {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.2;
+}
+.w4-vid small {
+  color: var(--ap4-faint);
+  font-size: calc(11 * var(--ws-type-px));
+}
+.w4-vid b {
+  font-size: calc(18 * var(--ws-type-px));
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.w4-opt {
+  margin-left: 4px;
+  color: var(--ap4-faint);
+  font-weight: 400;
+}
+.w4-checks {
+  display: flex;
+  flex-direction: column;
+  gap: calc(8 * var(--ws-px));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.w4-checks li {
+  position: relative;
+  padding-left: calc(20 * var(--ws-px));
+  color: var(--ap4-muted);
+  font-size: calc(13 * var(--ws-type-px));
+  line-height: 1.45;
+}
+.w4-checks li::before {
+  position: absolute;
+  top: 0.45em;
+  left: 2px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ap4-ok);
+  content: '';
+}
+.w4-checks b {
+  color: var(--ap4-text);
+  font-weight: 500;
+}
+/* A payment on its way or failed: not money to count on. */
+.w4-amt.w4-off {
+  color: var(--ap4-faint);
+}
+[data-state='failed'] .w4-amt.w4-off {
+  text-decoration: line-through;
+}
+
+/* Rate (Operation Rating R2, the approved Rate mockup): the stars, the agent, the rating on Base. */
+.ap4 {
+  --w4-star: #2457f5;
+  --w4-star-off: #d9e0eb;
+}
+:root[data-theme='dark'] .ap4 {
+  --w4-star-off: rgba(255, 255, 255, 0.16);
+}
+.w4-star {
+  display: block;
+  flex: none;
+  color: var(--w4-star-off);
+}
+.w4-star[data-on] {
+  color: var(--w4-star);
+}
+/* The Rate button's star is a line in the brand blue, beside the word. */
+.ap4-btn .w4-star {
+  color: var(--w4-star);
+}
+.w4-stars {
+  display: inline-flex;
+  gap: 2px;
+  vertical-align: -2px;
+}
+.w4-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: calc(10 * var(--ws-px));
+}
+.w4-pair .w4-field input {
+  min-width: 0;
+}
+.w4-pair-hint {
+  margin-top: calc(-10 * var(--ws-px));
+}
+.w4-av.w4-av-lg {
+  width: 44px;
+  height: 44px;
+  font-size: calc(18 * var(--ws-type-px));
+}
+.w4-rate-agent .w4-who b {
+  font-size: calc(16 * var(--ws-type-px));
+  font-weight: 600;
+}
+.w4-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(6 * var(--ws-px));
+}
+.w4-chip {
+  padding: calc(4 * var(--ws-px)) calc(10 * var(--ws-px));
+  border-radius: 999px;
+  background: var(--status-live-bg, color-mix(in srgb, var(--ap4-ok) 12%, transparent));
+  color: var(--status-live, var(--ap4-ok));
+  font-size: calc(12 * var(--ws-type-px));
+  font-weight: 500;
+}
+/* Why an agent can't be rated: the one sentence, set apart. */
+.w4-refusal {
+  margin: 0;
+  padding: calc(12 * var(--ws-px)) calc(14 * var(--ws-px));
+  border-radius: calc(12 * var(--ws-px));
+  background: var(--status-danger-bg, color-mix(in srgb, var(--ap4-bad) 10%, transparent));
+  color: var(--status-danger, var(--ap4-bad));
+  font-size: calc(14 * var(--ws-type-px));
+  line-height: 1.45;
+}
+.w4-rate-pick {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(12 * var(--ws-px));
+  padding: calc(20 * var(--ws-px)) calc(16 * var(--ws-px));
+  border: 1px solid var(--ap4-line);
+  border-radius: calc(14 * var(--ws-px));
+  background: var(--ap4-surface);
+  color: var(--ap4-muted);
+}
+.w4-pick {
+  display: flex;
+  gap: calc(8 * var(--ws-px));
+}
+.w4-pick-star {
+  position: relative;
+  display: grid;
+  width: 52px;
+  height: 52px;
+  place-items: center;
+  border-radius: calc(12 * var(--ws-px));
+  cursor: pointer;
+}
+.w4-pick-star:has(input:disabled) {
+  cursor: default;
+}
+.w4-pick-star input:focus-visible + .w4-star {
+  border-radius: calc(8 * var(--ws-px));
+  outline: 2px solid var(--w4-star);
+  outline-offset: 4px;
+}
+.w4-pick-caption {
+  color: var(--ap4-text);
+  font-weight: 500;
+}
+/* What a rating is, before it is signed: the mockup's blue-tinted note. */
+.w4-rate-note {
+  margin: 0;
+  padding: calc(12 * var(--ws-px)) calc(14 * var(--ws-px));
+  border-radius: calc(12 * var(--ws-px));
+  background: color-mix(in srgb, var(--w4-star) 10%, var(--ap4-surface));
+  color: var(--ap4-text);
+  font-size: calc(13 * var(--ws-type-px));
+  line-height: 1.5;
+}
+.w4-rate-card {
+  display: flex;
+  gap: calc(12 * var(--ws-px));
+  padding: calc(18 * var(--ws-px)) calc(16 * var(--ws-px));
+  border: 1px solid var(--ap4-line);
+  border-radius: calc(14 * var(--ws-px));
+  background: var(--ap4-surface);
+}
+.w4-rate-going {
+  align-items: center;
+}
+.w4-rate-going .v4s-spin {
+  width: 20px;
+  height: 20px;
+  border-top-color: var(--w4-star);
+}
+.w4-rate-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.w4-rate-text b {
+  font-size: calc(15 * var(--ws-type-px));
+  font-weight: 600;
+}
+.w4-rate-text small,
+.w4-rate-done small {
+  display: flex;
+  align-items: center;
+  gap: calc(6 * var(--ws-px));
+  color: var(--ap4-muted);
+  font-size: calc(13 * var(--ws-type-px));
+}
+.w4-rate-done {
+  flex-direction: column;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+  padding: calc(22 * var(--ws-px)) calc(16 * var(--ws-px));
+  text-align: center;
+}
+.w4-rate-done .w4-link {
+  align-self: center;
+}
+.w4-rate-ok {
+  display: grid;
+  width: 52px;
+  height: 52px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--status-live-bg, color-mix(in srgb, var(--ap4-ok) 12%, transparent));
+  color: var(--status-live, var(--ap4-ok));
+}
+.w4-rate-title {
+  font-size: calc(20 * var(--ws-type-px));
+  font-weight: 600;
+}
+.w4-rate-for {
+  display: flex;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+  font-size: calc(15 * var(--ws-type-px));
+}
+.w4-rate-actions {
+  display: flex;
+  gap: calc(8 * var(--ws-px));
+}
+.w4-rate-actions .ap4-btn {
+  flex: 1;
+  height: 44px;
+}
+
+/* Ratings given, under the Rate form: the agents rated so far; a row fills the form to rate again. */
+.w4-given {
+  display: grid;
+  gap: calc(14 * var(--ws-px));
+  margin-top: calc(6 * var(--ws-px));
+}
+.w4-given .w4-section {
+  margin: 0 0 calc(-6 * var(--ws-px));
+}
+.w4-given-row {
+  gap: calc(8 * var(--ws-px));
+}
+.w4-given-pick {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: calc(12 * var(--ws-px));
+  min-width: 0;
+  padding: calc(9 * var(--ws-px)) 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.w4-given-pick:focus-visible {
+  outline: 2px solid var(--w4-star);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+.w4-given-who {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(6 * var(--ws-px));
+  min-width: 0;
+}
+.w4-given-name {
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.w4-given-link {
+  flex: none;
+  color: var(--ap4-muted);
+  font-size: calc(12 * var(--ws-type-px));
+}
+.w4-given-note {
+  margin-top: calc(-6 * var(--ws-px));
+}

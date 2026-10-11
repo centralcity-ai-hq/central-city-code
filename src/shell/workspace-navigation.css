@@ -1,0 +1,575 @@
+/*
+ * Workspace v3 shell (docs/design/WORKSPACE_V3.md §3): one calm canvas, a quiet 272px sidebar
+ * with the room list under Rooms, and the account card at the bottom.
+ * Colours come from the v3 tokens (src/rooms/rooms-v2.css, scoped to the workspace there).
+ * Every length is written in workspace pixels (calc(N * var(--ws-px))) and every font size in
+ * workspace type pixels, so the workspace's 90% density applies (src/shell/tokens.css); on
+ * phones and touch screens the controls grow back to 44px touch targets (end of this file).
+ */
+.app-shell[data-workspace='v2'] {
+  grid-template-columns: calc(272 * var(--ws-px)) minmax(0, 1fr);
+  background: linear-gradient(180deg, var(--bg-page) 0%, var(--bg-page-2) 100%);
+  color: var(--text);
+  /* Warnings stay amber outside rooms (the v3 in-progress colour). */
+  --warning: var(--status-warn);
+  --warning-tint: var(--status-warn-bg);
+  /* The phone's top row (☰ + page title); there is no header bar from 900px up. */
+  --ws-topbar-h: 0px;
+}
+[data-workspace='v2'] .sidebar {
+  gap: 0;
+  padding: calc(20 * var(--ws-px)) calc(14 * var(--ws-px));
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+[data-workspace='v2'] .workspace-content {
+  min-width: 0;
+  min-height: 100dvh;
+}
+/* The page fills the window (no footer below it), so its canvas reaches the bottom. */
+[data-workspace='v2'] .workspace-content > .main-content {
+  flex: 1 0 auto;
+}
+.wv2-navigation {
+  display: flex;
+  flex-direction: column;
+  gap: calc(4 * var(--ws-px));
+  min-height: 100%;
+}
+.wv2-navigation :focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Brand: mark + "Central City" */
+.ws-brand {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(8 * var(--ws-px));
+  padding: 0 calc(8 * var(--ws-px)) calc(12 * var(--ws-px));
+}
+.ws-brand .lockup {
+  margin: 0;
+  padding: 0;
+  gap: calc(10 * var(--ws-px));
+  border-radius: calc(10 * var(--ws-px));
+}
+.ws-brand .city-mark {
+  width: calc(28 * var(--ws-px));
+  height: calc(28 * var(--ws-px));
+}
+
+/* Nav items: 40px tall, 12px radius, 18px icons at a 1.9 stroke */
+.wv2-navigation nav {
+  display: flex;
+  flex-direction: column;
+  gap: calc(2 * var(--ws-px));
+}
+.wv2-navigation nav[hidden] {
+  display: none;
+}
+.wv2-navigation .ws-nav {
+  display: flex;
+  align-items: center;
+  gap: calc(12 * var(--ws-px));
+  width: 100%;
+  height: calc(40 * var(--ws-px));
+  min-height: calc(40 * var(--ws-px));
+  padding: 0 calc(12 * var(--ws-px));
+  border: 0;
+  border-radius: calc(12 * var(--ws-px));
+  background: none;
+  color: var(--text);
+  font: 500 calc(15 * var(--ws-type-px)) / 1.2 var(--font-sans);
+  text-align: left;
+  transition:
+    background-color var(--motion-duration-fast) var(--motion-ease-out),
+    color var(--motion-duration-fast) var(--motion-ease-out);
+}
+.wv2-navigation .ws-nav svg {
+  flex-shrink: 0;
+  width: calc(18 * var(--ws-px));
+  height: calc(18 * var(--ws-px));
+  opacity: 0.8;
+}
+.wv2-navigation .ws-nav:hover {
+  background: var(--bg-inset);
+  color: var(--text);
+}
+.wv2-navigation .ws-nav.active {
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+.wv2-navigation .ws-nav.active svg {
+  opacity: 1;
+}
+.wv2-navigation .ws-nav.active::before {
+  display: none;
+}
+.wv2-navigation .ws-nav.nav-connect:not(.active) {
+  color: var(--text);
+}
+.ws-nav-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Counts: a filled accent circle (Messages unread, My agents pending requests). */
+.wv2-navigation .nav-count,
+[data-workspace='v2'] .wv2-pending {
+  min-width: calc(22 * var(--ws-px));
+  height: calc(22 * var(--ws-px));
+  padding: 0 calc(6 * var(--ws-px));
+  border-radius: 999px;
+  background: var(--primary);
+  color: var(--on-primary);
+  font: 600 max(11px, calc(12 * var(--ws-type-px))) / 1 var(--font-sans);
+}
+
+/* The room list under Rooms: indented with a 1px rule */
+.ws-rooms {
+  margin: calc(2 * var(--ws-px)) 0 calc(8 * var(--ws-px)) calc(22 * var(--ws-px));
+  padding-left: calc(12 * var(--ws-px));
+  border-left: 1px solid var(--border);
+}
+.wv2-navigation .ws-rooms {
+  gap: calc(2 * var(--ws-px));
+}
+.ws-rooms-slot:empty {
+  display: none;
+}
+.ws-room-group {
+  display: flex;
+  flex-direction: column;
+}
+.ws-room-rows {
+  display: flex;
+  flex-direction: column;
+  gap: calc(2 * var(--ws-px));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ws-room-group-label {
+  margin: calc(6 * var(--ws-px)) 0 calc(2 * var(--ws-px));
+  padding: 0 calc(10 * var(--ws-px));
+  /* Muted, not faint: small text needs AA contrast on the sidebar. */
+  color: var(--text-muted);
+  font: 600 max(11px, calc(11.5 * var(--ws-type-px))) / 1.6 var(--font-sans);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.ws-room {
+  display: flex;
+  align-items: center;
+  gap: calc(9 * var(--ws-px));
+  height: calc(34 * var(--ws-px));
+  padding: 0 calc(10 * var(--ws-px));
+  border-radius: calc(10 * var(--ws-px));
+  color: var(--text-muted);
+  font: 500 calc(14 * var(--ws-type-px)) / 1.2 var(--font-sans);
+  text-decoration: none;
+  transition: background-color var(--motion-duration-fast) var(--motion-ease-out);
+}
+.ws-room:hover {
+  background: var(--bg-inset);
+  color: var(--text);
+}
+.ws-room.active {
+  background: var(--accent-subtle);
+  color: var(--text);
+  font-weight: 600;
+}
+.ws-room.unread {
+  color: var(--text);
+  font-weight: 600;
+}
+/* One line with an ellipsis on every page (the full name is the row's title). The room
+   pages' older list CSS (src/rooms/sidebar.css) clamps names to two lines; this wins over it
+   whichever stylesheet loads last. */
+.ws-room .ws-room-name {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  -webkit-line-clamp: unset;
+  line-clamp: none;
+  line-height: 1.2;
+}
+.ws-room-dot {
+  flex-shrink: 0;
+  width: calc(7 * var(--ws-px));
+  height: calc(7 * var(--ws-px));
+  border-radius: 50%;
+  background: var(--status-live);
+}
+.ws-room-dot.ended {
+  background: var(--text-faint);
+}
+.ws-room-badge {
+  flex-shrink: 0;
+  min-width: calc(20 * var(--ws-px));
+  height: calc(20 * var(--ws-px));
+  padding: 0 calc(6 * var(--ws-px));
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--primary);
+  color: var(--on-primary);
+  font: 600 max(11px, calc(11.5 * var(--ws-type-px))) / 1 var(--font-sans);
+}
+.ws-room-ended-toggle {
+  display: flex;
+  align-items: center;
+  gap: calc(6 * var(--ws-px));
+  height: calc(30 * var(--ws-px));
+  padding: 0 calc(10 * var(--ws-px));
+  border: 0;
+  border-radius: calc(10 * var(--ws-px));
+  background: none;
+  color: var(--text-muted);
+  font: 500 max(12px, calc(13 * var(--ws-type-px))) / 1 var(--font-sans);
+  text-align: left;
+}
+.ws-room-ended-toggle:hover {
+  background: var(--bg-inset);
+  color: var(--text);
+}
+.ws-room-ended-count {
+  margin-left: auto;
+  color: var(--text-muted);
+}
+.ws-chevron {
+  flex-shrink: 0;
+  transition: transform var(--motion-duration-normal) var(--motion-ease-out);
+}
+.ws-room-ended-toggle[aria-expanded='true'] .ws-chevron {
+  transform: rotate(90deg);
+}
+.ws-room-actions {
+  display: flex;
+  gap: calc(6 * var(--ws-px));
+  margin-top: calc(4 * var(--ws-px));
+}
+.ws-mini {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(4 * var(--ws-px));
+  min-width: 0;
+  height: calc(32 * var(--ws-px));
+  padding: 0 calc(8 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(10 * var(--ws-px));
+  background: var(--bg-surface-elevated);
+  color: var(--text);
+  font: 600 max(12px, calc(13 * var(--ws-type-px))) / 1 var(--font-sans);
+  white-space: nowrap;
+}
+.ws-mini:hover {
+  background: var(--bg-inset);
+}
+.ws-mini.primary {
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+.ws-rooms-loading {
+  display: grid;
+  gap: calc(6 * var(--ws-px));
+  padding: calc(4 * var(--ws-px)) calc(10 * var(--ws-px));
+}
+.ws-rooms-loading span {
+  height: calc(12 * var(--ws-px));
+  border-radius: 999px;
+  background: var(--bg-inset);
+}
+.ws-rooms-error {
+  margin: 0;
+  padding: calc(4 * var(--ws-px)) calc(10 * var(--ws-px));
+  color: var(--text-muted);
+  font: 400 max(12px, calc(13 * var(--ws-type-px))) / 1.5 var(--font-sans);
+}
+
+/* ADVANCED: a collapsible group label */
+.ws-group {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  height: calc(32 * var(--ws-px));
+  margin: calc(18 * var(--ws-px)) 0 calc(4 * var(--ws-px));
+  padding: 0 calc(12 * var(--ws-px));
+  border: 0;
+  border-radius: calc(10 * var(--ws-px));
+  background: none;
+  /* Muted, not faint: an 11.5px label needs AA contrast (faint is 2.5:1 on the sidebar). */
+  color: var(--text-muted);
+  font: 600 max(11px, calc(11.5 * var(--ws-type-px))) / 1 var(--font-sans);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.ws-group:hover {
+  color: var(--text);
+}
+.ws-group[aria-expanded='false'] .ws-chevron {
+  transform: rotate(-90deg);
+}
+
+.wv2-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: calc(4 * var(--ws-px)) calc(8 * var(--ws-px));
+}
+.wv2-navigation .text-link {
+  min-height: calc(44 * var(--ws-px));
+  display: inline-flex;
+  align-items: center;
+}
+.ws-spacer {
+  flex: 1;
+  min-height: calc(16 * var(--ws-px));
+}
+
+/* Account card and its menu (opens above the card) */
+.ws-account {
+  position: relative;
+}
+.ws-account-card {
+  display: flex;
+  align-items: center;
+  gap: calc(10 * var(--ws-px));
+  width: 100%;
+  padding: calc(10 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(14 * var(--ws-px));
+  background: var(--bg-surface-elevated);
+  color: var(--text);
+  text-align: left;
+}
+.ws-account-card:hover {
+  background: var(--bg-inset);
+}
+.ws-account-card .workspace-avatar {
+  width: calc(34 * var(--ws-px));
+  height: calc(34 * var(--ws-px));
+  border-radius: 50%;
+  background: var(--text-primary);
+  color: var(--bg-page);
+  font: 700 calc(14 * var(--ws-type-px)) / 1 var(--font-sans);
+}
+.ws-account-text {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+.ws-account-text strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 600 calc(14 * var(--ws-type-px)) / 1.35 var(--font-sans);
+}
+.ws-account-text small {
+  color: var(--text-muted);
+  font: 400 max(12px, calc(12.5 * var(--ws-type-px))) / 1.35 var(--font-sans);
+}
+.ws-account-chevron {
+  flex-shrink: 0;
+  color: var(--text-faint);
+  transition: transform var(--motion-duration-normal) var(--motion-ease-out);
+}
+/* The caret points up (the menu opens above the card) and turns down while it is open. */
+.ws-account-card[aria-expanded='true'] .ws-account-chevron {
+  transform: rotate(180deg);
+}
+.ws-account-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + calc(8 * var(--ws-px)));
+  z-index: 20;
+  padding: calc(6 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(16 * var(--ws-px));
+  background: var(--bg-surface-elevated);
+  box-shadow: var(--shadow-elevated);
+  animation: ws-menu-in var(--motion-duration-normal) var(--motion-ease-out);
+}
+@keyframes ws-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(calc(6 * var(--ws-px)));
+  }
+}
+.ws-account-menu .workspace-select {
+  width: 100%;
+  margin: 0 0 calc(6 * var(--ws-px));
+  padding: calc(6 * var(--ws-px)) calc(8 * var(--ws-px));
+  border-radius: calc(10 * var(--ws-px));
+}
+.ws-menu-item {
+  display: flex;
+  align-items: center;
+  gap: calc(10 * var(--ws-px));
+  width: 100%;
+  height: calc(38 * var(--ws-px));
+  padding: 0 calc(10 * var(--ws-px));
+  border: 0;
+  border-radius: calc(10 * var(--ws-px));
+  background: none;
+  color: var(--text);
+  font: 500 calc(14 * var(--ws-type-px)) / 1 var(--font-sans);
+  text-align: left;
+  text-decoration: none;
+  /* One line per item: "Pause workspace · Running" used to wrap in the 272px sidebar. */
+  white-space: nowrap;
+}
+.ws-menu-item svg {
+  flex-shrink: 0;
+  width: calc(18 * var(--ws-px));
+  height: calc(18 * var(--ws-px));
+  opacity: 0.8;
+}
+.ws-menu-item:hover {
+  background: var(--bg-inset);
+}
+.ws-menu-item[aria-disabled='true'] {
+  cursor: not-allowed;
+}
+.ws-menu-item.danger {
+  color: var(--status-danger);
+}
+.ws-menu-value {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+}
+.ws-account-menu hr {
+  margin: calc(4 * var(--ws-px)) calc(6 * var(--ws-px));
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+/* Round chips: the phone's ☰ (top bar) and the drawer's close button */
+.ws-chip-round,
+[data-workspace='v2'] .cc-app-header .mobile-menu {
+  display: none;
+  place-items: center;
+  width: calc(44 * var(--ws-px));
+  height: calc(44 * var(--ws-px));
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-surface-elevated);
+  color: var(--text);
+  box-shadow: var(--shadow-float-sm);
+}
+
+/* The drawer's close button stays (keyboard and screen-reader users need it) but is quiet. */
+.wv2-close.ws-chip-round {
+  border-color: transparent;
+  background: none;
+  color: var(--text-muted);
+  box-shadow: none;
+}
+.wv2-close.ws-chip-round:hover {
+  background: var(--bg-inset);
+  color: var(--text);
+}
+
+/* Existing standalone account chrome is replaced by the workspace navigation. */
+[data-workspace='v2'] .public-shell > .cc-header,
+[data-workspace='v2'] .public-shell > .cc-footer {
+  display: none;
+}
+[data-workspace='v2'] #workspace-page-content {
+  height: calc(100dvh - var(--ws-topbar-h));
+}
+
+/*
+ * One calm canvas (§1): no full-width header bar. Each page's floating pill or heading carries
+ * its title and live status; the phone keeps a minimal top row for the drawer's ☰ chip.
+ */
+[data-workspace='v2'] .topbar.cc-app-header {
+  display: none;
+}
+
+/* Under 900px the sidebar is an off-canvas drawer opened by the round ☰ chip. */
+@media (max-width: 899px) {
+  .app-shell[data-workspace='v2'] {
+    grid-template-columns: minmax(0, 1fr);
+    --ws-topbar-h: calc(60 * var(--ws-px));
+  }
+  [data-workspace='v2'] .topbar.cc-app-header {
+    display: flex;
+    height: var(--ws-topbar-h);
+    min-height: var(--ws-topbar-h);
+    padding: 0 calc(16 * var(--ws-px));
+    border-bottom: 0;
+    background: color-mix(in srgb, var(--bg-page) 92%, transparent);
+  }
+  [data-workspace='v2'] .cc-app-header-title {
+    gap: calc(12 * var(--ws-px));
+  }
+  [data-workspace='v2'] .cc-app-header-title p {
+    font: 600 calc(17 * var(--ws-type-px)) / 1.3 var(--font-sans);
+    letter-spacing: -0.01em;
+  }
+  [data-workspace='v2'] .sidebar {
+    width: min(calc(288 * var(--ws-px)), calc(100vw - calc(32 * var(--ws-px))));
+    box-shadow: var(--shadow-elevated);
+  }
+  [data-workspace='v2'] .sidebar:not(.open) {
+    visibility: hidden;
+  }
+  .ws-chip-round,
+  [data-workspace='v2'] .cc-app-header .mobile-menu {
+    display: inline-grid;
+  }
+}
+
+/* Touch screens have no hover title: a long room name wraps onto more lines instead of an
+   ellipsis, so the whole name is readable (the row grows from its 44px minimum). */
+@media (hover: none) {
+  .ws-room {
+    height: auto;
+    padding-block: calc(8 * var(--ws-px));
+  }
+  .ws-room .ws-room-name {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.3;
+  }
+}
+
+/* Phones and touch screens: every control is a 44px touch target. */
+@media (max-width: 640px), (pointer: coarse) {
+  .wv2-navigation .ws-nav,
+  .ws-mini,
+  .ws-group,
+  .ws-room-ended-toggle,
+  .ws-menu-item {
+    height: 44px;
+    min-height: 44px;
+  }
+}
+/* Room rows: at least 44px; fixed at 44px (one line) where a hover title shows the full name. */
+@media (max-width: 640px), (pointer: coarse) {
+  .ws-room {
+    min-height: 44px;
+  }
+}
+@media ((max-width: 640px) or (pointer: coarse)) and (hover: hover) {
+  .ws-room {
+    height: 44px;
+  }
+}

@@ -21,6 +21,8 @@ import {
   assertPublicSafe,
   writePublicDocs,
 } from '../scripts/public-docs/build.js';
+import { GUIDE_SLUGS, renderGuides } from '../scripts/public-docs/guides.js';
+import { SHARE_CARDS } from '../shared/share-cards.js';
 
 /**
  * The docs AIs are pointed at must be reachable by everyone: pages on centralcity.ai that the
@@ -33,11 +35,14 @@ const vercel = JSON.parse(read('vercel.json')) as {
   rewrites: Array<{ source: string; destination: string }>;
   headers: Array<{ source: string; headers: Array<{ key: string; value: string }> }>;
 };
-const PUBLIC_REPOS = new Set(
-  (
+const PUBLIC_REPOS = new Set([
+  ...(
     JSON.parse(read('public/downtown.json')) as { public_repositories: Array<{ name: string }> }
   ).public_repositories.map((repo) => repo.name.toLowerCase()),
-);
+  // Public install sources that are not code repositories on Downtown: the published Gemini CLI
+  // extension (gemini extensions install needs its own repository root).
+  'centralcity-ai-hq/gemini-cli-extension',
+]);
 
 const out = mkdtempSync(join(tmpdir(), 'cc-public-docs-'));
 const generated = new Set(writePublicDocs(root, out).map((path) => `/${path}`));
@@ -151,9 +156,9 @@ function assertReachable(name: string, text: string, strict = false) {
 }
 
 test('the public repository list is known', () => {
-  assert.ok(PUBLIC_REPOS.has('centralcity-ai/protocol'));
-  assert.ok(PUBLIC_REPOS.has('centralcity-ai/toolkit'));
-  assert.ok(PUBLIC_REPOS.has('centralcity-ai/central-city-code'));
+  assert.ok(PUBLIC_REPOS.has('centralcity-ai-hq/protocol'));
+  assert.ok(PUBLIC_REPOS.has('centralcity-ai-hq/toolkit'));
+  assert.ok(PUBLIC_REPOS.has('centralcity-ai-hq/central-city-code'));
 });
 
 test('every URL in llms.txt and llms-full.txt is built on centralcity.ai or in a public repo', () => {
@@ -183,9 +188,10 @@ test('the build writes every public page, the index and /docs.md', () => {
   // Vercel answers /docs with a directory index or docs.* file, which would hand browsers raw
   // Markdown instead of the docs app: nothing may be written at those places.
   for (const path of generated) assert.doesNotMatch(path, /^\/docs(?:\/index)?\.[a-z]+$/, path);
-  assert.equal(
-    vercel.rewrites.find((item) => item.source === '/docs')?.destination,
-    '/index.html',
+  // The app shell: index.html or the copy of it with the /docs page head (shared/share-cards.ts).
+  assert.match(
+    vercel.rewrites.find((item) => item.source === '/docs')?.destination ?? '',
+    /^\/(?:index|share\/docs)\.html$/,
     '/docs is the docs app',
   );
   for (const path of generated) {
@@ -286,7 +292,14 @@ test('the rendered pages match the reviewed snapshot', () => {
 });
 
 test('Markdown pages are served as text/markdown; /docs links to them and works without JavaScript', () => {
-  for (const path of ['/docs/rooms.md', '/docs/index.md', '/docs.md', `/${DOCS_INDEX_FILE}`]) {
+  for (const path of [
+    '/docs/rooms.md',
+    '/docs/room-management.md',
+    '/docs/coding.md',
+    '/docs/index.md',
+    '/docs.md',
+    `/${DOCS_INDEX_FILE}`,
+  ]) {
     const headers = responseHeaders(path);
     assert.equal(headers.get('content-type'), 'text/markdown; charset=utf-8', path);
     assert.equal(headers.get('access-control-allow-origin'), '*', path);
@@ -296,6 +309,8 @@ test('Markdown pages are served as text/markdown; /docs links to them and works 
     ['/docs', '/docs/index.md'],
     ['/docs/start', '/docs/index.md'],
     ['/docs/rooms', '/docs/rooms.md'],
+    ['/docs/room-management', '/docs/room-management.md'],
+    ['/docs/coding', '/docs/coding.md'],
     ['/docs/api', '/docs/api.md'],
   ] as const) {
     assert.ok(served(page), page);
@@ -313,4 +328,41 @@ test('Markdown pages are served as text/markdown; /docs links to them and works 
     assert.ok(noscript.includes(`href="${href}"`), href);
   // The build hook is wired in.
   assert.match(read('vite.config.ts'), /plugins: \[[^\]]*publicDocs\(\)/);
+});
+
+test('the HTML guides render the same text as their Markdown pages', () => {
+  const out = mkdtempSync(join(tmpdir(), 'cc-guides-'));
+  try {
+    writePublicDocs(root, out);
+    const guides = renderGuides(root);
+    assert.deepEqual(
+      guides.map((guide) => guide.slug),
+      [...GUIDE_SLUGS],
+    );
+    const text = (node: object): string =>
+      'value' in node
+        ? String(node.value)
+        : 'children' in node
+          ? (node.children as object[]).map(text).join('')
+          : '';
+    for (const guide of guides) {
+      const doc = PUBLIC_DOCS.find((entry) => entry.slug === guide.slug)!;
+      assert.equal(guide.title, doc.title);
+      assert.equal(guide.summary, doc.summary);
+      const markdown = readFileSync(join(out, 'docs', `${guide.slug}.md`), 'utf8');
+      // Every H2 of the .md is a section of the page, in order.
+      assert.deepEqual(
+        guide.tree.children.filter((node) => node.type === 'heading' && node.depth === 2).map(text),
+        [...markdown.matchAll(/^## (.+)$/gm)].map((match) => match[1]!.replace(/`/g, '')),
+        guide.slug,
+      );
+      assert.equal(guide.tree.children.filter((node) => node.type === 'table').length > 0, true);
+      assert.ok(!JSON.stringify(guide.tree).includes('"position"'), 'no source positions');
+      // The page's meta description is the summary.
+      const card = SHARE_CARDS.find((each) => each.path === `/docs/${guide.slug}`);
+      assert.equal(card?.description, doc.summary, guide.slug);
+    }
+  } finally {
+    rmSync(out, { recursive: true, force: true });
+  }
 });

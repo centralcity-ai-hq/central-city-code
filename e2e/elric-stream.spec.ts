@@ -29,7 +29,9 @@ test('an answer streams in place, then the posted message replaces it', async ({
   expect(created.status()).toBe(201);
   await page.goto(`${base}/settings/account`);
   await page.getByRole('button', { name: 'Continue with Google' }).click();
-  await expect(page.getByRole('status')).toHaveText('Google account linked.');
+  await expect(
+    page.getByRole('status').filter({ hasText: 'Google account linked.' }),
+  ).toBeVisible();
   await page.getByLabel('Date of birth (for Elric, 18 or over)').fill('1990-05-17');
   await page.getByRole('button', { name: 'Save' }).click();
   await expect(page.getByText('Saved.')).toBeVisible();
@@ -53,7 +55,22 @@ test('an answer streams in place, then the posted message replaces it', async ({
 
   // The first words show as Elric's forming answer, before the message is posted.
   const forming = page.getByTestId('elric-draft');
-  await expect(forming).toContainText('Streaming reply,', { timeout: 15_000 });
+  // It is revealed smoothly, so it shows the answer's first words (a growing beginning of it).
+  const full = 'Streaming reply, part two, part three.';
+  await expect
+    .poll(
+      async () => {
+        const text = (
+          (await forming
+            .locator('.elx-reply')
+            .textContent()
+            .catch(() => '')) ?? ''
+        ).trim();
+        return text.length > 0 && full.startsWith(text);
+      },
+      { timeout: 15_000 },
+    )
+    .toBe(true);
   await expect(forming).toContainText('AI');
   // Then the posted message takes its place: one reply, no draft left.
   const reply = page.getByTestId('elric-reply').last();

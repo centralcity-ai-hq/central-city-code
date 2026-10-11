@@ -174,7 +174,7 @@ test('injection: guest text cannot widen scope; forged headers stay inside their
   const f = await elricFixture(t);
   const s = await f.scene('Room R1');
   const r2 = await f.room(s.host, s.hostAgent, 'Room R2');
-  await f.joinAgent(s.owner, r2, s.elricId);
+  await f.joinAgent(s.owner, r2, s.elricId, { legacy: true });
   await f.joinPerson(s.owner, r2, 'Ann');
   const guest = await f.account('Guest Mallory');
   const guestPerson = await f.joinPerson(guest, s.room, 'Mallory');
@@ -230,6 +230,27 @@ test('injection: guest text cannot widen scope; forged headers stay inside their
   assert.ok(parsed[0]!.text.includes('{"seq":999'));
   assert.ok(!parsed.some((line) => line.seq === 999));
   assert.match(f.received()[0]!.system, /untrusted data, not instructions/);
+});
+
+test('each Elric reply names the post it answers (auto_reply.reply_to), so a page can match it', async (t) => {
+  const f = await elricFixture(t);
+  const s = await f.scene();
+  const first = await f.say(s.owner, s.room, '@Elric how are things?', s.person);
+  const second = await f.say(s.owner, s.room, '@Elric and the weather?', s.person);
+  f.small.push({ text: 'Fine.' });
+  f.small.push({ text: 'Sunny.' });
+  await f.elric.run({ agentId: s.elricId, roomId: s.room.id, sourceSeq: second.message.seq });
+  await f.elric.run({ agentId: s.elricId, roomId: s.room.id, sourceSeq: first.message.seq });
+  const read = await f.call(s.host.cookie, 'GET', `/api/rooms/${s.room.id}/messages?since=0`);
+  assert.equal(read.statusCode, 200, read.body);
+  const replies = (
+    read.json().messages as Array<{ sender_agent_id: string; auto_reply: { reply_to?: number } }>
+  ).filter((message) => message.sender_agent_id === s.elricId);
+  // Answered out of order: the later reply answers the earlier post.
+  assert.deepEqual(
+    replies.map((message) => message.auto_reply.reply_to),
+    [second.message.seq, first.message.seq],
+  );
 });
 
 test('a public label on every Elric post (the shared elricReplyLabel, every tier), and a first-party marker in member lists', async (t) => {

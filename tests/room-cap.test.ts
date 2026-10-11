@@ -197,8 +197,13 @@ test('the host changes the member cap (never below the members), logged; others 
   const raised = await set(host.cookie, 100);
   assert.equal(raised.statusCode, 200, raised.body);
   assert.equal(raised.json().room.member_cap, 100);
-  const below = await set(host.cookie, 2);
-  assert.equal(below.statusCode, 200, 'two members, cap two is allowed');
+  // Three members: the host agent, the host as a person (in its room from creation) and the
+  // member. Cap three is allowed, two is below them.
+  const below = await set(host.cookie, 3);
+  assert.equal(below.statusCode, 200, 'three members, cap three is allowed');
+  const tooLow = await set(host.cookie, 2);
+  assert.equal(tooLow.statusCode, 409, tooLow.body);
+  assert.equal(tooLow.json().code, 'cap_below_members');
   const other = await set(member.cookie, 50);
   assert.equal(other.statusCode, 403, other.body);
   const snapshot = await app.inject({
@@ -291,7 +296,8 @@ test('a default join link admits as many joins as the room holds (an earlier tes
     url: `/api/rooms/${roomId}/members`,
     headers: { ...headers, cookie },
   });
-  assert.equal(members.json().members.length, 51);
+  // The host agent, the host as a person (in its room from creation) and the 50 guests.
+  assert.equal(members.json().members.length, 52);
 });
 
 test('a lowered CITY_LIMIT_ROOM_MEMBERS_MAX bounds joins to rooms created under a higher one', async (t) => {
@@ -348,12 +354,11 @@ test('a lowered CITY_LIMIT_ROOM_MEMBERS_MAX bounds joins to rooms created under 
       { cookie: member.cookie },
     );
   };
-  for (const name of ['Lowered one', 'Lowered two']) {
-    const joined = await join(name);
-    assert.equal(joined.statusCode, 200, joined.body);
-  }
-  // Host plus two members reach the server maximum of 3: the next join is refused.
-  const full = await join('Lowered three');
+  const joined = await join('Lowered one');
+  assert.equal(joined.statusCode, 200, joined.body);
+  // The host agent, the host as a person (in its room from creation) and one member reach the
+  // server maximum of 3: the next join is refused.
+  const full = await join('Lowered two');
   assert.equal(full.statusCode, 409, full.body);
   assert.equal(full.json().code, 'room_full');
   assert.match(full.json().message ?? full.json().error ?? full.body, /3 members/);
@@ -629,13 +634,17 @@ test('migration 36 lowers open rooms above 100 to GREATEST(100, active members);
     logged.push({ event, fields }),
   );
   assert.ok(result.applied.includes(36));
-  // One structured line with counts measured before the UPDATE (no ids).
-  assert.deepEqual(logged, [
-    {
-      event: 'rooms.migration36',
-      fields: { rooms_lowered: 3, at_10000: 2, over_100_active: 1, largest_active: 150 },
-    },
-  ]);
+  // One structured line with counts measured before the UPDATE (no ids). Later migrations that
+  // other test files registered (listMigrations() is global) may log their own lines.
+  assert.deepEqual(
+    logged.filter((line) => line.event === 'rooms.migration36'),
+    [
+      {
+        event: 'rooms.migration36',
+        fields: { rooms_lowered: 3, at_10000: 2, over_100_active: 1, largest_active: 150 },
+      },
+    ],
+  );
   const caps = Object.fromEntries(
     (
       await db.query<{ id: string; member_cap: number }>('SELECT id, member_cap FROM rooms')

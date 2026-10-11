@@ -5,7 +5,8 @@ import { withRoomDeadline } from './rooms/api';
 import { navigate } from './shell/navigation';
 import { PublicFooter } from './shell/PublicFooter';
 import { PublicHeader } from './shell/PublicHeader';
-import { roomSlugOf } from './rooms/pendingJoin';
+import { readPendingJoin, roomSlugOf } from './rooms/pendingJoin';
+import { LINKS } from './shell/links';
 
 /*
  * The app shell's mount of the Rooms experience (docs/ROOMS_UX.md, "Mounting it"): /rooms,
@@ -55,6 +56,7 @@ function SignedOutRooms() {
       <PublicHeader current="rooms" />
       <main id="main-content" tabIndex={-1} className="public-main rm-signed-out">
         <h1>Your rooms</h1>
+        <p>Rooms are shared spaces where people and their AIs work together.</p>
         <p>Sign in to create a room and invite your AI.</p>
         <button
           type="button"
@@ -69,11 +71,47 @@ function SignedOutRooms() {
   );
 }
 
+/** The no-invite message on /r/:slug, signed in or out. */
+const INCOMPLETE_INVITE = 'This invite link is incomplete; ask the host for a new link.';
+
+/**
+ * Signed-out /r/:slug without its invite secret (opened directly, or the secret was lost in a
+ * new tab). Decided in the browser from sessionStorage alone, with no request, so the page is
+ * the same for every slug and never tells whether a room exists.
+ */
+function IncompleteInvite({ slug }: { slug: string }) {
+  return (
+    <div className="public-shell">
+      <PublicHeader current="rooms" />
+      <main id="main-content" tabIndex={-1} className="public-main rm-signed-out">
+        <h1>Open your invite link</h1>
+        <p>{INCOMPLETE_INVITE}</p>
+        <div className="rm-signed-out-actions">
+          <button
+            type="button"
+            className="button primary large"
+            onClick={() => navigate(`/signin?next=${encodeURIComponent(`/r/${slug}`)}`)}
+          >
+            Sign in
+          </button>
+          <a className="button secondary large" href={LINKS.home}>
+            Go home
+          </a>
+        </div>
+        <p className="rm-signed-out-note">Already in this room? Sign in to open it.</p>
+      </main>
+      <PublicFooter />
+    </div>
+  );
+}
+
 export default function RoomsShell({
   signedIn,
+  embedded = false,
   workspaceId,
   accountName,
 }: {
+  embedded?: boolean;
   signedIn: boolean;
   workspaceId: string;
   accountName: string;
@@ -165,11 +203,15 @@ export default function RoomsShell({
       </div>
     );
 
-  // The join page (/r/:slug) keeps RoomsApp's own signed-out flow ("Sign in to join").
-  if (!signedIn && !roomSlugOf(window.location.pathname)) return <SignedOutRooms />;
+  // The join page (/r/:slug) with its invite keeps RoomsApp's own signed-out flow ("Sign in to join").
+  const slug = roomSlugOf(window.location.pathname);
+  if (!signedIn && !slug) return <SignedOutRooms />;
+  if (!signedIn && slug && !readPendingJoin(slug)) return <IncompleteInvite slug={slug} />;
 
   return (
     <RoomsApp
+      embedded={embedded}
+      shellMenu={embedded}
       key={workspaceId}
       client={client}
       signedIn={signedIn}
@@ -177,7 +219,7 @@ export default function RoomsShell({
       accountName={accountName}
       onSignIn={(next) => navigate(`/signin?next=${encodeURIComponent(next)}`)}
       nav={
-        signedIn ? (
+        signedIn && !embedded ? (
           <a
             className="rm-quiet rm-nav-link"
             href="/"

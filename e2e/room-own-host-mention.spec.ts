@@ -2,9 +2,10 @@ import { test, expect, type Browser, type Page } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
 
 /*
- * "@<your own host>" is not a mention. The owner of the room's host agent doesn't get that host
- * in the @ picker, and their "@Host" isn't highlighted (the server records no mention, so nothing
- * is woken). A second member still sees the host in the picker and mentions it normally.
+ * Operation Agency A3: writing as yourself, "@<your own host>" is a mention, and it wakes your own
+ * agent. The host's owner, in the room as a person, writes as themselves by default ("Post as"
+ * offers both identities); the @ picker offers their own host. Writing as the host agent itself,
+ * it isn't offered (an agent never mentions itself). A second member mentions it as before.
  */
 const PASSWORD = 'Local-test-only-passphrase-2026';
 const headers = { 'x-city-request': '1' };
@@ -25,7 +26,7 @@ async function personId(page: Page, roomId: string) {
   return members.find((m) => m.own && m.kind === 'person')!.id;
 }
 
-test('your own host is not in your @ picker or highlighted; a second member mentions it', async ({
+test('writing as yourself, your own host is in your @ picker and your @mention of it is one', async ({
   browser,
 }) => {
   // The host: an agent "Hostbot" hosts the room; its owner is also in the room as a person.
@@ -74,26 +75,39 @@ test('your own host is not in your @ picker or highlighted; a second member ment
   await say(host, 'Reminder to myself: @Hostbot summarize later');
   await say(bea, 'Question for @Hostbot please');
 
-  // The host's view: no Hostbot in the picker; Bea is offered.
+  // The host's view: Hana writes as herself by default; "Post as" offers Hostbot too.
   await host.goto(`/rooms/${roomId}`);
+  const postAs = host.locator('.rm3-postas select');
+  await expect(postAs).toHaveValue(await personId(host, roomId));
+  // The host is in their room as themselves from its creation (A1), under their account name.
+  await expect(postAs.locator('option')).toHaveText([/ \(you\)$/, 'Hostbot']);
+  // As herself, the picker offers her own Hostbot (her @mention wakes it) and Bea.
   const box = host.getByRole('textbox', { name: 'Message' });
   await box.click();
   await box.pressSequentially('@');
   const picker = host.getByRole('listbox', { name: 'Mention a member' });
   await expect(picker.getByRole('option', { name: /Bea/ })).toBeVisible();
+  await expect(picker.getByRole('option', { name: /Hostbot/ })).toBeVisible();
+  await expect(picker.getByRole('option', { name: /Hana/ })).toHaveCount(0);
+  await box.press('Escape');
+  await box.fill('');
+  // As Hostbot, Hostbot isn't offered: an agent never mentions itself.
+  await postAs.selectOption({ label: 'Hostbot' });
+  await box.click();
+  await box.pressSequentially('@');
+  await expect(picker.getByRole('option', { name: /Bea/ })).toBeVisible();
   await expect(picker.getByRole('option', { name: /Hostbot/ })).toHaveCount(0);
-  await box.pressSequentially('Host');
-  await expect(picker).toHaveCount(0);
-  // Its own "@Hostbot" is plain text; Bea's "@Hostbot" is a mention.
+  await box.press('Escape');
+  // Both "@Hostbot"s are mentions: Hana's as herself and Bea's.
   const messages = host.getByTestId('room-message');
   await expect(
     messages.filter({ hasText: 'Reminder to myself' }).locator('.rm-mention'),
-  ).toHaveCount(0);
+  ).toHaveText('@Hostbot');
   await expect(messages.filter({ hasText: 'Question for' }).locator('.rm-mention')).toHaveText(
     '@Hostbot',
   );
 
-  // Bea's view: Hostbot is offered and her mention is highlighted.
+  // Bea's view: Hostbot is offered, and both mentions are highlighted.
   await bea.goto(`/rooms/${roomId}`);
   const beaBox = bea.getByRole('textbox', { name: 'Message' });
   await beaBox.click();
@@ -101,14 +115,8 @@ test('your own host is not in your @ picker or highlighted; a second member ment
   await expect(
     bea.getByRole('listbox', { name: 'Mention a member' }).getByRole('option', { name: /Hostbot/ }),
   ).toBeVisible();
-  await expect(
-    bea.getByTestId('room-message').filter({ hasText: 'Question for' }).locator('.rm-mention'),
-  ).toHaveText('@Hostbot');
-  // The host's note to itself isn't a mention for Bea either (the server recorded none).
-  await expect(
-    bea
-      .getByTestId('room-message')
-      .filter({ hasText: 'Reminder to myself' })
-      .locator('.rm-mention'),
-  ).toHaveCount(0);
+  for (const text of ['Question for', 'Reminder to myself'])
+    await expect(
+      bea.getByTestId('room-message').filter({ hasText: text }).locator('.rm-mention'),
+    ).toHaveText('@Hostbot');
 });

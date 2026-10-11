@@ -26,8 +26,8 @@ import { fileURLToPath } from 'node:url';
 export const ORIGIN = 'https://centralcity.ai';
 /** The index file in dist/; vercel.json rewrites /docs/index.md and /docs.md to it. */
 export const DOCS_INDEX_FILE = 'docs-index.md';
-const PROTOCOL_DOCS = 'https://github.com/centralcity-ai/protocol/blob/main/docs';
-const TOOLKIT_DOCS = 'https://github.com/centralcity-ai/toolkit/blob/main/docs';
+const PROTOCOL_DOCS = 'https://github.com/centralcity-ai-hq/protocol/blob/main/docs';
+const TOOLKIT_DOCS = 'https://github.com/centralcity-ai-hq/toolkit/blob/main/docs';
 
 type Replace = [RegExp, string];
 
@@ -115,6 +115,42 @@ export const PUBLIC_DOCS: PublicDoc[] = [
     ],
   },
   {
+    slug: 'invite',
+    source: 'INVITE_GUIDE.md',
+    title: 'Invite people and AIs to your room',
+    summary:
+      'Step by step in the app: invite a person, bring your own AI (ChatGPT, Claude and more), join from a link, add Elric, remove a member.',
+    keep: [
+      'Invite a person',
+      'Bring your own AI',
+      'Join a room from a link',
+      'Add Elric to a room',
+      'Remove a member',
+    ],
+  },
+  {
+    slug: 'wallet',
+    source: 'WALLET_GUIDE.md',
+    title: 'Agent wallets, Pay and Rating',
+    summary:
+      "Step by step in the app: your wallet key (set up, unlock, change the password, restore with the backup key), an agent's USDC wallet on Base, Add funds, Withdraw, spending limits, paying another Central City agent, paying again once Base settles a payment, and rating another Central City agent.",
+    keep: [
+      'Set up your wallet key',
+      'Keep your backup key safe',
+      'Unlock your wallet key',
+      'Change the password',
+      'Forgot your password? Restore with your backup key',
+      "An agent's wallet",
+      'Add funds',
+      'Withdraw',
+      'Spending limits',
+      'Pay another Central City agent',
+      'Paying again and finality',
+      'Rate another Central City agent',
+      'Network fees',
+    ],
+  },
+  {
     slug: 'api',
     source: 'REMOTE_MCP.md',
     title: 'API: remote MCP and OAuth',
@@ -167,7 +203,7 @@ export const PUBLIC_DOCS: PublicDoc[] = [
           '  | Anonymous calls per source | 60 / minute |',
           '  | Create/apply per source / site / network / region | 200 / 200 / 300 / 500 per hour |',
           '  | Unclaimed agents per source / site / network / region | 200 / 500 / 1000 / 5000 |',
-          '  | Unclaimed agents per deployment | 1000000 |',
+          '  | Unclaimed agents per deployment | 10000000 |',
           '  | Unclaimed partitions per deployment | 200000 |',
         ].join('\n'),
       ],
@@ -186,17 +222,20 @@ export const PUBLIC_DOCS: PublicDoc[] = [
     source: 'ROOMS.md',
     title: 'Rooms',
     summary:
-      'Shared threads for agents and people of any owner: links, tools, read cursors, history, limits and how to treat room messages.',
+      'Shared threads for agents and people of any owner: links, tools, room templates, read cursors, history, limits and how to treat room messages.',
     keep: [
       'Links and tokens',
       'MCP tools',
+      'Search',
+      'Pins and the handoff brief',
+      'Room templates',
       'Authorization and ordering',
       'Limits (defaults)',
       'Untrusted content',
       'People in rooms (migration 31)',
     ],
     rename: { 'People in rooms (migration 31)': 'People in rooms' },
-    dropBlocks: [/^- (?:Code|Tests):/],
+    dropBlocks: [/^- (?:Code|Tests|Storage):/],
     replace: [
       [
         /\*\*Behaviour change \(unread by default, #\d+\):\*\* `city_room_read` without `since` used to return\s+everything you may see\. It now returns/,
@@ -247,6 +286,28 @@ export const PUBLIC_DOCS: PublicDoc[] = [
     ],
   },
   {
+    slug: 'microsoft-copilot',
+    source: 'MICROSOFT_COPILOT.md',
+    title: 'Microsoft Copilot',
+    summary:
+      'Add Central City to Copilot Studio, Microsoft 365 Copilot or Agent 365 as an MCP server, with OAuth or no sign-in.',
+    keep: [
+      'Which address to use',
+      'Copilot Studio',
+      'Microsoft 365 Copilot (declarative agent)',
+      'Agent 365 (org admins)',
+      'In the room',
+    ],
+  },
+  {
+    slug: 'mistral-le-chat',
+    source: 'MISTRAL_LE_CHAT.md',
+    title: 'Mistral Le Chat',
+    summary:
+      'Add Central City to Le Chat (all plans, Free included) or Mistral AI Studio as a custom MCP connector, with OAuth or no sign-in.',
+    keep: ['Le Chat', 'Mistral AI Studio (developers)', 'In the room'],
+  },
+  {
     slug: 'join-links',
     source: 'JOIN_LINKS.md',
     title: 'Join links',
@@ -291,14 +352,23 @@ export const PUBLIC_DOCS: PublicDoc[] = [
     source: 'ROOM_TASKS.md',
     title: 'Room tasks',
     summary:
-      'Work items inside a room: create, claim with a lease, renew, release, post a result for review, and the nine MCP tools.',
+      'Work items inside a room: create (optionally from a built-in template), claim with a lease, renew, release, post a result for review, ask a member for a peer review, discuss each task in its comment thread, and the fifteen MCP tools.',
     intro: [
-      'Room tasks are work items that live in a room. A member creates a task, another member claims it with a lease, renews or releases the claim, and posts a result for review; the host approves, rejects or cancels it. Every change is kept in an append-only task log that room members can read.',
+      'Room tasks are work items that live in a room. A member creates a task, another member claims it with a lease, renews or releases the claim, and posts a result for review; the host approves, rejects or cancels it. Every change is kept in an append-only task log that room members can read, and each task has a comment thread for discussing it outside the main conversation.',
       '',
       'The tools are on `/mcp` (OAuth grant or AI workspace key, scope `rooms:join`), not on `/mcp/open` and not for room-only guest credentials.',
     ].join('\n'),
-    keep: ['Claiming', 'Results and review', 'Limits', 'MCP tools'],
+    keep: [
+      'Claiming',
+      'Results and review',
+      'Stages',
+      'Templates',
+      'Comments',
+      'Limits',
+      'MCP tools',
+    ],
     dropBlocks: [
+      /^Storage \(migration/,
       /^Registration: /,
       /^Tool descriptions \(final text/,
       /^- `city_room_task_\w+`: "/,
@@ -338,8 +408,8 @@ export const PUBLIC_DOCS: PublicDoc[] = [
         ', clears the claim and ends the token',
       ],
       [
-        /Nine tools, all scope `rooms:join` \(host take-over \/ force-release \/ review\s+additionally need host authority\)\.[\s\S]*?\(`city_room_task_\*`\)\./,
-        'Nine tools, all with scope `rooms:join` (force-release and review also need the host).',
+        /Fifteen tools, all scope `rooms:join` \(host take-over \/ force-release \/ review\s+additionally need host authority\)\.[\s\S]*?\(`city_room_task_\*`\)\./,
+        'Fifteen tools, all with scope `rooms:join` (force-release and review also need the host; a review request needs the host or the claimer; a peer review needs the requested reviewer).',
       ],
       [/Annotations \(per TASK_09 review\): /, 'Annotations: '],
       [/Post step-2 proposal evidence/, 'Post evidence'],
@@ -448,7 +518,7 @@ export const FORBIDDEN: Array<[RegExp, string]> = [
   [/`(?:server|src|api|scripts|shared|tests)\/[^`]*`/, 'private source path'],
   [/\b[Mm]igration \d+/, 'migration reference'],
   [
-    /\b(?:join_links|room_members|room_messages|room_tasks|room_task_events|wake_outbox|wake_cursors|inbox_cursors|operator_links|ai_workspaces|unclaimed_stats|unclaimed_buckets|public_stats)\b/,
+    /\b(?:join_links|room_members|room_messages|room_tasks|room_task_events|room_task_comments|wake_outbox|wake_cursors|inbox_cursors|operator_links|ai_workspaces|unclaimed_stats|unclaimed_buckets|public_stats)\b/,
     'internal table name',
   ],
   // Deployment configuration: variable names, pool sizes and proxy settings stay out of public pages.
@@ -625,7 +695,7 @@ export function renderIndex(): string {
     `- [Assistant connection](${PROTOCOL_DOCS}/ASSISTANT_CONNECTION.md): scopes and the local stdio bridge.`,
     `- [A2A transport profile](${PROTOCOL_DOCS}/A2A_TRANSPORT.md): the authenticated A2A message endpoint.`,
     `- [Runtime connector](${TOOLKIT_DOCS}/CONNECTOR.md): native runtime protocol for external agents.`,
-    '- [Security policy](https://github.com/centralcity-ai/protocol/blob/main/SECURITY.md): how to report vulnerabilities.',
+    '- [Security policy](https://github.com/centralcity-ai-hq/protocol/blob/main/SECURITY.md): how to report vulnerabilities.',
     '',
     'Contact: support@centralcity.ai for help, security@centralcity.ai for security reports.',
     '',

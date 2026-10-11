@@ -68,9 +68,49 @@ const breakages: Array<[string, (text: string) => string]> = [
     'verify forgets a job',
     (text) =>
       text.replace(
-        'needs: [changes, secrets, unit, browser, portability]',
-        'needs: [changes, secrets, unit, portability]',
+        'needs: [changes, secrets, docs, unit, browser, postgres-races, portability]',
+        'needs: [changes, secrets, docs, unit, postgres-races, portability]',
       ),
+  ],
+  [
+    'verify forgets the postgres-races job',
+    (text) =>
+      text.replace(
+        'needs: [changes, secrets, docs, unit, browser, postgres-races, portability]',
+        'needs: [changes, secrets, docs, unit, browser, portability]',
+      ),
+  ],
+  [
+    'verify forgets the docs job',
+    (text) =>
+      text.replace(
+        'needs: [changes, secrets, docs, unit, browser, postgres-races, portability]',
+        'needs: [changes, secrets, unit, browser, postgres-races, portability]',
+      ),
+  ],
+  [
+    'verify ignores the docs checks',
+    (text) => text.replace('[[ "$DOCS_RESULT" == success ]] || exit 1\n', ''),
+  ],
+  [
+    'the docs job loses its docs-only gate',
+    (text) =>
+      text.replace(
+        "    if: needs.changes.outputs.code == 'false' && github.event.pull_request.draft != true\n",
+        "    if: needs.changes.outputs.code == 'true'\n",
+      ),
+  ],
+  [
+    'the docs checks disappear',
+    (text) =>
+      text.replace(
+        '      - run: pnpm test:files tests/internal-references.test.ts tests/public-docs.test.ts tests/public-copy.test.ts tests/public-docs-private.test.ts\n',
+        '',
+      ),
+  ],
+  [
+    'verify ignores the postgres-races result',
+    (text) => text.replace(' && "$POSTGRES_RACES_RESULT" == success', ''),
   ],
   [
     'verify ignores the browser result',
@@ -90,19 +130,19 @@ const breakages: Array<[string, (text: string) => string]> = [
   ],
   [
     'a shard is dropped from the matrix',
-    (text) => text.replace('shard: [1, 2, 3, 4]', 'shard: [1, 2, 3]'),
+    (text) => text.replace('shard: [1, 2, 3, 4, 5, 6]', 'shard: [1, 2, 3, 4, 5]'),
   ],
   [
     'the shard count disagrees with the script',
     (text) =>
       text.replace(
-        'pnpm test:shard ${{ matrix.shard }}/4',
+        'pnpm test:shard ${{ matrix.shard }}/6',
         'pnpm test:shard ${{ matrix.shard }}/5',
       ),
   ],
   [
     'browser shards disagree',
-    (text) => text.replace('--shard=${{ matrix.shard }}/2', '--shard=${{ matrix.shard }}/3'),
+    (text) => text.replace('--shard=${{ matrix.shard }}/4', '--shard=${{ matrix.shard }}/5'),
   ],
   ['a check disappears', (text) => text.replace('      - run: pnpm format:check\n', '')],
   [

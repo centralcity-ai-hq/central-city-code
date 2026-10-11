@@ -41,29 +41,38 @@ export function CrossWorkspaceConnections({
   const [issued, setIssued] = useState<{ agent: string; token: string } | null>(null);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [notice, setNotice] = useState('');
   const [from, setFrom] = useState('');
   const [inviteFor, setInviteFor] = useState('');
   const [token, setToken] = useState('');
   const [note, setNote] = useState('');
   const alive = useRef(true);
+  const loadVersion = useRef(0);
+  const acting = useRef(false);
+  const requestAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
   const live = agents.filter((agent) => agent.status !== 'revoked');
   const nameOf = (id: string) => agents.find((agent) => agent.id === id)?.name;
 
   const load = useCallback(async () => {
+    const version = ++loadVersion.current;
+    setLoading(true);
+    setLoadError('');
     try {
       const [requests, owned] = await Promise.all([
         api<Lists>(`${BASE}/requests`),
         api<{ invites: ConnectionInvite[] }>(`${BASE}/invites`),
       ]);
-      if (alive.current) {
+      if (alive.current && version === loadVersion.current) {
         setLists(requests);
         setInvites(owned.invites);
-        setError('');
       }
     } catch (err) {
-      if (alive.current)
-        setError(err instanceof Error ? err.message : 'Connection requests could not be loaded.');
+      if (alive.current && version === loadVersion.current)
+        setLoadError(err instanceof Error ? err.message : 'Please try again.');
+    } finally {
+      if (alive.current && version === loadVersion.current) setLoading(false);
     }
   }, []);
   useEffect(() => {
@@ -71,23 +80,36 @@ export function CrossWorkspaceConnections({
     void load();
     return () => {
       alive.current = false;
+      loadVersion.current++;
     };
   }, [load]);
 
-  async function act(key: string, fn: () => Promise<unknown>, message: string) {
-    if (busy) return;
+  async function act(
+    key: string,
+    fn: () => Promise<unknown>,
+    message: string,
+    onSuccess?: () => void,
+  ) {
+    if (acting.current) return;
+    acting.current = true;
     setBusy(key);
     setError('');
     setNotice('');
     try {
-      await fn();
+      try {
+        await fn();
+      } catch (err) {
+        if (alive.current)
+          setError(err instanceof Error ? err.message : "That didn't work. Try again.");
+        return;
+      }
+      if (!alive.current) return;
+      onSuccess?.();
+      setNotice(message);
       await load();
-      onChanged();
-      if (alive.current) setNotice(message);
-    } catch (err) {
-      if (alive.current)
-        setError(err instanceof Error ? err.message : "That didn't work. Try again.");
+      if (alive.current) onChanged();
     } finally {
+      acting.current = false;
       if (alive.current) setBusy('');
     }
   }
@@ -96,21 +118,31 @@ export function CrossWorkspaceConnections({
     const sender = from || live[0]?.id;
     // People paste the invite as they got it (a link or a code); the code is inside it.
     const value = codeFromPaste(token, /cci_[A-Za-z0-9_-]+/);
-    if (!sender || !value) return;
+    if (!sender || !value || acting.current) return;
     const target = /^cci_/.test(value) ? { invite_token: value } : { to_agent_id: value };
+    const body = {
+      from_agent_id: sender,
+      ...target,
+      ...(note.trim() ? { note: note.trim() } : {}),
+    };
+    const fingerprint = JSON.stringify(body);
+    if (requestAttempt.current?.fingerprint !== fingerprint)
+      requestAttempt.current = { fingerprint, key: crypto.randomUUID() };
+    const idempotencyKey = requestAttempt.current.key;
     await act(
       'request',
       () =>
         api(`${BASE}/requests`, {
-          from_agent_id: sender,
-          ...target,
-          ...(note.trim() ? { note: note.trim() } : {}),
-          idempotency_key: crypto.randomUUID(),
+          ...body,
+          idempotency_key: idempotencyKey,
         }),
-      'Request sent. The other person approves or denies it within 7 days.',
+      'Connection request recorded. Check its status in Connections and history.',
+      () => {
+        requestAttempt.current = null;
+        setToken('');
+        setNote('');
+      },
     );
-    setToken('');
-    setNote('');
   }
   async function invite(event: FormEvent) {
     event.preventDefault();
@@ -144,11 +176,11 @@ export function CrossWorkspaceConnections({
           <h2 id="cross-connections-title" className="cross-title">
             Connections with other people
           </h2>
-          <span>{pending.length}</span>
+          {lists ? <span>{pending.length}</span> : null}
         </div>
         <button
           className="button secondary compact"
-          disabled={Boolean(busy)}
+          disabled={Boolean(busy) || loading}
           onClick={() => void load()}
         >
           <RefreshCw size={14} />
@@ -165,15 +197,25 @@ export function CrossWorkspaceConnections({
           {error}
         </p>
       ) : null}
+      {loadError ? (
+        <p className="form-error" role="alert">
+          {lists
+            ? 'Connections could not be refreshed. Showing the previous list.'
+            : 'Connections could not be loaded.'}{' '}
+          {loadError} Use Refresh to try again.
+        </p>
+      ) : null}
       {notice ? (
         <p className="assistant-notice" role="status">
           {notice}
         </p>
       ) : null}
       {!lists ? (
-        <p role="status">
-          <LoaderCircle size={14} className="spin" /> Loading…
-        </p>
+        loading ? (
+          <p role="status">
+            <LoaderCircle size={14} className="spin" /> Loading…
+          </p>
+        ) : null
       ) : (
         <>
           <h3 className="cross-heading">Waiting for your approval</h3>
@@ -355,6 +397,7 @@ export function CrossWorkspaceConnections({
               <input
                 value={token}
                 onChange={(event) => setToken(event.target.value)}
+                disabled={Boolean(busy)}
                 placeholder="Paste the invite they sent you"
                 autoComplete="off"
                 spellCheck={false}
@@ -366,6 +409,7 @@ export function CrossWorkspaceConnections({
                 value={note}
                 maxLength={280}
                 onChange={(event) => setNote(event.target.value)}
+                disabled={Boolean(busy)}
               />
             </label>
             <button

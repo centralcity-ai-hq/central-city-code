@@ -1,19 +1,24 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, Copy, LoaderCircle, X } from 'lucide-react';
+import { Check, ChevronRight, Copy, LoaderCircle, User } from 'lucide-react';
 import { withRoomDeadline, type History, type JoinLink, type Room, type RoomsClient } from './api';
 import { describe } from './useRoomThread';
+import { joinLinkCache } from './joinLinkCache';
+import { PanelHead, SwitchRow } from './PanelV3';
 // How an outside AI joins with the link: one wording, shared with the Connect page.
-import { CHATGPT_ADMIN_NOTE, ROOM_INVITE_CLIENTS, roomInviteCopyLine } from '../shell/roomInvite';
+import { roomInviteCopyLine } from '../shell/roomInvite';
 
-/** Members are polled while the sheet is open, for at most 10 minutes. */
-const MEMBER_POLL_MS = 3_000;
-const MEMBER_POLL_LIMIT_MS = 10 * 60_000;
-const PULSE_MS = 60_000;
+/** The member limit steps by 10 (the mockup's −/+), clamped to 2…10 000 and never below today's members. */
+const CAP_STEP = 10;
+const CAP_MAX = 10_000;
 
-/** One join link per room for this page's lifetime; the code is never written to storage. */
-const cache = new Map<string, JoinLink>();
+/** One join link per room for this page's lifetime (shared with the Add an AI sheet). */
+const cache = joinLinkCache;
 
-/** The one link, host only (decision E1). */
+/**
+ * "Invite a person" (docs/design/ROOM_WHO_JOINS.md §4): the link as one full-width copy button,
+ * the room code under it, and the host's room access behind a disclosure — the four switches,
+ * the −/+ member limit and the link's quiet footer line (New link / Revoke).
+ */
 export function InviteSheet({
   client,
   room,
@@ -30,46 +35,61 @@ export function InviteSheet({
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
   const [copyHint, setCopyHint] = useState('');
-  const [joined, setJoined] = useState<string | null>(null);
-  const [waiting, setWaiting] = useState<'pulse' | 'still'>('pulse');
   const [confirmNew, setConfirmNew] = useState(false);
   const [busy, setBusy] = useState(false);
   const [confirmRevoke, setConfirmRevoke] = useState(false);
   const [notice, setNotice] = useState('');
   const rotateKey = useRef(crypto.randomUUID());
+  const copiedTimer = useRef(0);
   const dialog = useRef<HTMLDivElement>(null);
   const [attempt, setAttempt] = useState(0);
   const [history, setHistory] = useState<History>(room.history);
   const [historyBusy, setHistoryBusy] = useState(false);
   const [historyError, setHistoryError] = useState('');
-  useEffect(() => setHistory(room.history), [room.history]);
+  // A room read that answers while a change is saving may predate that change: it must not put
+  // the switch back (the save's own answer sets it, and the next read agrees).
+  const historySaving = useRef(false);
+  useEffect(() => {
+    if (!historySaving.current) setHistory(room.history);
+  }, [room.history]);
   // Host settings for people (migration 31): both on by default.
   const [people, setPeople] = useState({
     join: room.peopleMayJoin !== false,
     bringAi: room.membersMayBringAi !== false,
+    dm: room.membersMayDm !== false,
   });
   const [peopleError, setPeopleError] = useState('');
-  // Member cap (people and AIs share it): the host raises or lowers it, never below today's members.
-  const [cap, setCap] = useState(String(room.member_cap ?? ''));
+  // Member cap (people and AIs share it): −/+ steps it, never below today's members.
+  const [cap, setCap] = useState(room.member_cap ?? 0);
   const [capNote, setCapNote] = useState('');
-  useEffect(() => setCap(String(room.member_cap ?? '')), [room.member_cap]);
-  async function saveCap() {
-    const value = Number(cap);
-    if (!Number.isInteger(value)) return;
+  const capSeq = useRef(0);
+  useEffect(() => setCap(room.member_cap ?? 0), [room.member_cap]);
+  const capFloor = Math.max(2, room.member_count);
+  // The host's own maximum tops the stepper (the server refuses above it; standard rooms: 100).
+  const capTop = Math.min(CAP_MAX, room.memberCapMax ?? CAP_MAX);
+  const clampCap = (value: number) => Math.min(capTop, Math.max(capFloor, value));
+  async function stepCap(delta: number) {
+    const next = clampCap(cap + delta);
+    if (next === cap) return;
+    // Optimistic: the number follows the click; a failure puts it back and says so. Clicks that
+    // race each other settle on the last one (seq).
+    setCap(next);
     setCapNote('');
+    const seq = ++capSeq.current;
     try {
       const updated = await withRoomDeadline(
-        client.setMemberCap({ room_id: room.id, member_cap: value }),
+        client.setMemberCap({ room_id: room.id, member_cap: next }),
       );
-      setCap(String(updated.member_cap ?? value));
-      setCapNote('Saved.');
+      if (seq === capSeq.current) setCap(updated.member_cap ?? next);
       onRoomChanged?.();
     } catch (err) {
-      setCap(String(room.member_cap ?? ''));
-      setCapNote(describe(err));
+      if (seq === capSeq.current) {
+        setCap(room.member_cap ?? next);
+        setCapNote(describe(err));
+      }
     }
   }
-  async function changePeople(next: { join: boolean; bringAi: boolean }) {
+  async function changePeople(next: { join: boolean; bringAi: boolean; dm: boolean }) {
     const previous = people;
     setPeople(next);
     setPeopleError('');
@@ -79,11 +99,13 @@ export function InviteSheet({
           room_id: room.id,
           people_may_join: next.join,
           members_may_bring_ai: next.bringAi,
+          members_may_dm: next.dm,
         }),
       );
       setPeople({
         join: updated.peopleMayJoin !== false,
         bringAi: updated.membersMayBringAi !== false,
+        dm: updated.membersMayDm !== false,
       });
       onRoomChanged?.();
     } catch (err) {
@@ -107,38 +129,6 @@ export function InviteSheet({
       active = false;
     };
   }, [client, room.id, link, attempt]);
-
-  // Live status: a member who was not here when the sheet opened has joined.
-  useEffect(() => {
-    let active = true;
-    let baseline: Set<string> | null = null;
-    const started = Date.now();
-    const tick = async () => {
-      try {
-        const members = await withRoomDeadline(client.members({ room_id: room.id }));
-        if (!active) return;
-        if (!baseline) baseline = new Set(members.map((member) => member.id));
-        else {
-          const fresh = members.find((member) => !baseline!.has(member.id));
-          if (fresh) {
-            setJoined(fresh.name);
-            return;
-          }
-        }
-      } catch {
-        // Status is best effort; the link itself is what matters.
-      }
-      if (active && Date.now() - started < MEMBER_POLL_LIMIT_MS)
-        timer = window.setTimeout(() => void tick(), MEMBER_POLL_MS);
-    };
-    let timer = window.setTimeout(() => void tick(), 0);
-    const still = window.setTimeout(() => setWaiting('still'), PULSE_MS);
-    return () => {
-      active = false;
-      window.clearTimeout(timer);
-      window.clearTimeout(still);
-    };
-  }, [client, room.id]);
 
   // Focus the dialog, trap Tab inside it, close on Escape.
   useEffect(() => {
@@ -166,24 +156,36 @@ export function InviteSheet({
     document.addEventListener('keydown', keys);
     return () => {
       document.removeEventListener('keydown', keys);
+      window.clearTimeout(copiedTimer.current);
       previous?.focus?.();
     };
   }, [onClose]);
 
   async function copy() {
     if (!link) return;
+    window.clearTimeout(copiedTimer.current);
     try {
       if (!navigator.clipboard) throw new Error('Clipboard unavailable');
-      // One ready line for the AI (join and stay); the link itself stays visible above.
+      // One ready line for the AI (join and stay); the room code below is for people.
       await navigator.clipboard.writeText(roomInviteCopyLine(link.url));
       setCopyHint('');
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
+      copiedTimer.current = window.setTimeout(() => setCopied(false), 2000);
     } catch {
-      // Clipboard blocked: select the link so the person can copy it by keyboard.
-      dialog.current?.querySelector<HTMLInputElement>('input.rm-link')?.select();
-      const mac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
-      setCopyHint(`Press ${mac ? '⌘C' : 'Ctrl+C'} to copy`);
+      // Clipboard blocked: show the link itself, so the person can copy it by hand.
+      setCopied(false);
+      setCopyHint(link.url);
+    }
+  }
+  async function copyCode() {
+    if (!link?.code) return;
+    try {
+      if (!navigator.clipboard) throw new Error('Clipboard unavailable');
+      await navigator.clipboard.writeText(link.code);
+      setNotice('Code copied.');
+    } catch {
+      // The code stays on screen; the person copies it by hand.
+      setNotice('Copy the code above by hand.');
     }
   }
   async function makeNew() {
@@ -196,6 +198,9 @@ export function InviteSheet({
       rotateKey.current = crypto.randomUUID();
       cache.delete(room.id);
       setNotice('The old link no longer works. This is a new one.');
+      // A stale "Copied" or a blocked-copy fallback shows the old link's text: both end here.
+      setCopied(false);
+      setCopyHint('');
       setConfirmNew(false);
       setLink(null);
     } catch (err) {
@@ -214,6 +219,8 @@ export function InviteSheet({
       cache.delete(room.id);
       setConfirmRevoke(false);
       setNotice('The old link no longer works. This is a new one.');
+      setCopied(false);
+      setCopyHint('');
       setLink(null);
     } catch (err) {
       setError(describe(err));
@@ -227,6 +234,7 @@ export function InviteSheet({
     // Optimistic: the box follows the click; a failure puts it back and says so.
     setHistory(next);
     setHistoryBusy(true);
+    historySaving.current = true;
     setHistoryError('');
     try {
       const updated = await withRoomDeadline(
@@ -238,6 +246,7 @@ export function InviteSheet({
       setHistory(previous);
       setHistoryError(describe(err));
     } finally {
+      historySaving.current = false;
       setHistoryBusy(false);
     }
   }
@@ -245,26 +254,26 @@ export function InviteSheet({
   const expires = link ? new Date(link.expires_at) : null;
   return (
     <div
-      className="rm-backdrop"
+      className="rm-backdrop rm-v3-scrim"
       onMouseDown={(event) => event.target === event.currentTarget && onClose()}
     >
       <div
-        className="rm-sheet rm-invite"
+        className="rm-sheet rm-v3-sheet rm-invite"
         role="dialog"
         aria-modal="true"
         aria-labelledby="rm-invite-title"
         tabIndex={-1}
         ref={dialog}
       >
-        <div className="rm-sheet-head">
-          <h2 id="rm-invite-title">Invite to this room</h2>
-          <button type="button" className="rm-icon" aria-label="Close" onClick={onClose}>
-            <X size={18} aria-hidden="true" />
-          </button>
-        </div>
-        <p className="rm-muted rm-instruction">
-          Paste the link into your AI. New AI? <a href="/#connect">Connect your AI</a> first.
-        </p>
+        <PanelHead closeLabel="Close" onClose={onClose} className="rm-invite-sheet-head">
+          <span className="rm-invite-ghost" aria-hidden="true">
+            <User size={19} />
+          </span>
+          <span className="rm-invite-titles">
+            <h2 id="rm-invite-title">Invite a person</h2>
+            <p className="rm-invite-sub">Share the link or the code.</p>
+          </span>
+        </PanelHead>
         {error ? (
           <div className="rm-inline-error" role="alert">
             <span>{link ? error : "The link couldn't be created."}</span>
@@ -277,170 +286,147 @@ export function InviteSheet({
         ) : null}
         {link ? (
           <>
-            <input
-              className="rm-link"
-              readOnly
-              aria-label="Invite link"
-              value={link.url}
-              onFocus={(event) => event.currentTarget.select()}
-            />
-            <button type="button" className="rm-primary rm-copy" onClick={() => void copy()}>
+            {/* The one action: the invite line lands in the clipboard (mockup's wide button). */}
+            <button
+              type="button"
+              className="rm-v3-btn rm-v3-btn-primary rm-invite-copy"
+              onClick={() => void copy()}
+            >
               {copied ? (
                 <Check size={16} aria-hidden="true" />
               ) : (
                 <Copy size={16} aria-hidden="true" />
               )}
-              <span>{copied ? 'Copied' : 'Copy invite'}</span>
+              <span>{copied ? 'Copied' : 'Copy invite link'}</span>
             </button>
+            {link.code ? (
+              <>
+                <p className="rm-invite-code">
+                  <strong className="rm-code">{link.code}</strong>
+                  <button
+                    type="button"
+                    className="rm-v3-icon-btn"
+                    aria-label="Copy code"
+                    onClick={() => void copyCode()}
+                  >
+                    <Copy size={14} aria-hidden="true" />
+                  </button>
+                </p>
+                <p className="rm-meta rm-invite-codecap">
+                  or join with this code at centralcity.ai
+                </p>
+              </>
+            ) : null}
             {notice ? (
               <p className="rm-meta" role="status">
                 {notice}
               </p>
             ) : null}
             {copyHint ? (
-              <p className="rm-meta" role="status">
+              <p className="rm-meta rm-invite-url" role="status">
                 {copyHint}
               </p>
             ) : null}
             <span className="rm-visually-hidden" aria-live="polite">
               {copied ? 'Invite copied' : ''}
             </span>
-            {link.code ? (
-              <p className="rm-meta">
-                People join with the code <strong className="rm-code">{link.code}</strong>
-              </p>
-            ) : null}
           </>
         ) : error ? null : (
           <p className="rm-muted" role="status">
             <LoaderCircle className="spin" size={14} aria-hidden="true" /> Creating your link…
           </p>
         )}
-        <p
-          className={`rm-status${joined ? ' done' : waiting === 'pulse' ? ' pulse' : ''}`}
-          aria-live="polite"
-        >
-          {joined ? (
-            <>
-              <Check size={16} aria-hidden="true" /> {joined} joined
-            </>
-          ) : waiting === 'pulse' ? (
-            'Waiting for your AI…'
-          ) : (
-            'Still waiting. Paste the link into your AI, then come back.'
-          )}
-        </p>
-        {joined ? (
-          <button type="button" className="rm-primary" onClick={onClose}>
-            Go to room
-          </button>
-        ) : null}
-        <details className="rm-disclosure">
-          <summary>More options</summary>
+        <details className="rm-disclosure rm-invite-access">
+          <summary>
+            <ChevronRight size={16} aria-hidden="true" />
+            Room access
+          </summary>
           <div className="rm-invite-options">
-            <label className="rm-check">
-              <input
-                type="checkbox"
-                checked={history === 'full'}
-                disabled={historyBusy}
-                onChange={(event) =>
-                  void changeHistory(event.target.checked ? 'full' : 'from_join')
-                }
-              />
-              <span>New members can read earlier messages</span>
-            </label>
+            <SwitchRow
+              label="Can read earlier messages"
+              checked={history === 'full'}
+              disabled={historyBusy}
+              onChange={(checked) => void changeHistory(checked ? 'full' : 'from_join')}
+            />
             {historyError ? (
               <p className="rm-inline-error" role="alert">
                 {historyError}
               </p>
-            ) : history === 'full' ? (
-              <p className="rm-meta">People and AIs who join can read the whole conversation.</p>
             ) : null}
-            <label className="rm-check">
-              <input
-                type="checkbox"
-                checked={people.join}
-                onChange={(event) => void changePeople({ ...people, join: event.target.checked })}
-              />
-              <span>People can join as themselves</span>
-            </label>
-            <label className="rm-check">
-              <input
-                type="checkbox"
-                checked={people.bringAi}
-                onChange={(event) =>
-                  void changePeople({ ...people, bringAi: event.target.checked })
-                }
-              />
-              <span>Members can bring their own AI</span>
-            </label>
+            <SwitchRow
+              label="People join as themselves"
+              checked={people.join}
+              onChange={(checked) => void changePeople({ ...people, join: checked })}
+            />
+            <SwitchRow
+              label="Members can bring their AI"
+              checked={people.bringAi}
+              onChange={(checked) => void changePeople({ ...people, bringAi: checked })}
+            />
+            <SwitchRow
+              label="Private messages"
+              checked={people.dm}
+              onChange={(checked) => void changePeople({ ...people, dm: checked })}
+            />
             {peopleError ? (
               <p className="rm-inline-error" role="alert">
                 {peopleError}
               </p>
             ) : null}
             {room.member_cap !== undefined ? (
-              <form
-                className="rm-check"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  void saveCap();
-                }}
-              >
+              <div className="rm-invite-cap">
+                <span>Member limit</span>
                 {/* The limit comes from the room (the server sets the ceiling per account). */}
-                <label>
-                  <span>Member limit (people and AIs) </span>
-                  <input
-                    className="rm-input rm-cap"
-                    type="number"
-                    inputMode="numeric"
-                    min={Math.max(2, room.member_count)}
-                    value={cap}
-                    onChange={(event) => setCap(event.target.value)}
-                  />
-                </label>
-                <button type="submit" className="rm-quiet">
-                  Save
-                </button>
-                {capNote ? (
-                  <span className="rm-meta" role="status">
-                    {capNote}
-                  </span>
-                ) : null}
-              </form>
-            ) : null}
-            {expires ? <p className="rm-meta">Link expires {expires.toLocaleString()}.</p> : null}
-            {link ? (
-              confirmRevoke ? (
-                <div className="rm-confirm">
-                  <span className="rm-confirm-text">
-                    Anyone holding this link can no longer join with it.
-                  </span>
-                  <span className="rm-confirm-actions">
-                    <button
-                      type="button"
-                      className="rm-danger"
-                      disabled={busy}
-                      onClick={() => void revoke()}
-                    >
-                      Revoke link
-                    </button>
-                    <button
-                      type="button"
-                      className="rm-quiet"
-                      onClick={() => setConfirmRevoke(false)}
-                    >
-                      Cancel
-                    </button>
-                  </span>
+                <div className="rm-stepper">
+                  <button
+                    type="button"
+                    aria-label="Fewer members"
+                    disabled={cap <= capFloor}
+                    onClick={() => void stepCap(-CAP_STEP)}
+                  >
+                    −
+                  </button>
+                  <output aria-label="Member limit">{cap}</output>
+                  <button
+                    type="button"
+                    aria-label="More members"
+                    disabled={cap >= capTop}
+                    onClick={() => void stepCap(CAP_STEP)}
+                  >
+                    +
+                  </button>
                 </div>
-              ) : (
-                <button type="button" className="rm-quiet" onClick={() => setConfirmRevoke(true)}>
-                  Revoke this link
-                </button>
-              )
+              </div>
             ) : null}
-            {confirmNew ? (
+            {capNote ? (
+              <p className="rm-inline-error" role="alert">
+                {capNote}
+              </p>
+            ) : null}
+            {confirmRevoke ? (
+              <div className="rm-confirm">
+                <span className="rm-confirm-text">
+                  Anyone holding this link can no longer join with it.
+                </span>
+                <span className="rm-confirm-actions">
+                  <button
+                    type="button"
+                    className="rm-danger"
+                    disabled={busy}
+                    onClick={() => void revoke()}
+                  >
+                    Revoke link
+                  </button>
+                  <button
+                    type="button"
+                    className="rm-quiet"
+                    onClick={() => setConfirmRevoke(false)}
+                  >
+                    Cancel
+                  </button>
+                </span>
+              </div>
+            ) : confirmNew ? (
               <div className="rm-confirm">
                 <span className="rm-confirm-text">The old link stops working.</span>
                 <span className="rm-confirm-actions">
@@ -457,17 +443,28 @@ export function InviteSheet({
                   </button>
                 </span>
               </div>
-            ) : (
-              <button type="button" className="rm-quiet" onClick={() => setConfirmNew(true)}>
-                Make a new link
-              </button>
-            )}
-            <p className="rm-meta">
-              {ROOM_INVITE_CLIENTS} {CHATGPT_ADMIN_NOTE}
-            </p>
+            ) : link ? (
+              <p className="rm-invite-foot">
+                {expires ? <span>Link valid until {expires.toLocaleString()}</span> : null}
+                <span className="rm-invite-foot-gap" aria-hidden="true" />
+                <button
+                  type="button"
+                  className="rm-invite-foot-btn"
+                  onClick={() => setConfirmNew(true)}
+                >
+                  New link
+                </button>
+                <button
+                  type="button"
+                  className="rm-invite-foot-btn rm-invite-foot-danger"
+                  onClick={() => setConfirmRevoke(true)}
+                >
+                  Revoke
+                </button>
+              </p>
+            ) : null}
           </div>
         </details>
-        <p className="rm-meta">Anyone with this link can join this room, and nothing else.</p>
       </div>
     </div>
   );

@@ -1,7 +1,7 @@
 import type { Transaction as Tx } from '../database.js';
 import type { MessagePart } from '../messaging/contract.js';
 import { WAKE_LIMITS } from './contract.js';
-import { excerptAt, findMentions, textOf } from './mentions.js';
+import { excerptAt, findMentions, mentionKeys, nameKeyOf, slugOf, textOf } from './mentions.js';
 import { emit, type WakeSignal } from './signals.js';
 import { elricOnRoomPosted } from '../elric/hook.js';
 
@@ -94,9 +94,18 @@ export async function messageDelivered(
     contextId: string;
     parts: MessagePart[];
     time: number;
+    /**
+     * A private room message to an AI that muted that room's notifications: it lands in the inbox
+     * (long-poll readers still see it), but records no @mention and wakes no webhook.
+     */
+    quiet?: boolean;
   },
 ): Promise<void> {
   const signals: WakeSignal[] = [{ kind: 'inbox', id: m.recipientId, seq: m.seq }];
+  if (m.quiet) {
+    emit(tx, ...signals);
+    return;
+  }
   const kinds = ['message'];
   const text = textOf(m.parts);
   if (text.includes('@')) {
@@ -150,6 +159,45 @@ export async function messageDelivered(
   emit(tx, ...signals);
 }
 
+/**
+ * Fills the mention keys (migration 62) of the room's active members that have none: new
+ * members, and members whose name changed since. One indexed probe when there are none. Rows
+ * another transaction holds are skipped (they stay candidates), and a row whose name changed
+ * after it was read here (name_rev moved) keeps NULL, so a written key is never stale. A member
+ * whose agent is gone from its owner's workspace gets empty keys, which match nothing.
+ */
+export async function fillMemberNameKeys(tx: Pick<Tx, 'query'>, roomId: string): Promise<void> {
+  const unkeyed = (
+    await tx.query<{ agent_id: string; name: string | null; name_rev: number }>(
+      `SELECT m.agent_id, m.name_rev,
+          CASE WHEN m.kind='person' THEN m.display_name ELSE (
+            SELECT a->>'name' FROM workspaces w CROSS JOIN LATERAL jsonb_array_elements(
+              CASE WHEN jsonb_typeof(w.data->'agents')='array' THEN w.data->'agents' ELSE '[]'::jsonb END) a
+            WHERE w.operator_id=m.owner_id AND a->>'id'=m.agent_id LIMIT 1) END AS name
+        FROM room_members m WHERE m.room_id=$1 AND m.name_key IS NULL AND m.removed_at IS NULL`,
+      [roomId],
+    )
+  ).rows;
+  if (!unkeyed.length) return;
+  await tx.query(
+    `UPDATE room_members m SET name_key=k.name_key, slug_key=k.slug_key
+       FROM (SELECT x.agent_id, n.name_key, n.slug_key
+               FROM unnest($2::text[], $3::int[], $4::text[], $5::text[])
+                 AS n(agent_id, name_rev, name_key, slug_key)
+               JOIN room_members x ON x.room_id=$1 AND x.agent_id=n.agent_id
+                 AND x.name_rev=n.name_rev AND x.name_key IS NULL
+               FOR UPDATE OF x SKIP LOCKED) k
+      WHERE m.room_id=$1 AND m.agent_id=k.agent_id`,
+    [
+      roomId,
+      unkeyed.map((member) => member.agent_id),
+      unkeyed.map((member) => Number(member.name_rev)),
+      unkeyed.map((member) => (member.name === null ? '' : nameKeyOf(member.name))),
+      unkeyed.map((member) => (member.name === null ? '' : slugOf(member.name))),
+    ],
+  );
+}
+
 /** New room post (server/rooms/service.ts post), with the inserted room_messages row. */
 export async function roomPosted(
   tx: Tx,
@@ -164,19 +212,35 @@ export async function roomPosted(
     created_at: string | number;
     /** Server-stamped auto-reply label (migration 26); an auto-reply wakes no responder. */
     auto_reply?: unknown;
+    /** Server-stamped sender kind (migration 31): 'person' only for a person member's post. */
+    sender_kind?: string | null;
   },
+  room: {
+    /** The room is the owner's private chat with this own agent (server/rooms/private.ts). */
+    privateAgentId?: string | null;
+  } = {},
 ): Promise<void> {
   const seq = Number(row.seq);
   const time = Number(row.created_at);
   const signals: WakeSignal[] = [{ kind: 'room', id: row.room_id, seq }];
   const text = textOf(row.parts);
   const mentioned: string[] = [];
-  if (text.includes('@')) {
+  // In a private chat with an own agent, every post of the owner's person is addressed to that
+  // agent, "@" or not. Never an agent's post: its own posts and auto-replies stay unaddressed.
+  const addressed = row.sender_kind === 'person' ? (room.privateAgentId ?? null) : null;
+  if (text.includes('@') || addressed) {
     // Candidates: active members that can read this post: live agents of their owners, and
     // people in the room by their room-unique display name (migration 31). A member whose owner
     // the host muted (migration 35), or who muted the room's notifications for itself (migration
     // 38), still counts as a name (so "@Ann Lee" never falls back to "@Ann"), but no mention is
     // recorded for it.
+    // Only members that can match a mention token are loaded (indexed name_key / slug_key /
+    // id, migration 62), plus the sender (for its own-host rule), the addressed agent (by id) and
+    // members whose keys are not known yet; findMentions over them is the same as over every
+    // member (mentionKeys).
+    await fillMemberNameKeys(tx, row.room_id);
+    const keys = mentionKeys(text);
+    if (addressed) keys.ids = [...keys.ids, addressed.toLowerCase()];
     const members = (
       await tx.query<{
         agent_id: string;
@@ -186,42 +250,68 @@ export async function roomPosted(
         role: string;
         muted: boolean;
       }>(
-        `SELECT m.agent_id, m.owner_id, a->>'name' AS name, 'agent' AS kind, m.role,
+        `WITH c AS MATERIALIZED (
+           SELECT agent_id FROM room_members WHERE room_id=$1 AND name_key = ANY($3::text[])
+           UNION SELECT agent_id FROM room_members WHERE room_id=$1 AND slug_key = ANY($4::text[])
+           UNION SELECT agent_id FROM room_members WHERE room_id=$1 AND lower(agent_id) = ANY($5::text[])
+           UNION SELECT agent_id FROM room_members WHERE room_id=$1 AND name_key IS NULL
+           UNION SELECT $6::text)
+         SELECT m.agent_id, m.owner_id, a->>'name' AS name, 'agent' AS kind, m.role,
             EXISTS (SELECT 1 FROM room_members x WHERE x.owner_id=m.owner_id
               AND x.room_id=m.room_id AND (x.muted_at IS NOT NULL OR x.notifications_muted)) AS muted FROM room_members m
           JOIN workspaces w ON w.operator_id=m.owner_id
           CROSS JOIN LATERAL jsonb_array_elements(w.data->'agents') a
           WHERE m.room_id=$1 AND m.removed_at IS NULL AND m.visible_from_seq < $2
+            AND m.agent_id IN (SELECT agent_id FROM c)
             AND m.kind='agent' AND a->>'id'=m.agent_id AND (a->>'revokedAt') IS NULL
          UNION ALL
          SELECT m.agent_id, m.owner_id, m.display_name AS name, 'person' AS kind, m.role,
             EXISTS (SELECT 1 FROM room_members x WHERE x.owner_id=m.owner_id
               AND x.room_id=m.room_id AND (x.muted_at IS NOT NULL OR x.notifications_muted)) AS muted FROM room_members m
           WHERE m.room_id=$1 AND m.removed_at IS NULL AND m.visible_from_seq < $2
+            AND m.agent_id IN (SELECT agent_id FROM c)
             AND m.kind='person' AND m.display_name IS NOT NULL`,
-        [row.room_id, seq],
+        [row.room_id, seq, keys.names, keys.slugs, keys.ids, row.sender_agent_id],
       )
     ).rows;
-    // Never mentioned: the sender, and the room-host agent of the sender's own owner (a person
-    // or another agent of the owner writing "@<their host>" is not a mention: no record, no
-    // wake-up, no auto-reply). Both stay candidates, so their names still resolve. Anyone else
-    // mentions that host normally.
-    const senderOwner = members.find((member) => member.agent_id === row.sender_agent_id)?.owner_id;
-    const ownHost = members
-      .filter(
-        (member) =>
-          member.role === 'host' && member.kind === 'agent' && member.owner_id === senderOwner,
-      )
-      .map((member) => member.agent_id);
+    // Never mentioned: the sender itself (an agent never wakes on its own post or auto-reply).
+    // When an AGENT member posts (an AI, or its owner posting in its name), also not the
+    // room-host agent of the same owner: "@<their host>" from another agent of the owner is not
+    // a mention (no record, no wake-up, no auto-reply). A PERSON member is the owner themselves
+    // (only the console posts as a person, rooms/service.ts post): their "@<own agent>" is a
+    // mention like anyone's, also of the agent hosting the room, so it wakes it and its
+    // auto-reply can answer (owner decision, 10 Oct). Excluded ids stay candidates, so their
+    // names still resolve. Anyone else mentions that host normally.
+    const sender = members.find((member) => member.agent_id === row.sender_agent_id);
+    const ownHost =
+      sender?.kind === 'agent'
+        ? members
+            .filter(
+              (member) =>
+                member.role === 'host' &&
+                member.kind === 'agent' &&
+                member.owner_id === sender.owner_id,
+            )
+            .map((member) => member.agent_id)
+        : [];
     const found = findMentions(
       text,
       members.map((member) => ({ id: member.agent_id, name: member.name })),
       { exclude: [row.sender_agent_id, ...ownHost] },
     );
+    const ids = new Set(found.ids);
+    // The owner's person in its private chat with its own agent: the agent is addressed without
+    // an "@" while it is a live member that can read the post (the candidates' rules). Muted
+    // notifications, removal and revocation still record nothing, like any mention.
+    const target = addressed
+      ? members.find((member) => member.agent_id === addressed && member.kind === 'agent')
+      : undefined;
+    if (target && sender?.kind === 'person' && target.owner_id === sender.owner_id)
+      ids.add(target.agent_id);
     const owners = new Map(members.map((member) => [member.agent_id, member.owner_id]));
     const muted = new Set(members.filter((member) => member.muted).map((m) => m.agent_id));
     // Sorted, so concurrent posts lock wake_cursors rows in one global order.
-    for (const agentId of [...found.ids].sort()) {
+    for (const agentId of [...ids].sort()) {
       if (muted.has(agentId)) continue;
       const mentionSeq = await insertMention(tx, {
         agentId,
@@ -281,6 +371,88 @@ export async function roomPosted(
       row.sender_agent_id,
       row.auto_reply === undefined || row.auto_reply === null,
     ],
+  );
+  if (queued.rows.length) signals.push({ kind: 'outbox' });
+  emit(tx, ...signals);
+}
+
+/**
+ * Peer review notice (room tasks, docs/ROOM_TASKS.md "Peer review"): the server's line about a
+ * review request or verdict mentions the agents it concerns (the requested reviewer; or the
+ * claimer and the host), the same way an @mention in a room post does: a mention record, a
+ * webhook or hosted-responder wake-up, and an in-process signal. Members whose owner is muted in
+ * the room (by the host or by themselves) get nothing, like any mention. Inside the caller's
+ * transaction, after the line was written.
+ */
+export async function taskReviewNotice(
+  tx: Tx,
+  n: {
+    roomId: string;
+    seq: number;
+    agentIds: readonly string[];
+    fromAgentId: string;
+    fromName: string;
+    text: string;
+    time: number;
+  },
+): Promise<void> {
+  const message = (
+    await tx.query<{ id: string }>('SELECT id FROM room_messages WHERE room_id=$1 AND seq=$2', [
+      n.roomId,
+      n.seq,
+    ])
+  ).rows[0];
+  if (!message) return;
+  const targets = (
+    await tx.query<{ agent_id: string; owner_id: string; muted: boolean }>(
+      `SELECT m.agent_id, m.owner_id,
+          EXISTS (SELECT 1 FROM room_members x WHERE x.owner_id=m.owner_id
+            AND x.room_id=m.room_id AND (x.muted_at IS NOT NULL OR x.notifications_muted)) AS muted
+        FROM room_members m WHERE m.room_id=$1 AND m.agent_id = ANY($2::text[]) AND m.removed_at IS NULL`,
+      [n.roomId, [...new Set(n.agentIds)].filter((id) => id !== n.fromAgentId)],
+    )
+  ).rows.filter((row) => !row.muted);
+  const signals: WakeSignal[] = [];
+  const mentioned: string[] = [];
+  for (const target of [...targets].sort((a, b) => (a.agent_id < b.agent_id ? -1 : 1))) {
+    const seq = await insertMention(tx, {
+      agentId: target.agent_id,
+      ownerId: target.owner_id,
+      sourceKind: 'room',
+      sourceId: message.id,
+      roomId: n.roomId,
+      sourceSeq: n.seq,
+      contextId: null,
+      fromAgentId: n.fromAgentId,
+      fromName: n.fromName,
+      fromOwnerLabel: null,
+      excerpt: excerptAt(n.text, 0),
+      time: n.time,
+    });
+    if (seq !== null) {
+      mentioned.push(target.agent_id);
+      signals.push({ kind: 'mention', id: target.agent_id, seq });
+    }
+  }
+  if (!mentioned.length) return;
+  const event = {
+    kind: 'room_post',
+    room_id: n.roomId,
+    message_id: message.id,
+    seq: n.seq,
+    from_agent_id: n.fromAgentId,
+  };
+  const queued = await tx.query(
+    `INSERT INTO wake_outbox(webhook_id,agent_id,kinds,event,pending,version,attempts,first_at,next_attempt_at,kind)
+     SELECT w.id, w.agent_id, k.kinds, $3::jsonb, 1, 1, 0, $4, $4, w.kind FROM wake_webhooks w
+     CROSS JOIN LATERAL (SELECT ARRAY(SELECT e FROM unnest(ARRAY['mention']) AS e
+       WHERE e = ANY(w.events) ORDER BY e) AS kinds) k
+     WHERE w.agent_id = ANY($2::text[]) AND w.disabled_at IS NULL AND cardinality(k.kinds) > 0
+       AND (w.kind = 'https' OR EXISTS (
+         SELECT 1 FROM rooms r WHERE r.id=$1 AND r.responders_allowed AND r.closed_at IS NULL))
+     ORDER BY w.id
+     ${UPSERT}`,
+    [n.roomId, mentioned, JSON.stringify(event), n.time],
   );
   if (queued.rows.length) signals.push({ kind: 'outbox' });
   emit(tx, ...signals);

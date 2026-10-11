@@ -56,7 +56,10 @@ export function AgentGlyph({
 }
 
 /** Plain-language provenance: who drew this agent into the city. */
-export function creatorLabel(agent: Agent, nameOf: (id: string) => string | undefined) {
+export function creatorLabel(
+  agent: Pick<Agent, 'createdBy' | 'parentAgentId' | 'claimedAt'>,
+  nameOf: (id: string) => string | undefined,
+) {
   const by = agent.createdBy;
   if (agent.parentAgentId) return `Created under ${nameOf(agent.parentAgentId) ?? 'another agent'}`;
   if (!by || by.kind === 'owner') return 'Created by you';
@@ -73,14 +76,17 @@ export function EmptyState({
   title,
   children,
   action,
+  live,
 }: {
   icon?: ReactNode;
   title: string;
   children: ReactNode;
   action?: ReactNode;
+  /** Announces the empty state politely (role=status) where a page asks for it. */
+  live?: boolean;
 }) {
   return (
-    <div className="empty-state">
+    <div className="empty-state" role={live ? 'status' : undefined}>
       <div className="empty-icon">
         {icon || (
           <svg viewBox="0 0 48 48" aria-hidden="true">
@@ -102,12 +108,15 @@ export function Modal({
   onClose,
   children,
   wide = false,
+  variant = 'default',
 }: {
   title: string;
   subtitle?: string;
   onClose: () => void;
   children: ReactNode;
   wide?: boolean;
+  /** "confirm": a compact yes/no dialog with no kicker or close icon (see ConfirmDialog). */
+  variant?: 'default' | 'confirm';
 }) {
   const id = useId();
   const ref = useRef<HTMLDivElement>(null);
@@ -123,7 +132,11 @@ export function Modal({
           'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), a[href], [tabindex="0"]',
         ) || [],
       );
-    (focusables().find((element) => element.tagName !== 'BUTTON') || focusables()[0])?.focus();
+    (
+      ref.current?.querySelector<HTMLElement>('[data-autofocus]:not([disabled])') ||
+      focusables().find((element) => element.tagName !== 'BUTTON') ||
+      focusables()[0]
+    )?.focus();
     const key = (event: KeyboardEvent) => {
       if (event.key === 'Escape') closeRef.current();
       if (event.key === 'Tab') {
@@ -159,24 +172,97 @@ export function Modal({
     >
       <div
         ref={ref}
-        className={`modal ${wide ? 'wide' : ''}`}
+        className={variant === 'confirm' ? 'modal modal-confirm' : `modal ${wide ? 'wide' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby={id}
+        tabIndex={variant === 'confirm' ? -1 : undefined}
       >
-        <div className="modal-heading">
-          <div>
-            <p className="eyebrow">Central City / Workspace</p>
-            <h2 id={id}>{title}</h2>
-            {subtitle ? <p>{subtitle}</p> : null}
+        {variant === 'confirm' ? (
+          <h2 id={id} className="modal-confirm-title">
+            {title}
+          </h2>
+        ) : (
+          <div className="modal-heading">
+            <div>
+              <p className="eyebrow">Central City / Workspace</p>
+              <h2 id={id}>{title}</h2>
+              {subtitle ? <p>{subtitle}</p> : null}
+            </div>
+            <button className="icon-button" aria-label="Close dialog" onClick={onClose}>
+              <X size={20} />
+            </button>
           </div>
-          <button className="icon-button" aria-label="Close dialog" onClick={onClose}>
-            <X size={20} />
-          </button>
-        </div>
+        )}
         {children}
       </div>
     </div>
+  );
+}
+
+/**
+ * A compact confirm: a title, one short line, then Cancel and the action, right-aligned.
+ * Esc and Cancel close it; focus starts on Cancel. While busy it can't be closed and focus rests
+ * on the dialog itself, since both buttons are disabled.
+ */
+export function ConfirmDialog({
+  title,
+  children,
+  confirmLabel,
+  cancelLabel = 'Cancel',
+  tone = 'danger',
+  busy = false,
+  error,
+  status,
+  onConfirm,
+  onClose,
+}: {
+  title: string;
+  children: ReactNode;
+  confirmLabel: string;
+  cancelLabel?: string;
+  tone?: 'danger' | 'primary';
+  busy?: boolean;
+  error?: string;
+  status?: string;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  const body = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (busy) body.current?.closest<HTMLElement>('[role="dialog"]')?.focus();
+  }, [busy]);
+  return (
+    <Modal variant="confirm" title={title} onClose={() => (busy ? undefined : onClose())}>
+      <div className="modal-confirm-body" ref={body}>
+        {children}
+        {error ? (
+          <p className="modal-confirm-error" role="alert">
+            {error}
+          </p>
+        ) : null}
+        {status ? <p role="status">{status}</p> : null}
+      </div>
+      <div className="modal-confirm-actions">
+        <button
+          type="button"
+          className="confirm-button ghost"
+          data-autofocus
+          disabled={busy}
+          onClick={onClose}
+        >
+          {cancelLabel}
+        </button>
+        <button
+          type="button"
+          className={`confirm-button ${tone}`}
+          disabled={busy}
+          onClick={onConfirm}
+        >
+          {confirmLabel}
+        </button>
+      </div>
+    </Modal>
   );
 }
 

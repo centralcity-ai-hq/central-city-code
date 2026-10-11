@@ -19,12 +19,13 @@ export const LINKS = {
    * a clean snapshot of this application's tree, published as its own public repository.
    * `null` until that repository is public: the header shows no Developers section before then.
    */
-  code: 'https://github.com/centralcity-ai-org/central-city-code' as string | null,
+  code: 'https://github.com/centralcity-ai-hq/central-city-code' as string | null,
   /** Elric, Central City's AI assistant: the chat for signed-in owners (sign-in first otherwise). */
   elric: '/elric',
   docs: '/docs',
   rooms: null as string | null,
   answers: null as string | null,
+  workflows: '/workflows',
   about: '/about',
   contact: '/contact',
   support: '/support',
@@ -36,13 +37,13 @@ export const LINKS = {
   downtownMd: '/downtown.md',
 } as const;
 
-const GITHUB = 'https://github.com/centralcity-ai-org';
+const GITHUB = 'https://github.com/centralcity-ai-hq';
 
 /**
  * The one switch for "Elric on GitHub": set to true once the public code repository carries
  * Elric's folder (server/elric in central-city-code); the Developers menu then lists it.
  */
-export const ELRIC_CODE_PUBLISHED = false;
+export const ELRIC_CODE_PUBLISHED = true;
 /** Where "Elric on GitHub" points once it is published. */
 export const ELRIC_CODE_URL = `${GITHUB}/central-city-code/tree/main/server/elric`;
 
@@ -65,10 +66,10 @@ export type NavGroup = {
 
 /** The public GitHub repositories the header and footer may link (tests check every URL). */
 export const PUBLIC_REPOS = [
-  'https://github.com/centralcity-ai-org/protocol',
-  'https://github.com/centralcity-ai-org/sdk-ts',
-  'https://github.com/centralcity-ai-org/central-city-code',
-  'https://github.com/centralcity-ai-org/transparency',
+  'https://github.com/centralcity-ai-hq/protocol',
+  'https://github.com/centralcity-ai-hq/sdk-ts',
+  'https://github.com/centralcity-ai-hq/central-city-code',
+  'https://github.com/centralcity-ai-hq/transparency',
 ];
 
 /**
@@ -83,40 +84,25 @@ export const NAV_GROUPS: NavGroup[] = [
       { label: 'Elric', href: LINKS.elric, description: 'Your AI assistant in Central City' },
       { label: 'Workspace', href: LINKS.signIn },
       { label: 'Connect AI', href: '/connect' },
+      {
+        label: 'Base Agents',
+        href: '/explorer/base',
+        description: 'Agents with a passport on Base',
+      },
+      { label: 'Use cases', href: '/use-cases' },
     ],
   },
   {
     id: 'developers',
     label: 'Developers',
     items: [
-      { label: 'API', href: '/docs/api' },
       { label: 'Docs', href: '/docs' },
-      { label: 'Protocol', href: `${GITHUB}/protocol`, external: true },
-      { label: 'SDK', href: `${GITHUB}/sdk-ts`, external: true },
       {
         label: 'Changelog',
         href: `${GITHUB}/central-city-code/blob/main/CHANGELOG.md`,
         external: true,
       },
       { label: 'Status', href: LINKS.status },
-      // The code on GitHub. "Central City on GitHub" moved here from Open Source › Source code
-      // (nothing is listed twice); Elric's folder joins once ELRIC_CODE_PUBLISHED is true.
-      ...(ELRIC_CODE_PUBLISHED
-        ? [
-            {
-              label: 'Elric on GitHub',
-              href: ELRIC_CODE_URL,
-              external: true,
-              section: 'Open source',
-            },
-          ]
-        : []),
-      {
-        label: 'Central City on GitHub',
-        href: `${GITHUB}/central-city-code`,
-        external: true,
-        section: 'Open source',
-      },
     ],
   },
   {
@@ -125,12 +111,15 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       {
         label: 'Agent Explorer',
-        href: '/downtown/log',
+        href: '/explorer',
         description: 'Every AI agent on Central City, live',
       },
-      { label: 'Repositories', href: LINKS.downtown },
+      // Elric's folder on GitHub once ELRIC_CODE_PUBLISHED is true; the repositories are on /downtown.
+      ...(ELRIC_CODE_PUBLISHED
+        ? [{ label: 'Elric on GitHub', href: ELRIC_CODE_URL, external: true }]
+        : []),
+      { label: 'Downtown', href: LINKS.downtown },
       { label: 'Verify', href: '/downtown/verify' },
-      { label: 'Transparency log', href: `${GITHUB}/transparency`, external: true },
     ],
   },
   {

@@ -75,6 +75,8 @@ test('legacy peer conversations combine and structured updates disclose raw data
     .click();
   const conversations = page.getByRole('navigation', { name: 'Conversations' });
   await expect(conversations.getByRole('button')).toHaveCount(1);
+  await expect(conversations).toContainText('Desk');
+  await conversations.getByRole('button').click();
   await expect(page.getByText('Atlas registered').last()).toBeVisible();
   const thread0 = page.getByRole('list', { name: 'Thread messages' });
   for (const label of [
@@ -91,7 +93,7 @@ test('legacy peer conversations combine and structured updates disclose raw data
     await expect(raw).toBeHidden();
   await page.getByText('Details', { exact: true }).first().click();
   await expect(page.locator('.msg-data').first()).toContainText('synthetic-browser-session');
-  await expect(conversations).toContainText('Desk');
+  await expect(page.locator('.msg-v2-head')).toContainText('Desk');
   const thread = page.getByRole('list', { name: 'Thread messages' });
   await expect(thread).toContainText('Separate old thread 0');
   await expect(thread).toContainText('Separate old thread 1');

@@ -4,17 +4,38 @@
   "buildCommand": "pnpm build && rm -rf dist/.vite",
   "outputDirectory": "dist",
   "functions": {
-    "api/index.ts": {
-      "maxDuration": 60
+    "api/index.js": {
+      "maxDuration": 300,
+      "includeFiles": "api/_bundle/*.map"
     }
   },
   "crons": [
     {
       "path": "/api/cron/count-checkpoint",
-      "schedule": "10 0 * * *"
+      "schedule": "*/5 10-21 * * *"
+    },
+    {
+      "path": "/api/cron/fast-count-check",
+      "schedule": "30 12 * * *"
     },
     {
       "path": "/api/cron/wake-drain",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/email-drain",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/base-identity-finalize",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/base-pay-recover",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/base-wallet-sweep",
       "schedule": "* * * * *"
     }
   ],
@@ -23,6 +44,16 @@
       "source": "/:path((?!(?:api|mcp|oauth|\\.well-known|a2a|j)(?:/|$))[A-Za-z0-9](?:[^/.]*|[^/]*(?:/[^/]+)*/[^/.]+))/",
       "destination": "/:path",
       "permanent": true
+    },
+    {
+      "source": "/how",
+      "destination": "/#how",
+      "statusCode": 301
+    },
+    {
+      "source": "/answers",
+      "destination": "/docs",
+      "statusCode": 301
     }
   ],
   "rewrites": [
@@ -67,11 +98,34 @@
       "destination": "/api"
     },
     {
+      "source": "/.well-known/agent-registration.json",
+      "destination": "/api"
+    },
+    {
       "source": "/a2a/:path*",
       "destination": "/api"
     },
     {
+      "source": "/a/([0-9A-Za-z]{6})",
+      "has": [
+        {
+          "type": "header",
+          "key": "accept",
+          "value": "^(?=.*text/html)(?!.*json).*$"
+        }
+      ],
+      "destination": "/app.html"
+    },
+    {
+      "source": "/a/:path*",
+      "destination": "/api"
+    },
+    {
       "source": "/j/:path*",
+      "destination": "/api"
+    },
+    {
+      "source": "/assets/:path*",
       "destination": "/api"
     },
     {
@@ -83,135 +137,217 @@
       "destination": "/docs-index.md"
     },
     {
-      "source": "/how",
-      "destination": "/index.html"
-    },
-    {
       "source": "/about",
-      "destination": "/index.html"
+      "destination": "/share/about.html"
     },
     {
       "source": "/signin",
-      "destination": "/index.html"
+      "destination": "/app.html"
     },
     {
       "source": "/invite",
-      "destination": "/index.html"
+      "destination": "/share/invite.html"
     },
     {
       "source": "/connect",
-      "destination": "/index.html"
+      "destination": "/share/connect.html"
+    },
+    {
+      "source": "/workflows",
+      "destination": "/share/workflows.html"
     },
     {
       "source": "/r/([A-Za-z0-9_-]{1,64})",
-      "destination": "/index.html"
+      "destination": "/app.html"
     },
     {
       "source": "/rooms",
-      "destination": "/index.html"
+      "destination": "/app.html"
     },
     {
       "source": "/rooms/([A-Za-z0-9_-]{1,64})",
-      "destination": "/index.html"
+      "destination": "/app.html"
     },
     {
       "source": "/agents",
-      "destination": "/index.html"
+      "destination": "/app.html"
     },
     {
       "source": "/agents/([A-Za-z0-9_-]{1,64})",
-      "destination": "/index.html"
+      "destination": "/app.html"
     },
     {
-      "source": "/answers",
-      "destination": "/index.html"
+      "source": "/messages",
+      "destination": "/app.html"
     },
     {
       "source": "/elric",
-      "destination": "/index.html"
+      "destination": "/share/elric.html"
     },
     {
       "source": "/results/([A-Za-z0-9_-]{1,64})",
-      "destination": "/index.html"
+      "destination": "/app.html"
     },
     {
       "source": "/settings",
-      "destination": "/index.html"
+      "destination": "/app.html"
     },
     {
       "source": "/settings/([A-Za-z0-9_-]{1,64})",
-      "destination": "/index.html"
+      "destination": "/app.html"
+    },
+    {
+      "source": "/newsletter/confirm",
+      "destination": "/app.html"
+    },
+    {
+      "source": "/newsletter/unsubscribe",
+      "destination": "/app.html"
     },
     {
       "source": "/downtown",
-      "destination": "/index.html"
+      "destination": "/share/downtown.html"
     },
     {
       "source": "/privacy",
-      "destination": "/index.html"
+      "destination": "/share/privacy.html"
     },
     {
       "source": "/terms",
-      "destination": "/index.html"
+      "destination": "/share/terms.html"
     },
     {
       "source": "/security",
-      "destination": "/index.html"
+      "destination": "/share/security.html"
     },
     {
       "source": "/support",
-      "destination": "/index.html"
+      "destination": "/share/support.html"
     },
     {
       "source": "/status",
-      "destination": "/index.html"
+      "destination": "/share/status.html"
     },
     {
       "source": "/privacy-choices",
-      "destination": "/index.html"
+      "destination": "/share/privacy-choices.html"
     },
     {
       "source": "/acceptable-use",
-      "destination": "/index.html"
+      "destination": "/share/acceptable-use.html"
     },
     {
       "source": "/dpa",
-      "destination": "/index.html"
+      "destination": "/share/dpa.html"
     },
     {
       "source": "/imprint",
-      "destination": "/index.html"
+      "destination": "/share/imprint.html"
     },
     {
       "source": "/contact",
-      "destination": "/index.html"
+      "destination": "/share/contact.html"
     },
     {
       "source": "/downtown/verify",
-      "destination": "/index.html"
+      "destination": "/share/downtown/verify.html"
     },
     {
       "source": "/downtown/log",
-      "destination": "/index.html"
+      "destination": "/share/downtown/log.html"
+    },
+    {
+      "source": "/explorer",
+      "destination": "/share/explorer.html"
+    },
+    {
+      "source": "/explorer/base",
+      "destination": "/share/explorer/base.html"
     },
     {
       "source": "/docs",
-      "destination": "/index.html"
+      "destination": "/share/docs.html"
     },
     {
       "source": "/docs/start",
-      "destination": "/index.html"
+      "destination": "/share/docs/start.html"
     },
     {
       "source": "/docs/rooms",
-      "destination": "/index.html"
+      "destination": "/share/docs/rooms.html"
+    },
+    {
+      "source": "/docs/room-management",
+      "destination": "/share/docs/room-management.html"
+    },
+    {
+      "source": "/docs/coding",
+      "destination": "/share/docs/coding.html"
+    },
+    {
+      "source": "/docs/microsoft-copilot",
+      "destination": "/share/docs/microsoft-copilot.html"
+    },
+    {
+      "source": "/docs/mistral-le-chat",
+      "destination": "/share/docs/mistral-le-chat.html"
     },
     {
       "source": "/docs/api",
-      "destination": "/index.html"
+      "destination": "/share/docs/api.html"
+    },
+    {
+      "source": "/use-cases",
+      "destination": "/share/use-cases.html"
+    },
+    {
+      "source": "/use-cases/claude-and-chatgpt",
+      "destination": "/share/use-cases/claude-and-chatgpt.html"
+    },
+    {
+      "source": "/use-cases/gemini-cli-and-claude-code",
+      "destination": "/share/use-cases/gemini-cli-and-claude-code.html"
+    },
+    {
+      "source": "/use-cases/multi-ai-research-team",
+      "destination": "/share/use-cases/multi-ai-research-team.html"
+    },
+    {
+      "source": "/use-cases/multi-ai-code-review",
+      "destination": "/share/use-cases/multi-ai-code-review.html"
+    },
+    {
+      "source": "/use-cases/bring-your-own-agent",
+      "destination": "/share/use-cases/bring-your-own-agent.html"
+    },
+    {
+      "source": "/use-cases/cursor-and-claude-code",
+      "destination": "/share/use-cases/cursor-and-claude-code.html"
+    },
+    {
+      "source": "/use-cases/team-ai-workspace",
+      "destination": "/share/use-cases/team-ai-workspace.html"
     }
   ],
   "headers": [
+    {
+      "source": "/a/(.*)",
+      "headers": [
+        {
+          "key": "Vary",
+          "value": "Accept"
+        }
+      ]
+    },
+    {
+      "source": "/assets/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    },
     {
       "source": "/((?!assets/|api/|mcp(?:/|$)|oauth/|\\.well-known/|a2a/|j/).*)",
       "headers": [
@@ -238,7 +374,7 @@
         },
         {
           "key": "Content-Security-Policy",
-          "value": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+          "value": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://mainnet.base.org; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
         }
       ]
     },
@@ -486,6 +622,24 @@
       ]
     },
     {
+      "source": "/docs/room-management",
+      "headers": [
+        {
+          "key": "Link",
+          "value": "</docs/room-management.md>; rel=\"alternate\"; type=\"text/markdown\""
+        }
+      ]
+    },
+    {
+      "source": "/docs/coding",
+      "headers": [
+        {
+          "key": "Link",
+          "value": "</docs/coding.md>; rel=\"alternate\"; type=\"text/markdown\""
+        }
+      ]
+    },
+    {
       "source": "/docs/api",
       "headers": [
         {
@@ -517,6 +671,42 @@
         {
           "key": "Cache-Control",
           "value": "no-cache"
+        }
+      ]
+    },
+    {
+      "source": "/(rooms|settings|agents|messages|signin|r|results|share|newsletter)",
+      "headers": [
+        {
+          "key": "X-Robots-Tag",
+          "value": "noindex, nofollow"
+        }
+      ]
+    },
+    {
+      "source": "/(rooms|settings|agents|messages|signin|r|results|share|newsletter)/(.*)",
+      "headers": [
+        {
+          "key": "X-Robots-Tag",
+          "value": "noindex, nofollow"
+        }
+      ]
+    },
+    {
+      "source": "/api/(session|elric|public/.*)",
+      "headers": [
+        {
+          "key": "X-Robots-Tag",
+          "value": "noindex, nofollow"
+        }
+      ]
+    },
+    {
+      "source": "/(404|index|app)\\.html",
+      "headers": [
+        {
+          "key": "X-Robots-Tag",
+          "value": "noindex, nofollow"
         }
       ]
     }

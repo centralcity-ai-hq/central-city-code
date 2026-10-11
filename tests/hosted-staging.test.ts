@@ -5,7 +5,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { createApp } from '../server/app.js';
 import type { Snapshot } from '../shared/types.js';
 import { createServer, request as httpRequest, type IncomingHttpHeaders } from 'node:http';
-import { createHostedHandler } from '../api/index.js';
+import { createHostedHandler } from '../server/vercel-handler.js';
 import { signedHeaders } from '../connector/signing.js';
 import type { Workspace } from '../server/model.js';
 import { randomUUID } from 'node:crypto';
@@ -226,11 +226,11 @@ test('hosted deterministic jobs advance on owner polling without an interval', a
   );
 });
 
-test('registration transaction enforces the final account slot', async (t) => {
+test('hosted sign-up has no site-wide account ceiling: accounts 51 and 52 register concurrently', async (t) => {
   const app = await createApp({ hosted, database: await PGlite.create('memory://') });
   t.after(() => app.close());
   await app.city.db.query(
-    "INSERT INTO operators(id,name,name_key,password_hash,salt) SELECT 'seed-'||i, 'seed-'||i, 'seed-'||i, 'unused', 'unused' FROM generate_series(1,49) AS i",
+    "INSERT INTO operators(id,name,name_key,password_hash,salt) SELECT 'seed-'||i, 'seed-'||i, 'seed-'||i, 'unused', 'unused' FROM generate_series(1,50) AS i",
   );
   const registrations = await Promise.all(
     ['Final one', 'Final two'].map((name) =>
@@ -242,12 +242,15 @@ test('registration transaction enforces the final account slot', async (t) => {
       }),
     ),
   );
-  assert.deepEqual(registrations.map((result) => result.statusCode).sort(), [201, 409]);
+  assert.deepEqual(
+    registrations.map((result) => result.statusCode),
+    [201, 201],
+  );
   assert.equal(
     Number(
       (await app.city.db.query<{ count: string }>('SELECT count(*) FROM operators')).rows[0]?.count,
     ),
-    50,
+    52,
   );
 });
 

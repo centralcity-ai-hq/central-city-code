@@ -149,7 +149,8 @@ test('an adapter error refunds the allowance', async (t) => {
   const f = await elricFixture(t);
   const s = await f.scene();
   const trigger = await f.say(s.owner, s.room, '@Elric are you up?', s.person);
-  f.small.push({ error: 'server_error' });
+  // Persistent: the first try and its one retry both fail.
+  f.small.push({ error: 'server_error' }, { error: 'server_error' });
   const result = await f.elric.run({
     agentId: s.elricId,
     roomId: s.room.id,

@@ -1,0 +1,692 @@
+/*
+ * Use cases (/use-cases, /use-cases/<slug>): public pages in the visual language of the signed-in
+ * workspace (rooms v3, src/rooms/rooms-v3.css): room pills, rounded-square AI avatars, message
+ * bubbles and task chips. Colours, radii and shadows come from the shared tokens
+ * (src/shell/tokens.css), so light and dark follow the site theme.
+ */
+
+.uc-main {
+  width: 100%;
+  max-width: 1200px;
+  margin-inline: auto;
+  padding: calc(56 * var(--ws-px)) calc(24 * var(--ws-px)) calc(112 * var(--ws-px));
+  color: var(--text-primary, var(--text));
+  font-size: 16px;
+}
+.uc-main a:not(.button) {
+  color: var(--accent-text, var(--link));
+}
+.uc-main a:focus-visible,
+.uc-faq summary:focus-visible {
+  outline: var(--focus-ring) solid var(--focus);
+  outline-offset: var(--focus-offset);
+}
+:where(.uc-main) :where(h1, h2, h3, p, dl, dd, blockquote, pre) {
+  margin: 0;
+}
+.uc-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.uc-crumbs {
+  font-size: calc(14 * var(--ws-type-px));
+  margin-bottom: calc(16 * var(--ws-px));
+}
+/* Phone-sized tap targets (44 px) for the back link and the lists of other pages. */
+.uc-crumbs a,
+.uc-more a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+}
+
+/* ------------------------------------------------------------------ cards */
+.uc-card {
+  border: 1px solid var(--border);
+  border-radius: calc(24 * var(--ws-px));
+  background: var(--bg-surface-elevated, var(--surface-raised));
+  box-shadow: var(--shadow-elevated);
+}
+
+/* ------------------------------------------------------------------ hero */
+.uc-hero {
+  max-width: 760px;
+  padding-bottom: calc(56 * var(--ws-px));
+}
+.uc-hero-split {
+  max-width: none;
+  display: grid;
+  gap: calc(40 * var(--ws-px));
+  align-items: center;
+}
+@media (min-width: 960px) {
+  .uc-hero-split {
+    grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+    gap: calc(56 * var(--ws-px));
+  }
+}
+.uc-kicker {
+  font-size: calc(14 * var(--ws-type-px));
+  line-height: calc(20 * var(--ws-type-px));
+  font-weight: 600;
+  color: var(--accent-text, var(--link));
+}
+.uc-hero h1 {
+  margin-top: calc(12 * var(--ws-px));
+  font-size: clamp(34px, 5vw, 52px);
+  line-height: 1.08;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  text-wrap: balance;
+}
+.uc-hero-split h1 {
+  font-size: clamp(32px, 4.2vw, 48px);
+}
+.uc-lede {
+  margin-top: calc(20 * var(--ws-px));
+  font-size: calc(18 * var(--ws-type-px));
+  line-height: 1.6;
+  color: var(--text-secondary, var(--text-muted));
+  text-wrap: pretty;
+}
+.uc-actions {
+  margin-top: calc(32 * var(--ws-px));
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(12 * var(--ws-px));
+}
+
+/* ------------------------------------------------------------------ room pieces */
+.uc-av {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--accent);
+  color: var(--bg-page);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.uc-av-sm {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  font-size: 11px;
+  box-shadow: 0 0 0 2px var(--bg-surface-elevated, var(--surface-raised));
+}
+.uc-av[data-tone='success'] {
+  background: var(--success);
+}
+.uc-av[data-tone='warning'] {
+  background: var(--warning);
+}
+.uc-av[data-tone='slate'] {
+  background: var(--cc-slate);
+}
+.uc-av[data-tone='danger'] {
+  background: var(--error);
+}
+.uc-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 6px 12px 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--bg-surface-elevated, var(--surface-raised));
+  box-shadow: var(--shadow-card);
+  font-size: 14px;
+  white-space: nowrap;
+}
+.uc-pill-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+.uc-pill-avs {
+  display: inline-flex;
+  flex: none;
+}
+.uc-pill-avs .uc-av + .uc-av {
+  margin-left: -6px;
+}
+.uc-pill-active {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--success);
+}
+.uc-dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: currentColor;
+}
+.uc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 4px 12px;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-full);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--accent-text, var(--link));
+  background: var(--accent-tint, var(--bg-surface));
+}
+.uc-chip[data-tone='progress'] {
+  color: var(--warning);
+  background: var(--warning-tint);
+}
+.uc-chip[data-tone='done'] {
+  color: var(--success);
+  background: var(--success-tint);
+}
+.uc-msg {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  min-width: 0;
+}
+.uc-msg-body {
+  min-width: 0;
+}
+.uc-msg-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.uc-msg-name {
+  font-weight: 600;
+}
+.uc-badge {
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 18px;
+  color: var(--text-secondary, var(--text-muted));
+}
+.uc-bubble {
+  margin-top: 6px;
+  padding: 10px 14px;
+  border-radius: 16px;
+  background: var(--room-bubble, var(--bg-surface));
+  font-size: 14px;
+  line-height: 1.5;
+}
+.uc-msg-host {
+  justify-content: flex-end;
+}
+.uc-msg-host .uc-bubble,
+.uc-bubble-host {
+  max-width: 85%;
+  background: var(--primary);
+  color: var(--on-primary);
+}
+.uc-bubble-host a {
+  color: inherit !important;
+}
+
+/* ------------------------------------------------------------------ hero preview */
+.uc-preview-wrap {
+  min-width: 0;
+}
+.uc-preview {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: calc(24 * var(--ws-px));
+  background: var(--bg-page);
+  box-shadow: var(--shadow-elevated), var(--shadow-card);
+}
+.uc-preview-top {
+  display: flex;
+  justify-content: center;
+  padding: 16px 16px 4px;
+}
+.uc-preview-log {
+  display: grid;
+  gap: 14px;
+  padding: 16px 20px;
+}
+.uc-preview-chip {
+  padding-left: 48px;
+}
+.uc-composer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 4px 16px 16px;
+  padding: 8px 8px 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--bg-surface-elevated, var(--surface-raised));
+  color: var(--text-secondary, var(--text-muted));
+  font-size: 14px;
+  opacity: 0.85;
+}
+.uc-composer span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.uc-send {
+  width: 32px;
+  height: 32px;
+  flex: none;
+  border-radius: 10px;
+  background: var(--primary);
+  opacity: 0.5;
+}
+
+/* ------------------------------------------------------------------ sections */
+.uc-body {
+  max-width: 880px;
+}
+.uc-section {
+  padding-block: calc(48 * var(--ws-px));
+  border-top: 1px solid var(--border-subtle, var(--border));
+}
+.uc-section .uc-section {
+  padding-block: calc(24 * var(--ws-px)) 0;
+  border-top: 0;
+}
+.uc-section-title {
+  font-size: calc(26 * var(--ws-type-px));
+  line-height: 1.2;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+h3.uc-section-title {
+  font-size: calc(19 * var(--ws-type-px));
+}
+.uc-prose {
+  margin-top: calc(20 * var(--ws-px));
+  font-size: 16px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.uc-prose.uc-card {
+  padding: calc(28 * var(--ws-px));
+  box-shadow: var(--shadow-card);
+}
+.uc-prose > * + *,
+.uc-steps > li > * + * {
+  margin-top: calc(14 * var(--ws-px));
+}
+.uc-prose h3 {
+  margin-top: calc(28 * var(--ws-px));
+  font-size: calc(18 * var(--ws-type-px));
+  font-weight: 600;
+}
+.uc-prose ul,
+.uc-prose ol {
+  padding-left: calc(22 * var(--ws-px));
+}
+.uc-prose li + li {
+  margin-top: calc(10 * var(--ws-px));
+}
+/* Numbered steps with round badges, as in the workspace's task steps. */
+.uc-prose ol.uc-steps {
+  counter-reset: uc-step;
+  list-style: none;
+  padding-left: 0;
+}
+.uc-steps > li {
+  counter-increment: uc-step;
+  position: relative;
+  padding-left: 44px;
+  min-width: 0;
+}
+.uc-steps > li + li {
+  margin-top: calc(20 * var(--ws-px));
+}
+.uc-steps > li::before {
+  content: counter(uc-step);
+  position: absolute;
+  left: 0;
+  top: -2px;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--accent-tint, var(--bg-surface));
+  color: var(--accent-text, var(--link));
+  font-size: 13px;
+  font-weight: 600;
+}
+.uc-prose code,
+.uc-faq code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  padding: 0.1em 0.3em;
+  border-radius: 4px;
+  background: var(--bg-inset, var(--surface-sunken));
+}
+.uc-bubble-host code {
+  background: color-mix(in srgb, currentColor 18%, transparent);
+}
+.uc-code {
+  padding: calc(14 * var(--ws-px)) calc(16 * var(--ws-px));
+  border: 1px solid var(--border-subtle, var(--border));
+  border-radius: var(--radius-lg, 12px);
+  background: var(--bg-inset, var(--surface-sunken));
+  overflow-x: auto;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  line-height: 1.6;
+}
+.uc-code:focus-visible {
+  /* Focusable so keyboard users can scroll long commands sideways. */
+  outline: 2px solid var(--border-focus, var(--accent));
+  outline-offset: 2px;
+}
+.uc-code code {
+  font-family: var(--font-mono);
+  padding: 0;
+  background: none;
+  white-space: pre;
+}
+.uc-prose blockquote {
+  padding: calc(14 * var(--ws-px)) calc(18 * var(--ws-px));
+  border-left: 3px solid var(--accent-text, var(--link));
+  border-radius: 0 var(--radius-lg, 12px) var(--radius-lg, 12px) 0;
+  background: var(--bg-surface, var(--surface-sunken));
+  color: var(--text-secondary, var(--text-muted));
+}
+
+/* What you get: three cards */
+.uc-benefits {
+  list-style: none;
+  margin: calc(20 * var(--ws-px)) 0 0;
+  padding: 0;
+  display: grid;
+  gap: 16px;
+}
+@media (min-width: 760px) {
+  .uc-benefits {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+.uc-benefit {
+  padding: 24px;
+  box-shadow: var(--shadow-card);
+  line-height: 1.55;
+}
+.uc-benefit h3 {
+  margin-top: 16px;
+  font-size: 17px;
+  font-weight: 600;
+}
+.uc-benefit p {
+  margin-top: 8px;
+  color: var(--text-secondary, var(--text-muted));
+  font-size: 15px;
+}
+.uc-benefit-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: var(--accent-tint, var(--bg-surface));
+  color: var(--accent-text, var(--link));
+}
+
+/* Example prompt: the prompts as the host's messages in a room frame */
+.uc-prompt-room {
+  margin-top: calc(20 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(24 * var(--ws-px));
+  background: var(--bg-page);
+  box-shadow: var(--shadow-card);
+  overflow-wrap: anywhere;
+}
+.uc-prompt-log {
+  display: grid;
+  gap: 12px;
+  padding: 20px;
+}
+.uc-prompt-log .uc-bubble-host {
+  justify-self: end;
+  margin: 0;
+  padding: 12px 16px;
+  font-size: 15px;
+  line-height: 1.55;
+}
+.uc-prompt-note {
+  justify-self: start;
+  padding: 4px 12px;
+  border-radius: var(--radius-full);
+  background: var(--bg-surface, var(--surface-sunken));
+  color: var(--text-secondary, var(--text-muted));
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* FAQ accordion */
+.uc-faq {
+  margin-top: calc(20 * var(--ws-px));
+  display: grid;
+  gap: 12px;
+}
+.uc-faq-item {
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--bg-surface-elevated, var(--surface-raised));
+}
+.uc-faq summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 44px;
+  padding: 14px 20px;
+  border-radius: 16px;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+  list-style: none;
+}
+.uc-faq summary::-webkit-details-marker {
+  display: none;
+}
+.uc-faq-icon {
+  flex: none;
+  color: var(--text-secondary, var(--text-muted));
+  transition: transform var(--dur-2, 160ms) var(--ease-standard, ease);
+}
+.uc-faq-item[open] .uc-faq-icon {
+  transform: rotate(180deg);
+}
+.uc-faq-item > p {
+  padding: 0 20px 18px;
+  color: var(--text-secondary, var(--text-muted));
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+/* Call to action band, like the homepage's */
+.uc-cta {
+  margin-block: calc(24 * var(--ws-px));
+  padding: 48px 36px;
+  border: 1px solid var(--border);
+  border-radius: calc(24 * var(--ws-px));
+  background: var(--bg-surface-elevated, var(--surface-raised));
+  box-shadow: var(--shadow-elevated);
+  text-align: center;
+}
+.uc-cta h2 {
+  font-size: clamp(26px, 4vw, 32px);
+  line-height: 1.2;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.uc-cta .uc-actions {
+  margin-top: 24px;
+  justify-content: center;
+}
+
+/* More use cases: pills */
+.uc-more {
+  list-style: none;
+  margin: calc(20 * var(--ws-px)) 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.uc-more a {
+  padding: 0 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--bg-surface-elevated, var(--surface-raised));
+  color: var(--text-primary, var(--text)) !important;
+  font-size: 15px;
+  font-weight: 500;
+  text-decoration: none;
+}
+.uc-more a:hover {
+  border-color: var(--border-strong, var(--border));
+  background: var(--bg-surface-hover, var(--bg-surface));
+}
+
+/* ------------------------------------------------------------------ index grid */
+.uc-index {
+  list-style: none;
+  margin: calc(24 * var(--ws-px)) 0 0;
+  padding: 0;
+  display: grid;
+  gap: 24px;
+}
+@media (min-width: 700px) {
+  .uc-index {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (min-width: 1100px) {
+  .uc-index {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+.uc-room-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 20px 20px 24px;
+  transition:
+    transform var(--dur-2, 160ms) var(--ease-standard, ease),
+    box-shadow var(--dur-2, 160ms) var(--ease-standard, ease);
+}
+.uc-room-card:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-floating, var(--shadow-elevated));
+}
+.uc-room-card:has(a:focus-visible) {
+  outline: var(--focus-ring) solid var(--focus);
+  outline-offset: var(--focus-offset);
+}
+.uc-room-card a:focus-visible {
+  outline: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .uc-room-card,
+  .uc-faq-icon {
+    transition: none;
+  }
+  .uc-room-card:hover {
+    transform: none;
+  }
+}
+.uc-mini {
+  display: grid;
+  gap: 14px;
+  justify-items: start;
+  min-width: 0;
+  padding: 16px;
+  border-radius: 18px;
+  background: var(--bg-page);
+  border: 1px solid var(--border-subtle, var(--border));
+}
+.uc-mini-log {
+  display: grid;
+  gap: 12px;
+  width: 100%;
+}
+.uc-mini .uc-bubble {
+  font-size: 13px;
+}
+.uc-room-card h3 {
+  margin-top: 20px;
+  font-size: 19px;
+  line-height: 1.3;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.uc-room-card h3 a {
+  color: var(--text-primary, var(--text)) !important;
+  text-decoration: none;
+}
+/* The whole card is the link (stretched over the card). */
+.uc-room-card h3 a::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+.uc-room-card > p {
+  margin-top: 8px;
+  color: var(--text-secondary, var(--text-muted));
+  line-height: 1.55;
+}
+
+@media (max-width: 640px) {
+  .uc-main {
+    padding: calc(40 * var(--ws-px)) 16px calc(80 * var(--ws-px));
+  }
+  .uc-lede {
+    font-size: 17px;
+  }
+  .uc-section-title {
+    font-size: calc(22 * var(--ws-type-px));
+  }
+  .uc-prose.uc-card {
+    padding: 20px 16px;
+  }
+  .uc-preview-log,
+  .uc-prompt-log {
+    padding: 16px 12px;
+  }
+  .uc-preview-chip {
+    padding-left: 0;
+  }
+  .uc-cta {
+    padding: 32px 20px;
+  }
+}

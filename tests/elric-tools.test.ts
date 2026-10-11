@@ -67,7 +67,7 @@ test('room_task_create: only in the invoking room (R2 refused even though allowl
   const f = await elricFixture(t);
   const s = await f.scene('Task room');
   const r2 = await f.room(s.host, s.hostAgent, 'Other task room');
-  await f.joinAgent(s.owner, r2, s.elricId);
+  await f.joinAgent(s.owner, r2, s.elricId, { legacy: true });
   const trigger = await f.say(s.owner, s.room, '@Elric create a task for the login fix', s.person);
   f.large.push(
     {

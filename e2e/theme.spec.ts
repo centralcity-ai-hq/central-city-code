@@ -1,10 +1,10 @@
 import { test, expect, type Page } from '@playwright/test';
 
 /*
- * Theme: light by default on every device, whatever the OS colour-scheme setting. Dark only
- * when the visitor picks it with the theme toggle; the choice is remembered (localStorage
- * 'cc-theme') across reloads. A URL query parameter (?theme=dark|light) applies to that page
- * view only and is never stored.
+ * Theme: with no choice stored ("System") the site follows the device's light/dark setting,
+ * before the first paint and live when the setting changes. A choice from the theme toggle is
+ * remembered (localStorage 'cc-theme') across reloads and wins over the device setting. A URL
+ * query parameter (?theme=dark|light) applies to that page view only and is never stored.
  */
 
 const LIGHT_BODY = 'rgb(255, 255, 255)';
@@ -23,16 +23,54 @@ for (const width of [1440, 375]) {
   test.describe(`at ${width} px`, () => {
     test.beforeEach(async ({ page }) => {
       await page.setViewportSize({ width, height: width < 900 ? 812 : 900 });
-      await page.emulateMedia({ colorScheme: 'dark' });
+      await page.emulateMedia({ colorScheme: 'light' });
     });
 
-    test('an OS dark preference still renders light', async ({ page }) => {
+    test('with no stored choice a dark device renders dark, and follows live changes', async ({
+      page,
+    }) => {
+      await page.emulateMedia({ colorScheme: 'dark' });
+      await page.goto('/');
+      await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+      await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+      expect(await bodyBackground(page)).toBe(DARK_BODY);
+      expect(await page.evaluate(() => localStorage.getItem('cc-theme'))).toBeNull();
+      await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#0c1426');
+      await expect(page.locator('meta[name="color-scheme"]')).toHaveAttribute('content', 'dark');
+
+      // The device switches to light while the page is open.
+      await page.emulateMedia({ colorScheme: 'light' });
+      await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+      await expect.poll(() => bodyBackground(page)).toBe(LIGHT_BODY);
+      await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#ffffff');
+      expect(await page.evaluate(() => localStorage.getItem('cc-theme'))).toBeNull();
+    });
+
+    test('the theme is right before the app runs (no flash on the prerendered page)', async ({
+      page,
+    }) => {
+      await page.emulateMedia({ colorScheme: 'dark' });
+      // Block the app's module scripts: only the boot script in <head> sets the theme.
+      await page.route(/\/assets\/.*\.js$/, (route) =>
+        route.request().url().includes('theme-boot') ? route.continue() : route.abort(),
+      );
+      await page.goto('/');
+      await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+    });
+
+    test('a stored light choice stays light on a dark device', async ({ page }) => {
+      await page.addInitScript(() => localStorage.setItem('cc-theme', 'light'));
+      await page.emulateMedia({ colorScheme: 'dark' });
       await page.goto('/');
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
       await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
       expect(await bodyBackground(page)).toBe(LIGHT_BODY);
-      expect(await page.evaluate(() => localStorage.getItem('cc-theme'))).toBeNull();
-      await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#f4f6fa');
+      await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#ffffff');
+
+      // A live device change does not override the choice.
+      await page.emulateMedia({ colorScheme: 'light' });
+      await page.emulateMedia({ colorScheme: 'dark' });
+      await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
     });
 
     test('the toggle switches to dark and the choice survives a reload', async ({ page }) => {
@@ -60,7 +98,6 @@ for (const width of [1440, 375]) {
     test('?theme=dark applies to the view but does not change the saved choice', async ({
       page,
     }) => {
-      await page.emulateMedia({ colorScheme: 'light' });
       await page.goto('/?theme=dark');
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
       await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');

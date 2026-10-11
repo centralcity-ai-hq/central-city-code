@@ -13,7 +13,7 @@ blocker §9).
 - **Sign in and sign up** (`/signin`, both tabs): one "Continue with Google" button. It signs in
   the account linked to that Google account. A Google account that is not linked yet (its email
   is always verified) gets a new account with no password, the link and a session, under the
-  same account cap and per-address sign-up budget as the password sign-up. The new account then
+  same per-address sign-up budget (and optional `CITY_LIMIT_OPERATORS` emergency ceiling) as the password sign-up. The new account then
   chooses its account name on `/settings/account` (`POST /api/auth/google/handle`, once). The
   date of birth is asked only for Elric. An account created this way cannot unlink Google (it
   has no other way to sign in).

@@ -226,6 +226,71 @@ CREATE INDEX IF NOT EXISTS unclaimed_buckets_last_used ON unclaimed_buckets(last
 `,
 };
 
+/**
+ * Migration 61: an index for the expiry deletes of sessions (the per-instance sweep and every
+ * sign-in delete expired sessions by expires_at; without it each one scanned all sessions).
+ */
+export const sessionsExpiryMigration: Migration = {
+  version: 61,
+  name: 'sessions_expiry',
+  sql: `
+CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);
+`,
+};
+
+/**
+ * Migration 74: the index behind My agents' Overview "Tasks done" (GET /api/agents/:id/totals):
+ * tasks an agent handed in that were approved. A messages-sent total waits: an index on
+ * room_messages would lock its writes while it builds inside this transaction.
+ */
+export const agentTotalsMigration: Migration = {
+  version: 74,
+  name: 'agent_totals',
+  sql: `
+CREATE INDEX IF NOT EXISTS room_tasks_done_by ON room_tasks(submitted_by) WHERE status = 'done';
+`,
+};
+
+/**
+ * Migration 75: messages each agent sent in rooms (My agents' Overview "Messages"). A counter row
+ * per agent, bumped by a trigger in the same transaction as every room message insert (all
+ * insert paths, and older instances during a deploy), so the total never scans room_messages and
+ * no index on it is needed. Only AI posts count (sender_kind 'agent'): no system lines, no
+ * people's posts. The total means "ever sent": deleting a room removes its messages, but the
+ * counter never goes down. `counting_since` marks when counting
+ * began; messages created before it are added once by scripts/ops/backfill-message-counts.sql
+ * (run off-peak: it scans room_messages, so it is never part of a migration).
+ */
+export const agentMessageCountsMigration: Migration = {
+  version: 75,
+  name: 'agent_message_counts',
+  sql: `
+CREATE TABLE IF NOT EXISTS agent_message_counts (
+  agent_id text PRIMARY KEY,
+  sent bigint NOT NULL DEFAULT 0 CHECK (sent >= 0)
+);
+CREATE TABLE IF NOT EXISTS agent_message_counts_meta (
+  id boolean PRIMARY KEY DEFAULT true CHECK (id),
+  counting_since bigint NOT NULL,
+  backfilled_at bigint
+);
+INSERT INTO agent_message_counts_meta(id, counting_since)
+  VALUES (true, (extract(epoch from now()) * 1000)::bigint)
+  ON CONFLICT (id) DO NOTHING;
+CREATE OR REPLACE FUNCTION agent_message_counts_bump() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.sender_kind = 'agent' THEN
+    INSERT INTO agent_message_counts(agent_id, sent) VALUES (NEW.sender_agent_id, 1)
+      ON CONFLICT (agent_id) DO UPDATE SET sent = agent_message_counts.sent + 1;
+  END IF;
+  RETURN NULL;
+END $$;
+DROP TRIGGER IF EXISTS agent_message_counts_bump ON room_messages;
+CREATE TRIGGER agent_message_counts_bump AFTER INSERT ON room_messages
+  FOR EACH ROW EXECUTE FUNCTION agent_message_counts_bump();
+`,
+};
+
 const registry: Migration[] = [
   baseline,
   agentPresence,
@@ -284,6 +349,11 @@ export async function runMigrations(
   const ordered = [...migrations].sort((a, b) => a.version - b.version);
   if (new Set(ordered.map((item) => item.version)).size !== ordered.length)
     throw new Error('Duplicate migration version.');
+  // Every cold start runs this. When the schema is already exactly this build's, one unlocked read
+  // proves it (one round trip instead of five, and no wait on the lock behind other starting
+  // instances). Anything else (a missing table, a pending, unknown or changed migration) takes
+  // the locked path below, which applies or refuses exactly as before.
+  if (await schemaCurrent(db, ordered)) return { applied: [] };
   return db.transaction(async (tx) => {
     await tx.query('SELECT pg_advisory_xact_lock($1)', [SCHEMA_LOCK_KEY]);
     await tx.exec(
@@ -334,5 +404,25 @@ export async function runMigrations(
       if (report) log(report.event, report.fields);
     }
     return { applied };
+  });
+}
+
+/** True only when schema_migrations lists exactly `ordered`, each with its name and checksum. */
+async function schemaCurrent(db: Database, ordered: readonly Migration[]): Promise<boolean> {
+  let rows: { version: number | string; name: string; checksum: string }[];
+  try {
+    rows = (
+      await db.query<{ version: number | string; name: string; checksum: string }>(
+        'SELECT version,name,checksum FROM schema_migrations',
+      )
+    ).rows;
+  } catch {
+    return false;
+  }
+  if (rows.length !== ordered.length) return false;
+  const applied = new Map(rows.map((row) => [Number(row.version), row]));
+  return ordered.every((migration) => {
+    const row = applied.get(migration.version);
+    return !!row && row.name === migration.name && row.checksum === migrationChecksum(migration);
   });
 }

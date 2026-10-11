@@ -60,8 +60,45 @@ CREATE INDEX IF NOT EXISTS messages_context_recipient ON messages(context_id, re
 `,
 };
 
+/**
+ * Migration 70 `conversation_hidden` (docs/MESSAGING.md "Archive a conversation"): a person's
+ * "Delete conversation" in Messages hides one thread from their own list only. One row per
+ * (owner, thread); hidden_at is when it was last hidden, and the thread shows again as soon as
+ * a message newer than hidden_at arrives. No message is deleted, for either side.
+ */
+export const conversationHiddenMigration: Migration = {
+  version: 70,
+  name: 'conversation_hidden',
+  sql: `
+CREATE TABLE IF NOT EXISTS conversation_hidden (
+  owner_id text NOT NULL, context_id text NOT NULL, hidden_at bigint NOT NULL,
+  PRIMARY KEY(owner_id, context_id)
+);
+`,
+};
+
+/**
+ * Migration 73 `conversation_reads` (docs/MESSAGING.md "In the conversation list"): when an owner
+ * last read a thread in the console. A message one of its members received from someone else is
+ * unread for the owner only while it is newer than this mark (and its inbox has not acknowledged
+ * it). One row per (owner, thread); read_at is the newest message the owner had then. An AI's own
+ * inbox cursor is never moved by it, so the AI still receives every message.
+ */
+export const conversationReadsMigration: Migration = {
+  version: 73,
+  name: 'conversation_reads',
+  sql: `
+CREATE TABLE IF NOT EXISTS conversation_reads (
+  owner_id text NOT NULL, context_id text NOT NULL, read_at bigint NOT NULL,
+  PRIMARY KEY(owner_id, context_id)
+);
+`,
+};
+
 /** Idempotent; call before runMigrations. */
 export function registerMessagingMigration(): void {
   registerMigration(agentMessagesMigration);
   registerMigration(pairContextsMigration);
+  registerMigration(conversationHiddenMigration);
+  registerMigration(conversationReadsMigration);
 }

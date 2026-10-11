@@ -6,6 +6,7 @@ const expect = baseExpect.configure({ timeout: 15_000 });
 /**
  * Chat behaviour people expect of any modern chat app: open at the newest message, load
  * older history on scroll, and never reload the thread or the composer when a message arrives.
+ * Messages shows the inbox first; each test opens the conversation from it.
  */
 const headers = { 'X-City-Request': '1' };
 
@@ -57,13 +58,21 @@ async function seedRoom(page: Page, agents: Agents, count: number, prefix = 'UX'
   return room;
 }
 
+const conversationList = (page: Page) =>
+  page.getByRole('navigation', { name: 'Conversations', exact: true });
+
+/** Opens Messages, then the newest conversation (the thread replaces the inbox). */
 async function openMessages(page: Page) {
   await page.goto('/');
   await page
     .getByRole('navigation', { name: 'Workspace' })
     .getByRole('button', { name: /^Messages/ })
     .click();
+  await conversationList(page).getByRole('button').first().click();
 }
+
+/** Back to the inbox from the open thread. */
+const backToInbox = (page: Page) => page.getByRole('button', { name: 'Back to inbox' }).click();
 
 /** Makes every poll run now (the page polls on visibilitychange) instead of waiting 10 s. */
 const pollNow = (page: Page) =>
@@ -121,12 +130,11 @@ test('scrolling up loads older messages and keeps the reading position', async (
 
 test('the draft survives incoming messages and a conversation list re-sort', async ({ page }) => {
   const agents = await workspace(page);
-  // An older second conversation; the room is newest, so it opens by default (no click).
+  // An older second conversation; the room is newest, so it is the first row.
   await send(page.request, agents.Atlas, agents.Relay, 'Other chat');
   const room = await seedRoom(page, agents, 12, 'Room');
   await openMessages(page);
-  const conversations = page.getByRole('navigation', { name: 'Conversations' });
-  await expect(conversations.getByRole('button')).toHaveCount(2);
+  const conversations = conversationList(page);
   await expect(message(page, 'Room 11')).toBeVisible();
   const composer = page.getByRole('form', { name: 'Reply', exact: true });
   const box = composer.getByLabel('Message text');
@@ -140,15 +148,25 @@ test('the draft survives incoming messages and a conversation list re-sort', asy
   await expect(box).toHaveValue('Half-written reply');
   await send(page.request, agents.Atlas, agents.Relay, 'Other chat moves up');
   await pollNow(page);
+  await expect(box).toHaveValue('Half-written reply');
+  // The inbox re-sorts: the other chat moves up, the open chat stays marked.
+  await backToInbox(page);
+  await expect(conversations.getByRole('button')).toHaveCount(2);
   await expect(conversations.getByRole('button').first()).toContainText('Other chat moves up');
+  await expect(conversations.locator('[aria-current="true"]')).toHaveCount(1);
+  await conversations.locator('[aria-current="true"]').click();
+  await expect(message(page, 'Incoming while typing')).toBeVisible();
   await expect(box).toHaveValue('Half-written reply');
   await send(page.request, agents.Relay, agents.Sentinel, 'Room again', room);
   await pollNow(page);
   await expect(message(page, 'Room again')).toBeVisible();
+  await backToInbox(page);
   await expect(conversations.getByRole('button').first()).toContainText('Room again');
 
   // Still the same chat, the same draft, and the same sender (a new message did not switch it).
   await expect(conversations.locator('[aria-current="true"]')).toContainText('Room again');
+  await conversations.locator('[aria-current="true"]').click();
+  await expect(message(page, 'Room again')).toBeVisible();
   await expect(box).toHaveValue('Half-written reply');
   await expect(composer.getByLabel('Send as')).toHaveValue(sendAs);
 });

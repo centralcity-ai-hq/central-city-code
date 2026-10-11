@@ -277,6 +277,7 @@ test('flag on: every task route is reachable; host checks match the service', as
   );
   assert.equal(posted.statusCode, 200, 'result posted');
   assert.equal(posted.json().task.status, 'in_review');
+  assert.equal(posted.json().task.submitted_by, hostAgent, 'hand-in records who did the work');
 
   // A member who is not the host cannot review: 403 host_required.
   const memberReview = await api(
@@ -305,8 +306,16 @@ test('flag on: every task route is reachable; host checks match the service', as
   const fetched = await api(app, hostCookie, 'GET', `/api/rooms/${room.id}/tasks/${taskId}`);
   assert.equal(fetched.statusCode, 200, 'task read');
   assert.equal(fetched.json().task.status, 'done');
+  assert.equal(fetched.json().task.submitted_by, hostAgent);
   const listed = await api(app, hostCookie, 'GET', `/api/rooms/${room.id}/tasks`);
   assert.equal(listed.statusCode, 200, 'tasks listed');
+  assert.equal(
+    (listed.json().tasks as { id: string; submitted_by: string | null }[]).find(
+      (item) => item.id === taskId,
+    )?.submitted_by,
+    hostAgent,
+    'the list shows who handed it in',
+  );
   assert.ok(
     (listed.json().tasks as { id: string }[]).some((item) => item.id === taskId),
     'list contains the task',

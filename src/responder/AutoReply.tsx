@@ -1,7 +1,15 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { AlertTriangle, LoaderCircle } from 'lucide-react';
 import type { Agent } from '../../shared/types';
-import { getSettings, loadModels, removeKey, ResponderError, saveKey, updateSettings } from './api';
+import {
+  getSettings,
+  loadModels,
+  removeKey,
+  responderClient,
+  ResponderError,
+  updateSettings,
+  type ResponderClient,
+} from './api';
 import {
   LIMITS,
   PROVIDERS,
@@ -49,7 +57,22 @@ function useModels(): ModelOption[] | null | undefined {
   return models;
 }
 
-type SheetMode = 'setup' | 'key' | 'settings';
+export type SheetMode = 'setup' | 'key' | 'settings';
+
+/**
+ * How the sheet's requests go out. `work` sends them with the client it is given and returns what
+ * was saved; `done` is the line that says so. `send` resolves to what was saved, or to null when
+ * the requests did not finish here (the screen that opened the sheet moved on to another agent or
+ * workspace, or another action was on its way): then the sheet shows nothing more. A failure
+ * rejects with a ResponderError.
+ */
+export type SheetSend = (
+  work: (client: ResponderClient) => Promise<ResponderSettingsView>,
+  done: string,
+) => Promise<ResponderSettingsView | null>;
+
+/** The agent's settings dialog sends the sheet's requests as they are. */
+const sendDirect: SheetSend = (work) => work(responderClient);
 
 export function AutoReplySection({ agent }: { agent: Agent }) {
   const models = useModels();
@@ -57,42 +80,94 @@ export function AutoReplySection({ agent }: { agent: Agent }) {
   const [loadError, setLoadError] = useState(false);
   const [sheet, setSheet] = useState<SheetMode | null>(null);
   const [busy, setBusy] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const requestVersion = useRef(0);
+  const inFlight = useRef(false);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const confirmationRef = useRef<HTMLDivElement>(null);
+  const retryRef = useRef<HTMLButtonElement>(null);
   const titleId = useId();
 
   useEffect(() => {
     if (!models) return;
-    let live = true;
+    const version = ++requestVersion.current;
+    setSettings(null);
     setLoadError(false);
+    setBusy(false);
+    setRefreshing(false);
+    setConfirmRemove(false);
+    setError('');
+    setNotice('');
     getSettings(agent.id)
-      .then((value) => live && setSettings(value))
-      .catch(() => live && setLoadError(true));
+      .then((value) => version === requestVersion.current && setSettings(value))
+      .catch(() => version === requestVersion.current && setLoadError(true));
     return () => {
-      live = false;
+      requestVersion.current++;
+      inFlight.current = false;
     };
   }, [models, agent.id]);
 
   if (!models || agent.revokedAt) return null;
 
-  async function run(action: () => Promise<ResponderSettingsView>, done: string) {
+  function beginRequest() {
+    if (inFlight.current) return null;
+    inFlight.current = true;
+    const version = ++requestVersion.current;
     setBusy(true);
+    return () => version === requestVersion.current;
+  }
+
+  function finishRequest(isCurrent: () => boolean) {
+    if (!isCurrent()) return;
+    inFlight.current = false;
+    setBusy(false);
+    setRefreshing(false);
+  }
+
+  function showActionError(err: unknown) {
+    setError(
+      setupErrorCopy(err instanceof ResponderError ? err.code : '', {
+        provider: settings?.provider ?? 'openai',
+        status: err instanceof ResponderError ? err.status : 0,
+      }).message,
+    );
+  }
+
+  async function refreshSettings() {
+    const isCurrent = beginRequest();
+    if (!isCurrent) return;
+    setRefreshing(true);
+    try {
+      const value = await getSettings(agent.id);
+      if (!isCurrent()) return;
+      if (document.activeElement === retryRef.current) headingRef.current?.focus();
+      setSettings(value);
+      setLoadError(false);
+    } catch {
+      if (isCurrent()) setLoadError(true);
+    } finally {
+      finishRequest(isCurrent);
+    }
+  }
+
+  async function run(action: () => Promise<ResponderSettingsView>, done: string) {
+    const isCurrent = beginRequest();
+    if (!isCurrent) return;
     setError('');
     setNotice('');
     try {
-      setSettings(await action());
+      const value = await action();
+      if (!isCurrent()) return;
+      setSettings(value);
+      setLoadError(false);
       setNotice(done);
     } catch (err) {
-      const code = err instanceof ResponderError ? err.code : '';
-      setError(
-        setupErrorCopy(code, {
-          provider: settings?.provider ?? 'openai',
-          status: err instanceof ResponderError ? err.status : 0,
-        }).message,
-      );
+      if (isCurrent()) showActionError(err);
     } finally {
-      setBusy(false);
+      finishRequest(isCurrent);
     }
   }
   const setEnabled = (enabled: boolean) =>
@@ -100,25 +175,52 @@ export function AutoReplySection({ agent }: { agent: Agent }) {
       () => updateSettings(agent.id, { enabled }),
       enabled ? 'Auto-reply is on.' : 'Auto-reply is off.',
     );
-  const remove = () =>
-    run(async () => {
+  async function remove() {
+    const isCurrent = beginRequest();
+    if (!isCurrent) return;
+    setError('');
+    setNotice('');
+    try {
       await removeKey(agent.id);
+      if (!isCurrent()) return;
+      if (confirmationRef.current?.contains(document.activeElement)) headingRef.current?.focus();
+      // DELETE confirms these fields even when the subsequent read is unavailable.
+      setSettings((current) =>
+        current
+          ? { ...current, enabled: false, status: 'off', pause_reason: 'key_removed', key: null }
+          : current,
+      );
       setConfirmRemove(false);
-      return getSettings(agent.id);
-    }, 'Key removed. Auto-reply is off.');
+      setNotice('Key removed. Auto-reply is off.');
+      setLoadError(false);
+      setRefreshing(true);
+      try {
+        const value = await getSettings(agent.id);
+        if (isCurrent()) setSettings(value);
+      } catch {
+        if (isCurrent()) setLoadError(true);
+      }
+    } catch (err) {
+      if (isCurrent()) showActionError(err);
+    } finally {
+      finishRequest(isCurrent);
+    }
+  }
 
   const hasKey = settings?.key?.status === 'active';
-  const state: 'loading' | 'error' | 'unset' | 'on' | 'paused' | 'off' = loadError
-    ? 'error'
-    : !settings
-      ? 'loading'
-      : settings.status === 'paused'
-        ? 'paused'
-        : settings.enabled
-          ? 'on'
-          : hasKey
-            ? 'off'
-            : 'unset';
+  const state: 'loading' | 'error' | 'unset' | 'on' | 'paused' | 'off' =
+    loadError && !settings
+      ? 'error'
+      : !settings
+        ? 'loading'
+        : settings.status === 'paused' ||
+            (!settings.enabled && !settings.key && settings.pause_reason === 'key_removed')
+          ? 'paused'
+          : settings.enabled
+            ? 'on'
+            : hasKey
+              ? 'off'
+              : 'unset';
   const model = models.find(
     (item) => item.provider === settings?.provider && item.id === settings?.model,
   );
@@ -130,7 +232,9 @@ export function AutoReplySection({ agent }: { agent: Agent }) {
     <section className="ar-section" aria-labelledby={titleId} data-state={state}>
       <div className="ar-head">
         <div>
-          <h3 id={titleId}>Auto-reply</h3>
+          <h3 id={titleId} ref={headingRef} tabIndex={-1}>
+            Auto-reply
+          </h3>
           <p className="ar-muted">
             Reply automatically when @mentioned in a room. Uses your own OpenAI or Anthropic API
             key.
@@ -154,22 +258,27 @@ export function AutoReplySection({ agent }: { agent: Agent }) {
         ) : null}
       </div>
 
-      {state === 'loading' ? (
+      {state === 'loading' || (refreshing && !settings) ? (
         <p className="ar-muted" role="status">
           Loading…
         </p>
       ) : null}
-      {state === 'error' ? (
+      {refreshing && settings ? (
+        <p className="ar-muted" role="status">
+          Refreshing auto-reply settings…
+        </p>
+      ) : null}
+      {loadError ? (
         <p className="ar-error" role="alert">
-          Couldn't load auto-reply.{' '}
+          {settings
+            ? 'The key was removed, but auto-reply settings could not be refreshed.'
+            : "Couldn't load auto-reply."}{' '}
           <button
+            ref={retryRef}
             type="button"
             className="ar-link"
-            onClick={() => {
-              setLoadError(false);
-              setSettings(null);
-              void getSettings(agent.id).then(setSettings, () => setLoadError(true));
-            }}
+            aria-disabled={busy}
+            onClick={() => void refreshSettings()}
           >
             Retry
           </button>
@@ -177,7 +286,12 @@ export function AutoReplySection({ agent }: { agent: Agent }) {
       ) : null}
       {state === 'unset' ? (
         <div className="ar-actions">
-          <button type="button" className="button secondary" onClick={() => setSheet('setup')}>
+          <button
+            type="button"
+            className="button secondary"
+            disabled={busy}
+            onClick={() => setSheet('setup')}
+          >
             Set up
           </button>
         </div>
@@ -191,6 +305,7 @@ export function AutoReplySection({ agent }: { agent: Agent }) {
             <button
               type="button"
               className="ar-link"
+              disabled={busy}
               onClick={() => setSheet(hasKey ? 'key' : 'setup')}
             >
               {hasKey ? 'Change key' : 'Add a key'}
@@ -205,7 +320,12 @@ export function AutoReplySection({ agent }: { agent: Agent }) {
               Resume
             </button>
           ) : pause.action === 'pick_model' ? (
-            <button type="button" className="ar-link" onClick={() => setSheet('settings')}>
+            <button
+              type="button"
+              className="ar-link"
+              disabled={busy}
+              onClick={() => setSheet('settings')}
+            >
               Pick a model
             </button>
           ) : null}
@@ -227,12 +347,18 @@ export function AutoReplySection({ agent }: { agent: Agent }) {
                   ? ` · checked ${shortDate(settings.key.validated_at)}`
                   : ''}
               </span>
-              <button type="button" className="ar-link" onClick={() => setSheet('key')}>
+              <button
+                type="button"
+                className="ar-link"
+                disabled={busy}
+                onClick={() => setSheet('key')}
+              >
                 Replace
               </button>
               <button
                 type="button"
                 className="ar-link danger"
+                disabled={busy}
                 onClick={() => setConfirmRemove(true)}
               >
                 Remove
@@ -240,7 +366,13 @@ export function AutoReplySection({ agent }: { agent: Agent }) {
             </p>
           ) : null}
           {confirmRemove ? (
-            <div className="ar-confirm" role="group" aria-label="Remove the key?">
+            <div
+              ref={confirmationRef}
+              className="ar-confirm"
+              role="group"
+              aria-label="Remove the key?"
+              aria-busy={busy}
+            >
               <p>
                 Remove the key? Auto-reply turns off. To be certain the key can't be used anywhere,
                 also delete it at {providerName(settings.key?.provider ?? settings.provider)}.
@@ -248,7 +380,7 @@ export function AutoReplySection({ agent }: { agent: Agent }) {
               <button
                 type="button"
                 className="button danger"
-                disabled={busy}
+                aria-disabled={busy}
                 onClick={() => void remove()}
               >
                 Remove key
@@ -256,14 +388,20 @@ export function AutoReplySection({ agent }: { agent: Agent }) {
               <button
                 type="button"
                 className="button ghost"
-                onClick={() => setConfirmRemove(false)}
+                aria-disabled={busy}
+                onClick={() => !inFlight.current && setConfirmRemove(false)}
               >
                 Keep it
               </button>
             </div>
           ) : null}
           <div className="ar-actions">
-            <button type="button" className="ar-link" onClick={() => setSheet('settings')}>
+            <button
+              type="button"
+              className="ar-link"
+              disabled={busy}
+              onClick={() => setSheet('settings')}
+            >
               Settings
             </button>
           </div>
@@ -292,7 +430,9 @@ export function AutoReplySection({ agent }: { agent: Agent }) {
           settings={settings}
           onClose={() => setSheet(null)}
           onSaved={(value, message) => {
+            requestVersion.current++;
             setSettings(value);
+            setLoadError(false);
             setNotice(message);
             setError('');
             setSheet(null);
@@ -346,13 +486,16 @@ export function AutoReplySheet({
   agent,
   models,
   settings,
+  send = sendDirect,
   onClose,
   onSaved,
 }: {
   mode: SheetMode;
-  agent: Agent;
+  agent: Pick<Agent, 'id' | 'name'>;
   models: ModelOption[];
   settings: ResponderSettingsView | null;
+  /** Where the requests go (SheetSend); straight out by default. */
+  send?: SheetSend;
   onClose: () => void;
   onSaved: (settings: ResponderSettingsView, message: string) => void;
 }) {
@@ -386,6 +529,8 @@ export function AutoReplySheet({
   const [retry, setRetry] = useState(false);
   // Once the server has the key, a retry of the settings step never sends it again.
   const [keySaved, setKeySaved] = useState(false);
+  // One submit at a time, also for a second Enter before the busy button has rendered.
+  const sending = useRef(false);
   const ids = { key: useId(), model: useId(), reply: useId(), spend: useId(), instr: useId() };
 
   const needsKey = mode !== 'settings';
@@ -425,34 +570,43 @@ export function AutoReplySheet({
 
   async function submit(event?: FormEvent) {
     event?.preventDefault();
+    if (sending.current) return;
     const found = validate();
     setErrors(found);
     setRetry(false);
     if (Object.keys(found).length) return;
+    sending.current = true;
     setBusy(true);
+    const done =
+      mode === 'setup' ? 'Auto-reply is on.' : mode === 'key' ? 'Key saved.' : 'Settings saved.';
+    // The server clears a pause only on enabled:true, so "Pick a model" would otherwise save the new
+    // model and leave auto-reply paused for good.
+    const resume =
+      mode === 'settings' &&
+      settings?.status === 'paused' &&
+      settings.pause_reason === 'model_unavailable';
     try {
-      if (needsKey && !keySaved) {
-        await saveKey(agent.id, { provider, model, key: key.trim() });
-        // The key leaves the page's state as soon as the server has accepted it.
-        setKey('');
-        setKeySaved(true);
-      }
-      const body = editsSettings
-        ? {
-            model,
-            instructions,
-            daily_reply_cap: Number(replyCap),
-            daily_spend_cap_usd: parseUsd(spendCap)!,
-            ...(mode === 'setup' ? { enabled: true } : {}),
-          }
-        : settings?.model !== model
-          ? { model }
-          : {};
-      const saved = await updateSettings(agent.id, body);
-      onSaved(
-        saved,
-        mode === 'setup' ? 'Auto-reply is on.' : mode === 'key' ? 'Key saved.' : 'Settings saved.',
-      );
+      const saved = await send(async (client) => {
+        if (needsKey && !keySaved) {
+          await client.saveKey(agent.id, { provider, model, key: key.trim() });
+          // The key leaves the page's state as soon as the server has accepted it.
+          setKey('');
+          setKeySaved(true);
+        }
+        const body = editsSettings
+          ? {
+              model,
+              instructions,
+              daily_reply_cap: Number(replyCap),
+              daily_spend_cap_usd: parseUsd(spendCap)!,
+              ...(mode === 'setup' || resume ? { enabled: true } : {}),
+            }
+          : settings?.model !== model
+            ? { model }
+            : {};
+        return client.updateSettings(agent.id, body);
+      }, done);
+      if (saved) onSaved(saved, done);
     } catch (err) {
       const copy = setupErrorCopy(err instanceof ResponderError ? err.code : '', {
         provider,
@@ -468,6 +622,7 @@ export function AutoReplySheet({
         setKey('');
       setRetry(Boolean(copy.retry));
     } finally {
+      sending.current = false;
       setBusy(false);
     }
   }

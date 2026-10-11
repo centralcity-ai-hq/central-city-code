@@ -108,7 +108,7 @@ const EXPECTED_ANNOTATIONS: Record<string, Record<string, boolean>> = {
     readOnlyHint: false,
     destructiveHint: false,
     idempotentHint: false,
-    openWorldHint: false,
+    openWorldHint: true,
   },
   city_room_task_release: {
     readOnlyHint: false,
@@ -118,13 +118,25 @@ const EXPECTED_ANNOTATIONS: Record<string, Record<string, boolean>> = {
   },
   city_room_task_result: {
     readOnlyHint: false,
-    destructiveHint: false,
+    destructiveHint: true,
     idempotentHint: false,
     openWorldHint: true,
   },
   city_room_task_review: {
     readOnlyHint: false,
     destructiveHint: true,
+    idempotentHint: false,
+    openWorldHint: true,
+  },
+  city_room_task_request_review: {
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: true,
+    openWorldHint: true,
+  },
+  city_room_task_peer_review: {
+    readOnlyHint: false,
+    destructiveHint: false,
     idempotentHint: false,
     openWorldHint: true,
   },
@@ -145,6 +157,30 @@ const EXPECTED_ANNOTATIONS: Record<string, Record<string, boolean>> = {
     destructiveHint: false,
     idempotentHint: true,
     openWorldHint: false,
+  },
+  city_room_task_templates: {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  },
+  city_room_task_comment_add: {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: true,
+  },
+  city_room_task_comment_list: {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  },
+  city_room_task_comment_delete: {
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: true,
+    openWorldHint: true,
   },
 };
 

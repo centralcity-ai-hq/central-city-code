@@ -69,7 +69,7 @@ test('redirect or non-JSON success cannot be mistaken for health', async () => {
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../server/app.js';
-import { createHostedHandler } from '../api/index.js';
+import { createHostedHandler } from '../server/vercel-handler.js';
 
 test('real hosted app fails before rewrite fix and passes after it', async () => {
   const app = await createApp({ dataDir: ':memory:', startWorkers: false });

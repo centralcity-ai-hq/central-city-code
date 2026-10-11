@@ -1,0 +1,656 @@
+/*
+ * Workspace v2 Settings (preview, ?workspace=v2): the Rooms v2 tokens, scoped to .stv2.
+ * Values are the ones in src/rooms/rooms-v2.css (tests/settings-v2.test.ts keeps them in
+ * step). No orange: one blue accent and neutral greys; green only for confirmed states, red only
+ * for destructive actions. Nothing here matches outside .stv2, so the classic console is unchanged.
+ */
+.stv2 {
+  --bg-page: #ffffff;
+  --bg-surface: #f8fafc;
+  --bg-surface-elevated: #ffffff;
+  --bg-surface-hover: #f8fafc;
+  --bg-surface-active: #e2e8f0;
+  --border-subtle: rgba(15, 23, 42, 0.06);
+  --border: #e5e9f0;
+  --border-strong: rgba(15, 23, 42, 0.18);
+  --border-focus: #2563eb;
+  --text-primary: #0f172a;
+  --text-secondary: #334155;
+  --text-muted: #5f6f86;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-subtle: #eaf1ff;
+  --accent-border: #c7d7fb;
+  --accent-text: #1d4ed8;
+  --accent-contrast: #ffffff;
+  --status-live: #15803d;
+  --status-live-bg: rgba(22, 163, 74, 0.08);
+  --status-pending: #1d4ed8;
+  --status-pending-bg: rgba(37, 99, 235, 0.08);
+  --status-danger: #dc2626;
+  --status-danger-bg: rgba(220, 38, 38, 0.08);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.03);
+  --radius-s: 8px;
+  --radius-m: 12px;
+  --radius-l: 16px;
+  --radius-xl: 22px;
+  --primary: #2563eb;
+  --primary-hover: #1d4ed8;
+  /* Aliases the shared .button and .panel rules read. */
+  --surface: var(--bg-surface-elevated);
+  --surface-sunken: var(--bg-surface);
+  --text: var(--text-primary);
+  --focus: var(--border-focus);
+  --stv2-skeleton: rgba(15, 23, 42, 0.06);
+  color: var(--text-primary);
+}
+:root[data-theme='dark'] .stv2 {
+  --bg-page: #0b1020;
+  --bg-surface: #0d1326;
+  --bg-surface-elevated: #121a31;
+  --bg-surface-hover: #18213b;
+  --bg-surface-active: #24304c;
+  --border-subtle: rgba(255, 255, 255, 0.07);
+  --border: #243049;
+  --border-strong: rgba(255, 255, 255, 0.22);
+  --border-focus: #5b8cff;
+  --text-primary: #eef2f8;
+  --text-secondary: #cbd5e1;
+  --text-muted: #a3b0c6;
+  --accent: #5b8cff;
+  --accent-hover: #93c5fd;
+  --accent-subtle: #1a2a52;
+  --accent-border: #2c4380;
+  --accent-text: #60a5fa;
+  --accent-contrast: #ffffff;
+  --status-live: #4ade80;
+  --status-live-bg: rgba(74, 222, 128, 0.14);
+  --status-pending: #93c5fd;
+  --status-pending-bg: rgba(96, 165, 250, 0.14);
+  --status-danger: #f87171;
+  --status-danger-bg: rgba(248, 113, 113, 0.14);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.24);
+  /* White text needs the deeper blue as a fill (rooms-v2.css). */
+  --primary: #2563eb;
+  --primary-hover: #1d4ed8;
+  --stv2-skeleton: rgba(255, 255, 255, 0.06);
+}
+
+/* Page frame: header, then rail + panel. */
+.stv2 {
+  width: 100%;
+  max-width: 1120px;
+  min-width: 0;
+  margin: 0 auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--bg-surface-elevated);
+  box-shadow: var(--shadow-sm);
+  overflow-wrap: anywhere;
+}
+.stv2-page {
+  min-height: 100%;
+  padding: var(--space-6) var(--space-5);
+  overflow-y: auto;
+  height: 100%;
+  box-sizing: border-box;
+}
+.stv2-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-5) var(--space-6);
+  border-bottom: 1px solid var(--border);
+}
+.stv2-header h1 {
+  margin: 0;
+  font: 600 calc(26 * var(--ws-type-px))/1.2 var(--font-sans);
+  letter-spacing: -0.01em;
+}
+.stv2-back {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: calc(44 * var(--ws-px));
+  padding: 0 var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  color: var(--text-primary);
+  font: var(--type-ui);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.stv2-back:hover {
+  background: var(--bg-surface-hover);
+}
+.stv2-body {
+  display: grid;
+  grid-template-columns: calc(240 * var(--ws-px)) minmax(0, 1fr);
+  min-width: 0;
+}
+.stv2-rail {
+  display: grid;
+  align-content: start;
+  gap: var(--space-1);
+  padding: var(--space-4);
+  border-right: 1px solid var(--border);
+  background: var(--bg-page);
+  border-bottom-left-radius: var(--radius-xl);
+}
+.stv2-rail-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: calc(44 * var(--ws-px));
+  padding: 0 var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-m);
+  background: transparent;
+  color: var(--text-secondary);
+  font: var(--type-ui);
+  text-align: left;
+  cursor: pointer;
+}
+/* Hover never borrows the current-section look (a stale pointer must not mark a section). */
+@media (hover: hover) and (pointer: fine) {
+  .stv2-rail-item:not([aria-current='page']):hover {
+    color: var(--text-primary);
+    text-decoration: underline;
+    text-underline-offset: 4px;
+  }
+}
+.stv2-rail-item[aria-current='page'] {
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+.stv2-panel {
+  min-width: 0;
+  padding: var(--space-5) var(--space-6) var(--space-6);
+}
+.stv2 :is(button, a, summary, input):focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+/* Section heading row (title, context, primary action). */
+.stv2-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4) var(--space-5);
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+.stv2 .stv2-head h2 {
+  margin: 0;
+  font: 600 calc(20 * var(--ws-type-px))/1.3 var(--font-sans);
+}
+.stv2 .stv2-head p {
+  margin: var(--space-2) 0 0;
+  max-width: 68ch;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+.stv2-head-action {
+  flex-shrink: 0;
+}
+
+/* Shared surfaces inside the sections. */
+.stv2 .account-data {
+  max-width: none;
+}
+.stv2 .account-data-card {
+  border-color: var(--border);
+  border-radius: var(--radius-l);
+  background: var(--bg-surface-elevated);
+}
+.stv2 .account-data h3 {
+  margin: 0;
+  font: 600 calc(16 * var(--ws-type-px))/1.4 var(--font-sans);
+}
+/* v3: buttons are pills (docs/design/WORKSPACE_V3.md §2). */
+.stv2 .button {
+  min-height: calc(44 * var(--ws-px));
+  border-radius: var(--radius-full);
+}
+.stv2 .button.primary {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+.stv2 .button.primary:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+.stv2 .button.secondary {
+  border-color: var(--border-strong);
+  background: var(--bg-surface-elevated);
+  color: var(--text-primary);
+}
+.stv2 .button.stv2-danger {
+  border: 1px solid var(--status-danger);
+  background: transparent;
+  color: var(--status-danger);
+}
+.stv2 .button.stv2-danger:hover:not(:disabled) {
+  background: var(--status-danger-bg);
+}
+.stv2 .button.stv2-danger:disabled {
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+.stv2-muted {
+  margin: 0;
+  color: var(--text-muted);
+  font: var(--type-meta);
+}
+.stv2-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(6 * var(--ws-px));
+  padding: 2px calc(10 * var(--ws-px));
+  border-radius: var(--radius-full);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font: 500 12px/18px var(--font-sans);
+  white-space: nowrap;
+}
+.stv2-pill::before {
+  content: '';
+  width: calc(6 * var(--ws-px));
+  height: calc(6 * var(--ws-px));
+  border-radius: 50%;
+  background: currentColor;
+}
+.stv2-pill.live {
+  background: var(--status-live-bg);
+  color: var(--status-live);
+}
+.stv2-pill.pending {
+  background: var(--status-pending-bg);
+  color: var(--status-pending);
+}
+
+/* States: loading, empty and error. */
+.stv2-loading {
+  display: grid;
+  gap: var(--space-3);
+}
+.stv2-loading-label {
+  margin: 0;
+  color: var(--text-muted);
+  font: var(--type-meta);
+}
+.stv2-skeletons {
+  display: grid;
+  gap: var(--space-3);
+}
+.stv2-skeleton {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-l);
+}
+.stv2-skeleton > span {
+  display: block;
+  height: calc(12 * var(--ws-px));
+  border-radius: var(--radius-full);
+  background: linear-gradient(
+    90deg,
+    var(--stv2-skeleton) 0%,
+    transparent 50%,
+    var(--stv2-skeleton) 100%
+  );
+  background-color: var(--stv2-skeleton);
+  background-size: 200% 100%;
+  animation: stv2-wave 1.6s linear infinite;
+}
+.stv2-skeleton > span:first-child {
+  width: 40%;
+  height: calc(16 * var(--ws-px));
+}
+@keyframes stv2-wave {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .stv2-skeleton > span {
+    animation: none;
+  }
+}
+.stv2-empty {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-2);
+  padding: var(--space-6) var(--space-4);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-l);
+  color: var(--text-muted);
+  text-align: center;
+}
+.stv2-empty p {
+  margin: 0;
+  max-width: 48ch;
+  line-height: 1.6;
+}
+.stv2-empty-icon {
+  display: grid;
+  place-items: center;
+  width: calc(48 * var(--ws-px));
+  height: calc(48 * var(--ws-px));
+  border-radius: 50%;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+}
+.stv2 .stv2-empty-title {
+  color: var(--text-primary);
+  font: 600 calc(16 * var(--ws-type-px))/1.4 var(--font-sans);
+}
+.stv2 .account-data-error,
+.stv2-error {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid color-mix(in srgb, var(--status-danger) 40%, transparent);
+  border-radius: var(--radius-m);
+  background: var(--status-danger-bg);
+  color: var(--status-danger);
+}
+.stv2 .account-data-error > svg,
+.stv2-error > svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.stv2 .account-data-error > div,
+.stv2-error > div {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.stv2 .account-data-error p,
+.stv2-error p {
+  margin: 0;
+}
+.stv2 .account-data-error-title {
+  font-weight: 600;
+}
+.stv2 .account-data-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  color: var(--status-live);
+  font: var(--type-ui);
+}
+.stv2 .account-data-status:empty {
+  display: none;
+}
+.stv2 .stv2-notice {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-m);
+  background: var(--status-live-bg);
+}
+
+/* Connected apps */
+.stv2 .assistant-preview {
+  gap: var(--space-5);
+}
+.stv2 .assistant-card.stv2-apps {
+  display: grid;
+  gap: var(--space-4);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.stv2 .stv2-apps h3 {
+  margin: 0;
+  font: 600 calc(16 * var(--ws-type-px))/1.4 var(--font-sans);
+}
+.stv2 .stv2-grants {
+  display: grid;
+  gap: var(--space-3);
+}
+.stv2 .assistant-grants.stv2-grants > li {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: normal;
+  justify-content: normal;
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  background: var(--bg-surface-elevated);
+}
+.stv2-grant-top {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.stv2-grant-icon {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: calc(40 * var(--ws-px));
+  height: calc(40 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  background: var(--bg-surface);
+  color: var(--accent-text);
+}
+.stv2-grant-name {
+  display: grid;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.stv2 .stv2-grant-name strong {
+  margin: 0;
+  font: 600 calc(16 * var(--ws-type-px))/1.4 var(--font-sans);
+}
+.stv2 .stv2-grants small {
+  display: block;
+  color: var(--text-muted);
+  font: var(--type-meta);
+}
+.stv2 .assistant-grants .stv2-scopes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0;
+}
+.stv2-chip {
+  padding: calc(4 * var(--ws-px)) calc(10 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font: 500 max(12px, calc(13 * var(--ws-type-px))) / calc(18 * var(--ws-type-px)) var(--font-sans);
+}
+.stv2-grant-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.stv2 .assistant-notice {
+  margin: 0;
+  border-left: 0;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-m);
+  background: var(--accent-subtle);
+  color: var(--text-primary);
+}
+.stv2 .assistant-advanced {
+  border-radius: var(--radius-l);
+}
+
+/* Activity log */
+.account-activity-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.account-activity-filters button {
+  min-height: calc(44 * var(--ws-px));
+  padding: 0 var(--space-4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  background: var(--bg-surface-elevated);
+  color: var(--text-secondary);
+  font: var(--type-ui);
+  cursor: pointer;
+}
+.account-activity-filters button:hover {
+  background: var(--bg-surface-hover);
+}
+.account-activity-filters button[aria-pressed='true'] {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #fff;
+}
+.account-activity-type {
+  padding: 0 calc(8 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+}
+
+/* Account */
+.stv2-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  background: var(--bg-surface);
+}
+.stv2-row-stack {
+  display: grid;
+  justify-items: start;
+}
+.stv2-row-copy {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.stv2-row-copy p {
+  margin: 0;
+}
+.stv2-row-copy .stv2-pill {
+  margin-left: var(--space-2);
+}
+/* A title with its status pill: the pill wraps under the title on a phone without an indent. */
+.stv2-row-copy .stv2-row-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(6 * var(--ws-px)) var(--space-2);
+}
+.stv2-row-copy .stv2-row-title .stv2-pill {
+  margin-left: 0;
+  /* Visible as a pill even when its fill matches the row (the neutral "Not subscribed"). */
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+.stv2-form {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+.stv2-form label {
+  display: grid;
+  gap: var(--space-1);
+  font: var(--type-ui);
+}
+.stv2-form input {
+  min-height: calc(44 * var(--ws-px));
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-m);
+  background: var(--bg-surface-elevated);
+  color: var(--text-primary);
+  font: inherit;
+}
+.stv2 .auth-v8-google {
+  min-height: calc(44 * var(--ws-px));
+}
+
+/* Phones: header stacks, the rail becomes a horizontal strip, cards go full width. */
+@media (max-width: 760px) {
+  .stv2-page {
+    padding: var(--space-4) var(--space-4);
+  }
+  .stv2 {
+    border-radius: var(--radius-l);
+  }
+  .stv2-header {
+    flex-direction: column;
+    align-items: flex-start;
+    padding: var(--space-4);
+  }
+  .stv2-header h1 {
+    font-size: calc(24 * var(--ws-type-px));
+  }
+  .stv2-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .stv2-rail {
+    display: flex;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    border-radius: 0;
+    scrollbar-width: none;
+  }
+  .stv2-rail-item {
+    flex-shrink: 0;
+    border-color: var(--border);
+    background: var(--bg-surface-elevated);
+    white-space: nowrap;
+  }
+  .stv2-panel {
+    padding: var(--space-4);
+  }
+  .stv2-head {
+    flex-direction: column;
+  }
+  .stv2-head-action,
+  .stv2-head-action .button {
+    width: 100%;
+  }
+  .stv2 .assistant-grants.stv2-grants > li {
+    padding: var(--space-4);
+  }
+  .stv2-grant-top {
+    flex-wrap: wrap;
+  }
+  .stv2-grant-foot .button,
+  .stv2-row .button {
+    width: 100%;
+  }
+  .stv2-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+.stv2 .stv2-row .button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}

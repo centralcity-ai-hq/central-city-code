@@ -26,6 +26,7 @@ test('everything but the model turns fits ELRIC_STEP_CONTEXT_TOKENS at the estim
       id: 'r'.repeat(40),
       name: 'n'.repeat(200),
       topic: 't'.repeat(PROMPT_LIMITS.topicChars),
+      elric_private: false,
     },
     lines: [],
     triggerSeq: 1,

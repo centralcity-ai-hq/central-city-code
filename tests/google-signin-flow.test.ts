@@ -433,6 +433,24 @@ test('starting is rate limited per client address', async (t) => {
   assert.ok(retry >= 1 && retry <= 3600, String(limited.headers['retry-after']));
 });
 
+test('a test server can set its own per-address budgets (createApp options only)', async (t) => {
+  const google = fakeGoogle();
+  const app = await createApp({
+    dataDir: ':memory:',
+    startWorkers: false,
+    google: {
+      env: ENV,
+      transport: google.transport,
+      addressLimits: { startsPerAddress: 2, callbacksPerAddress: 2 },
+    },
+  });
+  t.after(() => app.close());
+  for (let i = 0; i < 2; i += 1) assert.equal((await start(app, 'signin')).res.statusCode, 200);
+  const limited = (await start(app, 'signin')).res;
+  assert.equal(limited.statusCode, 429);
+  assert.equal(limited.json().code, 'rate_limited');
+});
+
 test('the date of birth routes say when to retry once rate limited', async (t) => {
   const f = await fixture(t);
   const a = await person(f.app);
@@ -938,6 +956,7 @@ test('onboarding gate: a new Google account can only finish onboarding until it 
     name_needed: true,
     terms_needed: true,
     terms_version: TERMS_VERSION,
+    newsletter_available: true,
   });
   // "Back" to the app: every other API refuses (rooms, workspace, Elric, agents).
   for (const url of ['/api/snapshot', '/api/rooms', '/api/elric/age']) {
@@ -997,7 +1016,13 @@ test('onboarding gate: a new Google account can only finish onboarding until it 
   assert.equal((await get('/api/snapshot')).json().code, 'onboarding_required');
   assert.deepEqual(
     { ...(await get('/api/session')).json().onboarding, terms_version: undefined },
-    { required: true, name_needed: false, terms_needed: true, terms_version: undefined },
+    {
+      required: true,
+      name_needed: false,
+      terms_needed: true,
+      terms_version: undefined,
+      newsletter_available: true,
+    },
   );
   // An existing Google account without any recorded acceptance is gated too.
   await f.app.city.db.query('DELETE FROM account_terms_acceptances');
@@ -1038,6 +1063,7 @@ test('onboarding gate: an existing account signed in with Google needs a recorde
     name_needed: false,
     terms_needed: true,
     terms_version: TERMS_VERSION,
+    newsletter_available: true,
   });
   const room = await f.app.inject({
     method: 'POST',

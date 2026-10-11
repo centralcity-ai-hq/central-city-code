@@ -35,7 +35,16 @@ function renderHast(nodes: RootContent[], prefix: string): ReactNode[] {
   });
 }
 
-export function CodeBlock({ code, language }: { code: string; language: string }) {
+export function CodeBlock({
+  code,
+  language,
+  highlight = true,
+}: {
+  code: string;
+  language: string;
+  /** False while the code is still being written (streamed answers): plain until complete. */
+  highlight?: boolean;
+}) {
   const [tree, setTree] = useState<Root | null>(null);
   const [copied, setCopied] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -43,16 +52,16 @@ export function CodeBlock({ code, language }: { code: string; language: string }
   useEffect(() => {
     let live = true;
     setTree(null);
-    if (!lang) return;
+    if (!lang || !highlight) return;
     loadHighlighter()
-      .then((highlight) => {
-        if (live) setTree(highlight(lang, code));
+      .then((run) => {
+        if (live) setTree(run(lang, code));
       })
       .catch(() => undefined);
     return () => {
       live = false;
     };
-  }, [code, lang]);
+  }, [code, lang, highlight]);
   const long = code.split('\n').length > COLLAPSE_LINES;
   return (
     <div className="md-code" data-language={lang || undefined}>

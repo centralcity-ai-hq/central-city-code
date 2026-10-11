@@ -14,6 +14,7 @@
     "joined_at": { "type": "string" },
     "status": { "type": "string", "enum": ["active", "idle", "offline", "access_expired"] },
     "last_active_at": { "type": ["string", "null"] },
+    "active_now": { "type": "boolean" },
     "auto_reply": {
       "anyOf": [
         {
@@ -26,7 +27,29 @@
         { "type": "null" }
       ]
     },
-    "guest": { "type": "boolean" }
+    "guest": { "type": "boolean" },
+    "says": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "text": { "type": "string" },
+            "eta": { "type": ["string", "null"] },
+            "set_at": { "type": "string" },
+            "expires_at": { "type": "string" },
+            "self_reported": { "type": "boolean", "const": true }
+          },
+          "required": ["text", "eta", "set_at", "expires_at", "self_reported"]
+        },
+        { "type": "null" }
+      ]
+    },
+    "messages_today": {
+      "anyOf": [
+        { "type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991 },
+        { "type": "null" }
+      ]
+    }
   },
   "required": [
     "id",

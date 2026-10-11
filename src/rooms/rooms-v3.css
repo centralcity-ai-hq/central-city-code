@@ -1,0 +1,1611 @@
+/*
+ * Workspace v3: the room view (docs/design/WORKSPACE_V3.md §4.1–4.4). The floating top bar, the
+ * messages, the Elric hint and the floating composer. Every rule is scoped to the room section
+ * (.rm-room.rm3 inside the v2 rooms app) and uses the tokens from rooms-v2.css; every size is
+ * calc(N * var(--ws-px)) and every font size calc(N * var(--ws-type-px)), so the workspace's 90%
+ * density applies on wide screens and phones keep full size (44 px targets, 16 px inputs).
+ * Loaded after the v2 sheets (RoomsApp.tsx), so equal-weight rules here win.
+ * Motion: 150–250 ms ease-out; messages arrive with an 8 px rise and a fade; all of it off under
+ * prefers-reduced-motion.
+ */
+
+.rm-app[data-rooms='v2'] .rm-room.rm3 {
+  --rm3-col: calc(1100 * var(--ws-px));
+  --rm3-msg: calc(820 * var(--ws-px));
+  --rm3-side: calc(56 * var(--ws-px));
+  --rm3-chip-h: calc(44 * var(--ws-px));
+  --rm3-ease: var(--motion-ease-out, cubic-bezier(0.16, 1, 0.3, 1));
+  --rm3-code-bg: #0b1020;
+  background: linear-gradient(180deg, var(--bg-page) 0%, var(--bg-page-2) 100%);
+}
+
+/* ---------------------------------------------------------------- avatars */
+
+.rm-app[data-rooms='v2'] .rm3 .rm3-av {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: calc(40 * var(--ws-px));
+  height: calc(40 * var(--ws-px));
+  margin: 0;
+  border: 0;
+  /* §2 radii: AIs are rounded squares (10 px; 8 px at the pill's 28 px), people circles. */
+  border-radius: calc(10 * var(--ws-px));
+  background: var(--accent);
+  color: #ffffff;
+  font: 700 calc(15 * var(--ws-type-px)) / 1 var(--font-sans);
+  user-select: none;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-av-sm {
+  width: calc(28 * var(--ws-px));
+  height: calc(28 * var(--ws-px));
+  border-radius: calc(8 * var(--ws-px));
+  font-size: calc(12 * var(--ws-type-px));
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-av-xs {
+  width: calc(24 * var(--ws-px));
+  height: calc(24 * var(--ws-px));
+  border-radius: calc(7 * var(--ws-px));
+  font-size: calc(11 * var(--ws-type-px));
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-av[data-kind='person'] {
+  border-radius: 50%;
+}
+/* Elric: the accent; a fill under white text uses --primary (AA in both themes). */
+.rm-app[data-rooms='v2'] .rm3 .rm3-av[data-kind='elric'] {
+  background: var(--primary);
+  color: var(--on-primary);
+}
+
+/* ---------------------------------------------------------------- §4.1 top bar */
+
+.rm-app[data-rooms='v2'] .rm-room.rm3 .rm-room-head.rm3-topbar {
+  /* No z-index: the chips' popovers and toasts keep their own layers (a Needs-you toast must
+     stay above a full-screen panel on phones). */
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: calc(8 * var(--ws-px));
+  min-height: 0;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  padding: calc(18 * var(--ws-px)) calc(20 * var(--ws-px)) calc(10 * var(--ws-px));
+  border: 0;
+  /* The bar's backdrop: the page colour behind the pills and chips, fading out at its lower
+     edge, so the thread never shows between them (the thread fades out under it, §4.2). */
+  background: linear-gradient(
+    to bottom,
+    var(--bg-page) calc(100% - calc(10 * var(--ws-px))),
+    color-mix(in srgb, var(--bg-page) 0%, transparent)
+  );
+  box-shadow: none;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-chips {
+  display: contents;
+}
+
+/* The room pill: # name, overlapping avatars, the live line and a caret. One button covers it and
+   opens Members (the top bar has no separate Members chip): hover and focus show the accent
+   line, the open panel the active-chip look (accent-soft with the accent line). */
+.rm-app[data-rooms='v2'] .rm3 .rm3-pill {
+  position: relative;
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: calc(12 * var(--ws-px));
+  min-width: 0;
+  max-width: 100%;
+  min-height: var(--rm3-chip-h);
+  padding: calc(6 * var(--ws-px)) calc(12 * var(--ws-px)) calc(6 * var(--ws-px))
+    calc(18 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  box-shadow: var(--shadow-float-sm);
+  transition:
+    border-color 180ms var(--rm3-ease),
+    background-color 180ms var(--rm3-ease);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-pill:hover,
+.rm-app[data-rooms='v2'] .rm3 .rm3-pill:has(.rm3-pill-hit:focus-visible),
+.rm-app[data-rooms='v2'] .rm3 .rm3-pill[data-open] {
+  border-color: var(--accent-border);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-pill[data-open] {
+  background: var(--accent-subtle);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-pill[data-open] .rm3-stack .rm3-av {
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-pill-caret {
+  flex: none;
+  width: calc(16 * var(--ws-px));
+  height: calc(16 * var(--ws-px));
+  margin-left: calc(-4 * var(--ws-px));
+  color: var(--text-muted);
+  transition: transform 180ms var(--rm3-ease);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-pill:hover .rm3-pill-caret,
+.rm-app[data-rooms='v2'] .rm3 .rm3-pill[data-open] .rm3-pill-caret {
+  color: var(--accent-text);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-pill[data-open] .rm3-pill-caret {
+  transform: rotate(180deg);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-pill-name {
+  min-width: calc(48 * var(--ws-px));
+  max-width: 36ch;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font: 600 calc(17 * var(--ws-type-px)) / 1.3 var(--font-sans);
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-hash {
+  margin-right: calc(4 * var(--ws-px));
+  color: var(--text-muted);
+  font-weight: 500;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-stack {
+  display: flex;
+  flex: none;
+  align-items: center;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-stack .rm3-av {
+  margin-left: calc(-8 * var(--ws-px));
+  box-shadow: 0 0 0 2px var(--surface);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-stack .rm3-av:first-child {
+  margin-left: 0;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-stack .rm3-more {
+  width: auto;
+  min-width: calc(28 * var(--ws-px));
+  padding: 0 calc(6 * var(--ws-px));
+  border-radius: var(--radius-full);
+  background: var(--bg-inset);
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-live {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: calc(6 * var(--ws-px));
+  padding-right: calc(4 * var(--ws-px));
+  color: var(--status-live);
+  font: 600 calc(13 * var(--ws-type-px)) / 1.2 var(--font-sans);
+  white-space: nowrap;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-live i {
+  width: calc(8 * var(--ws-px));
+  height: calc(8 * var(--ws-px));
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 calc(4 * var(--ws-px)) color-mix(in srgb, currentColor 18%, transparent);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-live[data-idle] {
+  color: var(--text-muted);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-pill-hit {
+  position: absolute;
+  inset: -1px;
+  z-index: 1;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: none;
+  cursor: pointer;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-pill-hit:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* Chips: 40 px (44 on phones) pills; the open panel's chip is accent-soft with an accent line. */
+.rm-app[data-rooms='v2'] .rm3 .rm3-chip,
+.rm-app[data-rooms='v2'] .rm3 .rm-head-elric .cc-switch,
+.rm-app[data-rooms='v2'] .rm3 .rm3-topbar .rm-head-add-elric {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: calc(7 * var(--ws-px));
+  height: var(--rm3-chip-h);
+  min-height: var(--rm3-chip-h);
+  min-width: var(--rm3-chip-h);
+  margin: 0;
+  padding: 0 calc(12 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  color: var(--text-primary);
+  font: 600 calc(14 * var(--ws-type-px)) / 1 var(--font-sans);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color 160ms var(--rm3-ease),
+    background-color 160ms var(--rm3-ease),
+    color 160ms var(--rm3-ease);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-chip:hover:not(:disabled),
+.rm-app[data-rooms='v2'] .rm3 .rm-head-elric .cc-switch:hover:not(:disabled) {
+  border-color: var(--accent-border);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-chip[aria-expanded='true'] {
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-chip:focus-visible,
+.rm-app[data-rooms='v2'] .rm3 .rm3-invite:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-round {
+  width: var(--rm3-chip-h);
+  padding: 0;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-chip-icon,
+.rm-app[data-rooms='v2'] .rm3 .rv2-chip-icon {
+  display: none;
+  flex: none;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-n,
+.rm-app[data-rooms='v2'] .rm3 .rm3-chip .rm-count {
+  position: static;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: calc(22 * var(--ws-px));
+  height: calc(20 * var(--ws-px));
+  padding: 0 calc(8 * var(--ws-px));
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--bg-inset);
+  color: var(--text-muted);
+  font: 600 calc(12 * var(--ws-type-px)) / 1 var(--font-sans);
+  font-variant-numeric: tabular-nums;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-chip[aria-expanded='true'] .rm3-n {
+  background: var(--surface);
+  color: var(--accent-text);
+}
+/* Needs you: the count in the accent, so waiting work stands out without shouting. */
+.rm-app[data-rooms='v2'] .rm3 .rv2-needs-chip .rm3-n {
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+.rm-app[data-rooms='v2'] .rm3 .rv2-chip-short {
+  display: inline-flex;
+}
+
+/* Elric with its inline switch: the switch itself is the chip, so the whole chip toggles. */
+.rm-app[data-rooms='v2'] .rm3 .rm-head-elric {
+  display: inline-flex;
+  flex: none;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-head-elric .cc-switch {
+  gap: calc(10 * var(--ws-px));
+  padding: 0 calc(8 * var(--ws-px)) 0 calc(14 * var(--ws-px));
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-head-elric .cc-switch:disabled {
+  opacity: 0.6;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-head-elric .cc-switch-label {
+  position: static;
+  width: auto;
+  height: auto;
+  overflow: visible;
+  clip-path: none;
+}
+/* The knob says on/off; the word stays for assistive technology (aria-checked). */
+.rm-app[data-rooms='v2'] .rm3 .rm-head-elric .cc-switch-state {
+  display: none;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-head-elric .cc-switch-track {
+  width: calc(42 * var(--ws-px));
+  height: calc(24 * var(--ws-px));
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-head-elric .cc-switch-thumb {
+  top: calc(3 * var(--ws-px));
+  left: calc(3 * var(--ws-px));
+  width: calc(18 * var(--ws-px));
+  height: calc(18 * var(--ws-px));
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-head-elric .cc-switch[aria-checked='true'] .cc-switch-thumb {
+  transform: translateX(calc(18 * var(--ws-px)));
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-topbar .rm-head-add-elric {
+  border-style: dashed;
+  border-color: var(--accent-border);
+  color: var(--accent-text);
+}
+
+/* Invite: the one filled button. */
+.rm-app[data-rooms='v2'] .rm3 .rm3-invite {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  height: calc(46 * var(--ws-px));
+  min-width: var(--rm3-chip-h);
+  padding: 0 calc(20 * var(--ws-px));
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--primary);
+  color: var(--on-primary);
+  font: 600 calc(14 * var(--ws-type-px)) / 1 var(--font-sans);
+  box-shadow: 0 calc(10 * var(--ws-px)) calc(24 * var(--ws-px))
+    color-mix(in srgb, var(--primary) 28%, transparent);
+  cursor: pointer;
+  transition:
+    background-color 160ms var(--rm3-ease),
+    transform 160ms var(--rm3-ease);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-invite:hover {
+  background: var(--primary-hover);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-invite:active {
+  transform: scale(0.98);
+}
+
+/* ⋯ menu */
+.rm-app[data-rooms='v2'] .rm3 .rm3-topbar .rm-more {
+  position: relative;
+  flex: none;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-topbar .rm-more-menu {
+  top: calc(100% + calc(8 * var(--ws-px)));
+  right: 0;
+  z-index: 20;
+  min-width: calc(240 * var(--ws-px));
+  padding: calc(6 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(16 * var(--ws-px));
+  background: var(--surface);
+  box-shadow: var(--shadow-elevated);
+  animation: rm3-pop 180ms var(--rm3-ease);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-topbar .rm-more-menu button {
+  gap: calc(10 * var(--ws-px));
+  min-height: calc(40 * var(--ws-px));
+  padding: 0 calc(10 * var(--ws-px));
+  border-radius: calc(10 * var(--ws-px));
+  font: 500 calc(14 * var(--ws-type-px)) / 1.2 var(--font-sans);
+  white-space: nowrap;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-topbar .rm-more-menu button:hover,
+.rm-app[data-rooms='v2'] .rm3 .rm3-topbar .rm-more-menu button:focus-visible {
+  background: var(--bg-inset);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-topbar .rm-more-menu button[data-danger] {
+  color: var(--status-danger);
+}
+/* A divider rule before the destructive items, inset like the account menu's. */
+.rm-app[data-rooms='v2']
+  .rm3
+  .rm3-topbar
+  .rm-more-menu
+  button:not([data-danger])
+  + button[data-danger] {
+  position: relative;
+  margin-top: calc(9 * var(--ws-px));
+}
+.rm-app[data-rooms='v2']
+  .rm3
+  .rm3-topbar
+  .rm-more-menu
+  button:not([data-danger])
+  + button[data-danger]::before {
+  content: '';
+  position: absolute;
+  top: calc(-5 * var(--ws-px));
+  right: calc(6 * var(--ws-px));
+  left: calc(6 * var(--ws-px));
+  height: 1px;
+  background: var(--border);
+  pointer-events: none;
+}
+/* The Needs-you list opens under its chip. */
+.rm-app[data-rooms='v2'] .rm3 .rv2-needs-pop {
+  border-radius: calc(16 * var(--ws-px));
+  box-shadow: var(--shadow-elevated);
+  animation: rm3-pop 180ms var(--rm3-ease);
+}
+
+/* The pins row and the room's notices sit centred under the top bar. */
+.rm-app[data-rooms='v2'] .rm3 > .rm-banner,
+.rm-app[data-rooms='v2'] .rm3 > .rm-inline-error {
+  align-self: center;
+  width: auto;
+  max-width: min(var(--rm3-col), calc(100% - 2 * var(--space-4)));
+  margin: 0 auto calc(8 * var(--ws-px));
+  padding: calc(6 * var(--ws-px)) calc(16 * var(--ws-px));
+  border-radius: var(--radius-full);
+  text-align: center;
+}
+/* ⋯ "Delete chat" (the private chat with your own agent): the inline confirm as a small card
+   under the top bar, the same width as the notices; a failed delete shows one alert line in it. */
+.rm-app[data-rooms='v2'] .rm3 > .rm3-delete-chat {
+  display: grid;
+  gap: calc(8 * var(--ws-px));
+  width: min(calc(560 * var(--ws-px)), calc(100% - 2 * var(--space-4)));
+  margin: 0 auto calc(8 * var(--ws-px));
+  padding: calc(10 * var(--ws-px)) calc(14 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(16 * var(--ws-px));
+  background: var(--surface);
+}
+
+/* ---------------------------------------------------------------- §4.2 messages */
+
+/* The thread fades out under the top bar instead of being cut by a line. */
+.rm-app[data-rooms='v2'] .rm3 .rm-scroll {
+  mask-image: linear-gradient(to bottom, transparent 0, #000 calc(28 * var(--ws-px)));
+}
+/* Reduced transparency: a solid bar and no fade. */
+@media (prefers-reduced-transparency: reduce) {
+  .rm-app[data-rooms='v2'] .rm-room.rm3 .rm-room-head.rm3-topbar {
+    background: var(--bg-page);
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm-scroll {
+    mask-image: none;
+  }
+}
+
+.rm-app[data-rooms='v2'] .rm3 .rm-column {
+  width: 100%;
+  max-width: var(--rm3-col);
+  margin: 0 auto;
+  padding: calc(12 * var(--ws-px)) var(--rm3-side) calc(20 * var(--ws-px));
+  box-sizing: border-box;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-messages {
+  gap: 0;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-messages > li {
+  margin-top: calc(20 * var(--ws-px));
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-messages > li:first-child {
+  margin-top: 0;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-messages > li.rm-message.grouped {
+  margin-top: calc(8 * var(--ws-px));
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-messages > li.rm3-status-row {
+  margin-top: calc(8 * var(--ws-px));
+}
+
+/* One message: a 40 px avatar, then the meta row, the bubble and the quiet foot. */
+.rm-app[data-rooms='v2'] .rm3 .rm-message {
+  display: flex;
+  align-items: flex-start;
+  gap: calc(14 * var(--ws-px));
+  width: auto;
+  max-width: var(--rm3-msg);
+  margin-right: auto;
+  column-gap: calc(14 * var(--ws-px));
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-message > .rm3-av {
+  width: calc(40 * var(--ws-px));
+  height: calc(40 * var(--ws-px));
+  border: 0;
+  font-size: calc(15 * var(--ws-type-px));
+  font-weight: 700;
+  align-self: flex-start;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-message > .rm3-av[hidden] {
+  display: inline-flex;
+  visibility: hidden;
+  height: 0;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-byline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(4 * var(--ws-px)) calc(8 * var(--ws-px));
+  min-height: calc(22 * var(--ws-px));
+  margin: 0 0 calc(6 * var(--ws-px));
+  color: var(--text-muted);
+  font: 400 calc(13 * var(--ws-type-px)) / 1.3 var(--font-sans);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-byline strong {
+  color: var(--text-primary);
+  font: 600 calc(14.5 * var(--ws-type-px)) / 1.3 var(--font-sans);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-byline time {
+  margin-left: 0;
+  color: var(--text-muted);
+  font: 400 calc(12.5 * var(--ws-type-px)) / 1.3 var(--font-sans);
+  font-variant-numeric: tabular-nums;
+}
+/* Badges: AI, built in (Elric, accent), host, person. */
+.rm-app[data-rooms='v2'] .rm3 .rm3-tag,
+.rm-app[data-rooms='v2'] .rm3 .rm-byline .rm-agent-label .rm-badge-elric,
+.rm-app[data-rooms='v2'] .rm3 .rm-byline .rm-badge-reply {
+  display: inline-flex;
+  align-items: center;
+  height: calc(20 * var(--ws-px));
+  padding: 0 calc(7 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(7 * var(--ws-px));
+  background: var(--bg-inset);
+  color: var(--text-muted);
+  font: 600 calc(11.5 * var(--ws-type-px)) / 1 var(--font-sans);
+  letter-spacing: 0;
+  text-transform: none;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-byline .rm-role {
+  text-transform: lowercase;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-tag[data-tone='accent'] {
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-byline .rm-agent-label {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font: 400 calc(13 * var(--ws-type-px)) / 1.3 var(--font-sans);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-byline .rm-agent-label > [aria-hidden] {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(6 * var(--ws-px));
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-owner,
+.rm-app[data-rooms='v2'] .rm3 .rm-server-label {
+  color: var(--text-muted);
+  font: 400 calc(13 * var(--ws-type-px)) / 1.3 var(--font-sans);
+}
+
+/* Others' bubble: inset fill, 22 px with the corner nearest the avatar at 6 px. */
+.rm-app[data-rooms='v2'] .rm3 .rm-message:not(.own) .rm-bubble {
+  max-width: 100%;
+  padding: calc(13 * var(--ws-px)) calc(19 * var(--ws-px));
+  border: 0;
+  border-radius: calc(22 * var(--ws-px));
+  border-top-left-radius: calc(6 * var(--ws-px));
+  background: var(--bg-inset);
+  box-shadow: none;
+  color: var(--text-primary);
+  font: 400 calc(16.5 * var(--ws-type-px)) / 1.6 var(--font-sans);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-bubble .rm-text,
+.rm-app[data-rooms='v2'] .rm3 .rm-bubble .md-body {
+  font: inherit;
+}
+
+/* Own messages: right-aligned accent bubble, white text, the time under it. */
+.rm-app[data-rooms='v2'] .rm3 .rm-message.own {
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0;
+  margin-left: auto;
+  margin-right: 0;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-message.own .rm3-body {
+  align-items: flex-end;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-own-bubble {
+  max-width: 100%;
+  padding: calc(13 * var(--ws-px)) calc(19 * var(--ws-px));
+  border: 0;
+  border-radius: calc(22 * var(--ws-px));
+  border-top-right-radius: calc(6 * var(--ws-px));
+  background: var(--primary);
+  box-shadow: none;
+  color: var(--on-primary);
+  font: 400 calc(16.5 * var(--ws-type-px)) / 1.6 var(--font-sans);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-own-bubble a,
+.rm-app[data-rooms='v2'] .rm3 .rm-own-bubble .md-link-host {
+  color: inherit;
+  text-decoration: underline;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-own-bubble :not(pre) > code {
+  background: rgba(255, 255, 255, 0.18);
+  color: inherit;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-own-time {
+  margin: 0 0 0 calc(4 * var(--ws-px));
+  color: var(--text-muted);
+  font: 400 calc(12.5 * var(--ws-type-px)) / 1.3 var(--font-sans);
+  font-variant-numeric: tabular-nums;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-message.sending .rm-own-bubble {
+  opacity: 0.7;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-message.failed .rm-own-bubble {
+  border: 1px solid var(--error);
+  background: var(--surface);
+  color: var(--text-primary);
+}
+
+/* Mentions: accent, weight 500; on your own bubble white and underlined. */
+.rm-app[data-rooms='v2'] .rm3 .rm-mention {
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--mention);
+  font-weight: 500;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-own-bubble .rm-mention {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* Code blocks: dark, 14 px corners, inside the bubble (same in both themes). */
+.rm-app[data-rooms='v2'] .rm3 .rm-bubble .md-code {
+  --code-keyword: #c4a2ff;
+  --code-string: #5fd3a5;
+  --code-number: #ff8fa3;
+  --code-comment: #8b9ab3;
+  --code-title: #98b0ff;
+  --code-type: #f0b35a;
+  --code-add: #5fd3a5;
+  --code-del: #ff8fa3;
+  margin-top: calc(4 * var(--ws-px));
+  overflow: hidden;
+  border: 0;
+  border-radius: calc(14 * var(--ws-px));
+  background: var(--rm3-code-bg);
+  color: #e2e8f0;
+}
+/* The code header: the language and Copy with room to breathe, apart from the first line. */
+.rm-app[data-rooms='v2'] .rm3 .rm-bubble .md-code-bar {
+  min-height: calc(36 * var(--ws-px));
+  padding: calc(4 * var(--ws-px)) calc(6 * var(--ws-px)) calc(4 * var(--ws-px))
+    calc(14 * var(--ws-px));
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  color: #94a3b8;
+  font: 500 calc(12 * var(--ws-type-px)) / 1.3 var(--font-sans);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-bubble .md-code-copy {
+  color: #94a3b8;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-bubble .md-code-copy:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e2e8f0;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-bubble .md-code-pre {
+  padding: calc(12 * var(--ws-px)) calc(16 * var(--ws-px)) calc(14 * var(--ws-px));
+  font: 400 calc(13.5 * var(--ws-type-px)) / 1.6 var(--font-mono);
+}
+:root[data-theme='dark'] .rm-app[data-rooms='v2'] .rm3 .rm-bubble .md-code {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-data pre {
+  border-radius: calc(14 * var(--ws-px));
+  background: var(--rm3-code-bg);
+  color: #e2e8f0;
+}
+
+/* The foot: the task status pill and the quiet action row. Its buttons are 32 px, the desktop
+   minimum (§1.5; 44 px on touch), so it sits close under the bubble to keep the rhythm light. */
+.rm-app[data-rooms='v2'] .rm3 .rm3-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(4 * var(--ws-px)) calc(6 * var(--ws-px));
+  min-height: calc(32 * var(--ws-px));
+  margin-top: calc(2 * var(--ws-px));
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-message.own .rm3-foot {
+  justify-content: flex-end;
+  min-height: calc(32 * var(--ws-px));
+  margin-top: calc(2 * var(--ws-px));
+}
+/* Under your own @mention: "<agent> can’t reply here yet. …", its fixes and "Only you see this."
+   Quiet muted text, right under the foot like the time; it wraps rather than widening the column. */
+.rm-app[data-rooms='v2'] .rm3 .rm3-mention-hint {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: baseline;
+  gap: calc(2 * var(--ws-px)) calc(8 * var(--ws-px));
+  max-width: 100%;
+  margin: 0 0 calc(2 * var(--ws-px));
+  color: var(--text-muted);
+  font: 400 calc(13 * var(--ws-type-px)) / 1.4 var(--font-sans);
+  text-align: right;
+  animation: rm3-arrive 220ms var(--rm3-ease) both;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-mention-hint-text {
+  flex-basis: 100%;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-mention-hint-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0 calc(6 * var(--ws-px));
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-mention-hint-only {
+  font-size: calc(12 * var(--ws-type-px));
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-mention-hint a {
+  color: var(--accent-text);
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-mention-hint a:hover {
+  text-decoration: underline;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-mention-hint a:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-actions {
+  display: flex;
+  align-items: center;
+  gap: calc(2 * var(--ws-px));
+  opacity: 0;
+  transition: opacity 160ms var(--rm3-ease);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-message:hover .rm3-actions,
+.rm-app[data-rooms='v2'] .rm3 .rm-message:focus-within .rm3-actions,
+.rm-app[data-rooms='v2'] .rm3 .rm3-actions:has([aria-expanded='true']) {
+  opacity: 1;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-action {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(5 * var(--ws-px));
+  min-height: calc(32 * var(--ws-px));
+  padding: 0 calc(9 * var(--ws-px));
+  border: 0;
+  border-radius: calc(9 * var(--ws-px));
+  background: none;
+  color: var(--text-muted);
+  font: 500 calc(12.5 * var(--ws-type-px)) / 1 var(--font-sans);
+  cursor: pointer;
+  transition:
+    background-color 150ms var(--rm3-ease),
+    color 150ms var(--rm3-ease);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-action:hover,
+.rm-app[data-rooms='v2'] .rm3 .rm3-action[aria-expanded='true'] {
+  background: var(--bg-inset);
+  color: var(--text-primary);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-action:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+/* The old v2 menu wrapper is gone; its Pin button lives in the action row. */
+.rm-app[data-rooms='v2'] .rm3 .rm-v2-message-action {
+  position: static;
+  opacity: 1;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-details {
+  display: grid;
+  gap: calc(2 * var(--ws-px));
+  margin: calc(4 * var(--ws-px)) 0 0;
+  padding: calc(8 * var(--ws-px)) calc(12 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(12 * var(--ws-px));
+  background: var(--surface);
+  color: var(--text-muted);
+  font: 400 calc(12.5 * var(--ws-type-px)) / 1.5 var(--font-sans);
+  animation: rm3-pop 180ms var(--rm3-ease);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-details div {
+  display: flex;
+  gap: calc(8 * var(--ws-px));
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-details dt {
+  min-width: 5.5em;
+  color: var(--text-muted);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-details dd {
+  margin: 0;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+/* Status pills: Task · open and Claimed · In progress (amber), In review (accent), ✓ Done. */
+.rm-app[data-rooms='v2'] .rm3 .rm3-status {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(7 * var(--ws-px));
+  min-height: calc(32 * var(--ws-px));
+  padding: 0 calc(13 * var(--ws-px));
+  border: 1px solid transparent;
+  border-radius: var(--radius-full);
+  background: var(--bg-inset);
+  color: var(--text-muted);
+  font: 600 calc(13 * var(--ws-type-px)) / 1 var(--font-sans);
+  white-space: nowrap;
+}
+.rm-app[data-rooms='v2'] .rm3 button.rm3-status {
+  cursor: pointer;
+}
+.rm-app[data-rooms='v2'] .rm3 button.rm3-status:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-status i {
+  width: calc(7 * var(--ws-px));
+  height: calc(7 * var(--ws-px));
+  border-radius: 50%;
+  background: currentColor;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-status[data-tone='warn'] {
+  border-color: var(--status-warn-line);
+  background: var(--status-warn-bg);
+  color: var(--status-warn);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-status[data-tone='accent'] {
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-status[data-tone='ok'] {
+  background: var(--status-live-bg);
+  color: var(--status-live);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-status[data-tone='ok'] i {
+  display: none;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-status-row {
+  display: flex;
+  justify-content: center;
+}
+
+/* System lines (left, removed, ended, task changes): a centred pill with the member's avatar. */
+.rm-app[data-rooms='v2'] .rm3 .rm-system-line {
+  justify-content: center;
+  margin: calc(20 * var(--ws-px)) 0 0;
+  padding: 0;
+  color: var(--text-muted);
+  font: 400 calc(13.5 * var(--ws-type-px)) / 1.4 var(--font-sans);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-sys {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(9 * var(--ws-px));
+  max-width: 100%;
+  min-height: calc(34 * var(--ws-px));
+  padding: calc(5 * var(--ws-px)) calc(14 * var(--ws-px));
+  border-radius: var(--radius-full);
+  background: var(--bg-inset);
+  text-align: left;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-sys[data-initial] {
+  padding-left: calc(5 * var(--ws-px));
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-sys[data-initial]::before {
+  content: attr(data-initial);
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: calc(24 * var(--ws-px));
+  height: calc(24 * var(--ws-px));
+  border-radius: calc(7 * var(--ws-px));
+  background: var(--rm3-sys-av, var(--primary));
+  color: #ffffff;
+  font: 700 calc(11 * var(--ws-type-px)) / 1 var(--font-sans);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-sys[data-kind='person']::before {
+  border-radius: 50%;
+}
+
+/* Day markers, the New-since divider and the catch-up: centred pills. */
+.rm-app[data-rooms='v2'] .rm3 .rm-day {
+  display: flex;
+  justify-content: center;
+  gap: 0;
+  margin: calc(28 * var(--ws-px)) 0 0;
+  color: var(--text-muted);
+  font: 600 calc(11.5 * var(--ws-type-px)) / 1 var(--font-sans);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-day::before,
+.rm-app[data-rooms='v2'] .rm3 .rm-day::after {
+  display: none;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-messages > li.rm-day:first-child {
+  margin-top: calc(8 * var(--ws-px));
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-unread-divider-line::before,
+.rm-app[data-rooms='v2'] .rm3 .rm-unread-divider-line::after {
+  display: none;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-unread-divider-line {
+  justify-content: center;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-unread-pill {
+  min-height: calc(30 * var(--ws-px));
+  padding: 0 calc(14 * var(--ws-px));
+  border: 1px solid var(--accent-border);
+  background: var(--accent-subtle);
+  box-shadow: none;
+  color: var(--accent-text);
+  font: 600 calc(12.5 * var(--ws-type-px)) / 1 var(--font-sans);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-catchup-open,
+.rm-app[data-rooms='v2'] .rm3 .rm-catchup-retry {
+  min-height: var(--rm3-chip-h);
+  padding: 0 calc(16 * var(--ws-px));
+  border-color: var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow-float-sm);
+  color: var(--text-primary);
+  font: 600 calc(13 * var(--ws-type-px)) / 1 var(--font-sans);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-elric-catchup-card {
+  border: 1px solid var(--border);
+  border-radius: calc(22 * var(--ws-px));
+  background: var(--surface);
+  box-shadow: var(--shadow-float-sm);
+  padding: calc(14 * var(--ws-px)) calc(18 * var(--ws-px));
+}
+
+/* The safety notice above the first message. */
+.rm-app[data-rooms='v2'] .rm3 .rm-notice {
+  margin: calc(4 * var(--ws-px)) auto calc(20 * var(--ws-px));
+  padding: calc(6 * var(--ws-px)) calc(14 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  color: var(--text-muted);
+  font: 400 calc(12.5 * var(--ws-type-px)) / 1.4 var(--font-sans);
+}
+
+/* "New messages" jump pill. */
+.rm-app[data-rooms='v2'] .rm3 .rm-jump {
+  min-height: calc(36 * var(--ws-px));
+  padding: 0 calc(16 * var(--ws-px));
+  border-color: var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow-elevated);
+  font: 600 calc(13 * var(--ws-type-px)) / 1 var(--font-sans);
+}
+
+/* A message arriving while the room is open: an 8 px rise and a fade. */
+.rm-app[data-rooms='v2'] .rm3 .rm3-arrive {
+  animation: rm3-arrive 220ms var(--rm3-ease) both;
+}
+@keyframes rm3-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(calc(8 * var(--ws-px)));
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes rm3-pop {
+  from {
+    opacity: 0;
+    transform: translateY(calc(-4 * var(--ws-px)));
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ---------------------------------------------------------------- §4.3 Elric hint */
+
+.rm-app[data-rooms='v2'] .rm3 .rm-elric-banner-wrap {
+  justify-items: center;
+  width: min(var(--rm3-col), calc(100% - 2 * var(--space-4)));
+  /* Clear of the last message above and 16 px above the composer card (design review). */
+  margin: calc(8 * var(--ws-px)) auto calc(16 * var(--ws-px));
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+  max-width: 100%;
+  min-height: calc(34 * var(--ws-px));
+  padding: calc(4 * var(--ws-px)) calc(4 * var(--ws-px)) calc(4 * var(--ws-px))
+    calc(5 * var(--ws-px));
+  border: 1px solid var(--accent-border);
+  border-left-width: 1px;
+  border-radius: var(--radius-full);
+  background: var(--accent-subtle);
+  color: var(--text-secondary);
+  font: 400 calc(13.5 * var(--ws-type-px)) / 1.3 var(--font-sans);
+  animation: rm3-arrive 220ms var(--rm3-ease) both;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-hint .rm-ai-notice-text {
+  min-width: 0;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-hint-sep {
+  color: var(--text-muted);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-hint-ask {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-text);
+  font: 600 calc(13.5 * var(--ws-type-px)) / 1.3 var(--font-sans);
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-hint-ask:hover {
+  text-decoration: underline;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-hint-close {
+  width: calc(28 * var(--ws-px));
+  height: calc(28 * var(--ws-px));
+  padding: 0;
+  border-radius: 50%;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-hint-ask:focus-visible,
+.rm-app[data-rooms='v2'] .rm3 .rm3-hint-close:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm-elric-banner-wrap .rm-ephemeral-notice:not(.rm3-hint),
+.rm-app[data-rooms='v2'] .rm3 .rm-elric-banner-wrap .rm-limit-alert {
+  width: 100%;
+  border-radius: calc(16 * var(--ws-px));
+}
+
+/* "Join as yourself": the host's owner, not in the room as a person yet. A small Rooms pill
+   (34 px, 13 px semibold) centred above the composer; a failed join shows one alert line under it. */
+.rm-app[data-rooms='v2'] .rm3 .rm3-join-self {
+  display: grid;
+  justify-items: center;
+  gap: calc(6 * var(--ws-px));
+  width: min(var(--rm3-col), calc(100% - 2 * var(--space-4)));
+  margin: calc(8 * var(--ws-px)) auto calc(12 * var(--ws-px));
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-join-self-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: calc(34 * var(--ws-px));
+  padding: 0 calc(14 * var(--ws-px));
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-full);
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+  font: 600 max(12px, calc(13 * var(--ws-type-px))) / 1 var(--font-sans);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 160ms var(--rm3-ease);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-join-self-btn:hover:not(:disabled) {
+  border-color: var(--accent-text);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-join-self-btn:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-join-self .rm-inline-error {
+  padding: calc(6 * var(--ws-px)) calc(16 * var(--ws-px));
+  border-radius: var(--radius-full);
+  text-align: center;
+}
+@media (max-width: 640px), (pointer: coarse) {
+  .rm-app[data-rooms='v2'] .rm3 .rm3-join-self-btn {
+    height: calc(44 * var(--ws-px));
+  }
+}
+
+/* ---------------------------------------------------------------- §4.4 composer */
+
+.rm-app[data-rooms='v2'] .rm3 .rm-composer.rm3-composer {
+  width: min(calc(100% - 2 * 40 * var(--ws-px)), calc(var(--rm3-col) + 32 * var(--ws-px)));
+  margin: 0 auto calc(24 * var(--ws-px));
+  gap: calc(6 * var(--ws-px));
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-compose-card {
+  gap: calc(4 * var(--ws-px));
+  padding: calc(10 * var(--ws-px)) calc(10 * var(--ws-px)) calc(10 * var(--ws-px))
+    calc(20 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(24 * var(--ws-px));
+  background: var(--surface);
+  box-shadow: var(--shadow-elevated);
+  transition: border-color 160ms var(--rm3-ease);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-compose-card:focus-within {
+  border-color: var(--accent-border);
+  /* The card is the field's focus ring: a clear ring around the whole composer instead of a
+     second outline hugging the text inside it. */
+  box-shadow:
+    var(--shadow-elevated),
+    0 0 0 3px color-mix(in srgb, var(--accent, #2563eb) 22%, transparent);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-compose-row textarea:focus,
+.rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-compose-row textarea:focus-visible {
+  outline: none;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-compose-row textarea {
+  min-height: calc(46 * var(--ws-px));
+  padding: calc(8 * var(--ws-px)) 0;
+  font: 400 calc(16 * var(--ws-type-px)) / 1.5 var(--font-sans);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-preview {
+  flex: 1;
+  min-height: calc(46 * var(--ws-px));
+  padding: calc(8 * var(--ws-px)) 0;
+  font: 400 calc(16 * var(--ws-type-px)) / 1.5 var(--font-sans);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-compose-tools {
+  gap: calc(6 * var(--ws-px));
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-postas {
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+  min-width: 0;
+  max-width: min(60%, calc(320 * var(--ws-px)));
+  /* One pill (design review): avatar, "Post as", the name and ▾ inside a quiet outline. */
+  height: calc(32 * var(--ws-px));
+  margin: 0;
+  padding: 0 calc(10 * var(--ws-px)) 0 calc(4 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--bg-inset);
+  color: var(--text-primary);
+  font: 600 calc(13 * var(--ws-type-px)) / 1 var(--font-sans);
+  white-space: nowrap;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-postas-label {
+  flex: none;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-postas select {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 24ch;
+  height: 100%;
+  min-height: 0;
+  margin-right: calc(-22 * var(--ws-px));
+  padding: 0 calc(22 * var(--ws-px)) 0 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: 600 calc(13 * var(--ws-type-px)) / 1 var(--font-sans);
+  text-overflow: ellipsis;
+  appearance: none;
+  cursor: pointer;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-postas:focus-within {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-postas select:focus {
+  outline: none;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-postas-chevron {
+  flex: none;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-tool {
+  width: calc(36 * var(--ws-px));
+  height: calc(36 * var(--ws-px));
+  border-radius: calc(11 * var(--ws-px));
+  background: var(--bg-inset);
+  color: var(--text-muted);
+  transition:
+    background-color 150ms var(--rm3-ease),
+    color 150ms var(--rm3-ease);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-tool:hover {
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-preview-toggle {
+  display: inline-flex;
+  align-items: center;
+  height: calc(36 * var(--ws-px));
+  padding: 0 calc(14 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  color: var(--text-primary);
+  font: 600 calc(13 * var(--ws-type-px)) / 1 var(--font-sans);
+  cursor: pointer;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-preview-toggle[aria-pressed='true'] {
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-send {
+  width: calc(48 * var(--ws-px));
+  height: calc(48 * var(--ws-px));
+  border-radius: calc(15 * var(--ws-px));
+  background: var(--primary);
+  color: var(--on-primary);
+  transition:
+    background-color 150ms var(--rm3-ease),
+    transform 150ms var(--rm3-ease);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-send:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-send:active:not(:disabled) {
+  transform: scale(0.96);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-send:disabled {
+  background: var(--bg-inset);
+  color: var(--text-muted);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-tool:focus-visible,
+.rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-preview-toggle:focus-visible,
+.rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-send:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-compose-note {
+  padding: 0 calc(20 * var(--ws-px));
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-picker {
+  left: calc(10 * var(--ws-px));
+  bottom: calc(100% + calc(12 * var(--ws-px)));
+  padding: calc(6 * var(--ws-px));
+  border-radius: calc(16 * var(--ws-px));
+  background: var(--surface);
+  box-shadow: var(--shadow-elevated);
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-picker li {
+  align-items: center;
+  justify-content: flex-start;
+  gap: calc(10 * var(--ws-px));
+  border-radius: calc(10 * var(--ws-px));
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-picker li span:last-child {
+  margin-left: auto;
+}
+
+/* Read-only, ended and guest states: a calm centred note where the composer would be. */
+.rm-app[data-rooms='v2'] .rm3 .rm-readonly {
+  width: auto;
+  max-width: min(var(--rm3-col), calc(100% - 2 * var(--space-4)));
+  margin: 0 auto calc(24 * var(--ws-px));
+  padding: calc(10 * var(--ws-px)) calc(20 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  box-shadow: var(--shadow-float-sm);
+  color: var(--text-muted);
+  font: 500 calc(14 * var(--ws-type-px)) / 1.4 var(--font-sans);
+}
+
+/* ---------------------------------------------------------------- touch, phones, motion */
+
+/* Touch screens have no hover: the action row is always there. */
+@media (hover: none) {
+  .rm-app[data-rooms='v2'] .rm3 .rm3-actions {
+    opacity: 1;
+  }
+}
+/* Touch tablets and phones: 44 px action targets at any width. */
+@media (pointer: coarse) {
+  .rm-app[data-rooms='v2'] .rm3 .rm3-action,
+  .rm-app[data-rooms='v2'] .rm3 .rm3-status {
+    min-width: calc(44 * var(--ws-px));
+    min-height: calc(44 * var(--ws-px));
+    justify-content: center;
+  }
+}
+.rm-app[data-rooms='v2'] .rm3 .rm3-copy-failed {
+  margin: calc(4 * var(--ws-px)) 0 0;
+  color: var(--status-danger);
+  font: 500 calc(12.5 * var(--ws-type-px)) / 1.4 var(--font-sans);
+}
+
+@media (max-width: 899px) {
+  .rm-app[data-rooms='v2'] .rm3 {
+    --rm3-side: calc(16 * var(--ws-px));
+  }
+  .rm-app[data-rooms='v2'] .rm-room.rm3 .rm-room-head.rm3-topbar {
+    padding: calc(12 * var(--ws-px)) calc(16 * var(--ws-px)) calc(8 * var(--ws-px));
+    gap: calc(6 * var(--ws-px));
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm-composer.rm3-composer {
+    width: calc(100% - 2 * 12 * var(--ws-px));
+    margin-bottom: calc(16 * var(--ws-px));
+  }
+}
+
+@media (max-width: 639px) {
+  /* Phones: two rows at most. Row 1 is the pill (avatars collapse to +N) and ⋯; row 2 is one
+     strip of chips that scrolls sideways and never wraps, Invite last, so Invite never sits
+     alone. The chips show their icon and count (their names stay in aria-label). 44 px
+     targets throughout. */
+  .rm-app[data-rooms='v2'] .rm-room.rm3 .rm-room-head.rm3-topbar[data-compact] {
+    justify-content: flex-start;
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm3-topbar[data-compact] > .rm-menu {
+    order: -3;
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm3-pill {
+    order: -2;
+    flex: 1 1 0;
+    gap: calc(10 * var(--ws-px));
+    padding-left: calc(16 * var(--ws-px));
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm3-topbar[data-compact] > .rm-more {
+    order: -1;
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm3-pill-name {
+    flex: 1 1 auto;
+    max-width: none;
+    font-size: calc(16 * var(--ws-type-px));
+  }
+  /* Row 1 keeps the name readable: the live line is its dot (the words stay for assistive
+     technology and in the pill's name and tooltip). */
+  .rm-app[data-rooms='v2'] .rm3 .rm3-topbar[data-compact] .rm3-live-text {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm3-topbar[data-compact] .rm3-live {
+    padding: 0 calc(6 * var(--ws-px));
+  }
+  /* The strip runs to the screen edges (the bar's 16 px side padding becomes its scroll
+     padding); 4 px inside keep focus rings visible. */
+  .rm-app[data-rooms='v2'] .rm3 .rm3-topbar[data-compact] .rm3-chips {
+    display: flex;
+    flex: 0 0 calc(100% + 2 * 16 * var(--ws-px));
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: calc(6 * var(--ws-px));
+    min-width: 0;
+    margin: calc(-4 * var(--ws-px)) calc(-16 * var(--ws-px));
+    padding: calc(4 * var(--ws-px)) calc(16 * var(--ws-px));
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scroll-padding-inline: calc(16 * var(--ws-px));
+    scrollbar-width: none;
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm3-topbar[data-compact] .rm3-chips::-webkit-scrollbar {
+    display: none;
+  }
+  /* A mouse or trackpad on a narrow window gets a thin scrollbar to drag. */
+  @media (pointer: fine) {
+    .rm-app[data-rooms='v2'] .rm3 .rm3-topbar[data-compact] .rm3-chips {
+      scrollbar-width: thin;
+    }
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm3-chip {
+    gap: calc(5 * var(--ws-px));
+    padding: 0 calc(10 * var(--ws-px));
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm3-chip-icon,
+  .rm-app[data-rooms='v2'] .rm3 .rv2-chip-icon {
+    display: block;
+  }
+  /* The chips keep their names in aria-label, so the words can leave the layout. */
+  .rm-app[data-rooms='v2'] .rm3 .rm3-chip-label,
+  .rm-app[data-rooms='v2'] .rm3 .rv2-chip-full {
+    display: none;
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm-head-elric .cc-switch-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm-head-elric .cc-switch {
+    padding: 0 calc(10 * var(--ws-px));
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm-head-elric .cc-switch-track {
+    width: calc(38 * var(--ws-px));
+    height: calc(22 * var(--ws-px));
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm-head-elric .cc-switch-thumb {
+    width: calc(16 * var(--ws-px));
+    height: calc(16 * var(--ws-px));
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm-head-elric .cc-switch[aria-checked='true'] .cc-switch-thumb {
+    transform: translateX(calc(16 * var(--ws-px)));
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm3-n,
+  .rm-app[data-rooms='v2'] .rm3 .rm3-chip .rm-count {
+    min-width: calc(18 * var(--ws-px));
+    padding: 0 calc(5 * var(--ws-px));
+  }
+  /* Invite ends the strip: chip height, and no drop shadow for the strip to cut off. */
+  .rm-app[data-rooms='v2'] .rm3 .rm3-invite {
+    height: var(--rm3-chip-h);
+    padding: 0 calc(16 * var(--ws-px));
+    box-shadow: none;
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rv2-needs-pop {
+    position: fixed;
+    top: auto;
+    right: calc(8 * var(--ws-px));
+    left: calc(8 * var(--ws-px));
+    margin-top: calc(8 * var(--ws-px));
+  }
+}
+
+@media (max-width: 599px) {
+  .rm-app[data-rooms='v2'] .rm3 .rm-message {
+    gap: calc(10 * var(--ws-px));
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm-message > .rm3-av {
+    width: calc(32 * var(--ws-px));
+    height: calc(32 * var(--ws-px));
+    font-size: calc(13 * var(--ws-type-px));
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm-message:not(.own) .rm-bubble,
+  .rm-app[data-rooms='v2'] .rm3 .rm-own-bubble {
+    padding: calc(11 * var(--ws-px)) calc(15 * var(--ws-px));
+    font-size: calc(16 * var(--ws-type-px));
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm-message.own {
+    max-width: 88%;
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm3-action,
+  .rm-app[data-rooms='v2'] .rm3 .rm3-status {
+    min-height: calc(44 * var(--ws-px));
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm3-action span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm3-action {
+    min-width: calc(44 * var(--ws-px));
+    justify-content: center;
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm3-hint {
+    font-size: calc(13 * var(--ws-type-px));
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm3-hint-close {
+    width: calc(44 * var(--ws-px));
+    height: calc(44 * var(--ws-px));
+    margin: calc(-6 * var(--ws-px)) calc(-4 * var(--ws-px)) calc(-6 * var(--ws-px)) 0;
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-compose-card {
+    padding-left: calc(14 * var(--ws-px));
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm3-postas-label {
+    display: none;
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm3-postas {
+    height: calc(44 * var(--ws-px));
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-tool,
+  .rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-preview-toggle {
+    min-width: calc(44 * var(--ws-px));
+    height: calc(44 * var(--ws-px));
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-tool {
+    width: calc(44 * var(--ws-px));
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-send {
+    width: calc(48 * var(--ws-px));
+    height: calc(48 * var(--ws-px));
+  }
+}
+
+@media (max-width: 380px) {
+  /* The smallest phones: Preview moves to the narrowest form and the tools tighten. */
+  .rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-compose-tools {
+    gap: calc(4 * var(--ws-px));
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-preview-toggle {
+    padding: 0 calc(8 * var(--ws-px));
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-compose-card {
+    padding-left: calc(12 * var(--ws-px));
+    padding-right: calc(8 * var(--ws-px));
+  }
+}
+
+/* Phones and touch screens: the ⋯ menu's items and a code block's Copy are 44px touch targets
+   too (the visible Copy chip stays small; its hit area grows). */
+@media (max-width: 640px), (pointer: coarse) {
+  .rm-app[data-rooms='v2'] .rm3 .rm3-topbar .rm-more-menu button {
+    min-height: calc(44 * var(--ws-px));
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm-bubble .md-code-copy {
+    position: relative;
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm-bubble .md-code-copy::after {
+    content: '';
+    position: absolute;
+    inset: calc(-6 * var(--ws-px));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rm-app[data-rooms='v2'] .rm3 .rm3-arrive,
+  .rm-app[data-rooms='v2'] .rm3 .rm3-hint,
+  .rm-app[data-rooms='v2'] .rm3 .rm3-mention-hint,
+  .rm-app[data-rooms='v2'] .rm3 .rm3-details,
+  .rm-app[data-rooms='v2'] .rm3 .rm3-topbar .rm-more-menu,
+  .rm-app[data-rooms='v2'] .rm3 .rv2-needs-pop {
+    animation: none;
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm3-chip,
+  .rm-app[data-rooms='v2'] .rm3 .rm3-pill,
+  .rm-app[data-rooms='v2'] .rm3 .rm3-pill-caret,
+  .rm-app[data-rooms='v2'] .rm3 .rm3-invite,
+  .rm-app[data-rooms='v2'] .rm3 .rm3-join-self-btn,
+  .rm-app[data-rooms='v2'] .rm3 .rm3-action,
+  .rm-app[data-rooms='v2'] .rm3 .rm3-actions,
+  .rm-app[data-rooms='v2'] .rm3 .rm-head-elric .cc-switch,
+  .rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-compose-card,
+  .rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-tool,
+  .rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-send {
+    transition: none;
+  }
+  .rm-app[data-rooms='v2'] .rm3 .rm3-invite:active,
+  .rm-app[data-rooms='v2'] .rm3 .rm3-composer .rm-send:active:not(:disabled) {
+    transform: none;
+  }
+}
+
+/*
+ * The phone's top row on the rooms overview: the page's own h1 ("Your rooms") names the page,
+ * so the row shows only the ☰ chip (as on Messages) instead of a second title.
+ */
+@media (max-width: 899px) {
+  .app-shell[data-workspace='v2']:has(#rm-overview-title) .cc-app-header-title p {
+    display: none;
+  }
+}
+
+/*
+ * Phones and tablets: a room page has one top bar. The shell's ☰ row steps aside and the room's
+ * own top bar carries the ☰ chip in its first row (WORKSPACE_V3.md §3), as Messages does for a
+ * thread. The rooms overview keeps the shell row.
+ */
+@media (max-width: 899px) {
+  .app-shell[data-workspace='v2']:has(.rm-room.rm3 .rm3-topbar .rm-menu) {
+    --ws-topbar-h: 0px;
+  }
+  .app-shell[data-workspace='v2']:has(.rm-room.rm3 .rm3-topbar .rm-menu) .topbar.cc-app-header {
+    display: none;
+  }
+}
+@media (min-width: 900px) {
+  .rm-app[data-rooms='v2'] .rm3 .rm3-topbar > .rm-menu {
+    display: none;
+  }
+}

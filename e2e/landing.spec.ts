@@ -1,14 +1,21 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
+import { gotoMounted } from './mounted';
+
+/** A bounding box, waiting out the moment it is null while the prerendered copy is swapped for the live page. */
+async function box(locator: Locator) {
+  let found: Awaited<ReturnType<Locator['boundingBox']>> = null;
+  await expect.poll(async () => (found = await locator.boundingBox()) !== null).toBe(true);
+  return found!;
+}
 
 /*
  * The v8 landing (the approved mockup): hero with
- * the live agent count, a static picture of a room, "Built for real AI agents" with three calm
- * network visuals, and "Connect your AI in 30 seconds".
+ * the live agent count and the hero video, "Your room never sleeps" with its video, and
+ * "Connect your AI in 30 seconds".
  */
 
 const HEADLINE = 'Every AI. One room.';
-const SUBLINE =
-  'Central City is where the world’s AI agents meet, work together, and exchange ideas.';
+const SUBLINE = 'Central City is where the world’s AI agents meet.';
 
 const hero = (page: Page) => page.getByRole('region', { name: HEADLINE });
 
@@ -17,7 +24,7 @@ test('landing hero: one headline, Sign up and Explore open source, and its calls
 }) => {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
-  await page.goto('/');
+  await gotoMounted(page, '/');
   await expect(page).toHaveTitle(`Central City · ${HEADLINE}`);
   // The approved sub-line leads the hero; link previews carry the same words (index.html).
   for (const selector of [
@@ -67,43 +74,37 @@ test('landing hero: one headline, Sign up and Explore open source, and its calls
   await expect(page.getByLabel('Account name')).toBeVisible();
 
   // Explore open source opens the open source page.
-  await page.goto('/');
+  await gotoMounted(page, '/');
   await hero(page).getByRole('link', { name: 'Explore open source' }).click();
   await expect(page).toHaveURL(/\/downtown$/);
 
   // The header's Sign in still opens the sign-in form.
-  await page.goto('/');
+  await gotoMounted(page, '/');
   await page.getByRole('banner').getByRole('link', { name: 'Sign in', exact: true }).click();
   await expect(page.getByLabel('Account name')).toBeVisible();
   await expect(page.getByLabel('Password', { exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });
 
-test('Built for real AI agents: three cards with their actions, then Bring your AI', async ({
+test('Your room never sleeps: its video on the left, copy and Meet Elric on the right, then Invite your AI', async ({
   page,
 }) => {
-  await page.goto('/');
-  const features = page.getByRole('region', { name: 'Built for real AI agents' });
-  await expect(features).toHaveAttribute('id', 'how');
-  await expect(
-    features.getByText(
-      'Give your AI an identity, invite it to join a room with one link, and work together in the open.',
-    ),
-  ).toBeVisible();
-  const cards = features.getByRole('listitem');
-  await expect(cards).toHaveCount(3);
-  const expected = [
-    ['Collaboration', 'Real-Time Rooms', 'Sign in', '/#signin'],
-    ['Open source', 'Open Source Repositories', 'Explore repositories', '/downtown'],
-    ['Transparency', 'Verifiable Agent Count', 'Verify count', '/downtown/verify'],
-  ];
-  for (const [index, [eyebrow, title, action, href]] of expected.entries()) {
-    const card = cards.nth(index);
-    await expect(card.locator('.cc-lp-eyebrow')).toHaveText(eyebrow!, { ignoreCase: true });
-    await expect(card.getByRole('heading', { level: 3 })).toHaveText(title!);
-    await expect(card.getByRole('link')).toHaveText(action!);
-    await expect(card.getByRole('link')).toHaveAttribute('href', href!);
-  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await gotoMounted(page, '/');
+  const section = page.getByRole('region', { name: 'Your room never sleeps.' });
+  await expect(section).toHaveAttribute('id', 'how');
+  await expect(section.getByText(/Time zones don’t matter here\./)).toBeVisible();
+  await expect(section.getByRole('link', { name: 'Meet Elric' })).toHaveAttribute('href', '/elric');
+  const media = await box(section.locator('.cc-lp-hero-media'));
+  const copy = await box(section.locator('.cc-lp-feature-copy'));
+  expect(media.x + media.width).toBeLessThanOrEqual(copy.x + 1);
+  const video = section.locator('video');
+  await expect(video).toHaveAttribute('preload', 'none');
+  await section.scrollIntoViewIfNeeded();
+  await expect(video).toHaveAttribute('src', '/brand/hero/central-city-night.mp4');
+  // No cards and no arrows in the copy.
+  await expect(page.locator('.cc-lp-card')).toHaveCount(0);
+  expect(await section.innerText()).not.toContain('→');
 
   const cta = page.getByRole('region', { name: 'Connect your AI in 30 seconds' });
   await expect(cta.getByRole('link', { name: 'View documentation' })).toHaveAttribute(
@@ -112,150 +113,121 @@ test('Built for real AI agents: three cards with their actions, then Bring your 
   );
   // Invite your AI opens the first-run page /invite (DESIGN_SYSTEM §3.2).
   await cta.getByRole('link', { name: 'Invite your AI' }).click();
-  expect(new URL(page.url()).pathname).toBe('/invite');
+  await expect(page).toHaveURL(/\/invite$/);
   await expect(page.getByRole('heading', { level: 1, name: 'Invite your AI' })).toBeVisible();
+});
+
+test('Every agent deserves a passport: copy and Explore agents on Base on the left, its video on the right', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await gotoMounted(page, '/');
+  const section = page.getByRole('region', { name: 'Every agent deserves a passport.' });
+  await expect(section).toHaveAttribute('id', 'passport');
+  await expect(section.getByText(/Give your agent its own identity on Base\./)).toBeVisible();
+  await expect(section.getByRole('link', { name: 'Explore agents on Base' })).toHaveAttribute(
+    'href',
+    '/explorer/base',
+  );
+  const copy = await box(section.locator('.cc-lp-feature-copy'));
+  const media = await box(section.locator('.cc-lp-hero-media'));
+  expect(copy.x + copy.width).toBeLessThanOrEqual(media.x + 1);
+  const video = section.locator('video');
+  await expect(video).toHaveAttribute('preload', 'none');
+  await expect(video).toHaveAttribute('poster', '/brand/hero/central-city-passport-poster.jpg');
+  await section.scrollIntoViewIfNeeded();
+  await expect(video).toHaveAttribute('src', '/brand/hero/central-city-passport.mp4');
+  expect(await section.innerText()).not.toContain('→');
+  // After "Your room never sleeps", before "Connect your AI in 30 seconds".
+  const order = await page
+    .locator('main section[aria-labelledby]')
+    .evaluateAll((all) => all.map((el) => el.getAttribute('aria-labelledby')));
+  expect(order.indexOf('passport-title')).toBe(order.indexOf('how-title') + 1);
+  expect(order.indexOf('cta-title')).toBe(order.indexOf('passport-title') + 1);
 });
 
 test('landing fits 360 px with the primary action full width', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 780 });
-  await page.goto('/');
+  await gotoMounted(page, '/');
   const primary = hero(page).getByRole('link', { name: 'Sign up' });
   await expect(primary).toBeVisible();
-  const box = await primary.boundingBox();
-  expect(box!.width).toBeGreaterThanOrEqual(360 - 2 * 16 - 1);
-  expect(box!.height).toBeGreaterThanOrEqual(44);
+  // The box is null for a moment while the prerendered copy is swapped for the live page.
+  await expect
+    .poll(async () => (await primary.boundingBox())?.width ?? 0)
+    .toBeGreaterThanOrEqual(360 - 2 * 16 - 1);
+  expect((await box(primary)).height).toBeGreaterThanOrEqual(44);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
 
-/** Elements of the room picture that stick out of its frame or clip their own text. */
-function clippedInRoom(page: Page) {
-  return page.evaluate(() => {
-    const frame = document.querySelector('[data-room-showcase]')!.getBoundingClientRect();
-    return [...document.querySelectorAll<HTMLElement>('[data-room-showcase] *')]
-      .filter((element) => {
-        const box = element.getBoundingClientRect();
-        if (!box.width) return false;
-        const outside =
-          box.right > frame.right + 0.5 ||
-          box.bottom > frame.bottom + 0.5 ||
-          box.left < frame.left - 0.5;
-        // Form fields and visually hidden labels are drawn as in the room page.
-        const clipped =
-          element.scrollWidth > element.clientWidth + 1 &&
-          !['textarea', 'select'].includes(element.localName) &&
-          getComputedStyle(element).clipPath === 'none';
-        return outside || clipped;
-      })
-      .map((element) => `${element.className}: ${element.textContent?.slice(0, 40)}`);
-  });
-}
-
-test('the room picture is one labelled image and nothing in it is cut off', async ({ page }) => {
-  await page.goto('/');
-  const room = page.getByRole('img', { name: /^Example of a room/ });
-  await expect(room).toBeVisible();
-  // Illustrative only: the room page's markup, inert, so nothing inside can be focused or clicked.
-  await expect(room.locator('.cc-lp-room-canvas')).toHaveAttribute('inert', '');
-  await expect(room.locator('a[href], [tabindex]')).toHaveCount(0);
-  for (const name of ['Mia', 'Host agent', 'ChatGPT', 'Claude', 'Gemini', 'Grok', 'Custom Agent'])
-    await expect(room.locator('.cc-lp-room-member-name', { hasText: name })).toHaveCount(1);
-  await expect(room.getByText('Members · 7')).toBeVisible();
-  await expect(room.locator('.cc-lp-room-msg')).toHaveCount(7);
-
-  for (const [width, height] of [
-    [1440, 1000],
-    [1280, 900],
-    [1024, 900],
-    [768, 1000],
-    [360, 780],
-  ]) {
-    await page.setViewportSize({ width: width!, height: height! });
-    await expect(room).toBeVisible();
-    expect(await clippedInRoom(page), `${width} px`).toEqual([]);
-    expect(
-      await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
-      `${width} px scrolls sideways`,
-    ).toBe(true);
-    // On phones the Members sheet covers the conversation, as in the room page.
-    await expect(room.locator('.cc-lp-room-members')).toBeVisible();
-  }
-});
-
-test('network visuals: transparent, decorative, calm, and paused off screen', async ({ page }) => {
-  await page.goto('/');
-  const canvases = page.locator('main canvas');
-  await expect(canvases).toHaveCount(3);
-  for (const canvas of await canvases.all()) {
-    await expect(canvas).toHaveAttribute('aria-hidden', 'true');
-    // No grey panel: the canvas and its box are transparent, on the card.
-    await expect(canvas).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
-    await expect(canvas.locator('..')).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
-  }
-  // No other pictures on the page; the preview slot renders nothing until a preview exists.
-  await expect(page.locator('main img, main picture, main video')).toHaveCount(0);
-  await expect(page.locator('[data-preview-slot]')).toHaveCount(0);
-
-  const first = canvases.first();
-  // Below the fold: not running.
-  await expect(first).toHaveAttribute('data-animating', 'false');
-  await first.scrollIntoViewIfNeeded();
-  await expect(first).toHaveAttribute('data-animating', 'true');
-  // Something is drawn, and it moves.
-  const pixels = () =>
-    first.evaluate((canvas: HTMLCanvasElement) => {
-      const data = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height).data;
-      let painted = 0;
-      let sum = 0;
-      for (let index = 3; index < data.length; index += 4) {
-        if (data[index]! > 0) painted++;
-        sum = (sum * 31 + data[index]! * index) % 1_000_000_007;
-      }
-      return { painted, sum };
-    });
-  const a = await pixels();
-  expect(a.painted).toBeGreaterThan(500);
-  await expect.poll(async () => (await pixels()).sum).not.toBe(a.sum);
-  // Scrolled away again: paused.
-  await page.evaluate(() => window.scrollTo(0, 0));
-  await expect(first).toHaveAttribute('data-animating', 'false');
-});
-
-test('network visuals: one still frame under reduced motion', async ({ page }) => {
-  await page.emulateMedia({ reducedMotion: 'reduce' });
-  await page.goto('/');
-  const canvas = page.locator('main canvas').nth(2);
-  await canvas.scrollIntoViewIfNeeded();
-  await expect(canvas).toHaveAttribute('data-animating', 'false');
-  const snapshot = () => canvas.evaluate((element: HTMLCanvasElement) => element.toDataURL());
-  const before = await snapshot();
-  await page.waitForTimeout(600);
-  expect(await snapshot()).toBe(before);
-  // Still drawn, not blank.
-  expect(
-    await canvas.evaluate((element: HTMLCanvasElement) => {
-      const data = element.getContext('2d')!.getImageData(0, 0, element.width, element.height);
-      return data.data.some((value, index) => index % 4 === 3 && value > 0);
-    }),
-  ).toBe(true);
-});
-
-test('landing follows the theme: light by default, dark from the header toggle', async ({
+test('hero: copy on the left and the product video on the right, sized like claude.com', async ({
   page,
 }) => {
-  // The OS preference is ignored: dark only when the visitor picks it.
-  await page.emulateMedia({ colorScheme: 'dark' });
-  await page.goto('/');
-  const canvas = page.locator('main canvas').first();
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await gotoMounted(page, '/');
+  const copy = hero(page).locator('.cc-lp-hero-copy');
+  const frame = hero(page).locator('.cc-lp-hero-frame');
+  const video = frame.locator('video');
+  await expect(video).toHaveAttribute('src', '/brand/hero/central-city-hero.mp4');
+  await expect(video).toHaveAttribute('preload', 'none');
+  expect(await video.evaluate((v: HTMLVideoElement) => v.muted && v.loop)).toBe(true);
+  // Visitors can stop the loop (WCAG 2.2.2).
+  const pause = frame.getByRole('button', { name: 'Pause video' });
+  await pause.click();
+  await expect(frame.getByRole('button', { name: 'Play video' })).toBeVisible();
+  expect(await video.evaluate((v: HTMLVideoElement) => v.paused)).toBe(true);
+  const c = await box(copy);
+  const f = await box(frame);
+  // Two columns: the copy sits left of the video.
+  expect(c.x + c.width).toBeLessThanOrEqual(f.x + 1);
+  // claude.com at 1440 x 900: a 605 x 756 frame (1080:1350, fits 100svh - 9rem).
+  expect(Math.round(f.width)).toBeGreaterThanOrEqual(600);
+  expect(Math.round(f.width)).toBeLessThanOrEqual(610);
+  expect(f.height / f.width).toBeCloseTo(1350 / 1080, 2);
+  // No old room picture.
+  await expect(page.getByText('Example room')).toHaveCount(0);
+
+  // Below 1024 px the video steps aside, as on claude.com.
+  await page.setViewportSize({ width: 768, height: 1000 });
+  await expect(frame).toBeHidden();
+});
+
+test('hero video: phones download nothing, reduced motion keeps the poster', async ({ page }) => {
+  const fetched: string[] = [];
+  page.on('request', (request) => {
+    if (request.url().endsWith('.mp4')) fetched.push(request.url());
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await gotoMounted(page, '/');
+  await expect(hero(page)).toBeVisible();
+  await page.waitForTimeout(500);
+  expect(fetched).toEqual([]);
+  await expect(hero(page).locator('video')).not.toHaveAttribute('src', /./);
+
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await gotoMounted(page, '/');
+  await page.waitForTimeout(500);
+  expect(fetched).toEqual([]);
+  await expect(hero(page).getByRole('button', { name: /video/ })).toHaveCount(0);
+});
+
+test('landing follows the theme: the device setting by default, then the header toggle', async ({
+  page,
+}) => {
+  // With no theme chosen the device setting applies: light here, dark from the header toggle.
+  await page.emulateMedia({ colorScheme: 'light' });
+  await gotoMounted(page, '/');
+  const landing = page.locator('main.cc-lp');
   const nodeFill = () =>
-    canvas.evaluate((element) =>
+    landing.evaluate((element) =>
       getComputedStyle(element).getPropertyValue('--lp-net-node-fill').trim().toLowerCase(),
     );
   const cardBackground = () =>
     page
-      .locator('.cc-lp-card')
+      .locator('.cc-lp-hero-frame')
       .first()
       .evaluate((element) => getComputedStyle(element).backgroundColor);
-  expect(await nodeFill()).toMatch(/^#fff(fff)?$/);
+  await expect.poll(nodeFill).toMatch(/^#fff(fff)?$/);
   const lightCard = await cardBackground();
 
   await page.getByRole('banner').getByRole('button', { name: 'Use dark theme' }).click();
@@ -342,7 +314,6 @@ function lowContrastInMain(page: Page) {
         (parseFloat(style.fontSize) >= 18.66 && Number(style.fontWeight) >= 700);
       count++;
       // The room picture is an image of the room page (role img), drawn with that page's colours.
-      if (element.closest('[data-room-showcase]')) continue;
       if (ratio < (large ? 3.1 : 4.6))
         low.push(
           `${element.className}: ${walker.currentNode.textContent!.trim().slice(0, 30)} (${ratio.toFixed(2)})`,
@@ -356,8 +327,8 @@ for (const scheme of ['light', 'dark'] as const)
   test(`landing text meets contrast with the v8 tokens too (${scheme})`, async ({ page }) => {
     await page.emulateMedia({ reducedMotion: 'reduce' });
     await page.addInitScript((theme) => localStorage.setItem('cc-theme', theme), scheme);
-    await page.goto('/');
-    await expect(page.locator('main canvas')).toHaveCount(3);
+    await gotoMounted(page, '/');
+    await expect(page.locator('main video')).toHaveCount(3);
     await page.evaluate(
       ({ scheme, tokens }) => {
         const style = document.createElement('style');
@@ -370,23 +341,25 @@ for (const scheme of ['light', 'dark'] as const)
       { scheme, tokens: V8_TOKENS[scheme] },
     );
     const result = await lowContrastInMain(page);
-    expect(result.count).toBeGreaterThan(40);
+    // The page's own text (the videos carry none): hero, sections 2 and 3, call to action.
+    expect(result.count).toBeGreaterThan(10);
     expect(result.low).toEqual([]);
   });
 
-test('the card buttons share one line and the header keeps its menus off the logo', async ({
-  page,
-}) => {
+test('the header keeps its menus off the logo', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto('/');
-  await expect(page.locator('.cc-lp-card-body > .button')).toHaveCount(3);
-  const tops = await page
-    .locator('.cc-lp-card-body > .button')
-    .evaluateAll((els) => els.map((el) => Math.round(el.getBoundingClientRect().top)));
-  expect(tops).toHaveLength(3);
-  expect(new Set(tops).size).toBe(1);
-  const lockup = await page.locator('.cc-header .lockup').first().boundingBox();
-  const menus = await page.locator('.cc-header-nav button').first().boundingBox();
-  expect(lockup && menus).toBeTruthy();
+  await gotoMounted(page, '/');
+  await expect(page.locator('.cc-header-nav button').first()).toBeVisible();
+  await expect(page.locator('.cc-header .lockup').first()).toBeVisible();
+  let lockup = await page.locator('.cc-header .lockup').first().boundingBox();
+  let menus = await page.locator('.cc-header-nav button').first().boundingBox();
+  // Both are measured once the header has finished its first layout.
+  await expect
+    .poll(async () => {
+      lockup = await page.locator('.cc-header .lockup').first().boundingBox();
+      menus = await page.locator('.cc-header-nav button').first().boundingBox();
+      return Boolean(lockup && menus);
+    })
+    .toBe(true);
   expect(menus!.x - (lockup!.x + lockup!.width)).toBeGreaterThanOrEqual(24);
 });

@@ -13,7 +13,8 @@ import { remoteInputSchemas } from '../server/remote-mcp/tools.js';
 import { openInviteInputSchemas } from '../server/remote-mcp/open-invite.js';
 import { ASSISTANT_SCOPES } from '../shared/assistant.js';
 import { ANONYMOUS_TOOLS } from '../shared/assistant-tools.js';
-import { isClientRoute } from '../shared/routes.js';
+import { APP_SHELL, isClientRoute } from '../shared/routes.js';
+import { SHARE_CARDS } from '../shared/share-cards.js';
 import { ROOM_TASK_TOOLS } from '../server/rooms/tasks-tools.js';
 import { ROOM_REPO_TOOLS } from '../server/rooms/repos/tools.js';
 import { renderPublicDocs } from '../scripts/public-docs/build.js';
@@ -102,7 +103,7 @@ interface VercelConfig {
   framework: string;
   buildCommand: string;
   outputDirectory: string;
-  functions: Record<string, { maxDuration: number }>;
+  functions: Record<string, { maxDuration: number; includeFiles?: string }>;
   rewrites: Array<{ source: string; destination: string }>;
   headers: Array<{ source: string; headers: Array<{ key: string; value: string }> }>;
 }
@@ -148,6 +149,10 @@ const GENERATED_DOCS = new Set([...renderPublicDocs(root).keys()].map((path) => 
 
 function staticFile(path: string): string | null {
   if (path === '/' || path === '/index.html') return 'index.html';
+  // The plain app shell, the built index.html before the landing is prerendered (shared/routes.ts).
+  if (path === APP_SHELL) return 'index.html';
+  // Share-card copies of index.html the build writes (shared/share-cards.ts).
+  if (SHARE_CARDS.some((card) => path === `/${card.shell}`)) return 'index.html';
   if (GENERATED_DOCS.has(path)) return `dist${path}`;
   const file = join(root, 'public', ...decodeURIComponent(path).split('/').filter(Boolean));
   return existsSync(file) && statSync(file).isFile() ? `public${decodeURIComponent(path)}` : null;
@@ -288,7 +293,7 @@ test('server.json validates against the vendored MCP Registry schema and registr
   assert.match(server.websiteUrl, /^https:\/\/[^"'<> \t\n\r]+$/);
   assert.equal(server.repository.source, 'github');
   assert.match(server.repository.url, /^https?:\/\/(www\.)?github\.com\/[\w.-]+\/[\w.-]+\/?$/);
-  assert.equal(server.repository.url, 'https://github.com/centralcity-ai/protocol');
+  assert.equal(server.repository.url, 'https://github.com/centralcity-ai-hq/protocol');
   for (const icon of server.icons) {
     assert.ok(icon.src.startsWith(`${ORIGIN}/`), icon.src);
     const file = staticFile(new URL(icon.src).pathname);
@@ -414,7 +419,10 @@ test('the server card matches the tools, scopes and protocol versions the server
   const [open, oauth] = discovery.endpoints;
   const openTools = (await openRpc(app, 'tools/list')).tools;
   compare(openTools, open.tools, false);
-  const { tokens } = await fullFlow(app);
+  const { tokens } = await fullFlow(app, {
+    scope: ASSISTANT_SCOPES.join(' '),
+    scopes: [...ASSISTANT_SCOPES],
+  });
   const listed = await mcpCall(app, tokens.access_token, 'tools/list');
   assert.equal(listed.statusCode, 200, listed.body);
   const oauthTools = rpcResult(listed.body).result.tools as any[];
@@ -522,11 +530,12 @@ test('llms.txt follows the llmstxt.org structure and covers every tool', () => {
       assert.match(line, /^- \[[^\]]+\]\(https:\/\/[^)\s]+\)(?:: .+)?$/, `file list item: ${line}`);
   }
   if (sections.includes('Optional')) assert.equal(sections.at(-1), 'Optional');
-  // llms.txt names every live tool (about 60 across a dozen families) in one short file. 14 KB is
-  // about 3.5k tokens: still a small part of any client's context, next to about 130 KB for a
+  // llms.txt names every live tool (about 60 across a dozen families) in one short file. 15 KB is
+  // about 3.8k tokens: still a small part of any client's context, next to about 130 KB for a
   // full tools/list. Raised from 12 KB (29 Sep 2026) so the next tool family fits without
-  // cutting rules; keep adding detail to llms-full.txt and the /docs/*.md pages instead.
-  assert.ok(Buffer.byteLength(text) < 14_000, 'llms.txt stays small (under 14 KB)');
+  // cutting rules, and from 14 KB (7 Oct 2026) for the Microsoft Copilot and Mistral Le Chat
+  // docs pages; keep adding detail to llms-full.txt and the /docs/*.md pages instead.
+  assert.ok(Buffer.byteLength(text) < 15_000, 'llms.txt stays small (under 15 KB)');
 
   const full = read('public/llms-full.txt');
   assert.equal(full.split('\n')[0], '# Central City');
@@ -648,7 +657,9 @@ test('vercel.json keeps every existing route and serves the discovery files corr
   // in CI, before this step): /.vite/manifest.json is never public.
   assert.equal(vercel.buildCommand, 'pnpm build && rm -rf dist/.vite');
   assert.equal(vercel.outputDirectory, 'dist');
-  assert.deepEqual(vercel.functions, { 'api/index.ts': { maxDuration: 60 } });
+  assert.deepEqual(vercel.functions, {
+    'api/index.js': { maxDuration: 300, includeFiles: 'api/_bundle/*.map' },
+  });
   const agent = randomUUID();
   for (const path of [
     '/api/session',
@@ -751,7 +762,7 @@ test('client configurations, plugin manifests and install links agree with the e
   assert.equal(entry.version, version);
   assert.deepEqual(entry.source, {
     source: 'git-subdir',
-    url: 'centralcity-ai/toolkit',
+    url: 'centralcity-ai-hq/toolkit',
     path: 'integrations/claude-code/central-city',
   });
   assert.ok(existsSync(join(root, entry.source.path, '.claude-plugin', 'plugin.json')));

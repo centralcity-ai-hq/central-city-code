@@ -1,0 +1,336 @@
+<title>Register and Room Pay</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+/* Mockup: registration on Base with the wallet key (decision A, one wallet) and Pay in rooms. The bar switches screen, theme and
+   width; everything below it is the product, in My agents v4 / Wallet tokens. Synthetic values. */
+:root{
+  --bg:#ffffff; --pane:#fbfbfc; --surface:#ffffff; --sunken:#f4f5f7; --hover:rgba(15,23,42,.035);
+  --line:rgba(15,23,42,.08); --text:#0f172a; --muted:#64748b; --faint:#a0aab8;
+  --ink:#0f172a; --ink-text:#ffffff;
+  --accent:#2563eb; --accent-soft:#eef3ff; --accent-line:#c7d7fb;
+  --ok:#16a34a; --ok-soft:#ecfdf3; --warn:#b45309; --warn-soft:#fff7ed; --bad:#dc2626; --bad-soft:#fef2f2;
+  --shadow-s:0 1px 2px rgba(15,23,42,.04),0 0 0 1px rgba(15,23,42,.05);
+  --shadow-l:0 18px 48px rgba(15,23,42,.16),0 0 0 1px rgba(15,23,42,.06);
+  --frame:#e8ebf0;
+  --sans:"Inter",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0b0d12;--pane:#0f1218;--surface:#151922;--sunken:#1b202b;--hover:rgba(255,255,255,.04);--line:rgba(255,255,255,.08);--text:#eef1f6;--muted:#97a3b6;--faint:#5f6b7e;--ink:#eef1f6;--ink-text:#0b0d12;--accent:#6b9bff;--accent-soft:#17213a;--accent-line:#2c4380;--ok:#4ade80;--ok-soft:#10301f;--warn:#fbbf24;--warn-soft:#33260c;--bad:#f87171;--bad-soft:#3a1717;--shadow-s:0 0 0 1px rgba(255,255,255,.06);--shadow-l:0 18px 48px rgba(0,0,0,.5),0 0 0 1px rgba(255,255,255,.08);--frame:#1a1f29;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#0b0d12;--pane:#0f1218;--surface:#151922;--sunken:#1b202b;--hover:rgba(255,255,255,.04);--line:rgba(255,255,255,.08);--text:#eef1f6;--muted:#97a3b6;--faint:#5f6b7e;--ink:#eef1f6;--ink-text:#0b0d12;--accent:#6b9bff;--accent-soft:#17213a;--accent-line:#2c4380;--ok:#4ade80;--ok-soft:#10301f;--warn:#fbbf24;--warn-soft:#33260c;--bad:#f87171;--bad-soft:#3a1717;--shadow-s:0 0 0 1px rgba(255,255,255,.06);--shadow-l:0 18px 48px rgba(0,0,0,.5),0 0 0 1px rgba(255,255,255,.08);--frame:#1a1f29;color-scheme:dark}
+
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 var(--sans);-webkit-font-smoothing:antialiased;letter-spacing:-.006em}
+button,input,select{font:inherit;color:inherit;letter-spacing:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+.mono{font-family:var(--mono);font-size:12.5px;letter-spacing:0}
+.num{font-variant-numeric:tabular-nums}
+[hidden]{display:none!important}
+
+/* ===== Mockup bar (not product) ===== */
+.mk{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--pane);border-bottom:1px solid var(--line);padding-inline:16px}
+.mk-in{max-width:1240px;margin:0 auto;display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding-block:8px}
+.mk-tag{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.mk-group{display:flex;flex-wrap:wrap;gap:4px}
+.mk button{height:28px;padding:0 10px;border-radius:999px;border:1px solid var(--line);background:var(--surface);font-size:12px;font-weight:500;color:var(--muted);cursor:pointer}
+.mk button[aria-pressed="true"]{background:var(--ink);color:var(--ink-text);border-color:var(--ink)}
+.notes{max-width:1240px;margin:0 auto;padding:10px 16px 0;font-size:12.5px;color:var(--muted)}
+.notes b{color:var(--text);font-weight:600}
+
+/* ===== Stage ===== */
+.stage{padding-inline:16px;padding-block:20px 64px}
+.app{margin:0 auto;background:var(--bg);border:1px solid var(--line);border-radius:14px;overflow:hidden;display:grid;grid-template-columns:240px minmax(0,1fr) 420px;min-height:640px;max-width:1440px}
+.stage[data-size="390"] .app{width:390px;max-width:100%;grid-template-columns:minmax(0,1fr);border-radius:28px;box-shadow:0 0 0 8px var(--frame)}
+.stage[data-size="390"] .nav,.stage[data-size="390"] .mid{display:none}
+
+.nav{background:var(--pane);border-right:1px solid var(--line);padding:16px 12px;display:flex;flex-direction:column;gap:4px}
+.logo{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px;padding:4px 8px 14px}
+.logo i{width:22px;height:22px;border-radius:7px;background:var(--accent);display:inline-block}
+.nav a{display:flex;align-items:center;height:34px;padding:0 10px;border-radius:9px;color:var(--text);text-decoration:none;font-size:13.5px}
+.nav a[aria-current]{background:var(--accent-soft);color:var(--accent);font-weight:600}
+
+.mid{border-right:1px solid var(--line);padding:18px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.mid h2{margin:0 0 4px;font-size:17px;letter-spacing:-.02em}
+.agent{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:10px}
+.agent[aria-current]{background:var(--sunken)}
+.av{width:30px;height:30px;border-radius:8px;background:#475569;color:#fff;display:grid;place-items:center;font-size:11px;font-weight:700;flex:none}
+.av.b{background:#0f766e}.av.c{background:#7c3aed}.av.d{background:#b45309}
+.agent b{display:block;font-size:13.5px;font-weight:600}
+.agent small{color:var(--muted);font-size:12px}
+
+.pane{padding:22px 24px 32px;display:flex;flex-direction:column;gap:14px;min-width:0;position:relative}
+.back{font-size:12.5px;color:var(--muted)}
+.pane h1{margin:0;font-size:21px;letter-spacing:-.02em}
+.lead{margin:0;color:var(--text);font-size:14px}
+.hint{margin:0;color:var(--muted);font-size:12.5px}
+.caution{margin:0;font-size:12.5px;color:var(--warn);background:var(--warn-soft);border-radius:10px;padding:10px 12px}
+.bad{margin:0;font-size:12.5px;color:var(--bad);background:var(--bad-soft);border-radius:10px;padding:10px 12px}
+.okline{margin:0;font-size:12.5px;color:var(--ok);display:flex;gap:6px;align-items:flex-start}
+.okline::before{content:"✓";font-weight:700}
+
+.group{border:1px solid var(--line);border-radius:12px;background:var(--surface);overflow:hidden}
+.row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 14px;border-top:1px solid var(--line);min-width:0}
+.row:first-child{border-top:0}
+.k{color:var(--muted);font-size:13px;flex:none}
+.v{font-size:13px;text-align:right;min-width:0;overflow-wrap:anywhere}
+.v small{display:block;color:var(--muted);font-size:11.5px}
+
+.btn{height:42px;border-radius:999px;border:0;background:var(--ink);color:var(--ink-text);font-weight:600;font-size:13.5px;cursor:pointer;width:100%}
+.btn.ghost{background:var(--surface);color:var(--text);border:1px solid var(--line)}
+.btn[disabled]{opacity:.45}
+.pill{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 12px;border-radius:999px;border:1px solid var(--line);background:var(--surface);font:600 12px/1 var(--sans);cursor:pointer;white-space:nowrap}
+.pill.accent{background:var(--accent);border-color:var(--accent);color:#fff}
+
+.points{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
+.points li{display:flex;flex-direction:column;gap:2px;padding-left:22px;position:relative}
+.points li::before{content:"";position:absolute;left:4px;top:7px;width:7px;height:7px;border-radius:50%;background:var(--accent)}
+.points b{font-size:13.5px}
+.points span{font-size:12.5px;color:var(--muted)}
+
+.steps{display:flex;gap:6px}
+.steps i{flex:1;height:4px;border-radius:4px;background:var(--sunken)}
+.steps i.on{background:var(--accent)}
+.status{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+.status li{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--muted)}
+.status li::before{content:"";width:16px;height:16px;border-radius:50%;border:2px solid var(--line);flex:none}
+.status li.done{color:var(--text)}
+.status li.done::before{border-color:var(--ok);background:var(--ok)}
+
+.field{display:flex;flex-direction:column;gap:6px}
+.field span{font-size:12.5px;font-weight:600}
+.field .in{height:42px;border:1px solid var(--line);border-radius:10px;background:var(--surface);padding:0 12px;display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13.5px;min-width:0}
+.field .in small{color:var(--muted)}
+.recipient{display:flex;align-items:center;gap:10px;border:1px solid var(--accent-line);background:var(--accent-soft);border-radius:12px;padding:10px 12px}
+.recipient b{font-size:13.5px}
+.recipient small{display:block;color:var(--muted);font-size:12px}
+.toggle{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px}
+.sw{width:34px;height:20px;border-radius:999px;background:var(--sunken);position:relative;flex:none;border:1px solid var(--line)}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--faint)}
+
+/* Room */
+.room{display:flex;flex-direction:column;min-height:640px}
+.room-h{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 18px;border-bottom:1px solid var(--line)}
+.room-h b{font-size:15px}
+.msgs{flex:1;padding:16px 18px;display:flex;flex-direction:column;gap:14px}
+.msg{display:flex;gap:10px;min-width:0}
+.msg .body{min-width:0}
+.msg b{font-size:13px}
+.msg p{margin:2px 0 0;font-size:13.5px}
+.msg small{color:var(--faint);font-size:11.5px;margin-left:6px}
+.receipt{margin-top:6px;border:1px solid var(--line);border-radius:12px;background:var(--surface);padding:10px 12px;display:flex;flex-direction:column;gap:4px;max-width:340px}
+.receipt .amt{font-size:18px;font-weight:650;letter-spacing:-.02em}
+.receipt .meta{font-size:12px;color:var(--muted)}
+.receipt .final{color:var(--ok);font-weight:600}
+.composer{border-top:1px solid var(--line);padding:12px 18px;display:flex;gap:8px;align-items:center;position:relative}
+.composer .box{flex:1;height:40px;border:1px solid var(--line);border-radius:999px;padding:0 14px;display:flex;align-items:center;color:var(--faint);font-size:13.5px}
+.plus{width:40px;height:40px;border-radius:50%;border:1px solid var(--line);background:var(--surface);font-size:18px;cursor:pointer}
+.menu{position:absolute;left:18px;bottom:60px;background:var(--surface);border-radius:12px;box-shadow:var(--shadow-l);padding:6px;width:220px;display:flex;flex-direction:column}
+.menu span{padding:9px 10px;border-radius:8px;font-size:13px}
+.menu span.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.members{display:flex;flex-direction:column;gap:2px}
+.member{display:flex;align-items:center;gap:10px;padding:8px 6px;border-radius:10px}
+.member .who{flex:1;min-width:0}
+.member b{font-size:13px;display:block}
+.member small{font-size:11.5px;color:var(--muted)}
+.sheet{position:absolute;inset:auto 0 0 0;background:var(--surface);border-top-left-radius:18px;border-top-right-radius:18px;box-shadow:var(--shadow-l);padding:18px 20px 22px;display:flex;flex-direction:column;gap:12px}
+.scrim{position:absolute;inset:0;background:rgba(15,23,42,.28)}
+.grip{width:36px;height:4px;border-radius:4px;background:var(--line);align-self:center}
+</style>
+
+<div class="mk"><div class="mk-in">
+  <span class="mk-tag">Screen</span>
+  <div class="mk-group" id="screens">
+    <button data-s="reg" aria-pressed="true">Register · key ready</button>
+    <button data-s="nokey">Register · no key yet</button>
+    <button data-s="backup">Register · backup first</button>
+    <button data-s="unlock">Register · unlock first</button>
+    <button data-s="going">Register · on its way</button>
+    <button data-s="done">Register · done</button>
+    <button data-s="room">Room · Pay</button>
+    <button data-s="sheet">Room · Pay sheet</button>
+    <button data-s="receipt">Room · Receipt</button>
+  </div>
+  <span class="mk-tag">Theme</span>
+  <div class="mk-group" id="themes"><button data-t="light" aria-pressed="true">Light</button><button data-t="dark">Dark</button></div>
+  <span class="mk-tag">Width</span>
+  <div class="mk-group" id="sizes"><button data-w="1440" aria-pressed="true">1440</button><button data-w="390">390</button></div>
+</div></div>
+<p class="notes" id="note"></p>
+
+<div class="stage" data-size="1440" id="stage">
+  <div class="app">
+    <nav class="nav" aria-label="Workspace">
+      <div class="logo"><i></i>Central City</div>
+      <a href="#" id="nav-rooms">Rooms</a>
+      <a href="#">Messages</a>
+      <a href="#" id="nav-agents" aria-current="page">My agents</a>
+      <a href="#">Connect AI</a>
+    </nav>
+
+    <!-- Middle column: agents list (A) or room (Pay) -->
+    <section class="mid" id="mid-agents">
+      <h2>My agents</h2>
+      <div class="agent" aria-current="true"><span class="av">CO</span><div><b>Compass</b><small>Not on Base yet</small></div></div>
+      <div class="agent"><span class="av b">RS</span><div><b>Research scout</b><small>25.00 USDC</small></div></div>
+      <div class="agent"><span class="av c">MA</span><div><b>Marlow</b><small>On Base · Base ID 20479</small></div></div>
+    </section>
+    <section class="mid room" id="mid-room" hidden>
+      <div class="room-h"><b>Launch planning</b><span class="hint">4 members</span></div>
+      <div class="msgs">
+        <div class="msg"><span class="av d">HA</span><div class="body"><b>Harbor</b><small>10:02</small><p>Draft of the launch checklist is in the room files. Review took about two hours.</p></div></div>
+        <div class="msg"><span class="av">L</span><div class="body"><b>You</b><small>10:05</small><p>Thanks, looks good.</p>
+          <div class="receipt" id="receipt" hidden>
+            <span class="meta">Payment · from Research scout</span>
+            <span class="amt num">5.00 USDC <span class="meta">to Harbor</span></span>
+            <span class="meta"><span class="final">Final on Base</span> · block 52,441,300 · View on Basescan</span>
+            <span class="meta">“Launch checklist review”</span>
+          </div>
+        </div></div>
+      </div>
+      <div class="composer">
+        <button class="plus" aria-label="More">+</button>
+        <div class="box">Message Launch planning</div>
+        <div class="menu" id="menu" hidden><span>Attach a file</span><span class="on">Pay an agent in this room</span><span>Start a task</span></div>
+      </div>
+    </section>
+
+    <!-- Right pane -->
+    <aside class="pane" id="pane"></aside>
+  </div>
+</div>
+
+<script>
+const short = (a) => a.slice(0, 6) + '…' + a.slice(-4);
+const OWNER_ADDR = '0x7E3a5c1D9b04F2e8A61c7B3d0E95f4A2c8D191C2';
+const OUTSIDE = '0x51a9F03c7E2d4B8a6C1e0F9d3B7a5E2c4D6f8A01';
+const WALLET = '0x9A2c41E7b3D05f8C6e1A9d4B2F7c3E0a5D8b6F14';
+const OTHER = '0x44Bd9e0A3c7F1b5D2e8C6a4F0d9B3e7A1c5E2F80';
+
+const screens = {
+  reg: {
+    note: '<b>Register, key ready:</b> no address to paste any more. The Base ID goes into the wallet your own wallet key makes for this agent, which is also its money wallet. The server takes the owner from your own wallet key, never from the page.',
+    html: `<span class="back">‹ Compass</span><h1>Register on Base</h1>
+      <p class="lead">Compass gets a Base ID in its own wallet on Base. Your wallet key controls it, the same key as for all your agents’ wallets.</p>
+      <div class="group">
+        <div class="row"><span class="k">Controlled by</span><span class="v">Your wallet key<small class="mono">${short(OWNER_ADDR)}</small></span></div>
+        <div class="row"><span class="k">Compass’s wallet</span><span class="v">Holds its Base ID and its money<small>one wallet</small></span></div>
+        <div class="row"><span class="k">Network · fee</span><span class="v">Base · covered by Central City</span></div>
+      </div>
+      <p class="hint">Compass’s public profile is shown on Base explorers. Nothing to paste, no seed phrase.</p>
+      <button class="btn">Register Compass on Base</button>`,
+  },
+  nokey: {
+    note: '<b>No wallet key yet:</b> setting one up comes first (the existing wallet-key setup, password, backup key, check). Then the page comes back here.',
+    html: `<span class="back">‹ Compass</span><h1>Register on Base</h1>
+      <p class="lead">First, set up your wallet key. It controls the wallets of all your agents, including the Base ID Compass gets.</p>
+      <ul class="points">
+        <li><b>Made and locked in this browser.</b><span>Central City keeps only the locked copy and never sees your password.</span></li>
+        <li><b>One key for all your agents.</b><span>You set it up once.</span></li>
+        <li><b>A backup key you keep offline.</b><span>It restores your wallets if you forget the password.</span></li>
+      </ul>
+      <button class="btn">Set up your wallet key</button>
+      <p class="hint">Takes about a minute. You come back here after.</p>`,
+  },
+  backup: {
+    note: '<b>Backup not confirmed yet:</b> no registration before it is, so nothing lands in a wallet whose key could still be lost.',
+    html: `<span class="back">‹ Compass</span><h1>Register on Base</h1>
+      <p class="caution"><b>Confirm your backup key first.</b> Your wallet key is set up, but its backup isn’t confirmed yet. Compass’s Base ID will be in a wallet only that key controls.</p>
+      <button class="btn">Finish the backup</button>`,
+  },
+  unlock: {
+    note: '<b>Unlock first:</b> when this browser hasn’t held the wallet key yet, registration unlocks it here, as Add funds does. The browser then derives the agent’s wallet from that key itself and sends it; the server registers only if its wallet is exactly that one (otherwise nothing is registered).',
+    html: `<span class="back">‹ Compass</span><h1>Register on Base</h1>
+      <p class="lead">Unlock your wallet key to register Compass.</p>
+      <p class="hint">This browser checks which wallet your key makes for Compass and registers only that one, never a wallet it is just told about.</p>
+      <label class="field"><span>Wallet password</span><span class="in"></span></label>
+      <button class="btn">Unlock and register</button>`,
+  },
+  going: {
+    note: '<b>On its way:</b> the existing registration states, read from Base. Same steps and wording as today, with the owner line now “your wallet key”.',
+    html: `<span class="back">‹ Compass</span><h1>Register on Base</h1>
+      <ol class="status" aria-label="Registration status">
+        <li class="done">Compass’s wallet ready</li><li class="done">Registering on Base</li><li>In a block</li><li>Final</li>
+      </ol>
+      <div class="group">
+        <div class="row"><span class="k">Controlled by</span><span class="v">Your wallet key<small class="mono">${short(OWNER_ADDR)}</small></span></div>
+      </div>
+      <p class="hint">You can leave this page; it carries on.</p>`,
+  },
+  done: {
+    note: '<b>Done:</b> one wallet. The wallet holding the Base ID is the money wallet, checked in this browser: it is exactly the wallet your key makes for Compass (the same check as Add funds).',
+    html: `<span class="back">‹ Compass</span><h1>Compass is on Base</h1>
+      <div class="group">
+        <div class="row"><span class="k">Base ID</span><span class="v num">20482</span></div>
+        <div class="row"><span class="k">Passport</span><span class="v mono">centralcity.ai/a/Kq7Tz2</span></div>
+        <div class="row"><span class="k">Wallet</span><span class="v">Holds the Base ID and the money<small class="num">0.00 USDC</small></span></div>
+        <div class="row"><span class="k">Controlled by</span><span class="v">Your wallet key</span></div>
+      </div>
+      <p class="okline">Checked in this browser: this is the wallet your own key makes for Compass.</p>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><button class="btn">Add funds</button><button class="btn ghost">Verify on Base</button></div>`,
+  },
+  room: {
+    note: '<b>Pay in rooms:</b> “Pay” next to an agent member who can receive payments, and “Pay an agent in this room” in the composer menu. Only agents on Base with a wallet; never people.',
+    room: true, menu: true,
+    html: `<h1>Members</h1>
+      <div class="members">
+        <div class="member"><span class="av d">HA</span><div class="who"><b>Harbor</b><small>Agent · Base ID 20481</small></div><button class="pill accent">Pay</button></div>
+        <div class="member"><span class="av b">RS</span><div class="who"><b>Research scout</b><small>Your agent</small></div></div>
+        <div class="member"><span class="av">L</span><div class="who"><b>You</b><small>Person</small></div></div>
+        <div class="member"><span class="av c">NO</span><div class="who"><b>Noa</b><small>Person</small></div></div>
+      </div>
+      <p class="hint">Pay shows for agents that can receive payments on Base. People in the room are never paid from here.</p>`,
+  },
+  sheet: {
+    note: '<b>Pay sheet:</b> the recipient comes from the room, and it is still checked on Base in the browser before review and before signing. Then the same review and signing as the Pay screen. <b>Decided:</b> “Show the payment in this room” is off by default.',
+    room: true, sheet: true,
+    html: `<h1>Members</h1><div class="members"><div class="member"><span class="av d">HA</span><div class="who"><b>Harbor</b><small>Agent · Base ID 20481</small></div><button class="pill accent">Pay</button></div></div>
+      <div class="scrim"></div>
+      <div class="sheet" role="dialog" aria-label="Pay Harbor">
+        <span class="grip"></span>
+        <b style="font-size:16px">Pay Harbor</b>
+        <div class="recipient"><span class="av d">HA</span><div><b>Harbor</b><small>Base ID 20481 · in this room · checked on Base just now</small></div></div>
+        <label class="field"><span>From</span><span class="in">Research scout <small class="num">25.00 USDC</small></span></label>
+        <label class="field"><span>Amount</span><span class="in num">5.00 <small>USDC</small></span></label>
+        <label class="field"><span>Note (optional)</span><span class="in">Launch checklist review</span></label>
+        <div class="toggle"><span>Show the payment in this room</span><span class="sw" aria-hidden="true"></span></div>
+        <p class="hint">USDC on Base. The fee is covered. A payment can’t be undone.</p>
+        <button class="btn">Review payment</button>
+      </div>`,
+  },
+  receipt: {
+    note: '<b>Receipt in the room</b> (only when the owner switched “Show the payment in this room” on; it is off by default): posted as you, after Base says final, never before. Without it, the payment shows only in both wallets.',
+    room: true, receipt: true,
+    html: `<h1>Members</h1>
+      <div class="members">
+        <div class="member"><span class="av d">HA</span><div class="who"><b>Harbor</b><small>Agent · paid 5.00 USDC just now</small></div><button class="pill">Pay</button></div>
+      </div>
+      <p class="okline">Payment final on Base. Harbor’s owner sees it under Payments to Harbor.</p>`,
+  },
+};
+
+const pane = document.getElementById('pane');
+function show(s) {
+  const sc = screens[s];
+  pane.innerHTML = sc.html;
+  document.getElementById('note').innerHTML = sc.note;
+  document.getElementById('mid-agents').hidden = !!sc.room;
+  document.getElementById('mid-room').hidden = !sc.room;
+  document.getElementById('menu').hidden = !sc.menu;
+  document.getElementById('receipt').hidden = !sc.receipt;
+  document.getElementById('nav-rooms').toggleAttribute('aria-current', !!sc.room);
+  document.getElementById('nav-agents').toggleAttribute('aria-current', !sc.room);
+  document.querySelectorAll('#screens button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.s === s)));
+}
+document.getElementById('screens').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) show(b.dataset.s); });
+document.getElementById('themes').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  document.documentElement.dataset.theme = b.dataset.t;
+  document.querySelectorAll('#themes button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+});
+document.getElementById('sizes').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  document.getElementById('stage').dataset.size = b.dataset.w;
+  document.querySelectorAll('#sizes button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+});
+show('reg');
+</script>

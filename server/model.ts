@@ -11,10 +11,12 @@ import type {
 
 export const PRESENCE_TTL = 90_000;
 export const LEASE_TTL = 60_000;
-export interface StoredAgent extends Omit<Agent, 'status'> {
+export interface StoredAgent extends Omit<Agent, 'status' | 'credentialHint'> {
   lastSequence: number;
   announcedOnline: boolean;
   demoKey?: string;
+  /** Last 4 characters of the current runtime credential; only ownerAgent shows it. */
+  credentialHint?: string;
 }
 export interface StoredJob extends Job {
   idempotencyKey: string;
@@ -72,7 +74,13 @@ export function reachable(agent: StoredAgent, time: number): boolean {
   );
 }
 export function publicAgent(agent: StoredAgent, jobs: StoredJob[], time: number): Agent {
-  const { lastSequence: _sequence, announcedOnline: _online, demoKey: _demoKey, ...fields } = agent;
+  const {
+    lastSequence: _sequence,
+    announcedOnline: _online,
+    demoKey: _demoKey,
+    credentialHint: _hint,
+    ...fields
+  } = agent;
   return {
     ...fields,
     status: agent.revokedAt
@@ -82,6 +90,13 @@ export function publicAgent(agent: StoredAgent, jobs: StoredJob[], time: number)
         : jobs.some((job) => job.providerId === agent.id && job.status === 'running')
           ? 'working'
           : 'online',
+  };
+}
+/** publicAgent plus what only the owner sees: the masked runtime credential hint. */
+export function ownerAgent(agent: StoredAgent, jobs: StoredJob[], time: number): Agent {
+  return {
+    ...publicAgent(agent, jobs, time),
+    credentialHint: agent.credentialHint ? `…${agent.credentialHint}` : null,
   };
 }
 export function publicJob(job: StoredJob): Job {
@@ -217,7 +232,7 @@ export function syncWorkflows(workspace: Workspace, time: number): void {
   }
 }
 export function snapshot(workspace: Workspace, operator: Operator, time: number): Snapshot {
-  const agents = workspace.agents.map((agent) => publicAgent(agent, workspace.jobs, time));
+  const agents = workspace.agents.map((agent) => ownerAgent(agent, workspace.jobs, time));
   return {
     operator,
     paused: workspace.paused,

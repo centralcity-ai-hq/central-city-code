@@ -11,7 +11,8 @@ import {
 /**
  * Versioned built-in manifest templates. A template version is immutable: changing content means
  * publishing a new version, so `template:<id>@<version>` always resolves to the same document and
- * resolved manifest hashes stay stable.
+ * resolved manifest hashes stay stable. The listing `title` and `description` (outside `manifest`)
+ * are catalog copy: never resolved or hashed, so they may be reworded within a version.
  */
 export interface AgentTemplate {
   kind: 'Agent';
@@ -101,7 +102,8 @@ export const BUILTIN_TEMPLATE_SOURCES: readonly TemplateSource[] = [
     id: 'research-analyst',
     version: '1.0.0',
     title: 'Research analyst',
-    description: 'Organizes supplied text into a short brief with source URLs. Zero-cost demo.',
+    description:
+      'Organizes supplied text into a short brief with source URLs. Zero-cost, deterministic built-in agent that runs on Central City.',
     manifest: {
       apiVersion: MANIFEST_API_VERSION,
       kind: 'Agent',
@@ -123,7 +125,7 @@ export const BUILTIN_TEMPLATE_SOURCES: readonly TemplateSource[] = [
             name: 'Research brief',
             description:
               'Turns supplied text into a short brief and lists its source URLs for independent checking.',
-            tags: ['research', 'brief', 'demo'],
+            tags: ['research', 'brief', 'cc-agent'],
             ...text,
             examples: ['Summarize these notes and list their sources.'],
           },
@@ -138,7 +140,8 @@ export const BUILTIN_TEMPLATE_SOURCES: readonly TemplateSource[] = [
     id: 'extractor',
     version: '1.0.0',
     title: 'Extractor',
-    description: 'Extracts key/value fields, URLs and numbers from supplied text. Zero-cost demo.',
+    description:
+      'Extracts key/value fields, URLs and numbers from supplied text. Zero-cost, deterministic built-in agent that runs on Central City.',
     manifest: {
       apiVersion: MANIFEST_API_VERSION,
       kind: 'Agent',
@@ -157,7 +160,7 @@ export const BUILTIN_TEMPLATE_SOURCES: readonly TemplateSource[] = [
             id: 'field-extraction',
             name: 'Field extraction',
             description: 'Returns key/value fields, URLs and numbers found in the supplied text.',
-            tags: ['extract', 'fields', 'demo'],
+            tags: ['extract', 'fields', 'cc-agent'],
             ...text,
             examples: ['Invoice amount: 42'],
           },
@@ -173,7 +176,7 @@ export const BUILTIN_TEMPLATE_SOURCES: readonly TemplateSource[] = [
     version: '1.0.0',
     title: 'Fact checker (structural)',
     description:
-      'Runs structural checks on supplied text. Does not verify factual accuracy. Zero-cost demo.',
+      'Runs structural checks on supplied text. Does not verify factual accuracy. Zero-cost, deterministic built-in agent that runs on Central City.',
     manifest: {
       apiVersion: MANIFEST_API_VERSION,
       kind: 'Agent',
@@ -195,7 +198,7 @@ export const BUILTIN_TEMPLATE_SOURCES: readonly TemplateSource[] = [
             name: 'Structural check',
             description:
               'Reports whether supplied text is non-empty, cites a source URL and is valid JSON.',
-            tags: ['verify', 'checks', 'demo'],
+            tags: ['verify', 'checks', 'cc-agent'],
             ...text,
             examples: ['Check this brief before I rely on it.'],
           },
@@ -218,7 +221,8 @@ export const BUILTIN_TEMPLATE_SOURCES: readonly TemplateSource[] = [
       metadata: {
         name: 'research-team',
         displayName: 'Research team',
-        description: 'Requester → researcher → checker. Zero-cost hosted demo agents.',
+        // Hashed into this version's team_hash: reword only in a new template version.
+        description: 'Requester → researcher → checker. Zero-cost hosted CC agents.',
       },
       spec: {
         coordinator: 'requester',

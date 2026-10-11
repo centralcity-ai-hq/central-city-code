@@ -72,6 +72,9 @@ export function Status() {
 
   return (
     <>
+      <p className="trust-lead">
+        Live health checks for Central City services and APIs, run directly from your browser.
+      </p>
       <p className={`trust-status-summary is-${overall}`} role="status" aria-live="polite">
         <span className="trust-status-dot" aria-hidden="true" />
         {summary[overall]}
@@ -79,17 +82,26 @@ export function Status() {
       <ul className="trust-checks">
         {checks.map((check) => (
           <li key={check.id} data-check={check.id} data-state={check.state}>
-            <span>{check.label}</span>
+            <span className="trust-check-info">
+              <span className="trust-check-name">{check.label}</span>
+              <code className="trust-check-endpoint">GET {check.url}</code>
+            </span>
             <span className={`trust-check-state is-${check.state}`}>
+              <span className="trust-check-dot" aria-hidden="true" />
               {WORDS[check.state]}
-              {check.ms !== null ? ` · ${check.ms} ms` : ''}
+              {check.ms !== null ? <span className="trust-check-ms"> · {check.ms} ms</span> : null}
             </span>
           </li>
         ))}
       </ul>
-      <p className="trust-status">
+      <p className="trust-status trust-status-bar">
         {checkedAt ? `Checked from your browser at ${checkedAt.toLocaleTimeString()}. ` : null}
-        <button type="button" className="button" onClick={() => void run()} disabled={!done}>
+        <button
+          type="button"
+          className="button secondary"
+          onClick={() => void run()}
+          disabled={!done}
+        >
           Check again
         </button>
       </p>

@@ -201,3 +201,134 @@ test('without a valid root key the routes answer 503 and log the reason, not the
   assert.ok(lines.includes('responder.unavailable reason=invalid'));
   assert.equal(lines.join('\n').includes('not-32-bytes'), false);
 });
+
+test("answering: Auto-reply on with a working key, or a connected runtime; another owner's agent is refused", async (t) => {
+  const { app, agent, call, register } = await setup(t);
+  const url = `/api/agents/${agent.id}/answering`;
+  const read = async () => {
+    const res = await call('GET', url);
+    assert.equal(res.statusCode, 200, res.body);
+    return res.json();
+  };
+  // A new external agent: no Auto-reply, never connected.
+  assert.deepEqual(await read(), {
+    agent_id: agent.id,
+    can: false,
+    by: null,
+    auto_reply: 'none',
+    runtime_connected: false,
+    scripted: false,
+  });
+  // A working key, then on: it answers through Auto-reply.
+  const key = await call('POST', `/api/agents/${agent.id}/responder/key`, {
+    provider: 'anthropic',
+    key: FAKE_ANTHROPIC,
+  });
+  assert.equal(key.statusCode, 200, key.body);
+  assert.equal((await read()).auto_reply, 'off');
+  assert.equal(
+    (await call('PUT', `/api/agents/${agent.id}/responder`, { enabled: true })).statusCode,
+    200,
+  );
+  assert.deepEqual(await read(), {
+    agent_id: agent.id,
+    can: true,
+    by: 'auto_reply',
+    auto_reply: 'on',
+    runtime_connected: false,
+    scripted: false,
+  });
+  // A key the provider no longer accepts leaves Auto-reply on but not answering: paused.
+  await app.city.db.query("UPDATE responder_credentials SET status='invalid' WHERE agent_id=$1", [
+    agent.id,
+  ]);
+  assert.deepEqual(
+    { can: (await read()).can, auto_reply: (await read()).auto_reply },
+    { can: false, auto_reply: 'paused' },
+  );
+  // Its runtime connected (seen just now): it answers itself.
+  const seen = (at: number) =>
+    app.city.db.query(
+      `INSERT INTO agent_presence(agent_id, operator_id, last_seen_at, sequence, updated_at)
+       SELECT $1, operator_id, $2, 1, $2 FROM workspaces
+        WHERE data->'agents' @> jsonb_build_array(jsonb_build_object('id', $1::text))
+       ON CONFLICT (agent_id) DO UPDATE SET last_seen_at=EXCLUDED.last_seen_at`,
+      [agent.id, at],
+    );
+  await seen(Date.now());
+  const live = await read();
+  assert.equal(live.runtime_connected, true, JSON.stringify(live));
+  assert.deepEqual(
+    { can: live.can, by: live.by, scripted: live.scripted },
+    { can: true, by: 'runtime', scripted: false },
+  );
+  // Seen longer ago than the presence window: not connected any more.
+  await seen(Date.now() - 10 * 60_000);
+  assert.equal((await read()).runtime_connected, false);
+  // Only the owner: another owner gets the uniform 404, no session is refused.
+  const other = await register('Other answering owner');
+  assert.equal((await call('GET', url, undefined, other)).statusCode, 404);
+  assert.ok((await call('GET', url, undefined, '')).statusCode >= 401);
+});
+
+/*
+ * Regression (live, 11 Oct): the owner's room host "Lion", a CC agent (hosted, isDemo: "Create a
+ * CC agent", or the host New room makes), answered can:true by:'runtime' once its synthetic
+ * heartbeat was fresh, so "Lion can't reply here yet" was hidden under "hey @Lion", although its
+ * scripted runtime never posts in a room or a chat. Its heartbeat is reported, never counted.
+ */
+test("answering: a CC agent's scripted runtime never answers; only its Auto-reply does", async (t) => {
+  const { app, call } = await setup(t);
+  const created = await call('POST', '/api/agents', {
+    name: 'Lion',
+    description: 'Synthetic CC agent',
+    capability: 'research',
+    mode: 'hosted',
+  });
+  assert.equal(created.statusCode, 201, created.body);
+  const lion = (created.json() as { agent: Agent }).agent;
+  assert.deepEqual({ mode: lion.mode, isDemo: lion.isDemo }, { mode: 'hosted', isDemo: true });
+  const url = `/api/agents/${lion.id}/answering`;
+  const read = async () => {
+    const res = await call('GET', url);
+    assert.equal(res.statusCode, 200, res.body);
+    return res.json();
+  };
+  // The platform's own tick refreshes the hosted heartbeat (server/app.ts refreshPresence).
+  await app.city.tick();
+  const snapshot = await call('GET', '/api/snapshot');
+  const stored = (snapshot.json() as { agents: Agent[] }).agents.find((a) => a.id === lion.id)!;
+  assert.ok(stored.lastSeenAt, 'the scripted runtime has a fresh heartbeat');
+  // Connected, truthfully, but it can't answer: the exact shape the console now gets.
+  assert.deepEqual(await read(), {
+    agent_id: lion.id,
+    can: false,
+    by: null,
+    auto_reply: 'none',
+    runtime_connected: true,
+    scripted: true,
+  });
+  // A key, Auto-reply still off: it still can't answer.
+  const key = await call('POST', `/api/agents/${lion.id}/responder/key`, {
+    provider: 'anthropic',
+    key: FAKE_ANTHROPIC,
+  });
+  assert.equal(key.statusCode, 200, key.body);
+  assert.deepEqual(
+    { can: (await read()).can, auto_reply: (await read()).auto_reply },
+    { can: false, auto_reply: 'off' },
+  );
+  // Auto-reply on and working: it answers, through Auto-reply.
+  assert.equal(
+    (await call('PUT', `/api/agents/${lion.id}/responder`, { enabled: true })).statusCode,
+    200,
+  );
+  assert.deepEqual(await read(), {
+    agent_id: lion.id,
+    can: true,
+    by: 'auto_reply',
+    auto_reply: 'on',
+    runtime_connected: true,
+    scripted: true,
+  });
+});

@@ -50,7 +50,12 @@
             "provider": { "type": "string", "enum": ["openai", "anthropic", "elric"] },
             "model": { "type": "string" },
             "label": { "type": "string" },
-            "pending_id": { "type": "string" }
+            "pending_id": { "type": "string" },
+            "reply_to": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            }
           },
           "required": ["provider", "model"]
         },

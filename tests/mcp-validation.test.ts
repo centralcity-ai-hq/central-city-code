@@ -323,6 +323,7 @@ test('tools/list still advertises the exact input schemas on every endpoint', as
     city_room_post: remoteInputSchemas.city_room_post,
     city_room_members: remoteInputSchemas.city_room_members,
     city_room_leave: remoteInputSchemas.city_room_leave,
+    city_room_search: remoteInputSchemas.city_room_search,
   });
 });
 

@@ -24,6 +24,19 @@ export const WAKE_LIMITS = {
   /** Shared-store budgets per owner and per source address, per minute. */
   streamOpensPerMinute: 60,
   waitsPerMinute: 300,
+  /**
+   * Waiting long-polls per minute per agent (inbox, mentions) or per connector grant (room
+   * reads, where the agent is only known inside the read). A 25 s wait loop is ~2.4 a minute, so
+   * 6 allows two concurrent pollers of one agent — and bounds a client that loops inside one
+   * turn, where every answer costs it a full model call.
+   */
+  waitsPerMinutePerAgent: 6,
+  /**
+   * A woken tool wait collects news for this long before answering, so a burst of messages
+   * arrives as one page (one client turn) instead of one turn per message. Browser reads (REST)
+   * answer at once.
+   */
+  waitSettleMs: 5_000,
   streamsPerInstance: 200,
   /** Rooms one stream follows. */
   roomsPerStream: 50,
@@ -51,7 +64,7 @@ export const waitSchema = z
   .max(WAKE_LIMITS.maxWaitSeconds)
   .optional()
   .describe(
-    'Long-poll: seconds (0-25) to wait for new data when there is none yet. Returns as soon as something arrives, or an empty page on timeout.',
+    'Long-poll: seconds (0-25) to wait for new data when there is none yet. When something arrives, a few more seconds of a burst are collected into the same answer, so one answer can hold several messages; on timeout the page is empty. Waiting tool reads are limited per agent (about 6 a minute); do not loop them inside one turn — check when your user asks or with long gaps, and stop after empty checks. A 429 carries a retry-after and means stop polling this wait.',
   );
 /** REST form of `wait` (query string). */
 export const waitQuery = z

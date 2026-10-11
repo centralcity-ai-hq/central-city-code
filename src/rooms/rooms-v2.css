@@ -1,0 +1,230 @@
+/*
+ * Smart Rooms v2 (preview): design tokens and base surfaces.
+ * Applies only under [data-rooms='v2'], which the rooms app root carries when the rooms_v2
+ * preview flag is on (src/rooms/roomsV2.ts). With the flag off nothing here matches.
+ *
+ * The global token names from src/shell/tokens.css are reused where they mean the same thing,
+ * so every existing rooms rule picks up the v2 values; --rv2-* tokens exist only where no global
+ * name fits. The component aliases (--canvas, --surface, --text, --primary...) are declared again
+ * here because a custom property resolves where it is declared: overriding --bg-page alone would
+ * not change --canvas below :root.
+ *
+ * Colour rules: no orange. Blue accent and neutral greys; green only for done/success; red only
+ * for destructive actions. --warning (amber in v1) is therefore blue here.
+ * Dark follows the site's theme mechanism: html[data-theme='dark'] (src/shell/theme.ts).
+ * Text pairs meet WCAG AA (4.5:1) in both themes: tests/rooms-v2-tokens.test.ts.
+ *
+ * Workspace v3 (docs/design/WORKSPACE_V3.md §2): the same tokens also apply to the whole
+ * signed-in workspace (.app-shell[data-workspace='v2']), so the sidebar, every page and the rooms
+ * share one canvas. The only amber is --status-warn ("in progress"), which the v3 spec adds.
+ * Three v3 values are kept a shade darker so text stays at AA: --status-live (#15803d, spec
+ * #16a34a), the grey fills under muted text (--bg-surface, --bg-surface-hover: #f8fafc) and
+ * --text-muted (#5f6f86, spec #64748b), which is 4.4:1 on --bg-inset at the spec value.
+ */
+
+/* Light (the site default) */
+.app-shell[data-workspace='v2'],
+.rm-app[data-rooms='v2'] {
+  /* Surfaces */
+  --bg-page: #ffffff;
+  --bg-page-2: #f6f8fc;
+  --bg-sidebar: #fbfcfe;
+  --bg-surface: #f8fafc;
+  --bg-surface-elevated: #ffffff;
+  --bg-surface-hover: #f8fafc;
+  --bg-surface-active: #e2e8f0;
+  --bg-inset: #f4f6fa;
+
+  /* Borders */
+  --border-subtle: rgba(15, 23, 42, 0.06);
+  --border: #e5e9f0;
+  --border-strong: rgba(15, 23, 42, 0.18);
+  --border-focus: #2563eb;
+
+  /* Text */
+  --text-primary: #0f172a;
+  --text-secondary: #334155;
+  --text-muted: #5f6f86;
+  --text-faint: #94a3b8;
+  --text-inverse: #ffffff;
+
+  /* Accent: one blue */
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-active: #1e40af;
+  --accent-subtle: #eaf1ff;
+  --accent-border: #c7d7fb;
+  --accent-text: #1d4ed8;
+  --accent-contrast: #ffffff;
+
+  /* States: green = done, red = destructive, "pending" is blue, amber only for "in progress" */
+  --status-live: #15803d;
+  --status-live-bg: rgba(22, 163, 74, 0.08);
+  --status-pending: #1d4ed8;
+  --status-pending-bg: rgba(37, 99, 235, 0.08);
+  --status-warn: #b45309;
+  --status-warn-bg: #fff7ed;
+  --status-warn-line: #fed7aa;
+  --status-danger: #dc2626;
+  --status-danger-bg: rgba(220, 38, 38, 0.08);
+
+  /* Shadows: soft and low; floating surfaces (cards, pills, menus) use the v3 pair */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.03);
+  --shadow-card: 0 4px 12px rgba(0, 0, 0, 0.05), 0 1px 3px rgba(0, 0, 0, 0.03);
+  --shadow-elevated: 0 14px 40px rgba(15, 23, 42, 0.08);
+  --shadow-float-sm: 0 6px 18px rgba(15, 23, 42, 0.06);
+  --shadow-floating: 0 24px 48px rgba(15, 23, 42, 0.18), 0 4px 12px rgba(15, 23, 42, 0.06);
+
+  /* Radii: softer than v1 */
+  --radius-s: 8px;
+  --radius-m: 12px;
+  --radius-l: 16px;
+  --radius-xl: 22px;
+  --radius-sm: 6px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+
+  /* Type: 15px body; the rest of the scale is unchanged */
+  --type-body: 400 calc(15 * var(--ws-type-px)) / calc(22 * var(--ws-type-px)) var(--font-sans);
+
+  /* New tokens (no global equivalent) */
+  --rv2-glass: rgba(255, 255, 255, 0.82);
+  --rv2-radius-2xl: 28px;
+  --rv2-type-caption: 400 12px/16px var(--font-sans);
+  --rv2-focus-ring: 0 0 0 2px var(--bg-surface-elevated), 0 0 0 4px var(--focus);
+
+  /* Component aliases, resolved against the values above */
+  --canvas: var(--bg-page);
+  --surface: var(--bg-surface-elevated);
+  --surface-sunken: var(--bg-surface);
+  --surface-raised: var(--bg-surface-elevated);
+  --text: var(--text-primary);
+  --border-control: var(--border-strong);
+  --primary: var(--accent);
+  --primary-hover: var(--accent-hover);
+  --on-primary: var(--accent-contrast);
+  --accent-tint: var(--accent-subtle);
+  --link: var(--accent-text);
+  --focus: var(--border-focus);
+  --mention: var(--accent-text);
+  --mention-tint: var(--accent-subtle);
+  --success: var(--status-live);
+  --success-tint: var(--status-live-bg);
+  --error: var(--status-danger);
+  --error-tint: var(--status-danger-bg);
+  --backdrop: rgba(15, 23, 42, 0.4);
+  --elev-1: var(--shadow-sm);
+  --elev-2: var(--shadow-card);
+  --elev-3: var(--shadow-floating);
+}
+
+/* Rooms only: "pending" is blue there. The rest of the workspace keeps an amber --warning
+   (--status-warn, src/shell/workspace-navigation.css), e.g. Elric's usage meters. */
+.rm-app[data-rooms='v2'] {
+  --warning: var(--status-pending);
+  --warning-tint: var(--status-pending-bg);
+}
+
+/* Dark: only when the visitor picked it (html[data-theme='dark']) */
+:root[data-theme='dark'] .app-shell[data-workspace='v2'],
+:root[data-theme='dark'] .rm-app[data-rooms='v2'] {
+  --bg-page: #0b1020;
+  --bg-page-2: #0d1326;
+  --bg-sidebar: #0e152a;
+  --bg-surface: #0d1326;
+  --bg-surface-elevated: #121a31;
+  --bg-surface-hover: #18213b;
+  --bg-surface-active: #24304c;
+  --bg-inset: #18213b;
+
+  --border-subtle: rgba(255, 255, 255, 0.07);
+  --border: #243049;
+  --border-strong: rgba(255, 255, 255, 0.22);
+  --border-focus: #5b8cff;
+
+  --text-primary: #eef2f8;
+  --text-secondary: #cbd5e1;
+  --text-muted: #a3b0c6;
+  --text-faint: #6b7a96;
+  --text-inverse: #0b1020;
+
+  --accent: #5b8cff;
+  --accent-hover: #93c5fd;
+  --accent-active: #3b82f6;
+  --accent-subtle: #1a2a52;
+  --accent-border: #2c4380;
+  --accent-text: #60a5fa;
+  --accent-contrast: #ffffff;
+
+  --status-live: #4ade80;
+  --status-live-bg: rgba(74, 222, 128, 0.14);
+  --status-pending: #93c5fd;
+  --status-pending-bg: rgba(96, 165, 250, 0.14);
+  --status-warn: #fbbf24;
+  --status-warn-bg: #33260c;
+  --status-warn-line: #5c4312;
+  --status-danger: #f87171;
+  --status-danger-bg: rgba(248, 113, 113, 0.14);
+
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.24);
+  --shadow-card: 0 4px 16px rgba(0, 0, 0, 0.32);
+  --shadow-elevated: 0 14px 40px rgba(0, 0, 0, 0.35);
+  --shadow-float-sm: 0 6px 18px rgba(0, 0, 0, 0.3);
+  --shadow-floating: 0 24px 60px rgba(0, 0, 0, 0.65), 0 4px 16px rgba(0, 0, 0, 0.3);
+
+  --rv2-glass: rgba(18, 26, 49, 0.82);
+
+  /*
+   * Filled buttons keep a deeper blue so white text stays above 4.5:1.
+   * Rule: dark --accent (#60a5fa) must never be a fill under white text (about 2.5:1, fails AA);
+   * it is for text, borders and tints only. Only --primary may be a fill under white text.
+   */
+  --primary: #2563eb;
+  --primary-hover: #1d4ed8;
+  --mention: #93c5fd;
+  --mention-tint: rgba(96, 165, 250, 0.18);
+  --backdrop: rgba(0, 0, 0, 0.6);
+}
+
+/* Base surfaces: calm canvas, white (or raised dark) panels and cards, hairline borders. */
+.rm-app[data-rooms='v2'] .rm-sidebar {
+  background-color: var(--surface);
+  border-right-color: var(--border);
+}
+.rm-app[data-rooms='v2'] .rm-room-head {
+  background: var(--surface);
+  border-bottom-color: var(--border-subtle);
+}
+.rm-app[data-rooms='v2'] .rm-room-head .rm-outline,
+.rm-app[data-rooms='v2'] .rm-room-head .rm-primary {
+  border-radius: var(--radius-full);
+}
+.rm-app[data-rooms='v2'] .rm-room-head .rm-outline {
+  border-color: var(--border);
+}
+.rm-app[data-rooms='v2'] .rm-panel {
+  background: var(--surface);
+  border-left-color: var(--border);
+}
+.rm-app[data-rooms='v2'] .rm-sheet {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xl);
+}
+.rm-app[data-rooms='v2'] .rm-own-bubble {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-l);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+.rm-app[data-rooms='v2'] .rm-task {
+  border-color: var(--border-subtle);
+  box-shadow: var(--shadow-sm);
+}
+.rm-app[data-rooms='v2'] .rm-compose-card {
+  border-color: var(--border);
+  box-shadow: var(--shadow-card);
+}
+.rm-app[data-rooms='v2'] .rm-composer .rm-primary,
+.rm-app[data-rooms='v2'] .rm-composer .rm-quiet {
+  border-radius: var(--radius-full);
+}

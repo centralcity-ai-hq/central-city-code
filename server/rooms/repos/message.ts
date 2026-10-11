@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Transaction as Tx } from '../../database.js';
 import type { StoredAgent, Workspace } from '../../model.js';
 import { ROOM_LIMITS } from '../contract.js';
-import { touchMembers } from '../member-status.js';
+import { recordPost } from '../overview.js';
 import { roomPosted } from '../../wake/hooks.js';
 import { refuseIfMuted } from '../service.js';
 import { refuse, type MemberRow } from './access.js';
@@ -66,7 +66,9 @@ export async function postObjectMessage(
   ).rows[0]!;
   if (room.closed_at !== null) refuse(409, 'room_closed', 'The room is closed.');
   // The host muted this owner (migration 35): no proposal or review message in the thread either.
-  await refuseIfMuted(tx, input.roomId, input.ownerId);
+  // Repo writers are always agent members (access.ts loads kind='agent' only), so a bulk
+  // "Mute all AIs" applies here as well as an individual mute.
+  await refuseIfMuted(tx, input.roomId, input.ownerId, 'agent');
   if (Number(room.next_seq) > ROOM_LIMITS.messagesPerRoom)
     refuse(
       429,
@@ -109,7 +111,9 @@ export async function postObjectMessage(
       ],
     )
   ).rows[0]!;
-  await touchMembers(tx, input.roomId, [input.agent.id], input.time);
+  // A member's message: counts toward its messages today (migration 64). An agent's own post, so
+  // its owner's cursors at the head move past it (no wake on its own message).
+  await recordPost(tx, input.roomId, input.agent.id, input.time, { seq, ownerId: input.ownerId });
   await roomPosted(tx as Tx, row);
   return seq;
 }

@@ -1,0 +1,174 @@
+/*
+ * My agents v4: the agent pane's Activity and Developer details screens
+ * (docs/design/my-agents-v4-mockup.html). They are pushed screens of the pane and use its classes
+ * and tokens (src/agents/v4/agent-pane.css: .ap4-wrap, .ap4-back, .ap4-title, .ap4-group,
+ * .ap4-row, .ap4-k, .ap4-v, .ap4-chev, .ap4-note, .ap4-btn). This file has only what the pane has
+ * no equivalent for: day headings, run status pills, two-line rows, monospace values, the spinner,
+ * the empty state and the copy note. Every length is calc(N * var(--ws-px)) and every font size
+ * calc(N * var(--ws-type-px)), as in the rest of the workspace.
+ */
+.ad4 {
+  --ad4-ok-soft: #ecfdf3;
+  --ad4-warn: #b45309;
+  --ad4-warn-soft: #fff7ed;
+  --ad4-bad-soft: #fef2f2;
+}
+:root[data-theme='dark'] .ad4 {
+  --ad4-ok-soft: #10301f;
+  --ad4-warn: #fbbf24;
+  --ad4-warn-soft: #33260c;
+  --ad4-bad-soft: #3a1717;
+}
+
+/* Rows that only show something: no pointer, no hover. */
+.ad4 .ap4-row.ad4-still {
+  cursor: default;
+}
+.ad4 .ap4-row.ad4-still:hover {
+  background: none;
+}
+.ad4-link {
+  text-decoration: none;
+}
+/* About is free text: it wraps under its label's line instead of widening the pane. */
+.ap4-row.ad4-about {
+  align-items: baseline;
+  padding-top: calc(12 * var(--ws-px));
+  padding-bottom: calc(12 * var(--ws-px));
+}
+.ad4-about .ap4-k {
+  flex: none;
+}
+.ad4-about .ap4-v {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Activity: a day heading over its group, two-line rows, run status pills. */
+.ad4-day {
+  display: flex;
+  flex-direction: column;
+  gap: calc(8 * var(--ws-px));
+}
+.ad4-day h4 {
+  margin: 0 calc(2 * var(--ws-px));
+  color: var(--ap4-faint);
+  font-size: calc(12 * var(--ws-type-px));
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.ad4-two {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  padding: calc(8 * var(--ws-px)) 0;
+  line-height: 1.35;
+}
+.ad4-two b {
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ad4-two time {
+  color: var(--ap4-muted);
+  font-size: calc(12.5 * var(--ws-type-px));
+  white-space: nowrap;
+}
+.ad4-status {
+  flex: none;
+  padding: calc(1 * var(--ws-px)) calc(7 * var(--ws-px));
+  border-radius: calc(6 * var(--ws-px));
+  background: var(--ap4-sunken);
+  color: var(--ap4-muted);
+  font-size: calc(11.5 * var(--ws-type-px));
+  font-weight: 550;
+  white-space: nowrap;
+}
+.ad4-status[data-tone='ok'] {
+  background: var(--ad4-ok-soft);
+  color: var(--ap4-ok);
+}
+.ad4-status[data-tone='warn'] {
+  background: var(--ad4-warn-soft);
+  color: var(--ad4-warn);
+}
+.ad4-status[data-tone='bad'] {
+  background: var(--ad4-bad-soft);
+  color: var(--ap4-bad);
+}
+.ad4-older {
+  align-self: center;
+}
+
+/* Developer details: the ID, template and key in monospace, cut short when they don't fit. */
+.ad4-mono {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-mono, 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: calc(12.5 * var(--ws-type-px));
+  text-overflow: ellipsis;
+}
+
+/* Quiet states: a failed read, the spinner, nothing yet, the copy note. */
+.ad4-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: calc(10 * var(--ws-px));
+}
+.ad4-error .ap4-note {
+  margin: 0 calc(2 * var(--ws-px));
+}
+.ad4-spin {
+  flex: none;
+  width: calc(14 * var(--ws-px));
+  height: calc(14 * var(--ws-px));
+  border: 2px solid var(--ap4-line);
+  border-top-color: var(--ap4-text);
+  border-radius: 50%;
+  animation: ad4-spin 0.9s linear infinite;
+}
+@keyframes ad4-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.ad4-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(4 * var(--ws-px));
+  padding: calc(28 * var(--ws-px)) calc(8 * var(--ws-px)) calc(8 * var(--ws-px));
+  text-align: center;
+}
+.ad4-empty b {
+  font-size: calc(15 * var(--ws-type-px));
+}
+.ad4-empty span {
+  color: var(--ap4-muted);
+  font-size: calc(13 * var(--ws-type-px));
+}
+.ad4-toast {
+  position: fixed;
+  bottom: calc(22 * var(--ws-px));
+  left: 50%;
+  z-index: 70;
+  padding: calc(8 * var(--ws-px)) calc(14 * var(--ws-px));
+  border-radius: 999px;
+  background: var(--ap4-ink);
+  color: var(--ap4-ink-text);
+  font-size: calc(13 * var(--ws-type-px));
+  font-weight: 500;
+  transform: translateX(-50%);
+}
+@media (prefers-reduced-motion: reduce) {
+  .ad4-spin {
+    animation: none;
+  }
+}

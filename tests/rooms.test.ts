@@ -212,16 +212,19 @@ test('F4 §0 lifecycle: create, join by link across owners, post, read with per-
   );
   for (const member of members.members)
     assert.deepEqual(Object.keys(member).sort(), [
+      'active_now',
       'auto_reply',
       'guest',
       'id',
       'joined_at',
       'kind',
       'last_active_at',
+      'messages_today',
       'name',
       'own',
       'owner_label',
       'role',
+      'says',
       'status',
     ]);
 
@@ -330,6 +333,12 @@ test('history default and host change: full by default, city_room_update opens e
     joinedOpen.next_actions[0],
     /without since first; it returns the conversation from the start as unread/,
   );
+  // No polling loop by default: check on request, long gaps, stop after 3 empty checks.
+  const standing = joinedOpen.next_actions.at(-1) as string;
+  assert.match(standing, /^Do not poll the room in a loop within one turn\./);
+  assert.match(standing, /stop after 3 checks in a row with nothing new/);
+  assert.match(standing, /each check uses their AI usage/);
+  assert.doesNotMatch(joinedOpen.next_actions.join(' '), /wait=25|once a minute|keep checking/);
   assert.deepEqual(
     (await ok(app, b.key, 'city_room_read', { room_id: open.room.id })).messages.map(
       (m: { text: string }) => m.text,
@@ -597,7 +606,12 @@ test('member cap, agents per owner and the per-room seq stay exact under concurr
     seqs,
     Array.from({ length: 30 }, (_, index) => index + 1),
   );
-  const read = await ok(app, a.key, 'city_room_read', { room_id: big.room.id, limit: 100 });
+  // A lookup (since 0): the host's own posts are not unread for it.
+  const read = await ok(app, a.key, 'city_room_read', {
+    room_id: big.room.id,
+    since: 0,
+    limit: 100,
+  });
   assert.deepEqual(
     read.messages.map((m: { seq: number }) => m.seq),
     seqs,
@@ -667,14 +681,26 @@ test('console REST: the same operations with a session, in the shapes the rooms 
   // Person accounts are shown by an opaque label, never their sign-in name.
   assert.match(message.sender_owner_label, /^Account [0-9a-f]{8}$/);
   const members = await api(memberCookie, 'GET', `/api/rooms/${slug}/members`);
+  // The host's agent, the host as a person (in its room from creation, under the name it goes by
+  // there) and the member's agent.
+  const hostPerson = members
+    .json()
+    .members.find((m: { kind: string; own: boolean }) => m.kind === 'person' && !m.own);
+  assert.ok(hostPerson, 'the host is in its room as itself');
   assert.deepEqual(
-    members.json().members.map((m: { id: string; role: string }) => [m.id, m.role]),
+    members
+      .json()
+      .members.filter((m: { kind: string }) => m.kind === 'agent')
+      .map((m: { id: string; role: string }) => [m.id, m.role]),
     [
       [host, 'host'],
       [member, 'member'],
     ],
   );
-  assert.ok(!JSON.stringify(members.json()).includes('Rest host'.concat('"')));
+  assert.equal(hostPerson.role, 'member');
+  // Owner labels stay opaque: an account is never named by its sign-in name in a label.
+  for (const m of members.json().members as Array<{ owner_label: string }>)
+    assert.match(m.owner_label, /^Account [0-9a-f]{8}$/);
   const listed = await api(memberCookie, 'GET', '/api/rooms');
   assert.deepEqual(
     listed.json().rooms.map((r: { id: string }) => r.id),
@@ -741,7 +767,11 @@ test('official MCP client: two AIs create, join, post and read a room over /mcp'
   const tools = Object.fromEntries(
     (await memberClient.listTools()).tools.map((tool) => [tool.name, tool]),
   );
-  assert.equal(tools.city_room_read!.annotations?.readOnlyHint, true);
+  assert.equal(
+    tools.city_room_read!.annotations?.readOnlyHint,
+    false,
+    'a read moves the cursor and the visible status',
+  );
   assert.equal(tools.city_room_close!.annotations?.destructiveHint, true);
   assert.equal(tools.city_room_update!.annotations?.destructiveHint, false);
 
@@ -890,6 +920,64 @@ test('read cursor with wait (as on /mcp): a wait that returns messages advances 
   const empty = await ok(app, b.key, 'city_room_read', { room_id: roomId, wait: 1 });
   assert.deepEqual(empty.messages, []);
   assert.equal(await cursor(), 1);
+});
+
+test('no wake on your own post: post then read returns nothing new; unread messages from others still arrive', async (t) => {
+  const app = await fixture(t);
+  const a = await owner(app, 'Self host');
+  const b = await owner(app, 'Self member');
+  const host = await agent(app, a.key, 'Self host desk');
+  const bravo = await agent(app, b.key, 'Bravo');
+  const charlie = await agent(app, b.key, 'Charlie');
+  const created = await createRoom(app, a.key, host);
+  const roomId = created.room.id as string;
+  assert.equal((await join(app, b.key, created.link.link, bravo)).statusCode, 200);
+  const unread = async (extra: object = {}) =>
+    (await ok(app, b.key, 'city_room_read', { room_id: roomId, ...extra })).messages.map(
+      (m: { text: string }) => m.text,
+    );
+  const cursor = async (agentId: string) =>
+    Number(
+      (
+        await app.city.db.query<{ last_read_seq: string | number }>(
+          'SELECT last_read_seq FROM room_members WHERE room_id=$1 AND agent_id=$2',
+          [roomId, agentId],
+        )
+      ).rows[0]!.last_read_seq,
+    );
+  assert.equal((await post(app, a.key, roomId, 'Welcome')).statusCode, 200);
+  assert.deepEqual(await unread(), ['Welcome']);
+
+  // Caught up, then my own post: the next read, and a long-poll, do not return it.
+  const mine = await post(app, b.key, roomId, 'My reply', { agent_id: bravo });
+  assert.equal(mine.statusCode, 200, mine.body);
+  assert.equal(await cursor(bravo), mine.json().message.seq);
+  assert.deepEqual(await unread(), []);
+  assert.deepEqual(await unread({ wait: 1 }), []);
+  // Others still see it as new.
+  assert.deepEqual(
+    (await ok(app, a.key, 'city_room_read', { room_id: roomId })).messages.map(
+      (m: { text: string }) => m.text,
+    ),
+    ['My reply'],
+  );
+
+  // Another member posts between my read and my post: it is still delivered, with my post.
+  assert.equal((await post(app, a.key, roomId, 'Question for you')).statusCode, 200);
+  const late = await post(app, b.key, roomId, 'Posted before reading', { agent_id: bravo });
+  assert.equal(late.statusCode, 200, late.body);
+  assert.ok((await cursor(bravo)) < late.json().message.seq, 'an unread message keeps the cursor');
+  assert.deepEqual(await unread(), ['Question for you', 'Posted before reading']);
+  assert.deepEqual(await unread(), []);
+
+  // Reads are per owner: a second agent of the same owner at the head moves too.
+  assert.equal((await join(app, b.key, created.link.link, charlie)).statusCode, 200);
+  const third = await post(app, b.key, roomId, 'From Bravo again', { agent_id: bravo });
+  assert.equal(third.statusCode, 200, third.body);
+  assert.equal(await cursor(charlie), third.json().message.seq);
+  assert.deepEqual(await unread(), []);
+  // The other owner's cursor never moves on my post.
+  assert.ok((await cursor(host)) < third.json().message.seq);
 });
 
 test('city_room_leave (workspace key, as on /mcp): a member leaves; the host is told to close instead', async (t) => {

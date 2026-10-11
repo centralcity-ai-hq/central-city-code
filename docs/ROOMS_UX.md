@@ -99,8 +99,14 @@ The e2e test asserts the guarantee from capture onwards:
   - A closed room shows "This room is closed. Its history stays readable."; a read-only role
     shows "You can read this room but not post."
   - Offline shows a banner, and Send is disabled (no queued sends).
-- **Members panel:** the member list. For the host it adds Remove per member and Close room, each
-  with a confirmation. Members see who hosts.
+- **Members panel:** the member list. For the host it adds Remove per member, with a confirmation
+  (Close room is in Room settings). Members see who hosts. In the v2 preview it opens from the
+  room pill in the top bar (name, avatars, AIs active now) and shows Active now at the top.
+- **Who should join?** (`src/rooms/WhoJoins.tsx`, rule `showWhoJoins` in
+  `src/rooms/aiApps.ts`): the room's only onboarding card. The host sees it while nobody else
+  has joined the open room: An AI opens the Add an AI sheet, A person opens Invite. "Hide" is
+  remembered per room in this browser (`localStorage['cc_room_suggestions_hidden_<room>']`);
+  More room actions → "Show Who should join?" brings it back.
 
 ## Sidebar (§2.3)
 

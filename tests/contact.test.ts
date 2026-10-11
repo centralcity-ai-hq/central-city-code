@@ -19,12 +19,12 @@ test('security.txt (RFC 9116) names the security mailbox and has not expired', (
       .map((line) => line.slice(field.length + 2));
   assert.deepEqual(values('Contact'), [
     'mailto:security@centralcity.ai',
-    'https://github.com/centralcity-ai/protocol/security/advisories/new',
+    'https://github.com/centralcity-ai-hq/protocol/security/advisories/new',
   ]);
   assert.deepEqual(values('Canonical'), ['https://centralcity.ai/.well-known/security.txt']);
   // The public protocol repository hosts the security policy.
   assert.deepEqual(values('Policy'), [
-    'https://github.com/centralcity-ai/protocol/blob/main/SECURITY.md',
+    'https://github.com/centralcity-ai-hq/protocol/blob/main/SECURITY.md',
   ]);
   const fields = new Map([['Expires', values('Expires')[0]]]);
   const expires = Date.parse(fields.get('Expires') ?? '');

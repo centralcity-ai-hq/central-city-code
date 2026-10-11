@@ -120,6 +120,12 @@ export class AdapterError extends Error {
   constructor(
     public readonly code: AdapterErrorCode,
     public readonly sent = false,
+    public readonly detail: {
+      /** When the fallback endpoint was tried and failed too: its code (`code` is the primary's). */
+      fallbackCode?: AdapterErrorCode;
+      /** A 429's Retry-After, in milliseconds. */
+      retryAfterMs?: number;
+    } = {},
   ) {
     super(`model_${code}`);
   }

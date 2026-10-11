@@ -11,6 +11,8 @@ import {
   deriveMemberStatus,
   memberActivityMigration,
   presentMemberStatus,
+  activeNowSince,
+  isActiveNow,
 } from '../server/rooms/member-status.js';
 
 process.env.CITY_INVITE_FLOW = '1';
@@ -64,8 +66,13 @@ test('presentation: exact time (minute precision) for host/own viewers only', ()
   assert.deepEqual(presentMemberStatus(input, true), {
     status: 'active',
     last_active_at: '2026-09-28T12:00:00.000Z',
+    active_now: true,
   });
-  assert.deepEqual(presentMemberStatus(input, false), { status: 'active', last_active_at: null });
+  assert.deepEqual(presentMemberStatus(input, false), {
+    status: 'active',
+    last_active_at: null,
+    active_now: true,
+  });
   assert.equal(coarseTime(T0 + 29_000), '2026-09-28T12:00:00.000Z');
 });
 
@@ -82,13 +89,20 @@ test("coarse clock: for non-host viewers, status changes only on the member's bu
     const status = presentMemberStatus(input(now), false, offset).status;
     if (status !== previous) {
       edges++;
-      // A boundary of this member's shifted grid lies in the last sampled second.
-      if (previous)
-        assert.notEqual(snap(now, offset), snap(now - 1_000, offset), `edge at ${now - last} ms`);
+      // active -> idle is the shared "active now" edge (a whole minute, as the overview count);
+      // idle -> offline lies on a boundary of this member's shifted grid.
+      const edge = `edge at ${now - last} ms`;
+      if (previous === 'active')
+        assert.notEqual(activeNowSince(now), activeNowSince(now - 1_000), edge);
+      else if (previous) assert.notEqual(snap(now, offset), snap(now - 1_000, offset), edge);
       previous = status;
     }
-    // The exact viewer still sees the exact thresholds.
-    assert.equal(presentMemberStatus(input(now), true).status, deriveMemberStatus(input(now)));
+    // Every viewer: an AI is "active" exactly when it is active now; idle and offline as derived.
+    const exact = presentMemberStatus(input(now), true);
+    assert.equal(exact.active_now, isActiveNow(input(now)));
+    assert.equal(exact.status === 'active', exact.active_now);
+    if (!exact.active_now)
+      assert.equal(exact.status, deriveMemberStatus(input(now)) === 'offline' ? 'offline' : 'idle');
   }
   assert.equal(edges, 3); // active, idle, offline
   // Credential expiry is not activity: it applies on the real clock.
@@ -180,8 +194,14 @@ async function fixture(
     admit,
     invoke,
     hostMembers,
+    // The owner writing in the host AI's name (agent_id): without it, a console post is the
+    // owner's own as a person (in its room from creation).
     hostPost: (text: string) =>
-      post(`/api/rooms/${roomId}/messages`, { text, idempotency_key: randomUUID() }, { cookie }),
+      post(
+        `/api/rooms/${roomId}/messages`,
+        { text, agent_id: agent.json().agent.id, idempotency_key: randomUUID() },
+        { cookie },
+      ),
     advance: (ms: number) => {
       time += ms;
     },
@@ -208,8 +228,9 @@ test('members response: status from reads and posts; host sees times, other memb
   assert.equal(byName(members, 'Status guest').status, 'active');
   assert.equal(byName(members, 'Status guest').last_active_at, coarseTime(f.now()));
 
-  // Idle after 5 minutes, offline after an hour.
-  f.advance(MEMBER_STATUS.activeMs);
+  // Idle once the read is more than 5 minutes back (the shared active-now window starts on a
+  // whole minute, so up to a minute later), offline after an hour.
+  f.advance(MEMBER_STATUS.activeMs + MIN);
   assert.equal(byName(await f.hostMembers(), 'Status guest').status, 'idle');
   f.advance(MEMBER_STATUS.idleMs);
   assert.equal(byName(await f.hostMembers(), 'Status guest').status, 'offline');

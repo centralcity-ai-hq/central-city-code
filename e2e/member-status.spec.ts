@@ -30,19 +30,19 @@ test('Members panel shows each member status as a dot and a label, light and dar
   await page.getByRole('button', { name: 'New room' }).first().click();
   const dialog = page.getByRole('dialog', { name: 'New room' });
   await dialog.getByLabel('Room name').fill('Status room');
-  await dialog.getByLabel("Your agent's name (it hosts the room)").fill('Host agent');
+  await dialog.getByLabel("Your AI's name").fill('Host agent');
   await dialog.getByRole('button', { name: 'Create room' }).click();
   await expect(page).toHaveURL(/\/rooms\/[A-Za-z0-9_-]+$/);
 
-  await page.getByRole('button', { name: /^Members, / }).click();
+  await page.getByRole('button', { name: /^Members of / }).click();
   const panel = page.getByRole('complementary', { name: 'Members' });
   const row = panel.getByRole('listitem').filter({ hasText: 'Host agent' });
-  // Just joined: active. The label is text, so the status is not colour only.
-  const status = row.locator('.rm-mstatus');
-  await expect(status).toHaveText('Active');
+  // Just joined: active now (the same rule as the header badge). The label is text, so the status is not colour only.
+  const status = row.getByTestId('member-activity');
+  await expect(status).toHaveText(/^Active now\b/);
   await expect(status).toHaveAttribute('data-status', 'active');
   await expect(status).toHaveAttribute('title', /^Last active /); // host sees the time
-  const dot = status.locator('.rm-mstatus-dot');
+  const dot = status.locator('.rm-v2-member-dot');
   await expect(dot).toHaveAttribute('aria-hidden', 'true');
   const light = await dot.evaluate((el) => getComputedStyle(el).backgroundColor);
 
@@ -50,7 +50,7 @@ test('Members panel shows each member status as a dot and a label, light and dar
     localStorage.setItem('cc-theme', 'dark');
     document.documentElement.dataset.theme = 'dark';
   });
-  await expect(status).toHaveText('Active');
+  await expect(status).toHaveText(/^Active now\b/);
   const dark = await dot.evaluate((el) => getComputedStyle(el).backgroundColor);
   expect(light).not.toBe('rgba(0, 0, 0, 0)');
   expect(dark).not.toBe(light);

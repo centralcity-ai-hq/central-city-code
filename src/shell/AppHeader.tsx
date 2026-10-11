@@ -2,17 +2,19 @@ import { Menu } from 'lucide-react';
 import './shell.css';
 
 /**
- * The signed-in header outside a room: the page title, plus the drawer
- * button under 980 px and the live-update status. Theme, refresh and the account moved to the
- * sidebar's account area (§2.3).
+ * The phone's top row in the signed-in workspace (docs/design/WORKSPACE_V3.md §1, §3): the round
+ * ☰ chip that opens the navigation drawer, and the page title. From 900 px up there is no header
+ * bar at all (one calm canvas): each page's own floating pill or heading carries its context and
+ * its h1, so this row is hidden there.
  */
 export function AppHeader({
   title,
-  live,
+  showTitle = true,
   onOpenNavigation,
 }: {
   title: string;
-  live: boolean;
+  /** False when the page's own pill already shows the title on a phone (Messages). */
+  showTitle?: boolean;
   onOpenNavigation: () => void;
 }) {
   return (
@@ -26,12 +28,8 @@ export function AppHeader({
         >
           <Menu size={20} aria-hidden="true" />
         </button>
-        <p title={title}>{title}</p>
+        {showTitle ? <p title={title}>{title}</p> : null}
       </div>
-      <span className={`connection-indicator ${live ? 'connected' : ''}`}>
-        <span aria-hidden="true" />
-        {live ? 'Live updates' : 'Updates every few seconds'}
-      </span>
     </header>
   );
 }

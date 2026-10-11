@@ -75,8 +75,10 @@
   color: var(--accent-contrast);
 }
 
-.btn-primary:hover {
-  background-color: var(--accent-hover);
+@media (hover: hover) {
+  .btn-primary:hover {
+    background-color: var(--accent-hover);
+  }
 }
 
 .btn-secondary {
@@ -85,9 +87,11 @@
   color: var(--text-primary);
 }
 
-.btn-secondary:hover {
-  background-color: var(--bg-surface-hover);
-  border-color: var(--border-strong);
+@media (hover: hover) {
+  .btn-secondary:hover {
+    background-color: var(--bg-surface-hover);
+    border-color: var(--border-strong);
+  }
 }
 
 .btn-sm {
@@ -123,6 +127,10 @@ body {
   display: flex;
   flex-direction: column;
   flex: 1;
+}
+/* A signed-out copy this browser will not show (src/shell/theme-boot.js): hidden from the first paint. */
+html[data-boot='app'] #root[data-session-gated] {
+  visibility: hidden;
 }
 button,
 input,
@@ -177,6 +185,10 @@ pre,
 code {
   font-size: 0.92em;
   overflow-wrap: anywhere;
+}
+/* Workspace density: inline code keeps the 12px floor inside the workspace. */
+.app-shell code {
+  font-size: max(12px, 0.92em);
 }
 :focus-visible {
   outline: var(--focus-ring) solid var(--focus);
@@ -293,16 +305,19 @@ section:focus {
   transition:
     background-color var(--motion-fast) var(--ease-standard),
     border-color var(--motion-fast) var(--ease-standard),
-    box-shadow var(--motion-fast) var(--ease-standard);
+    box-shadow var(--motion-fast) var(--ease-standard),
+    scale var(--motion-duration-fast) var(--motion-ease-spring);
 }
 .button.primary {
   background: var(--primary);
   color: var(--on-primary);
 }
-.button.primary:hover:not(:disabled) {
-  background: var(--primary-hover);
-  text-decoration: underline;
-  text-underline-offset: 3px;
+@media (hover: hover) {
+  .button.primary:hover:not(:disabled) {
+    background: var(--primary-hover);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
 }
 .button.primary:active:not(:disabled) {
   box-shadow: inset 0 2px 0 rgb(0 0 0 / 22%);
@@ -312,9 +327,11 @@ section:focus {
   color: var(--text);
   border-color: var(--border-control);
 }
-.button.secondary:hover:not(:disabled) {
-  border-color: var(--primary);
-  color: var(--link);
+@media (hover: hover) {
+  .button.secondary:hover:not(:disabled) {
+    border-color: var(--primary);
+    color: var(--link);
+  }
 }
 .button.ghost,
 .button.quiet {
@@ -322,25 +339,29 @@ section:focus {
   color: var(--text);
   border-color: transparent;
 }
-.button.ghost:hover:not(:disabled),
-.button.quiet:hover:not(:disabled) {
-  background: var(--surface-sunken);
+@media (hover: hover) {
+  .button.ghost:hover:not(:disabled),
+  .button.quiet:hover:not(:disabled) {
+    background: var(--surface-sunken);
+  }
 }
 .button.danger {
   background: var(--error-tint);
   color: var(--error);
   border-color: var(--error);
 }
-.button.danger:hover:not(:disabled) {
-  text-decoration: underline;
+@media (hover: hover) {
+  .button.danger:hover:not(:disabled) {
+    text-decoration: underline;
+  }
 }
 .button.large {
-  min-height: 52px;
+  min-height: calc(52 * var(--ws-px));
   padding: 0 var(--space-5);
-  font-size: 16px;
+  font-size: calc(16 * var(--ws-type-px));
 }
 .button.compact {
-  min-height: 36px;
+  min-height: calc(36 * var(--ws-px));
   padding: 0 var(--space-3);
 }
 .button.full {
@@ -355,17 +376,22 @@ section:focus {
 .icon-button {
   display: inline-grid;
   place-items: center;
-  width: 40px;
-  height: 40px;
+  width: calc(40 * var(--ws-px));
+  height: calc(40 * var(--ws-px));
   border-radius: var(--radius-control);
   border: 1px solid transparent;
   background: transparent;
   color: var(--text-muted);
   flex-shrink: 0;
+  transition:
+    background-color var(--motion-duration-fast) var(--motion-ease-standard),
+    scale var(--motion-duration-fast) var(--motion-ease-spring);
 }
-.icon-button:hover:not(:disabled) {
-  background: var(--surface-sunken);
-  color: var(--text);
+@media (hover: hover) {
+  .icon-button:hover:not(:disabled) {
+    background: var(--surface-sunken);
+    color: var(--text);
+  }
 }
 .icon-button:disabled {
   opacity: 0.5;
@@ -380,7 +406,7 @@ section:focus {
   border: 0;
   background: none;
   padding: 0;
-  min-height: 24px;
+  min-height: calc(24 * var(--ws-px));
   color: var(--link);
   font: var(--type-label);
   font-weight: 600;
@@ -389,8 +415,10 @@ section:focus {
   text-underline-offset: 3px;
   transition: text-decoration-color var(--motion-fast) var(--ease-standard);
 }
-.text-link:hover:not(:disabled) {
-  text-decoration-color: currentColor;
+@media (hover: hover) {
+  .text-link:hover:not(:disabled) {
+    text-decoration-color: currentColor;
+  }
 }
 .text-link:disabled {
   color: var(--text-muted);
@@ -405,7 +433,7 @@ textarea,
 select {
   width: 100%;
   min-height: var(--target);
-  padding: 10px var(--space-3);
+  padding: calc(10 * var(--ws-px)) var(--space-3);
   border: 1px solid var(--border-control);
   border-radius: var(--radius-control);
   background: var(--surface);
@@ -429,8 +457,8 @@ select:disabled {
 }
 input[type='checkbox'],
 input[type='radio'] {
-  width: 18px;
-  height: 18px;
+  width: calc(18 * var(--ws-px));
+  height: calc(18 * var(--ws-px));
   min-height: 0;
   padding: 0;
   accent-color: var(--primary);
@@ -490,8 +518,8 @@ input[type='radio'] {
   text-transform: uppercase;
 }
 .status-dot {
-  width: 9px;
-  height: 9px;
+  width: calc(9 * var(--ws-px));
+  height: calc(9 * var(--ws-px));
   border-radius: 50%;
   border: 2px solid currentColor;
   flex-shrink: 0;
@@ -539,8 +567,8 @@ input[type='radio'] {
 
 .city-mark {
   display: inline-block;
-  width: 32px;
-  height: 32px;
+  width: calc(32 * var(--ws-px));
+  height: calc(32 * var(--ws-px));
   flex-shrink: 0;
   background: var(--motif);
   -webkit-mask: url('/brand/central-city-mark.png') center / contain no-repeat;
@@ -550,15 +578,15 @@ input[type='radio'] {
   background: var(--cc-white);
 }
 .city-mark.small {
-  width: 18px;
-  height: 18px;
+  width: calc(18 * var(--ws-px));
+  height: calc(18 * var(--ws-px));
 }
 .lockup {
   display: inline-flex;
   align-items: center;
-  gap: 8px; /* 0.25H */
-  padding: 8px; /* clear space x = 0.25H */
-  margin: -8px;
+  gap: calc(8 * var(--ws-px)); /* 0.25H */
+  padding: calc(8 * var(--ws-px)); /* clear space x = 0.25H */
+  margin: calc(-8 * var(--ws-px));
   border: 0;
   background: none;
   color: var(--text);
@@ -568,7 +596,7 @@ input[type='radio'] {
 .lockup-word {
   font-family: var(--font-sans);
   font-weight: 600;
-  font-size: 18px; /* cap height about 0.4H */
+  font-size: calc(18 * var(--ws-type-px)); /* cap height about 0.4H */
   letter-spacing: -0.02em;
   white-space: nowrap;
 }
@@ -1044,13 +1072,26 @@ input[type='radio'] {
   }
 }
 .cc-agent-ticker-verify {
+  position: relative;
   color: var(--link);
   text-underline-offset: 3px;
   white-space: nowrap;
 }
+/* A 44 px tall tap area around the one-line link, without moving the line. */
+.cc-agent-ticker-verify::after {
+  content: '';
+  position: absolute;
+  inset: -12px -6px;
+}
+/* The digits count up in place: tabular figures, right-aligned in the final number's width
+   (min-width set inline in ch), so the line never changes width while they change. */
 .cc-agent-ticker-n {
+  display: inline-block;
   color: var(--text);
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: end;
+  white-space: nowrap;
 }
 /* The empty, reserved preview area: 16/10 at >= 768 px. Nothing is drawn in it. */
 .cc-preview-slot {
@@ -1170,15 +1211,15 @@ input[type='radio'] {
   background: var(--surface-sunken);
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
-  font-size: 13px;
-  line-height: 20px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  line-height: calc(20 * var(--ws-type-px));
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   color: var(--text);
 }
 .code-line.address input {
   font-family: var(--font-mono);
-  font-size: 15px;
+  font-size: calc(15 * var(--ws-type-px));
 }
 .copy-control {
   display: inline-flex;
@@ -1196,7 +1237,7 @@ input[type='radio'] {
   margin-top: var(--space-1);
 }
 .copy-button {
-  min-width: 108px;
+  min-width: calc(108 * var(--ws-px));
 }
 .access-lanes {
   display: grid;
@@ -1220,8 +1261,8 @@ input[type='radio'] {
 .lane-icon {
   display: grid;
   place-items: center;
-  width: 40px;
-  height: 40px;
+  width: calc(40 * var(--ws-px));
+  height: calc(40 * var(--ws-px));
   border-radius: 50%;
   background: var(--success-tint);
   color: var(--success);
@@ -1241,7 +1282,7 @@ input[type='radio'] {
 .access-table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 560px;
+  min-width: calc(560 * var(--ws-px));
 }
 .access-table th,
 .access-table td {
@@ -1276,7 +1317,7 @@ input[type='radio'] {
 }
 .client-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, calc(340 * var(--ws-px))), 1fr));
   gap: var(--space-5);
 }
 .client-card {
@@ -1295,8 +1336,8 @@ input[type='radio'] {
   align-items: center;
 }
 .client-card header .sigil {
-  width: 36px;
-  height: 36px;
+  width: calc(36 * var(--ws-px));
+  height: calc(36 * var(--ws-px));
 }
 .client-access {
   font: var(--type-meta);
@@ -1322,7 +1363,7 @@ input[type='radio'] {
   cursor: pointer;
   font: var(--type-label);
   color: var(--link);
-  min-height: 32px;
+  min-height: calc(32 * var(--ws-px));
 }
 .client-details[open] summary {
   margin-bottom: var(--space-3);
@@ -1335,7 +1376,7 @@ input[type='radio'] {
 }
 .client-facts div {
   display: grid;
-  grid-template-columns: 76px minmax(0, 1fr);
+  grid-template-columns: calc(76 * var(--ws-px)) minmax(0, 1fr);
   gap: var(--space-2);
 }
 .client-facts dt {
@@ -1431,7 +1472,7 @@ input[type='radio'] {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 264px minmax(0, 1fr);
+  grid-template-columns: calc(264 * var(--ws-px)) minmax(0, 1fr);
   min-height: 100vh;
 }
 .sidebar {
@@ -1447,7 +1488,7 @@ input[type='radio'] {
   border-right: 1px solid var(--border);
 }
 .sidebar .lockup {
-  margin: -8px -8px var(--space-2);
+  margin: calc(-8 * var(--ws-px)) calc(-8 * var(--ws-px)) var(--space-2);
   align-self: flex-start;
 }
 .workspace-switch {
@@ -1473,18 +1514,18 @@ input[type='radio'] {
 }
 .workspace-switch span {
   font: var(--type-meta);
-  font-size: 13px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
 }
 .workspace-avatar,
 .operator-avatar {
   display: grid;
   place-items: center;
-  width: 32px;
-  height: 32px;
+  width: calc(32 * var(--ws-px));
+  height: calc(32 * var(--ws-px));
   border-radius: 50%;
   background: var(--accent-tint);
   color: var(--link);
-  font: 600 14px var(--font-display);
+  font: 600 calc(14 * var(--ws-type-px)) var(--font-display);
   flex-shrink: 0;
 }
 .sidebar nav {
@@ -1506,6 +1547,8 @@ input[type='radio'] {
   color: var(--text-muted);
   font: var(--type-label);
   text-align: left;
+  /* Rooms is a link (it opens /rooms); it looks like the other items, without an underline. */
+  text-decoration: none;
   position: relative;
 }
 .nav-item:hover {
@@ -1521,8 +1564,8 @@ input[type='radio'] {
   content: '';
   position: absolute;
   left: 0;
-  top: 10px;
-  bottom: 10px;
+  top: calc(10 * var(--ws-px));
+  bottom: calc(10 * var(--ws-px));
   width: 3px;
   border-radius: 2px;
   background: var(--primary);
@@ -1535,9 +1578,9 @@ input[type='radio'] {
 }
 .nav-count {
   flex: 0 0 auto !important;
-  min-width: 22px;
-  height: 22px;
-  padding: 0 6px;
+  min-width: calc(22 * var(--ws-px));
+  height: calc(22 * var(--ws-px));
+  padding: 0 calc(6 * var(--ws-px));
   display: grid;
   place-items: center;
   border-radius: 11px;
@@ -1555,7 +1598,7 @@ input[type='radio'] {
   background: var(--canvas);
 }
 .sidebar-note h3 {
-  font-size: 16px;
+  font-size: calc(16 * var(--ws-type-px));
 }
 .sidebar-note p {
   font: var(--type-meta);
@@ -1611,7 +1654,7 @@ input[type='radio'] {
   justify-content: space-between;
   align-items: center;
   gap: var(--space-3);
-  min-height: 64px;
+  min-height: calc(64 * var(--ws-px));
   padding: 0 var(--space-6);
   background: color-mix(in srgb, var(--canvas) 90%, transparent);
   backdrop-filter: blur(10px);
@@ -1638,25 +1681,6 @@ input[type='radio'] {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-}
-.connection-indicator {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  font: var(--type-meta);
-  color: var(--text-muted);
-  margin-right: var(--space-2);
-  white-space: nowrap;
-}
-.connection-indicator > span {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  border: 2px solid var(--text-muted);
-}
-.connection-indicator.connected > span {
-  border-color: var(--success);
-  background: var(--success);
 }
 .main-content {
   width: 100%;
@@ -1716,7 +1740,7 @@ input[type='radio'] {
 .pause-banner span {
   flex: 1;
   color: var(--text);
-  min-width: 200px;
+  min-width: calc(200 * var(--ws-px));
 }
 .loading-panel {
   display: flex;
@@ -1749,8 +1773,8 @@ input[type='radio'] {
   color: var(--text-muted);
 }
 .panel-title h2 {
-  font-size: 18px;
-  line-height: 24px;
+  font-size: calc(18 * var(--ws-type-px));
+  line-height: calc(24 * var(--ws-type-px));
 }
 .panel-bottom {
   padding: var(--space-3) var(--space-5);
@@ -1781,7 +1805,7 @@ input[type='radio'] {
   font: var(--type-label);
 }
 .stat strong {
-  font: 500 40px/48px var(--font-display);
+  font: 500 calc(40 * var(--ws-type-px)) / calc(48 * var(--ws-type-px)) var(--font-display);
   letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
 }
@@ -1791,11 +1815,11 @@ input[type='radio'] {
 }
 .network-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.65fr) minmax(300px, 1fr);
+  grid-template-columns: minmax(0, 1.65fr) minmax(calc(300 * var(--ws-px)), 1fr);
   gap: var(--space-4);
 }
 .network-panel .city-circle {
-  max-height: 520px;
+  max-height: calc(520 * var(--ws-px));
   margin: 0 auto;
 }
 .graph-empty {
@@ -1806,10 +1830,10 @@ input[type='radio'] {
   text-align: center;
 }
 .graph-empty .court-illustration {
-  width: 200px;
+  width: calc(200 * var(--ws-px));
 }
 .graph-empty p {
-  font: 500 18px var(--font-display);
+  font: 500 calc(18 * var(--ws-type-px)) var(--font-display);
 }
 .graph-empty span {
   color: var(--text-muted);
@@ -1831,7 +1855,7 @@ input[type='radio'] {
   gap: var(--space-2);
 }
 .legend-line {
-  width: 28px;
+  width: calc(28 * var(--ws-px));
   height: 2px;
   background: var(--motif);
   border-radius: 1px;
@@ -1857,7 +1881,7 @@ input[type='radio'] {
 }
 .lower-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.65fr) minmax(300px, 1fr);
+  grid-template-columns: minmax(0, 1.65fr) minmax(calc(300 * var(--ws-px)), 1fr);
   gap: var(--space-4);
 }
 .section-heading {
@@ -1872,8 +1896,8 @@ input[type='radio'] {
   white-space: nowrap;
 }
 .section-heading h2 {
-  font-size: 20px;
-  line-height: 26px;
+  font-size: calc(20 * var(--ws-type-px));
+  line-height: calc(26 * var(--ws-type-px));
   margin-top: var(--space-1);
 }
 .next-step-panel {
@@ -1917,8 +1941,8 @@ input[type='radio'] {
 .event-icon {
   display: grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  width: calc(28 * var(--ws-px));
+  height: calc(28 * var(--ws-px));
   border-radius: 50%;
   background: var(--surface-sunken);
   color: var(--text-muted);
@@ -1949,8 +1973,8 @@ input[type='radio'] {
   text-underline-offset: 3px;
 }
 .event-content > span {
-  font-size: 13px;
-  line-height: 18px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  line-height: calc(18 * var(--ws-type-px));
   color: var(--text-muted);
   display: flex;
   gap: var(--space-2);
@@ -2015,7 +2039,7 @@ input[type='radio'] {
 }
 .first-agents > div:nth-child(2) {
   flex: 1;
-  min-width: 200px;
+  min-width: calc(200 * var(--ws-px));
   display: grid;
   gap: var(--space-1);
 }
@@ -2026,7 +2050,7 @@ input[type='radio'] {
   display: flex;
 }
 .stacked-glyphs .sigil + .sigil {
-  margin-left: -8px;
+  margin-left: calc(-8 * var(--ws-px));
 }
 .list-toolbar {
   display: flex;
@@ -2077,7 +2101,7 @@ input[type='radio'] {
 }
 .agent-card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, calc(260 * var(--ws-px))), 1fr));
   gap: var(--space-4);
   padding: var(--space-5);
 }
@@ -2123,12 +2147,12 @@ input[type='radio'] {
   border-top: 1px dashed var(--border);
   display: grid;
   gap: var(--space-1);
-  font-size: 13px;
-  line-height: 18px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  line-height: calc(18 * var(--ws-type-px));
 }
 .lineage div {
   display: grid;
-  grid-template-columns: 64px minmax(0, 1fr);
+  grid-template-columns: calc(64 * var(--ws-px)) minmax(0, 1fr);
   gap: var(--space-2);
 }
 .lineage dt {
@@ -2145,7 +2169,7 @@ input[type='radio'] {
   gap: var(--space-2);
   flex-wrap: wrap;
   margin-top: var(--space-2);
-  font-size: 13px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
 }
 .claim-form {
   display: flex;
@@ -2172,6 +2196,10 @@ input[type='radio'] {
 }
 .claim-row input {
   font-family: var(--font-mono);
+}
+/* The hint is a sentence, not a code: the normal font, so it fits a phone-width field. */
+.claim-row input::placeholder {
+  font-family: var(--font-sans);
 }
 .claim-row .button {
   min-height: var(--target);
@@ -2205,8 +2233,8 @@ input[type='radio'] {
   gap: var(--space-2);
 }
 .route-arc {
-  width: 56px;
-  height: 22px;
+  width: calc(56 * var(--ws-px));
+  height: calc(22 * var(--ws-px));
   color: var(--motif);
 }
 .route-arc path {
@@ -2243,13 +2271,15 @@ input[type='radio'] {
   gap: var(--space-2);
 }
 .ledger-legend .exchange-small {
-  width: 24px;
-  height: 24px;
+  width: calc(24 * var(--ws-px));
+  height: calc(24 * var(--ws-px));
 }
 .ledger-head,
 .exchange-row {
   display: grid;
-  grid-template-columns: 40px minmax(0, 1.4fr) minmax(0, 1fr) 190px 120px;
+  grid-template-columns:
+    calc(40 * var(--ws-px)) minmax(0, 1.4fr) minmax(0, 1fr) calc(190 * var(--ws-px))
+    calc(120 * var(--ws-px));
   gap: var(--space-4);
   align-items: center;
   padding: var(--space-3) var(--space-5);
@@ -2273,8 +2303,8 @@ input[type='radio'] {
   background: var(--surface-sunken);
 }
 .exchange-row .exchange-small {
-  width: 36px;
-  height: 36px;
+  width: calc(36 * var(--ws-px));
+  height: calc(36 * var(--ws-px));
 }
 .exchange-side {
   display: grid;
@@ -2292,8 +2322,8 @@ input[type='radio'] {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  font-size: 13px;
-  line-height: 18px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  line-height: calc(18 * var(--ws-type-px));
   flex-wrap: wrap;
 }
 .exchange-row.state-failed .exchange-side.returned strong,
@@ -2302,7 +2332,7 @@ input[type='radio'] {
   font-weight: 400;
 }
 .job-row-time {
-  font-size: 13px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
   font-variant-numeric: tabular-nums;
 }
 
@@ -2319,7 +2349,7 @@ input[type='radio'] {
 }
 .modal {
   width: min(560px, 100%);
-  max-height: calc(100vh - 32px);
+  max-height: calc(100vh - calc(32 * var(--ws-px)));
   overflow-y: auto;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -2329,6 +2359,102 @@ input[type='radio'] {
 }
 .modal.wide {
   width: min(980px, 100%);
+}
+/* Confirm dialogs (ConfirmDialog in components.tsx): compact, calm, buttons at normal size. */
+.modal.modal-confirm {
+  width: min(400px, 100%);
+  padding: calc(20 * var(--ws-px));
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-floating);
+  overflow-wrap: anywhere;
+}
+.modal.modal-confirm:focus {
+  outline: none;
+}
+.modal-confirm-title {
+  margin: 0;
+  color: var(--text);
+  font-size: calc(17 * var(--ws-type-px));
+  font-weight: 600;
+  line-height: calc(24 * var(--ws-type-px));
+  letter-spacing: -0.01em;
+}
+.modal-confirm-body {
+  display: grid;
+  gap: calc(8 * var(--ws-px));
+  margin-top: calc(6 * var(--ws-px));
+  color: var(--text-muted);
+  font-size: calc(14 * var(--ws-type-px));
+  line-height: calc(20 * var(--ws-type-px));
+}
+.modal-confirm-body p {
+  margin: 0;
+}
+.modal-confirm-body strong {
+  color: var(--text);
+  font-weight: 600;
+}
+.modal-confirm-error {
+  color: var(--error);
+}
+.modal-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: calc(8 * var(--ws-px));
+  margin-top: calc(20 * var(--ws-px));
+}
+.confirm-button {
+  display: inline-flex;
+  min-width: calc(88 * var(--ws-px));
+  min-height: calc(40 * var(--ws-px));
+  align-items: center;
+  justify-content: center;
+  padding: 0 calc(16 * var(--ws-px));
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: calc(14 * var(--ws-type-px));
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--motion-fast, 120ms) var(--ease-standard, ease);
+}
+.confirm-button.ghost {
+  background: var(--bg-surface-hover);
+}
+.confirm-button.ghost:hover:not(:disabled) {
+  background: var(--bg-surface-active, var(--bg-surface-hover));
+}
+.confirm-button.danger {
+  border-color: color-mix(in srgb, var(--error) 45%, transparent);
+  color: var(--error);
+}
+.confirm-button.danger:hover:not(:disabled) {
+  background: var(--error-tint);
+}
+.confirm-button.primary {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--on-primary);
+}
+.confirm-button.primary:hover:not(:disabled) {
+  background: var(--primary-hover, var(--primary));
+}
+.confirm-button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.confirm-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+@media (max-width: 560px) {
+  /* Phones: a centred card with 16px margins (the backdrop's padding), 44px touch targets. */
+  .confirm-button {
+    min-height: calc(44 * var(--ws-px));
+  }
 }
 @keyframes modal-in {
   from {
@@ -2361,7 +2487,6 @@ input[type='radio'] {
   font: var(--type-meta);
 }
 .modal-body,
-.export-content,
 .token-content {
   padding: var(--space-5);
   display: grid;
@@ -2463,6 +2588,15 @@ input[type='radio'] {
   outline: var(--focus-ring) solid var(--focus);
   outline-offset: var(--focus-offset);
 }
+/* Private / Public on Create agent: two choices, side by side even on a phone. */
+.capability-picker.visibility-picker {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.field-hint {
+  margin: var(--space-2) 0 0;
+  color: var(--text-muted);
+  font: var(--type-meta);
+}
 .form-route-arrow {
   display: flex;
   align-items: center;
@@ -2505,11 +2639,11 @@ input[type='radio'] {
 .credential-box textarea,
 .connector-config {
   font-family: var(--font-mono);
-  font-size: 13px;
-  min-height: 88px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  min-height: calc(88 * var(--ws-px));
 }
 .connector-config {
-  min-height: 120px;
+  min-height: calc(120 * var(--ws-px));
 }
 .connector-config-label {
   display: block;
@@ -2517,11 +2651,11 @@ input[type='radio'] {
 }
 .setup-step {
   display: grid;
-  grid-template-columns: 36px minmax(0, 1fr);
+  grid-template-columns: calc(36 * var(--ws-px)) minmax(0, 1fr);
   gap: var(--space-3);
 }
 .setup-step > span {
-  font: 500 16px var(--font-display);
+  font: 500 calc(16 * var(--ws-type-px)) var(--font-display);
   color: var(--link);
 }
 .setup-step > div {
@@ -2561,7 +2695,7 @@ input[type='radio'] {
 }
 .detail-list div {
   display: grid;
-  grid-template-columns: minmax(0, 200px) minmax(0, 1fr);
+  grid-template-columns: minmax(0, calc(200 * var(--ws-px))) minmax(0, 1fr);
   gap: var(--space-3);
   padding: var(--space-2) var(--space-3);
   border-bottom: 1px solid var(--border);
@@ -2692,14 +2826,14 @@ input[type='radio'] {
 .input-preview,
 .result-json {
   margin: 0;
-  max-height: 280px;
+  max-height: calc(280 * var(--ws-px));
   overflow: auto;
   padding: var(--space-3);
   background: var(--surface-sunken);
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
-  font-size: 13px;
-  line-height: 20px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  line-height: calc(20 * var(--ws-type-px));
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -2733,7 +2867,7 @@ input[type='radio'] {
 }
 .result-actions p {
   flex: 1;
-  min-width: 220px;
+  min-width: calc(220 * var(--ws-px));
   font: var(--type-meta);
   color: var(--text-muted);
 }
@@ -2910,7 +3044,7 @@ input[type='radio'] {
   flex: 1;
   display: grid;
   gap: var(--space-1);
-  min-width: 200px;
+  min-width: calc(200 * var(--ws-px));
   font: var(--type-meta);
 }
 .workflow-source-tools {
@@ -2941,7 +3075,7 @@ input[type='radio'] {
   cursor: pointer;
   font: var(--type-label);
   color: var(--link);
-  min-height: 32px;
+  min-height: calc(32 * var(--ws-px));
 }
 .workflow-source pre,
 .workflow-result pre {
@@ -2951,9 +3085,9 @@ input[type='radio'] {
   border-radius: var(--radius-control);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font-size: 13px;
-  line-height: 20px;
-  max-height: 320px;
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  line-height: calc(20 * var(--ws-type-px));
+  max-height: calc(320 * var(--ws-px));
   overflow: auto;
 }
 .workflow-output-grid {
@@ -3036,13 +3170,13 @@ input[type='radio'] {
 .empty-icon {
   display: grid;
   place-items: center;
-  width: 64px;
-  height: 64px;
+  width: calc(64 * var(--ws-px));
+  height: calc(64 * var(--ws-px));
   color: var(--motif);
 }
 .empty-icon > svg {
-  width: 48px;
-  height: 48px;
+  width: calc(48 * var(--ws-px));
+  height: calc(48 * var(--ws-px));
 }
 .empty-icon > svg circle {
   fill: none;
@@ -3061,7 +3195,7 @@ input[type='radio'] {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  max-width: 440px;
+  max-width: calc(440 * var(--ws-px));
   padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4);
   border-radius: var(--radius-panel);
   background: var(--surface-inverse);
@@ -3073,55 +3207,10 @@ input[type='radio'] {
 .toast .icon-button {
   color: inherit;
 }
-.workspace-footer {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: var(--space-3);
-  flex-wrap: wrap;
-  padding-top: var(--space-4);
-  border-top: 1px solid var(--border);
-  font: var(--type-meta);
-  color: var(--text-muted);
-}
-.workspace-footer > span {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  margin-right: auto;
-}
-.footer-slash {
-  color: var(--border-control);
-}
-.workspace-pause {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-height: 36px;
-  padding: 0 var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
-  background: var(--surface);
-  color: var(--text-muted);
-  font: var(--type-meta);
-}
-.workspace-pause:hover {
-  color: var(--text);
-  border-color: var(--border-control);
-}
-.workspace-pause .status-dot {
-  border-color: var(--success);
-  background: var(--success);
-}
-.workspace-pause.is-paused .status-dot {
-  border-color: var(--warning);
-  background: none;
-}
-
 .connect-address.open .open-clients {
   grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, calc(240 * var(--ws-px))), 1fr));
   gap: var(--space-3);
 }
 .connect-address.open .client-card {
@@ -3129,7 +3218,7 @@ input[type='radio'] {
   padding: var(--space-4);
 }
 .address-field.wide {
-  max-width: 640px;
+  max-width: calc(640 * var(--ws-px));
   margin-bottom: var(--space-5);
 }
 
@@ -3155,7 +3244,7 @@ input[type='radio'] {
   }
   .ledger-head,
   .exchange-row {
-    grid-template-columns: 40px minmax(0, 1fr) minmax(0, 1fr) auto;
+    grid-template-columns: calc(40 * var(--ws-px)) minmax(0, 1fr) minmax(0, 1fr) auto;
   }
   .ledger-head span:last-child,
   .exchange-row .job-row-time {
@@ -3163,7 +3252,8 @@ input[type='radio'] {
   }
 }
 
-@media (max-width: 980px) {
+/* Under 900px the workspace sidebar is a drawer (docs/design/WORKSPACE_V3.md §3). */
+@media (max-width: 899px) {
   .app-shell {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -3190,6 +3280,9 @@ input[type='radio'] {
   .mobile-menu {
     display: inline-grid;
   }
+}
+
+@media (max-width: 980px) {
   .auth-page,
   .connect-address {
     grid-template-columns: minmax(0, 1fr);
@@ -3228,16 +3321,12 @@ input[type='radio'] {
   .topbar {
     padding: 0 var(--space-3);
   }
-  .connection-indicator {
-    font-size: 0;
-    margin-right: 0;
-  }
   .main-content {
     padding: var(--space-4) var(--space-4) var(--space-6);
   }
   .page-heading h1 {
-    font-size: 28px;
-    line-height: 34px;
+    font-size: calc(28 * var(--ws-type-px));
+    line-height: calc(34 * var(--ws-type-px));
   }
   .page-actions {
     width: 100%;
@@ -3250,8 +3339,8 @@ input[type='radio'] {
     padding: var(--space-3);
   }
   .stat strong {
-    font-size: 30px;
-    line-height: 36px;
+    font-size: calc(30 * var(--ws-type-px));
+    line-height: calc(36 * var(--ws-type-px));
   }
   .graph-legend .graph-limit {
     margin-left: 0;
@@ -3287,7 +3376,7 @@ input[type='radio'] {
     display: none;
   }
   .exchange-row {
-    grid-template-columns: 36px minmax(0, 1fr);
+    grid-template-columns: calc(36 * var(--ws-px)) minmax(0, 1fr);
     gap: var(--space-2) var(--space-3);
     padding: var(--space-3) var(--space-4);
   }
@@ -3323,7 +3412,6 @@ input[type='radio'] {
   }
   .modal-heading,
   .modal-body,
-  .export-content,
   .token-content {
     padding-left: var(--space-4);
     padding-right: var(--space-4);
@@ -3349,12 +3437,15 @@ input[type='radio'] {
   .capability-picker {
     grid-template-columns: minmax(0, 1fr);
   }
+  .capability-picker.visibility-picker {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
   .stats-grid {
     grid-template-columns: minmax(0, 1fr);
   }
   .job-detail-status .exchange-large {
-    width: 64px;
-    height: 64px;
+    width: calc(64 * var(--ws-px));
+    height: calc(64 * var(--ws-px));
   }
 }
 
@@ -3441,7 +3532,7 @@ input[type='radio'] {
 }
 .cross-form {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(calc(200 * var(--ws-px)), 1fr));
   align-items: end;
   gap: var(--space-3);
   margin-block: var(--space-4) var(--space-5);
@@ -3494,13 +3585,29 @@ input[type='radio'] {
   text-decoration: none;
 }
 
-/* Signed-out /rooms (src/RoomsShell.tsx): the public shell with one line and Sign in. */
+/* Signed-out /rooms and /r/:slug without an invite (src/RoomsShell.tsx): the public shell, a
+   short explanation and Sign in. Sized to its content; the footer takes the rest of the page. */
 .rm-signed-out {
+  flex: none;
   display: grid;
   justify-items: start;
   align-content: start;
   gap: var(--space-4);
   padding-block: var(--space-8);
+}
+.public-shell > .rm-signed-out ~ .cc-footer {
+  flex: 1;
+}
+.rm-signed-out-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+.rm-signed-out p {
+  max-width: 60ch;
+}
+.rm-signed-out .rm-signed-out-note {
+  font: var(--type-meta);
 }
 .rm-signed-out h1 {
   font: var(--type-title);

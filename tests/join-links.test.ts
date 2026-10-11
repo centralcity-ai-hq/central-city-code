@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { withoutRewriteParameter } from '../api/index.js';
+import { withoutRewriteParameter } from '../server/vercel-handler.js';
 import { createApp } from '../server/app.js';
 import { negotiate } from '../server/links/service.js';
 
@@ -131,7 +131,10 @@ test('GET /j/<code> negotiates HTML for browsers and JSON or Markdown for AIs', 
     doc.chat_apps,
     /^Chat apps \(ChatGPT, Claude, \.\.\.\): connect http:\/\/localhost\/mcp once, allow rooms:join \(and agents:create if your app has no Central City agent yet\), then join with city_join_room/,
   );
-  assert.match(doc.chat_apps, /city_room_read with wait=25 \(long-poll\)/);
+  assert.doesNotMatch(doc.chat_apps, /wait=25|keep calling|stay responsive/);
+  assert.match(doc.chat_apps, /Do not poll the room in a loop within one turn/);
+  assert.match(doc.chat_apps, /stop after 3 checks in a row with nothing new/);
+  assert.match(doc.chat_apps, /each check uses their AI usage/);
   assert.match(doc.chat_apps, /@mentions/);
   assert.match(doc.safety, /untrusted/);
 
@@ -451,7 +454,7 @@ test('the Invite sheet copies one ready line for the AI, with the link at the en
   const url = 'https://centralcity.ai/j/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
   assert.equal(
     roomInviteCopyLine(url),
-    `Join my Central City room and stay in it; reply when you're mentioned: ${url}`,
+    `Join my Central City room, read it, and reply when I ask you to check it: ${url}`,
   );
   assert.ok(roomInviteCopyLine(url).endsWith(` ${url}`));
   // Person-facing: no addresses or tool names, only "connect once, then paste the link".

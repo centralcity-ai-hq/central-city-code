@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { X } from 'lucide-react';
 import { ApiError } from '../api';
 import { RoomsError, withRoomDeadline, type Room, type RoomsClient } from './api';
 import { describe } from './useRoomThread';
+import { useDialogFocus } from './useDialogFocus';
+import { PanelHead } from './PanelV3';
 
 /** One message for every unusable invite, so a code's existence never leaks. */
 const INVALID = 'This invite is invalid or has expired. Ask the host for a new one.';
@@ -31,12 +32,16 @@ export function JoinRoomSheet({
   onJoined: (room: Room) => void;
 }) {
   const [invite, setInvite] = useState('');
+  // You join as yourself; the name override stays tucked away until someone asks for it.
   const [name, setName] = useState(accountName.slice(0, 40));
+  const [naming, setNaming] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const key = useRef(crypto.randomUUID());
   const field = useRef<HTMLInputElement>(null);
   useEffect(() => field.current?.focus(), []);
+  const sheet = useRef<HTMLFormElement>(null);
+  useDialogFocus(sheet, onClose);
 
   async function join() {
     const parsed = readInvite(invite);
@@ -64,11 +69,12 @@ export function JoinRoomSheet({
 
   return (
     <div
-      className="rm-backdrop"
+      className="rm-backdrop rm-v3-scrim"
       onMouseDown={(event) => event.target === event.currentTarget && onClose()}
     >
       <form
-        className="rm-sheet"
+        ref={sheet}
+        className="rm-sheet rm-v3-sheet rm-join-sheet"
         role="dialog"
         aria-modal="true"
         aria-labelledby="rm-join-title"
@@ -77,12 +83,9 @@ export function JoinRoomSheet({
           void join();
         }}
       >
-        <div className="rm-sheet-head">
+        <PanelHead closeLabel="Close" onClose={onClose}>
           <h2 id="rm-join-title">Join a room</h2>
-          <button type="button" className="rm-icon" aria-label="Close" onClick={onClose}>
-            <X size={18} aria-hidden="true" />
-          </button>
-        </div>
+        </PanelHead>
         <p className="rm-muted">
           Paste the invite link or type the code the host gave you. You join as yourself.
         </p>
@@ -94,33 +97,46 @@ export function JoinRoomSheet({
             value={invite}
             autoComplete="off"
             spellCheck={false}
-            placeholder="7K4M-Q9XP"
+            placeholder="centralcity.ai/j/… or 7K4M-Q9XP"
             onChange={(event) => {
               setInvite(event.target.value);
               setError('');
             }}
           />
         </label>
-        <label className="rm-field">
-          <span>Your name in the room</span>
-          <input
-            className="rm-input"
-            value={name}
-            maxLength={40}
-            onChange={(event) => setName(event.target.value)}
-          />
-        </label>
+        {naming ? (
+          <label className="rm-field">
+            <span>Your name in the room</span>
+            <input
+              className="rm-input"
+              value={name}
+              maxLength={40}
+              onChange={(event) => setName(event.target.value)}
+            />
+          </label>
+        ) : (
+          <p className="rm-muted rm-join-identity">
+            You join as {name || accountName}.{' '}
+            <button type="button" className="rm-v2-link" onClick={() => setNaming(true)}>
+              Use a different name
+            </button>
+          </p>
+        )}
         {error ? (
           <p className="rm-inline-error" role="alert">
             {error}
           </p>
         ) : null}
-        <div className="rm-actions">
-          <button type="submit" className="rm-primary" disabled={busy || !readInvite(invite)}>
-            {busy ? 'Joining…' : 'Join room'}
-          </button>
-          <button type="button" className="rm-quiet" onClick={onClose}>
+        <div className="rm-v3-sheet-actions">
+          <button type="button" className="rm-v3-btn rm-v3-btn-ghost" onClick={onClose}>
             Cancel
+          </button>
+          <button
+            type="submit"
+            className="rm-v3-btn rm-v3-btn-primary"
+            disabled={busy || !readInvite(invite)}
+          >
+            {busy ? 'Joining…' : 'Join room'}
           </button>
         </div>
       </form>

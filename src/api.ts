@@ -1,4 +1,5 @@
 import { plainApiMessage } from './ui/plainText';
+import { parseRetryAfter } from './ui/errors';
 
 export class ApiError extends Error {
   constructor(
@@ -8,6 +9,8 @@ export class ApiError extends Error {
     public code?: string,
     /** Machine-readable facts the server attached (for example a removal's reason). */
     public details?: unknown,
+    /** The server's Retry-After (ms), when it sent one (for example a 429). */
+    public retryAfterMs?: number,
   ) {
     super(message);
   }
@@ -31,10 +34,33 @@ export async function api<T>(
   method = 'POST',
   signal?: AbortSignal,
 ): Promise<T> {
-  const workspace: Record<string, string> = selectedWorkspace
-    ? { 'X-City-Workspace': selectedWorkspace }
-    : {};
-  const response = await fetch(path, {
+  return send<T>(selectedWorkspace, path, body, method, signal);
+}
+
+/**
+ * api() in the workspace the caller names (null: the person's own), not whichever one is selected
+ * when the request goes out. For reads whose answer must belong to the workspace they were asked
+ * in: the caller captures the workspace when the read starts. `fetcher` stands in for fetch in tests.
+ */
+export function apiInWorkspace<T>(
+  workspace: string | null,
+  path: string,
+  options: { body?: unknown; method?: string; signal?: AbortSignal; fetcher?: typeof fetch } = {},
+): Promise<T> {
+  const { body, method = 'POST', signal, fetcher } = options;
+  return send<T>(workspace, path, body, method, signal, fetcher);
+}
+
+async function send<T>(
+  workspaceId: string | null,
+  path: string,
+  body: unknown,
+  method: string,
+  signal: AbortSignal | undefined,
+  fetcher?: typeof fetch,
+): Promise<T> {
+  const workspace: Record<string, string> = workspaceId ? { 'X-City-Workspace': workspaceId } : {};
+  const init: RequestInit = {
     method: body === undefined && method === 'POST' ? 'GET' : method,
     credentials: 'same-origin',
     headers:
@@ -43,7 +69,8 @@ export async function api<T>(
         : { 'Content-Type': 'application/json', 'X-City-Request': '1', ...workspace },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     ...(signal ? { signal } : {}),
-  });
+  };
+  const response = await (fetcher ? fetcher(path, init) : fetch(path, init));
   const value = (await response.json().catch(() => null)) as {
     error?: string;
     code?: unknown;
@@ -56,6 +83,7 @@ export async function api<T>(
       response.status,
       typeof value?.code === 'string' ? value.code : undefined,
       value?.details,
+      parseRetryAfter(response.headers?.get?.('Retry-After') ?? undefined),
     );
   return value as T;
 }

@@ -325,7 +325,7 @@ test('signed-in joins refuse links of other hosts and with user info; the consol
 });
 
 test('redeem charges the address budget before a pasted room link can mint a join link', async (t) => {
-  const f = await fixture(t, { unclaimedCreatesPerSourcePerHour: 1 });
+  const f = await fixture(t, { inviteRequestsPerSourcePerHour: 1 });
   const person = await f.console('Console host');
   const desk = await person.post('/api/agents', {
     name: 'Console desk',

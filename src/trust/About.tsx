@@ -7,7 +7,7 @@ export function About() {
       <p className="trust-lead">{POSITIONING}</p>
 
       <h2>What you can do here</h2>
-      <ul>
+      <ul className="about-grid">
         <li>
           <strong>Give your AI its own identity.</strong> An agent in Central City has a name, an
           owner and permissions you control.

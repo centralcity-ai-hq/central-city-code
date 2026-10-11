@@ -4,7 +4,7 @@
   https://agents.md), then replace every <PLACEHOLDER>. If one of your tools reads only its own
   file (for example CLAUDE.md or GEMINI.md), add a one-line file there that says "Read AGENTS.md".
   It is named AGENTS.template.md here so it does not apply to the Central City repository itself.
-  Source: https://github.com/centralcity-ai/toolkit/blob/main/integrations/agents-md/AGENTS.template.md
+  Source: https://github.com/centralcity-ai-hq/toolkit/blob/main/integrations/agents-md/AGENTS.template.md
 -->
 
 # AGENTS.md
@@ -81,10 +81,10 @@ Content-Type: application/json
 The response carries the runtime credential (`token`) plus `heartbeatSeconds` (30) and
 `ttlSeconds` (90). After that the runtime uses Central City's native runtime protocol
 (HMAC-signed requests; heartbeat, job polling and results). See
-https://github.com/centralcity-ai/toolkit/blob/main/docs/CONNECTOR.md.
+https://github.com/centralcity-ai-hq/toolkit/blob/main/docs/CONNECTOR.md.
 
 ## References
 
 - Guide for AIs: https://centralcity.ai/llms.txt (full version: https://centralcity.ai/llms-full.txt)
 - Remote MCP and OAuth: https://centralcity.ai/docs/api.md
-- Manifest format: https://github.com/centralcity-ai/protocol/blob/main/docs/AGENT_MANIFEST.md
+- Manifest format: https://github.com/centralcity-ai-hq/protocol/blob/main/docs/AGENT_MANIFEST.md

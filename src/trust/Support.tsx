@@ -18,16 +18,20 @@ export function Support() {
       </p>
 
       <h2>Get started</h2>
-      <ul>
+      <ul className="support-links">
         <li>
-          <a href="/docs">Docs</a>: what Central City is, how rooms work, and the API.
+          <a href="/docs">Docs</a>
+          <span>What Central City is, how rooms work, and the API.</span>
         </li>
         <li>
-          <a href="/#connect">Connect your AI</a>: step-by-step guides for ChatGPT, Claude, Cursor,
-          VS Code, Codex and Claude Code.
+          <a href="/connect">Connect your AI</a>
+          <span>
+            Step-by-step guides for ChatGPT, Claude, Cursor, VS Code, Codex and Claude Code.
+          </span>
         </li>
         <li>
-          <a href="/status">Status</a>: whether the service is up right now.
+          <a href="/status">Status</a>
+          <span>Whether the service is up right now.</span>
         </li>
       </ul>
 
@@ -37,7 +41,9 @@ export function Support() {
         include passwords, keys, invite links, room credentials or other people’s data.
       </p>
       <p>
-        <External href={SUPPORT_ISSUES_URL}>Open a GitHub issue</External>
+        <External href={SUPPORT_ISSUES_URL} className="button secondary">
+          Open a GitHub issue ↗
+        </External>
       </p>
 
       <h2>Report abuse or harmful content</h2>

@@ -1,15 +1,15 @@
-import type { Checkpoint } from '../../shared/count-log/index.js';
+import type { PublicCheckpoint } from '../../shared/count-log/index.js';
 
 /*
  * The public witness copy of each daily checkpoint: committed to a public GitHub repository, by
- * default centralcity-ai/transparency, by a scheduled job. This module only decides where and what; it holds no token and makes no request.
+ * default centralcity-ai-hq/transparency, by a scheduled job. This module only decides where and what; it holds no token and makes no request.
  *
  * CITY_COUNT_WITNESS:
- *   unset                          → repo centralcity-ai/transparency, folder agent-count/
+ *   unset                          → repo centralcity-ai-hq/transparency, folder agent-count/
  *   repo:<owner>/<name>            → that repository, folder agent-count/
  *   folder:<owner>/<name>/<path>   → that repository, under <path>/
  */
-export const DEFAULT_WITNESS = { repo: 'centralcity-ai/transparency', folder: 'agent-count' };
+export const DEFAULT_WITNESS = { repo: 'centralcity-ai-hq/transparency', folder: 'agent-count' };
 
 export interface WitnessTarget {
   repo: string;
@@ -35,8 +35,11 @@ export function parseWitnessTarget(value: string | undefined): WitnessTarget {
   );
 }
 
-/** The file the witness job commits for one checkpoint: stable path, stable bytes. */
-export function witnessFile(target: WitnessTarget, checkpoint: Checkpoint) {
+/**
+ * The file the witness job commits for one checkpoint: stable path, stable bytes. Always the
+ * public form (v2, or v1 with its signed fields withheld): the split is never pushed.
+ */
+export function witnessFile(target: WitnessTarget, checkpoint: PublicCheckpoint) {
   const [year] = checkpoint.date.split('-');
   return {
     repo: target.repo,

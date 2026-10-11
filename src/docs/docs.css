@@ -293,6 +293,8 @@
   list-style: none;
 }
 .docs-index li {
+  /* The whole card is the link's tap area (the title link stretches over it). */
+  position: relative;
   padding: 16px 18px;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -305,6 +307,13 @@
   font-weight: 650;
   text-decoration: none;
 }
+.docs-index a::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+.docs-index li:hover a,
 .docs-index a:hover {
   color: var(--accent-text, var(--link));
 }
@@ -312,6 +321,84 @@
   margin-top: 4px !important;
   color: var(--text-secondary, var(--text-muted));
   font-size: 13.5px;
+}
+
+/* Pages rendered from the public Markdown (Guide.tsx): the quiet link to the .md, the headings
+   and blocks Markdown adds, and tables that scroll sideways inside their box on narrow screens. */
+.docs-source {
+  margin-top: -8px !important;
+  font-size: 13px;
+}
+.docs-article .docs-source a {
+  color: var(--text-muted);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.docs-article .docs-source a:hover {
+  color: var(--accent-text, var(--link));
+}
+.docs-article h3,
+.docs-article h4 {
+  scroll-margin-top: calc(var(--header-h, 56px) + 16px);
+}
+.docs-article h4 {
+  margin: 4px 0 0;
+  color: var(--text-primary, var(--text));
+  font-size: 14.5px;
+  font-weight: 600;
+}
+.docs-article li > ul,
+.docs-article li > ol {
+  margin-top: 6px;
+}
+.docs-article blockquote {
+  margin: 0;
+  padding: 4px 0 4px 16px;
+  border-left: 3px solid var(--border);
+  color: var(--text-secondary, var(--text-muted));
+}
+.docs-article hr {
+  width: 100%;
+  margin: 8px 0;
+  border: none;
+  border-top: 1px solid var(--border);
+}
+.docs-table {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.docs-table:focus-visible {
+  outline: 2px solid var(--border-focus, var(--focus));
+  outline-offset: 2px;
+}
+.docs-table table {
+  min-width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.docs-table th,
+.docs-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle, var(--border));
+  text-align: left;
+  vertical-align: top;
+}
+.docs-table th {
+  background: var(--bg-surface, var(--surface));
+  color: var(--text-primary, var(--text));
+  font-weight: 600;
+  white-space: nowrap;
+}
+.docs-table tbody tr:last-child td {
+  border-bottom: none;
+}
+/* Codes and short values stay on one line; the box scrolls instead of breaking them. */
+.docs-table code {
+  overflow-wrap: normal;
+  white-space: nowrap;
 }
 
 .docs-help {
@@ -372,5 +459,34 @@
   }
   .docs-article h1 {
     font-size: 28px;
+  }
+}
+
+/* Screens under 600px: category links form a horizontally scrolling strip with a fade at
+   the trailing edge indicating more content to swipe. When search is active, wrap normally. */
+@media (max-width: 600px) {
+  .docs-nav {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    padding-right: 40px;
+    scroll-padding-inline-end: 40px;
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent);
+  }
+  .docs-nav::-webkit-scrollbar {
+    display: none;
+  }
+  .docs-nav-link {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .docs-sidebar:has(.docs-search-input:not(:placeholder-shown)) .docs-nav {
+    flex-wrap: wrap;
+    overflow-x: visible;
+    padding-right: 0;
+    -webkit-mask-image: none;
+    mask-image: none;
   }
 }

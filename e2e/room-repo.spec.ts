@@ -99,7 +99,9 @@ test('without room repositories on the server, the room shows no Code button', a
   browser,
 }) => {
   const { host, room } = await hostRoom(browser);
-  expect((await host.request.get(`/api/rooms/${room.id}/repo`)).status()).toBe(404);
+  const off = await host.request.get(`/api/rooms/${room.id}/repo`);
+  expect(off.status()).toBe(200);
+  expect(await off.json()).toEqual({ available: false });
   await host.page.goto(`/rooms/${room.id}`);
   await expect(host.page.getByRole('heading', { level: 1, name: 'Launch plan' })).toBeVisible();
   await expect(

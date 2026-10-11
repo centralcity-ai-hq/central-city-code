@@ -1302,7 +1302,11 @@ test('17 scopes: results:publish is opt-in, results:read starts checked, old cre
   assert.deepEqual(
     [...INITIAL_KEY_SCOPES],
     ASSISTANT_SCOPES.filter(
-      (scope) => scope !== 'rooms:host' && scope !== 'rooms:apply' && scope !== 'results:publish',
+      (scope) =>
+        scope !== 'rooms:host' &&
+        scope !== 'rooms:apply' &&
+        scope !== 'results:publish' &&
+        scope !== 'pay',
     ),
   );
 });

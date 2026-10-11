@@ -22,11 +22,13 @@ const FORBIDDEN: Array<[RegExp, string]> = [
   [/\bcoming soon\b/i, 'coming soon'],
   [/\bbeta\b/i, 'beta'],
   [/\bpreview\b/i, 'preview'],
+  [/\bprototype\b/i, 'prototype'],
+  [/\bearly access\b/i, 'early access'],
   [/\bplugins?\b/i, 'plugin'],
 ];
 
 /** One-word strings that are copy whatever their context (status labels, badges, menu items). */
-const SINGLE_WORDS = /^(?:beta|preview|official|certified|partners?|plugins?)$/i;
+const SINGLE_WORDS = /^(?:beta|preview|prototype|official|certified|partners?|plugins?)$/i;
 
 /**
  * True statements that contain a forbidden word; each allows only its exact phrase. Vendor terms
@@ -40,14 +42,17 @@ const ALLOWED: RegExp[] = [
   /\bpersonal plugins\b/i,
   /\bits plugin(?:\s+directory)?$/i,
   /chatgpt\.com\/plugins/i,
+  // Claude Code's own command names, in the published install commands.
+  /\/plugin (?:marketplace add centralcity-ai-hq\/toolkit|install central-city@centralcity-ai)/g,
 ];
 
 /**
  * Repository docs (README, CHANGELOG, CONTRIBUTING, SECURITY, docs/*.md) ship in the public code
  * repository. They use "official", "preview" and "plugin" in their technical senses (an official
  * release archive, a preview deployment, a Claude Code plugin), so they get only the overclaims:
- * the open-source phrases, "trusted by", "coming soon", and official/certified/partner when the
- * sentence says it about Central City or us.
+ * the open-source phrases, "trusted by", "coming soon", "development prototype" and "not a
+ * production release" (the service is live), and official/certified/partner when the sentence
+ * says it about Central City or us.
  */
 const REPO_FORBIDDEN: Array<[RegExp, string]> = [
   [/\bfully open[- ]source(?:d)?\b/i, 'fully open source'],
@@ -55,6 +60,8 @@ const REPO_FORBIDDEN: Array<[RegExp, string]> = [
   [/\beverything is open\b/i, 'everything is open'],
   [/\btrusted by\b/i, 'trusted by'],
   [/\bcoming soon\b/i, 'coming soon'],
+  [/\bdevelopment prototype\b/i, 'development prototype'],
+  [/\bnot a production release\b/i, 'not a production release'],
   [
     /\b(?:Central City|centralcity\.ai|our|we|we're|we are|us)\b[^.]{0,40}\b(?:official|certified|partners?|partnership)\b/i,
     'official/certified/partner about us',
@@ -177,6 +184,8 @@ test('the repository-docs check refuses claims about us and allows technical use
     'An official Central City connector.',
     'Everything is open.',
     'Trusted by thousands of teams.',
+    'This repository contains a development prototype.',
+    'It is not a production release.',
   ])
     assert.ok(problems('sample', [line], REPO_FORBIDDEN).length > 0, line);
   for (const line of [
@@ -202,6 +211,8 @@ test('the checks catch the phrases and let code identifiers through', () => {
     'Built with our partner.',
     'Rooms are in beta.',
     'A preview of rooms.',
+    'Central City is a development prototype.',
+    'Rooms are in early access.',
   ])
     assert.ok(problems('sample', [line]).length > 0, line);
   // A one-word status label is copy: it is extracted and refused. A CSS class is not copy.

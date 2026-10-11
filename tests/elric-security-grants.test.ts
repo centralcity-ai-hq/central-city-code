@@ -80,26 +80,16 @@ test('grant: city_control resume cannot un-pause an owner-paused Elric', async (
   assert.equal(f.adapterCalls(), 0, 'a paused Elric costs nothing');
 });
 
-test('grant: city_control pause or revoke only ever stops Elric (the safe direction)', async (t) => {
+test('grant: city_control pause or revoke on Elric is refused (409 elric_managed)', async (t) => {
   const f = await elricFixture(t);
   const s = await f.scene();
   const token = await grant(f, s.owner.cookie);
-  const paused = await tool(f, token, 'city_control', { agent_id: s.elricId, action: 'pause' });
-  await f.say(s.owner, s.room, '@Elric hello', s.person);
-  await f.elric.drain();
-  // Documented follow-up (docs/ELRIC.md): agents:control is not yet blocked on Elric. Whatever
-  // the grant did, Elric must not have answered while its workspace agent was paused.
-  if (paused.statusCode === 200) assert.equal(f.adapterCalls(), 0);
-  const revoked = await tool(f, token, 'city_control', { agent_id: s.elricId, action: 'revoke' });
-  if (revoked.statusCode === 200) {
-    const calls = f.adapterCalls();
-    await f.say(s.owner, s.room, '@Elric still there?', s.person);
-    await f.elric.drain();
-    assert.equal(f.adapterCalls(), calls);
+  for (const action of ['pause', 'revoke']) {
+    const response = await tool(f, token, 'city_control', { agent_id: s.elricId, action });
+    assert.equal(response.statusCode, 409, response.body);
+    assert.equal(response.json().code, 'elric_managed');
   }
-  t.diagnostic(
-    `city_control on Elric: pause=${paused.statusCode} revoke=${revoked.statusCode} (403 expected once blocked)`,
-  );
+  assert.equal(await elricStatus(f, s.owner.cookie), 'active');
 });
 
 test('grant: Elric console routes and pending approval refuse bearer credentials', async (t) => {

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
 import type { Transaction as Tx } from '../server/database.js';
 import { createApp } from '../server/app.js';
+import { publicAgent, type Workspace } from '../server/model.js';
 import { signedHeaders } from '../connector/signing.js';
 import type { Agent, Job, Snapshot } from '../shared/types.js';
 
@@ -197,6 +198,52 @@ test('rotation requires the owner and rejects hosted, revoked or malformed targe
   );
   assert.equal((await api(f.app, f.cookie, path, {})).statusCode, 409);
   assert.equal((await f.app.city.db.query('SELECT agent_id FROM credentials')).rows.length, 0);
+});
+
+test('the owner sees a masked credential hint that follows create and rotation, nobody else does', async (t) => {
+  const f = await fixture(t);
+  const id = f.external.agent.id;
+  const hintOf = (token: string) => `…${token.slice(-4)}`;
+  const mine = async (agentId = id) =>
+    (await snapshot(f.app, f.cookie)).agents.find((agent) => agent.id === agentId)!;
+  // Set on create, shown in the create answer and the owner's snapshot; hosted agents have none.
+  assert.equal(f.external.agent.credentialHint, hintOf(f.external.token));
+  assert.equal((await mine()).credentialHint, hintOf(f.external.token));
+  assert.equal(f.peer.agent.credentialHint, null);
+  assert.equal((await mine(f.peer.agent.id)).credentialHint, null);
+  // Rotation replaces it with the new credential's last 4 characters.
+  const rotated = await rotate(f.app, f.cookie, id);
+  assert.equal(rotated.agent.credentialHint, hintOf(rotated.token));
+  assert.equal((await mine()).credentialHint, hintOf(rotated.token));
+  // Only the last 4 characters are stored, never the credential itself.
+  const workspaces = (
+    await f.app.city.db.query<{ data: Workspace }>('SELECT data FROM workspaces')
+  ).rows.map((row) => row.data);
+  const stored = JSON.stringify(workspaces);
+  assert.ok(!stored.includes(rotated.token));
+  assert.ok(!stored.includes(f.external.token));
+  // The shared shape (assistant, runtime and MCP views) never carries it.
+  const storedAgent = workspaces
+    .flatMap((workspace) => workspace.agents)
+    .find((agent) => agent.id === id)!;
+  assert.equal(storedAgent.credentialHint, rotated.token.slice(-4));
+  assert.equal('credentialHint' in publicAgent(storedAgent, [], now), false);
+  // Another workspace never sees it.
+  const other = await account(f.app, 'Another owner');
+  const theirs = await snapshot(f.app, other);
+  assert.ok(!JSON.stringify(theirs).includes(hintOf(rotated.token)));
+  // Agents from before hints were kept show null until their next rotation.
+  await f.app.city.db.query(
+    `UPDATE workspaces SET data = jsonb_set(data, '{agents}',
+       (SELECT jsonb_agg(a - 'credentialHint') FROM jsonb_array_elements(data->'agents') a))
+     WHERE jsonb_array_length(data->'agents') > 0`,
+  );
+  assert.equal((await mine()).credentialHint, null);
+  const again = await rotate(f.app, f.cookie, id);
+  assert.equal((await mine()).credentialHint, hintOf(again.token));
+  // Revocation deletes the credential and its hint.
+  assert.equal((await api(f.app, f.cookie, `/api/agents/${id}/revoke`, {})).statusCode, 200);
+  assert.equal((await mine()).credentialHint, null);
 });
 
 test('a persistence failure rolls back the secret replacement, cancellation, presence and audit together', async (t) => {
