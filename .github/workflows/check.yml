@@ -21,7 +21,7 @@ jobs:
     outputs:
       code: ${{ steps.paths.outputs.code }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -36,10 +36,13 @@ jobs:
           const jobsText = text.split('\njobs:\n')[1];
           const names = [...jobsText.matchAll(/^  ([A-Za-z0-9_-]+):\n/gm)].map(match => match[1]);
           const job = name => text.split(`  ${name}:\n`)[1].split(/^  [A-Za-z0-9_-]+:\n/m)[0];
-          assert.deepEqual(names, ['changes', 'secrets', 'unit', 'browser', 'portability', 'verify'], 'jobs changed: update this guard and verify');
-          // Draft and docs policy: every job except changes, secrets and verify is gated on the classification.
-          for (const name of names.filter(name => !['changes', 'secrets', 'verify'].includes(name)))
+          assert.deepEqual(names, ['changes', 'secrets', 'docs', 'unit', 'browser', 'postgres-races', 'portability', 'verify'], 'jobs changed: update this guard and verify');
+          // Draft and docs policy: every job except changes, secrets, docs and verify is gated on the
+          // classification; the docs job is gated the other way (docs-only, non-draft PRs).
+          for (const name of names.filter(name => !['changes', 'secrets', 'docs', 'verify'].includes(name)))
             assert.match(job(name), /^    if: needs\.changes\.outputs\.code == 'true'/m, `${name} must be gated on changes`);
+          assert.match(job('docs'), /^    if: needs\.changes\.outputs\.code == 'false' && github\.event\.pull_request\.draft != true$/m, 'docs must be gated on docs-only, non-draft PRs');
+          assert.match(job('docs'), /run: pnpm test:files tests\/public-docs\.test\.ts/, 'docs runs the cheap docs checks');
           for (const name of ['unit', 'browser']) {
             assert.doesNotMatch(job(name), /continue-on-error/, `${name} may not ignore failures`);
             assert.match(job(name), /fail-fast: false/, `${name} reports every shard`);
@@ -59,8 +62,9 @@ jobs:
             assert.match(verify, new RegExp(`${variable}: \\$\\{\\{ needs\\.${name}\\.result \\}\\}`), `verify reads ${name}`);
             assert.match(verify.split('run: |')[1], new RegExp(`"\\$${variable}" == success`), `verify requires ${name} success`);
           }
-          for (const name of ['unit', 'browser'])
-            assert.match(verify, new RegExp(`"\\$${name.toUpperCase()}_RESULT" == skipped`), `verify requires ${name} skipped for docs and drafts`);
+          for (const name of ['unit', 'browser', 'postgres-races'])
+            assert.match(verify, new RegExp(`"\\$${name.toUpperCase().replaceAll('-', '_')}_RESULT" == skipped`), `verify requires ${name} skipped for docs and drafts`);
+          assert.match(verify.split('run: |')[1], /"\$DOCS_RESULT" == skipped/, 'verify requires docs skipped for code PRs and drafts');
           // The shards cover every check the single job ran, each test file exactly once.
           const { UNIT_SHARDS, assignShards, testFiles } = await import(pathToFileURL(`${process.cwd()}/scripts/test-shard.mjs`));
           const range = count => `[${Array.from({ length: count }, (_, index) => index + 1).join(', ')}]`;
@@ -75,6 +79,9 @@ jobs:
             assert.ok(job('unit').includes(`run: ${command}`) || job('browser').includes(`run: ${command}`), command);
           assert.match(job('unit'), /run: pnpm install --frozen-lockfile/);
           assert.match(job('browser'), /run: pnpm install --frozen-lockfile/);
+          // Real PostgreSQL races: the service must match production's major version.
+          assert.match(job('postgres-races'), /image: public\.ecr\.aws\/docker\/library\/postgres:17-alpine/);
+          assert.match(job('postgres-races'), /CITY_TEST_POSTGRES_URL: postgres:\/\/city:city-ci-only@127\.0\.0\.1:5432\/city/);
           NODE
       - id: paths
         shell: bash
@@ -125,11 +132,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.23.3
       - name: Install checksum-pinned Gitleaks
@@ -148,6 +155,29 @@ jobs:
         run: node scripts/check-secrets.mjs
       - name: Test scanner safeguards
         run: node --test tests/secret-scan.test.ts
+  # Docs-only PRs skip the application jobs; they still get the cheap docs/public checks
+  # (docs/CI.md, "Documentation-only pull requests"), so a broken reference or a private
+  # name in a published file can no longer merge green. Drafts defer even these.
+  docs:
+    needs: changes
+    if: needs.changes.outputs.code == 'false' && github.event.pull_request.draft != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # pnpm first, so setup-node can restore the pnpm store cache (keyed on pnpm-lock.yaml).
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0, Node 24
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.3
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:files tests/public-docs.test.ts tests/public-copy.test.ts
   # The former single `application` job, split so its parts run in parallel (docs/CI.md,
   # "Parallel jobs"). Same checks: every Node test file runs in exactly one `unit` shard
   # (scripts/test-shard.mjs), every browser scenario in one `browser` shard.
@@ -155,14 +185,14 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         # Keep equal to UNIT_SHARDS in scripts/test-shard.mjs (checked in `changes`).
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -170,14 +200,14 @@ jobs:
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0, Node 24
         with:
           version: 11.19.0
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.23.3
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - run: pnpm test:shard ${{ matrix.shard }}/4
+      - run: pnpm test:shard ${{ matrix.shard }}/6
         env:
           # Scanner coverage stays on hosted Linux in the unconditional secrets job.
           CI: ''
@@ -185,13 +215,14 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        # About 20 minutes each (one worker); at 3 shards they ran 25-28 of their 30 minutes.
+        shard: [1, 2, 3, 4]
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -199,7 +230,7 @@ jobs:
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0, Node 24
         with:
           version: 11.19.0
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.23.3
           cache: pnpm
@@ -214,7 +245,7 @@ jobs:
         shell: bash
         run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
       - id: browsers
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}-chromium
@@ -225,7 +256,54 @@ jobs:
         if: runner.os == 'Linux' && steps.browsers.outputs.cache-hit == 'true'
       - run: pnpm exec playwright install chromium
         if: runner.os != 'Linux'
-      - run: pnpm test:browser --shard=${{ matrix.shard }}/2
+      - run: pnpm test:browser --shard=${{ matrix.shard }}/4
+  # Join races on a real PostgreSQL server (production runs PostgreSQL 17): PGlite has one
+  # connection, so only here do parallel joins hold separate sessions and truly contend.
+  postgres-races:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    services:
+      postgres:
+        # The Docker Official Image from its ECR Public mirror (same digest as Docker Hub's
+        # postgres:17-alpine): unauthenticated Docker Hub pulls hit its rate limit in CI.
+        image: public.ecr.aws/docker/library/postgres:17-alpine
+        env:
+          # Ephemeral service database; a test-only value, not a secret.
+          POSTGRES_USER: city
+          POSTGRES_PASSWORD: city-ci-only
+          POSTGRES_DB: city
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U city -d city"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # pnpm first, so setup-node can restore the pnpm store cache (keyed on pnpm-lock.yaml).
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0, Node 24
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.3
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:files tests/invite-join-concurrency.test.ts tests/checkpoint-postgres-race.test.ts tests/base-fleet-admit.test.ts tests/base-payment-receive-postgres.test.ts
+        env:
+          CITY_TEST_POSTGRES_URL: postgres://city:city-ci-only@127.0.0.1:5432/city
+          CI: ''
+      - run: >-
+          node --import tsx --test --test-concurrency=1 --test-name-pattern="lanes: two creates|sponsor exposure: per wallet, concurrent creates|sponsor exposure: cancel races" tests/base-wallet-withdraw.test.ts
+        env:
+          CITY_TEST_POSTGRES_URL: postgres://city:city-ci-only@127.0.0.1:5432/city
+          CITY_WALLET_POSTGRES_RACES: '1'
   portability:
     needs: changes
     if: needs.changes.outputs.code == 'true' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
@@ -237,10 +315,10 @@ jobs:
       matrix:
         os: [windows-2025]
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.23.3
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0, Node 24
@@ -261,7 +339,7 @@ jobs:
   verify:
     # Always report the required check, including classification errors and docs-only PRs.
     if: always()
-    needs: [changes, secrets, unit, browser, portability]
+    needs: [changes, secrets, docs, unit, browser, postgres-races, portability]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
@@ -271,24 +349,30 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           IS_DRAFT: ${{ github.event.pull_request.draft }}
           SECRETS_RESULT: ${{ needs.secrets.result }}
+          DOCS_RESULT: ${{ needs.docs.result }}
           PORTABILITY_RESULT: ${{ needs.portability.result }}
           CHANGES_RESULT: ${{ needs.changes.result }}
           CODE: ${{ needs.changes.outputs.code }}
           UNIT_RESULT: ${{ needs.unit.result }}
           BROWSER_RESULT: ${{ needs.browser.result }}
+          POSTGRES_RACES_RESULT: ${{ needs.postgres-races.result }}
         run: |
           set -euo pipefail
           [[ "$CHANGES_RESULT" == success && "$SECRETS_RESULT" == success ]] || exit 1
           if [[ "$CODE" == false ]]; then
-            [[ "$UNIT_RESULT" == skipped && "$BROWSER_RESULT" == skipped && "$PORTABILITY_RESULT" == skipped ]] || exit 1
+            [[ "$UNIT_RESULT" == skipped && "$BROWSER_RESULT" == skipped && "$POSTGRES_RACES_RESULT" == skipped && "$PORTABILITY_RESULT" == skipped ]] || exit 1
             if [[ "$IS_DRAFT" == true ]]; then
+              [[ "$DOCS_RESULT" == skipped ]] || exit 1
               echo "draft: tests deferred"
             else
-              echo "Documentation-only PR: application checks intentionally skipped."
+              # Docs-only PR: the cheap docs/public checks are the gate.
+              [[ "$DOCS_RESULT" == success ]] || exit 1
+              echo "Documentation-only PR: application checks intentionally skipped; docs checks ran."
             fi
           else
+            [[ "$DOCS_RESULT" == skipped ]] || exit 1
             # Every leg of both matrices must succeed: a matrix job reports success only then.
-            [[ "$CODE" == true && "$UNIT_RESULT" == success && "$BROWSER_RESULT" == success ]] || exit 1
+            [[ "$CODE" == true && "$UNIT_RESULT" == success && "$BROWSER_RESULT" == success && "$POSTGRES_RACES_RESULT" == success ]] || exit 1
             if [[ "$EVENT_NAME" == schedule || "$EVENT_NAME" == workflow_dispatch ]]; then
               [[ "$PORTABILITY_RESULT" == success ]] || exit 1
             else
