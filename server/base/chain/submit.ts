@@ -36,6 +36,7 @@ import { BASE_MAINNET, type Address, type BaseNetwork } from '../../../shared/ba
 import type { ChainOpKind, ChainOpStatus } from '../../../shared/base/types.js';
 import { createAccountCall, type DerivationRecipe } from './derive.js';
 import { walletSignature } from './permissions.js';
+import { liveReads } from './rpc-budget.js';
 
 export interface Call {
   target: Address;
@@ -486,32 +487,61 @@ async function searchOnChain(
 
 export type ChainReader = Pick<SubmitDeps, 'network' | 'client'>;
 
-/** Latest block, uncached (viem caches the block number for seconds). */
-const headBlock = (deps: ChainReader) => deps.client.getBlockNumber({ cacheTime: 0 });
+/**
+ * Latest block, read live (never the shared head, see rpc-budget.ts): every use here concludes
+ * something from it (where a search starts or ends, whether a node has reached a block).
+ */
+const headBlock = (deps: ChainReader) => liveReads(deps.client).getBlockNumber({ cacheTime: 0 });
 
-/** The block below which nothing reorgs: finalized on mainnet, head − confirmations elsewhere. */
-async function settledBlock(deps: ChainReader): Promise<bigint | null> {
-  if (deps.network.chainId === BASE_MAINNET)
-    return (
-      (await deps.client.getBlock({ blockTag: 'finalized' }).catch(() => null))?.number ?? null
-    );
+/** A head: its number, and its hash when it came from a block tag. */
+export interface ChainHead {
+  number: bigint;
+  hash: Hex | null;
+}
+
+/** A tagged head as the (possibly shared) client reports it; null without a number and hash. */
+async function taggedHead(deps: ChainReader, blockTag: 'safe' | 'finalized') {
+  const block = await deps.client.getBlock({ blockTag }).catch(() => null);
+  if (!block || block.number === null || block.number === undefined || !block.hash) return null;
+  return { number: block.number, hash: block.hash } satisfies ChainHead;
+}
+
+/**
+ * The block below which nothing reorgs: finalized on mainnet (a shared, possibly stale or foreign
+ * head: anything concluded from it checks headIsCanonical first), the live head − confirmations
+ * elsewhere.
+ */
+async function settledHead(deps: ChainReader): Promise<ChainHead | null> {
+  if (deps.network.chainId === BASE_MAINNET) return taggedHead(deps, 'finalized');
   const head = await headBlock(deps).catch(() => null);
   if (head === null) return null;
   const depth = BigInt(deps.network.confirmations);
-  return head > depth ? head - depth : 0n;
+  return { number: head > depth ? head - depth : 0n, hash: null };
 }
 
 /**
  * The newest block that is safe but not necessarily final: on mainnet the 'safe' tag (its data is
  * posted to L1, so only an L1 reorg could still drop it), elsewhere the settled block itself. Null
  * when the node cannot tell, which counts as not safe. It is a display signal only: an operation
- * becomes 'final' solely through settledBlock (finalized on mainnet), which payments and fleet
- * batches rely on.
+ * becomes 'final' solely through settledHead (finalized on mainnet), which payments and fleet
+ * batches rely on. A caller that reports 'safe' checks headIsCanonical first.
  */
-export async function safeBlock(deps: ChainReader): Promise<bigint | null> {
-  if (deps.network.chainId === BASE_MAINNET)
-    return (await deps.client.getBlock({ blockTag: 'safe' }).catch(() => null))?.number ?? null;
-  return settledBlock(deps);
+export async function safeHead(deps: ChainReader): Promise<ChainHead | null> {
+  if (deps.network.chainId === BASE_MAINNET) return taggedHead(deps, 'safe');
+  return settledHead(deps);
+}
+
+/**
+ * Whether a tagged head is on the chain as it is now: the block at its height, read live by number,
+ * has its hash. A head from another fork, or one rolled back since, fails; so does a node that does
+ * not have that block. A depth-derived head (no hash) is taken as read: it came from a live head.
+ */
+export async function headIsCanonical(deps: ChainReader, head: ChainHead): Promise<boolean> {
+  if (head.hash === null) return true;
+  const block = await liveReads(deps.client)
+    .getBlock({ blockNumber: head.number })
+    .catch(() => null);
+  return !!block?.hash && block.hash.toLowerCase() === head.hash.toLowerCase();
 }
 
 /** Sent and not settled: the states a broadcast or a receipt lookup may still move forward. */
@@ -580,6 +610,7 @@ async function reconcile(deps: SubmitDeps, row: StoredOperation): Promise<Stored
     })
     .catch(() => null);
   if (current !== null && current > nonce) {
+    // The nonce was just read at the newest block: the (live) search must reach at least as far.
     const head = await headBlock(deps);
     const search = await searchOnChain(deps, row, head);
     if (search.kind === 'found') return record(deps, row, search.receipt);
@@ -816,7 +847,7 @@ export async function refreshFinality(
   if (!row) return null;
   if (TERMINAL.includes(row.status)) return row;
   const current = await reconcile(deps, row);
-  const settled = await settledBlock(deps);
+  const settled = await settledHead(deps);
   if (settled === null) return current;
 
   // Nonce consumed by something else: failed only when the consumption itself is settled (nonce
@@ -829,13 +860,16 @@ export async function refreshFinality(
         abi: entryPointAbi,
         functionName: 'getNonce',
         args: [getAddress(current.sender), nonce >> 64n],
-        blockNumber: settled,
+        blockNumber: settled.number,
       })
       .catch(() => null);
     if (atSettled === null || atSettled <= nonce) return current;
-    const search = await searchOnChain(deps, current, settled);
+    const search = await searchOnChain(deps, current, settled.number);
     if (search.kind === 'found') return record(deps, current, search.receipt);
     if (search.kind === 'unknown') return current;
+    // Only a settled block still on the chain (its hash, read live by number) proves anything: a
+    // shared finalized head from another fork or a rolled-back node does not.
+    if (!(await headIsCanonical(deps, settled))) return current;
     return move(deps, idempotencyKey, ['reconciling'], { status: 'failed' }, receiptOf(current));
   }
   if (current.status !== 'included' || current.blockNumber === null) return current;
@@ -847,6 +881,7 @@ export async function refreshFinality(
   let head: bigint | null = null;
   if (!fresh) {
     try {
+      // Read live (headBlock): an absent result up to this head declares the receipt gone.
       head = await headBlock(deps);
       const search = await searchOnChain(deps, current, head);
       fresh =
@@ -871,7 +906,7 @@ export async function refreshFinality(
   }
   if (fresh.txHash !== current.txHash || fresh.blockNumber.toString(10) !== current.blockNumber)
     return record(deps, current, fresh);
-  if (fresh.blockNumber > settled) return current;
+  if (fresh.blockNumber > settled.number) return current;
   // The bundler's word is not enough to settle: the chain itself must hold this receipt in the
   // canonical block at that height, with our operation's outcome (a stale receipt survives a reorg
   // to another block at the same height with the same number).
@@ -889,6 +924,9 @@ export async function refreshFinality(
       { status: 'reorged', errorCode: 'RECEIPT_GONE' },
       receiptOf(current),
     );
+  // Final only under a settled block that is on the chain now (hash read live by number): the
+  // receipt's block is canonical (above) and so is the settled block, hence its ancestor.
+  if (!(await headIsCanonical(deps, settled))) return current;
   return move(
     deps,
     idempotencyKey,

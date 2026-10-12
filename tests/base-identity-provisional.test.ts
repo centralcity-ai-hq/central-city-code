@@ -831,7 +831,7 @@ test('polling with unchanged evidence writes nothing', async (t) => {
     ctx.clock.at += 5_000;
     const v = await ctx.advance();
     assert.equal(v.stage, 'finalizing');
-    assert.equal(v.pollAfterMs, 15000);
+    assert.equal(v.pollAfterMs, 30000);
   }
   const after = await ctx.row();
   assert.equal(after.updated_at, before.updated_at);
@@ -868,7 +868,7 @@ test('D1: mint and hand-over both safe is "registered"; the state stays submitte
   const registered = await ctx.advance();
   assert.equal(registered.stage, 'registered');
   assert.equal(registered.state, 'submitted');
-  assert.equal(registered.pollAfterMs, 15000);
+  assert.equal(registered.pollAfterMs, 30000);
   assert.equal(registered.provisionalAgentId, '99029');
   assert.equal(registered.erc8004AgentId, null);
   assert.equal(registered.canRetry, false);

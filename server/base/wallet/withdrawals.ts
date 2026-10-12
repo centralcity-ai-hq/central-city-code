@@ -66,6 +66,7 @@ import { BASE_NETWORKS, NATIVE_ETH, type Address } from '../../../shared/base/ch
 import type { WalletDerivation } from '../../../shared/base/types.js';
 import { WALLET_EXPLORER, WALLET_TESTNET } from '../../../shared/base/wallet-network.js';
 import { laneKey, LaneKeyError } from '../../../shared/base/lanes.js';
+import { sponsoredValidUntil } from '../../../shared/base/paymasters.js';
 import {
   decodeOwnerCall,
   noopCall,
@@ -694,6 +695,23 @@ function intentHash(
 /** The lane a stored operation (and its cancel) runs in: its own, or (absent) the owner lane. */
 const laneInput = (row: Pick<Row, 'lane_key'>): { nonceKey?: bigint } =>
   row.lane_key === null ? {} : { nonceKey: BigInt(row.lane_key) };
+
+/**
+ * Until when a prepared operation can be signed: its fixed signing deadline, or, in its own lane
+ * and sponsored, the earlier of that and the paymaster's signed validUntil (prepare refused any
+ * sponsorship ending after the deadline). A sponsorship that died frees its slot and exposure
+ * then, not minutes later. Only unsigned operations ever expire; a signed one is never freed by it.
+ */
+const signableUntil = (
+  deadline: number,
+  laned: boolean,
+  sponsored: boolean,
+  operation: Pick<UserOperation<'0.6'>, 'paymasterAndData'>,
+) => {
+  if (!laned || !sponsored) return deadline;
+  const until = sponsoredValidUntil(operation.paymasterAndData);
+  return until === null ? deadline : Math.min(deadline, until);
+};
 
 /** `lanes: true` only for an operation in its own lane; nothing at all otherwise. */
 const lanesFlag = (row: Pick<Row, 'lane_key'>): { lanes?: true } =>
@@ -2418,7 +2436,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
               prepared.operation.nonce.toString(10),
               JSON.stringify(userOperationToRpc(prepared.operation)),
               userOpHash,
-              signingDeadline,
+              signableUntil(signingDeadline, lane !== null, prepared.sponsored, prepared.operation),
               reservation.reservationId,
               at,
               prepared.sponsored,
@@ -2629,7 +2647,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
               prepared.operation.nonce.toString(10),
               JSON.stringify(userOperationToRpc(prepared.operation)),
               userOpHash,
-              signingDeadline,
+              signableUntil(signingDeadline, lane !== null, true, prepared.operation),
               at,
               lane === null ? null : lane.toString(10),
             ],
@@ -3026,7 +3044,12 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
             at,
             JSON.stringify(userOperationToRpc(prepared.operation)),
             cancelHash,
-            cancelDeadline,
+            signableUntil(
+              cancelDeadline,
+              row.lane_key !== null,
+              prepared.sponsored,
+              prepared.operation,
+            ),
             prepared.sponsored,
             (prepared.sponsored ? 0n : prepared.maxCostWei).toString(10),
           ],

@@ -28,7 +28,6 @@ import {
   createPublicClient,
   encodeFunctionData,
   getAddress,
-  http,
   parseAbi,
   recoverAddress,
   type Hex,
@@ -51,6 +50,7 @@ import {
 import { createAccountCall, deriveAddressLocal, type DerivationRecipe } from './derive.js';
 import { walletSignature } from './permissions.js';
 import { BundlerError, rpcBundler } from './rpc-bundler.js';
+import { cdpTransport } from './rpc-budget.js';
 import { ChainRuntimeError, WALLET_FEE_CAP_SETTING, walletFeeCap } from './runtime.js';
 import { pgChainOperationStore } from './stores.js';
 import {
@@ -373,7 +373,7 @@ export function ownerRevokePortFromEnv(
       nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
       rpcUrls: { default: { http: [url] } },
     },
-    transport: http(url),
+    transport: cdpTransport(url),
   });
   return createOwnerRevokePort({
     network,

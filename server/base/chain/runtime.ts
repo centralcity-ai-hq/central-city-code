@@ -17,7 +17,7 @@
  *
  * No setting value (they contain keys) ever appears in an error message or a log line.
  */
-import { createPublicClient, http, type Hex } from 'viem';
+import { createPublicClient, type Hex } from 'viem';
 import type { Database } from '../../database.js';
 import { BASE_MAINNET, baseNetwork, type BaseChainId } from '../../../shared/base/chains.js';
 import type { ChainRuntime } from '../identity/routes.js';
@@ -31,6 +31,7 @@ import { WALLET_CHAIN_ID } from '../../../shared/base/wallet-network.js';
 import { walletSignature } from './permissions.js';
 import { createWalletChainPort } from './port.js';
 import { rpcBundler } from './rpc-bundler.js';
+import { blockTagCache, cdpTransport, withLiveReads } from './rpc-budget.js';
 import { pgChainOperationStore, pgSpenderKeyStore } from './stores.js';
 
 export class ChainRuntimeError extends Error {
@@ -104,15 +105,18 @@ export function createChainRuntime(deps: {
       ? walletFeeCap(env, network.chainId)
       : null;
 
-  const client = createPublicClient({
-    chain: {
-      id: network.chainId,
-      name: network.name,
-      nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-      rpcUrls: { default: { http: [url] } },
-    },
-    transport: http(url),
-  });
+  const chain = {
+    id: network.chainId,
+    name: network.name,
+    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+    rpcUrls: { default: { http: [url] } },
+  };
+  // Head reads are shared for a moment across every request and cron of this process; a read whose
+  // conclusion needs a current head uses the live twin (rpc-budget.ts).
+  const client = withLiveReads(
+    createPublicClient({ chain, transport: blockTagCache(cdpTransport(url)) }),
+    createPublicClient({ chain, transport: cdpTransport(url) }),
+  );
   const keyStore = pgSpenderKeyStore(db);
   const keystore = createKeystore({ store: keyStore, keks });
   const bundler = rpcBundler({

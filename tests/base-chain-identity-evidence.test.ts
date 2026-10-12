@@ -94,6 +94,13 @@ interface Scripted {
   receipt?: { blockNumber: bigint; blockHash: Hex; logs: RawLog[] } | Error;
   /** The hash of the block at BLOCK now (defaults to the receipt's block hash). */
   canonicalHash?: Hex;
+  /**
+   * The hash a tag read reports for its block (defaults to the canonical hash at that height): a
+   * different one is a head served from another fork.
+   */
+  tagHash?: Hex;
+  /** Blocks above this height are not on the chain now (a node rolled back): by-number reads fail. */
+  rolledBackAbove?: bigint;
   tokenUri?: (id: bigint, blockNumber: bigint | undefined) => string;
   owner?: Address;
   /** The account's next nonce on the lane, now (latest) or at a block. */
@@ -108,9 +115,15 @@ interface Scripted {
 function scriptedChain(s: Scripted) {
   const reads: { functionName: string; blockNumber: bigint | undefined }[] = [];
   const receipt = s.receipt ?? { blockNumber: BLOCK, blockHash: BLOCK_HASH, logs: ourBundle() };
+  /** The canonical hash at a height: the receipt's block at BLOCK, a derived one elsewhere. */
+  const hashAt = (n: bigint): Hex =>
+    n === BLOCK
+      ? (s.canonicalHash ?? (receipt instanceof Error ? BLOCK_HASH : receipt.blockHash))
+      : (`0x${n.toString(16).padStart(64, '0')}` as Hex);
   const tag = (value: bigint | Error | undefined) => {
     if (value instanceof Error) throw value;
-    return { number: value ?? 0n, hash: `0x${'01'.repeat(32)}` };
+    const number = value ?? 0n;
+    return { number, hash: s.tagHash ?? hashAt(number) };
   };
   const head = () => {
     if (s.head instanceof Error) throw s.head;
@@ -121,11 +134,11 @@ function scriptedChain(s: Scripted) {
     getBlock: async (args: { blockTag?: string; blockNumber?: bigint } = {}) => {
       if (args.blockTag === 'finalized') return tag(s.finalized);
       if (args.blockTag === 'safe') return tag(s.safe);
-      if (args.blockNumber !== undefined)
-        return {
-          number: args.blockNumber,
-          hash: s.canonicalHash ?? (receipt instanceof Error ? BLOCK_HASH : receipt.blockHash),
-        };
+      if (args.blockNumber !== undefined) {
+        if (s.rolledBackAbove !== undefined && args.blockNumber > s.rolledBackAbove)
+          throw new Error('BlockNotFoundError');
+        return { number: args.blockNumber, hash: hashAt(args.blockNumber) };
+      }
       return { number: head(), hash: `0x${'02'.repeat(32)}` };
     },
     getTransactionReceipt: async () => {
@@ -341,6 +354,72 @@ test('finality on mainnet: safe is its own signal and never makes an operation f
   const settled = await portOn(final.client, store, bundler).mintEvidence(ask);
   assert.equal(settled.kind === 'minted' && settled.status, 'final');
   assert.equal(settled.kind === 'minted' && settled.finality, 'final');
+});
+
+test('a shared head from another fork, or one rolled back since, never makes anything safe or final', async () => {
+  // Each head is past the block by height; none is the chain's block at that height now.
+  const foreign = `0x${'fe'.repeat(32)}` as Hex;
+  const heads: { name: string; scripted: Scripted }[] = [
+    // Same height, different hash: the tag was served from another fork.
+    { name: 'fork', scripted: { finalized: BLOCK + 5n, safe: BLOCK + 5n, tagHash: foreign } },
+    // The tag said N+5; the chain now ends at N (a rolled-back or lagging node behind the URL).
+    {
+      name: 'rollback',
+      scripted: { finalized: BLOCK + 5n, safe: BLOCK + 5n, rolledBackAbove: BLOCK },
+    },
+  ];
+  for (const { name, scripted } of heads) {
+    const { client } = scriptedChain(scripted);
+    const { store, map } = memoryOps([registration({ status: 'included' })]);
+    const { bundler } = scriptedBundler(landed());
+    const port = portOn(client, store, bundler);
+    const evidence = await port.mintEvidence(ask);
+    assert.equal(evidence.kind, 'minted', name);
+    if (evidence.kind !== 'minted') return;
+    assert.equal(evidence.status, 'included', `${name}: never final`);
+    assert.equal(evidence.finality, 'included', `${name}: never safe`);
+    assert.equal(map.get(KEY)!.status, 'included', `${name}: nothing written`);
+    const op = await port.register({
+      operationKey: KEY,
+      chainId: BASE_MAINNET,
+      spenderKeyRef: 'unused',
+      spender: SENDER,
+      uri: URI,
+    });
+    assert.equal(op.finality, 'included', `${name}: the operation view agrees`);
+  }
+  // The same heights on the chain itself: safe, then final.
+  const { client } = scriptedChain({ finalized: BLOCK + 5n, safe: BLOCK + 5n });
+  const { store } = memoryOps([registration({ status: 'included' })]);
+  const settled = await portOn(client, store, scriptedBundler(landed()).bundler).mintEvidence(ask);
+  assert.equal(settled.kind === 'minted' && settled.status, 'final');
+});
+
+test('a reverted attempt never fails under a finalized head from another fork or a rolled-back node', async () => {
+  const run = async (scripted: Scripted) => {
+    const { client } = scriptedChain({
+      finalized: BLOCK + 5n,
+      safe: BLOCK + 5n,
+      receipt: {
+        blockNumber: BLOCK,
+        blockHash: BLOCK_HASH,
+        logs: [beforeExecution(), operationEvent(OP_HASH, false)],
+      },
+      ...scripted,
+    });
+    const { store, map } = memoryOps([
+      registration({ status: 'included', errorCode: 'USEROP_REVERTED' }),
+    ]);
+    const port = portOn(client, store, scriptedBundler(landed(false)).bundler);
+    return { evidence: await port.mintEvidence(ask), status: map.get(KEY)!.status };
+  };
+  for (const scripted of [
+    { tagHash: `0x${'fe'.repeat(32)}` as Hex },
+    { rolledBackAbove: BLOCK },
+  ] satisfies Scripted[])
+    assert.deepEqual(await run(scripted), { evidence: { kind: 'reverted' }, status: 'included' });
+  // Under the chain's own finalized block the revert is final: failed.
+  assert.deepEqual(await run({}), { evidence: { kind: 'failed' }, status: 'failed' });
 });
 
 test('finality elsewhere: shallow is included, unlanded has none, the settled depth is final', async () => {

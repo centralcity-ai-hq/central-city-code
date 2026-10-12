@@ -62,6 +62,7 @@ import {
 } from '../server/base/chain/derive.js';
 import { walletSignature } from '../server/base/chain/permissions.js';
 import { rpcBundler } from '../server/base/chain/rpc-bundler.js';
+import { withLiveReads } from '../server/base/chain/rpc-budget.js';
 import { pgChainOperationStore } from '../server/base/chain/stores.js';
 import {
   createOwnerOperationsPort,
@@ -551,6 +552,8 @@ interface Options {
   /** How long one safe-head proof may take (the port's default otherwise). */
   proofTimeoutMs?: number;
   limit?: (key: string, max: number, windowMs: number) => Promise<void>;
+  /** The client the owner operations port reads through (the chain's own by default). */
+  portClient?: (client: PublicClient) => PublicClient;
 }
 
 async function setup(t: { after: (fn: () => Promise<unknown>) => void }, options: Options = {}) {
@@ -648,7 +651,7 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }, options
   });
   const port = createOwnerOperationsPort({
     network: NETWORK,
-    client: chain.client,
+    client: options.portClient ? options.portClient(chain.client) : chain.client,
     store: pgChainOperationStore(db, () => clock.now),
     bundler,
     maxCostWeiCap: options.unbounded ? undefined : (options.maxCostWeiCap ?? FEE_BUDGET),
@@ -2413,36 +2416,81 @@ async function signIt(f: Fixture, body: { withdrawalId: string; userOpHash: Hex 
   return res.json();
 }
 
-test('lanes: expired sponsorship refuses unsigned signatures but retains signed holds for reconciliation', async (t) => {
+test('lanes: past its sponsorship an unsigned operation expires and is freed; a signed one keeps its holds', async (t) => {
   const f = await lanesSetup(t);
   f.chain.state.sponsorValidUntil = () => Math.floor((f.clock.now + 60_000) / 1000);
   const unsigned = await created(f, 1, { amount: '1000000' });
+  // Signable only while sponsored: expires_at is the paymaster's validUntil, not the 10 minutes.
+  assert.equal(unsigned.expiresAt, Math.floor((f.clock.now + 60_000) / 1000) * 1000);
   const signed = await created(f, 2, { amount: '1000000' });
   await signIt(f, signed);
   const asked = (await post(f, `${signed.withdrawalId}/cancel`, {})).json();
   assert.ok(asked.cancel?.userOpHash);
+  assert.ok(asked.cancel.expiresAt <= f.clock.now + 60_000);
   f.clock.now += 61_000;
   const refused = await post(f, `${unsigned.withdrawalId}/signature`, {
     signature: await rawSign(f.owner, unsigned.userOpHash),
   });
-  assert.equal(refused.statusCode, 409, refused.body);
-  assert.equal(refused.json().code, 'sponsorship_expired', refused.body);
+  assert.equal(refused.statusCode, 410, refused.body);
+  assert.equal(refused.json().code, 'expired', refused.body);
   const cancelRefused = await post(f, `${signed.withdrawalId}/cancel/signature`, {
     signature: await rawSign(f.owner, asked.cancel.userOpHash),
   });
-  assert.equal(cancelRefused.statusCode, 409, cancelRefused.body);
-  assert.equal(cancelRefused.json().code, 'sponsorship_expired', cancelRefused.body);
-  assert.equal((await heldRows(f)).length, 2);
-  assert.equal((await read(f, unsigned.withdrawalId)).json().state, 'awaiting_signature');
-  assert.ok(
-    ['submitted', 'cancel_pending'].includes((await read(f, signed.withdrawalId)).json().state),
-  );
+  assert.equal(cancelRefused.statusCode, 410, cancelRefused.body);
+  assert.equal(cancelRefused.json().code, 'expired', cancelRefused.body);
+  // The unsigned one freed its hold; the signed one keeps its own, past its validUntil too.
+  assert.equal((await heldRows(f)).length, 1);
+  assert.equal((await read(f, unsigned.withdrawalId)).json().state, 'expired');
+  assert.equal((await read(f, signed.withdrawalId)).json().state, 'submitted');
+  assert.ok((await heldExposure(f)) > 0n, 'the signed one still holds the sponsor exposure');
+  assert.equal((await read(f, signed.withdrawalId)).json().state, 'submitted');
   const stored = await f.pg.query<{ owner_signature: unknown; cancel_signature: unknown }>(
     'SELECT owner_signature, cancel_signature FROM base_wallet_withdrawals WHERE withdrawal_id = $1',
     [signed.withdrawalId],
   );
   assert.ok(stored.rows[0].owner_signature);
   assert.equal(stored.rows[0].cancel_signature, null);
+});
+
+test('lanes: an unsigned operation past its sponsorship frees its open slot and exposure at once', async (t) => {
+  const f = await lanesSetup(t, { CITY_BASE_LANES_CAP: '1' });
+  f.chain.state.sponsorValidUntil = () => Math.floor((f.clock.now + 90_000) / 1000);
+  const first = await created(f, 1, { amount: '1000000' });
+  assert.equal(first.expiresAt, Math.floor((f.clock.now + 90_000) / 1000) * 1000);
+  assert.ok(first.expiresAt < f.clock.now + WITHDRAWAL_SIGNATURE_TTL_MS);
+  const held = await heldExposure(f);
+  assert.ok(held > 0n);
+  const full = await create(f, usdc(2, { amount: '1000000' }));
+  assert.equal(full.statusCode, 409, full.body);
+  assert.equal(full.json().code, 'too_many_open');
+  // At its validUntil (not 10 minutes later) the slot and the exposure are free again.
+  f.clock.now = first.expiresAt;
+  const next = await create(f, usdc(3, { amount: '1000000' }));
+  assert.equal(next.statusCode, 201, next.body);
+  assert.equal((await read(f, first.withdrawalId)).json().state, 'expired');
+  assert.equal(await heldExposure(f), held, 'only the new one is held');
+});
+
+test('lanes: the sign-time check passes until validUntil and fails exactly from it', async (t) => {
+  const f = await lanesSetup(t);
+  f.chain.state.sponsorValidUntil = () => Math.floor((f.clock.now + 60_000) / 1000);
+  const body = await created(f, 1, { amount: '1000000' });
+  // The stored deadline is validUntil itself: validUntil <= deadline holds (equal allowed).
+  const data = body.userOperation.paymasterAndData;
+  assert.equal(f.port.sponsorshipValid!(data, body.expiresAt), true);
+  f.clock.now = body.expiresAt - 1;
+  assert.equal(f.port.sponsorshipValid!(data, body.expiresAt), true);
+  f.clock.now = body.expiresAt;
+  assert.equal(f.port.sponsorshipValid!(data, body.expiresAt), false);
+  f.clock.now = body.expiresAt - 1;
+  await signIt(f, body);
+});
+
+test('lanes off: expires_at stays the fixed 10 minutes, whatever the paymaster signs', async (t) => {
+  const f = await setup(t);
+  f.chain.state.sponsorValidUntil = () => Math.floor((f.clock.now + 60_000) / 1000);
+  const body = await created(f, 1, { amount: '1000000' });
+  assert.equal(body.expiresAt, f.clock.now + WITHDRAWAL_SIGNATURE_TTL_MS);
 });
 
 test('lanes: sponsorship expiring after the initial check is refused before signature acceptance', async (t) => {
@@ -3030,6 +3078,42 @@ test('the safe-head proof is one chain view: a safe tag of another branch is no 
   assert.equal(await f.port.settledAtSafe!(proof), null);
   assert.ok(Date.now() - started < 2_000, 'answers within its timeout');
   f.chain.state.callHang = false;
+});
+
+test('the safe-head proof reads the safe head live: a shared head higher than the chain now (rolled back) never releases a hold', async (t) => {
+  // The shared (cached) view still says the head itself is safe; the chain now says it is not.
+  const stale = (client: PublicClient) =>
+    ({
+      ...client,
+      getBlock: async (args: { blockNumber?: bigint; blockTag?: string } = {}) =>
+        args.blockTag === 'safe'
+          ? client.getBlock({ blockTag: 'latest' })
+          : client.getBlock(args as never),
+    }) as PublicClient;
+  const run = async (portClient: (client: PublicClient) => PublicClient) => {
+    const f = await setup(t, { portClient });
+    f.chain.state.safeDepth = 5n;
+    const first = await signedWithdrawal(f, 1);
+    f.chain.include(first.userOpHash);
+    f.chain.mine(1);
+    const landed = f.chain.state.landed.get(first.userOpHash)!;
+    const proof = {
+      sender: f.wallets[AGENT],
+      nonce: BigInt(first.userOperation.nonce),
+      userOpHash: first.userOpHash,
+      txHash: landed.txHash,
+      blockNumber: landed.blockNumber,
+      success: true,
+    };
+    const answer = await f.port.settledAtSafe!(proof);
+    return { answer, next: (await create(f, usdc(2))).json().code };
+  };
+  // The runtime's client: the shared view with its live twin. The proof reads the twin: not safe.
+  const live = await run((client) => withLiveReads(stale(client), client));
+  assert.equal(live.answer, false);
+  assert.equal(live.next, 'operation_pending', 'the hold stays');
+  // Read through the shared view, the same proof would have released it: why it reads live.
+  assert.equal((await run(stale)).answer, true);
 });
 
 test('lanes off: a sent operation that is final by now is brought up to date before the next is admitted', async (t) => {

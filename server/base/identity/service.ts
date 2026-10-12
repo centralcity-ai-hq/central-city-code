@@ -333,12 +333,16 @@ function stageOf(row: IdentityRow): IdentityStage {
   return 'finalizing';
 }
 
+/**
+ * How soon the owner's page asks again. Finality takes 15–30 minutes and one finalizing poll costs
+ * about 14 RPC calls on the shared endpoint, so the settling stages ask every 30 s.
+ */
 const POLL_AFTER: Record<IdentityStage, number | null> = {
   registering: 2000,
   handing_over: 3000,
   rechecking: 5000,
-  finalizing: 15000,
-  registered: 15000,
+  finalizing: 30000,
+  registered: 30000,
   confirmed: null,
   failed: null,
 };

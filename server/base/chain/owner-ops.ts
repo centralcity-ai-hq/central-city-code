@@ -44,6 +44,7 @@ import {
 } from '../../../shared/base/paymasters.js';
 import { deriveAddressLocal, type DerivationRecipe } from './derive.js';
 import { BundlerError, SponsorError } from './rpc-bundler.js';
+import { liveReads } from './rpc-budget.js';
 import {
   canonicalOutcome,
   nonceLaneFor,
@@ -337,7 +338,9 @@ export function createOwnerOperationsPort(deps: OwnerOperationsDeps): OwnerOpera
       // One chain view: the safe block by number AND hash; the nonce read at exactly that hash
       // (EIP-1898); both blocks re-checked as canonical at the end. Anything else is not proof.
       const proof = async (): Promise<boolean | null> => {
-        const safeBlock = await deps.client.getBlock({ blockTag: 'safe' });
+        // Live, never the shared head (rpc-budget.ts): this proof releases holds. Its hash binds
+        // every read below, and both blocks are re-checked as canonical at the end.
+        const safeBlock = await liveReads(deps.client).getBlock({ blockTag: 'safe' });
         const safe = safeBlock.number;
         const safeHash = safeBlock.hash;
         if (safe === null || safe === undefined || !safeHash) return null;

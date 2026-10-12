@@ -222,13 +222,13 @@ test('GET reports "registered" (mint and hand-over both safe) from the database 
   const posted = (await register(app, 'ws-1')).json().identity;
   assert.equal(posted.stage, 'registered');
   assert.equal(posted.state, 'submitted');
-  assert.equal(posted.pollAfterMs, 15000);
+  assert.equal(posted.pollAfterMs, 30000);
   assert.equal(posted.provisionalAgentId, '99029');
   assert.equal(posted.erc8004AgentId, null);
   const calls = JSON.stringify(chain.calls);
   const [read] = (await status(app, 'ws-1')).json().identities;
   assert.equal(read.stage, 'registered');
-  assert.equal(read.pollAfterMs, 15000);
+  assert.equal(read.pollAfterMs, 30000);
   assert.equal(read.provisionalAgentId, '99029');
   assert.equal(JSON.stringify(chain.calls), calls, 'GET never calls the chain');
 });

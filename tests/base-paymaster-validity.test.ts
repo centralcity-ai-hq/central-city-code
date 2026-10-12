@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { sponsoredWithinDeadline, SPONSOR_DATA_BYTES } from '../shared/base/paymasters.js';
+import {
+  sponsoredValidUntil,
+  sponsoredWithinDeadline,
+  SPONSOR_DATA_BYTES,
+} from '../shared/base/paymasters.js';
 import type { Address } from '../shared/base/chains.js';
 import type { RpcUserOperation } from '../shared/base/withdraw.js';
 import { checkSigningWindow } from '../src/base/wallet/withdraw.js';
@@ -62,4 +66,19 @@ test('requires exact pinned token-free data and valid clock inputs', () => {
     assert.equal(check(value, now, invalid), false);
   }
   assert.equal(check(value, now, now), false);
+});
+
+test('sponsoredValidUntil reads the signed validUntil in ms, or null when there is none', () => {
+  assert.equal(sponsoredValidUntil(data(seconds + 90)), (seconds + 90) * 1000);
+  // The same field the deadline check reads: valid until exactly then, and not from then on.
+  const until = sponsoredValidUntil(data(seconds + 90))!;
+  assert.equal(check(data(seconds + 90), until - 1, until), true);
+  assert.equal(check(data(seconds + 90), until, until), false);
+  assert.equal(sponsoredValidUntil(data(0)), null);
+  // Beyond a safe integer of milliseconds: never taken as a time.
+  assert.equal(sponsoredValidUntil(data(2 ** 48 - 1)), null);
+  assert.equal(sponsoredValidUntil(undefined), null);
+  assert.equal(sponsoredValidUntil('0x'), null);
+  assert.equal(sponsoredValidUntil(data(seconds + 90).slice(0, -2)), null);
+  assert.equal(sponsoredValidUntil(`${data(seconds + 90).slice(0, -2)}zz`), null);
 });

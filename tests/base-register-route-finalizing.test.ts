@@ -180,7 +180,7 @@ async function assertStillRegistered(s: Setup, response: Awaited<ReturnType<Setu
   const body = response.json();
   assert.equal(body.identity.state, 'submitted');
   assert.equal(body.identity.stage, 'registered');
-  assert.equal(body.identity.pollAfterMs, 15000);
+  assert.equal(body.identity.pollAfterMs, 30000);
   assert.equal(body.wallet.address, WALLET);
   assert.equal((await s.row()).state, 'submitted');
   assert.equal((await s.row()).destination_mismatch, null, 'nothing concluded from the failure');

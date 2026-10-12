@@ -2047,26 +2047,60 @@ test('lanes off: a rating keeps its paymaster window unchecked, as a withdrawal 
   assert.equal((await sign(f, r)).statusCode, 202);
 });
 
-test('lanes: signing a rating after its sponsorship ran out is 409 sponsorship_expired, nothing stored or sent', async (t) => {
-  const f = await lanesSetup(t);
-  // The paymaster's window ends a minute in, well before the rating's own expiry.
+test('lanes: a rating can be signed only until its sponsorship ends; then it expires and frees its slot', async (t) => {
+  const f = await lanesSetup(t, { CITY_BASE_LANES_CAP: '1' });
+  // The paymaster's window ends a minute in, well before the 10-minute signing deadline.
   f.ops.state.sponsorValidUntil = () => Math.floor((f.clock.now + 60_000) / 1000);
   const r = await rated(f, 1);
-  const held = await heldExposure(f);
-  assert.ok(sponsoredUntil(r.userOperation) < r.expiresAt);
-  f.clock.now += 61_000;
-  assert.ok(f.clock.now < r.expiresAt, 'the rating itself has not expired');
+  assert.equal(r.expiresAt, sponsoredUntil(r.userOperation));
+  assert.ok(r.expiresAt < f.clock.now + WITHDRAWAL_SIGNATURE_TTL_MS);
+  const [stored] = await ratingRows(f);
+  assert.equal(Number(stored.expires_at), r.expiresAt);
+  assert.ok((await heldExposure(f)) > 0n);
+  const full = await rate(f, rateBody(2));
+  assert.equal(full.statusCode, 409, full.body);
+  assert.equal(full.json().code, 'too_many_open');
+  f.clock.now = r.expiresAt;
   // The browser refuses it first (checkRatingWindow, before signing and before sending) ...
   assert.throws(
     () => checkRatingWindow(r as unknown as RateSigningRequest, f.clock.now, SPONSORS),
     (error: unknown) => error instanceof RatingWindowError,
   );
-  // ... and the server refuses a signature anyway, before it stores anything.
+  // ... and the server has expired it: nothing stored or sent, its exposure released.
+  const refused = await sign(f, r);
+  assert.equal(refused.statusCode, 410, refused.body);
+  assert.equal(refused.json().code, 'expired');
+  const [row] = await ratingRows(f);
+  assert.equal(row.state, 'expired');
+  assert.equal(row.owner_signature, null);
+  assert.equal(f.ops.state.sends.length, 0);
+  assert.equal(await heldExposure(f), 0n);
+  // Its slot is free: the next rating (a new key) is prepared afresh and signs.
+  f.ops.state.sponsorValidUntil = () =>
+    Math.floor((f.clock.now + WITHDRAWAL_SIGNATURE_TTL_MS) / 1000);
+  const next = await rated(f, 3);
+  assert.notEqual(next.withdrawalId, r.withdrawalId);
+  assert.equal((await sign(f, next)).statusCode, 202);
+});
+
+test('lanes: a rating whose sponsorship ends during signing is 409 sponsorship_expired, nothing stored or sent', async (t) => {
+  const f = await lanesSetup(t);
+  f.ops.state.sponsorValidUntil = () => Math.floor((f.clock.now + 60_000) / 1000);
+  const r = await rated(f, 1);
+  const held = await heldExposure(f);
+  // The first check passes; the sponsorship has ended by the second, inside the transaction.
+  const valid = f.ops.port.sponsorshipValid!.bind(f.ops.port);
+  let checks = 0;
+  f.ops.port.sponsorshipValid = (data, deadline) => {
+    const result = valid(data, deadline);
+    if (++checks === 1) f.clock.now = r.expiresAt;
+    return result;
+  };
   const refused = await sign(f, r);
   assert.equal(refused.statusCode, 409, refused.body);
   assert.equal(refused.json().code, 'sponsorship_expired');
+  assert.equal(checks, 2);
   const [row] = await ratingRows(f);
-  assert.equal(row.state, 'awaiting_signature');
   assert.equal(row.owner_signature, null);
   assert.equal(row.signed_at, null);
   assert.equal(f.ops.state.sends.length, 0);
@@ -2075,19 +2109,20 @@ test('lanes: signing a rating after its sponsorship ran out is 409 sponsorship_e
     "SELECT kind FROM base_audit_events WHERE kind = 'rating_signed'",
   );
   assert.equal(events.rows.length, 0);
-  // Discarded, the next rating (a new key) is prepared afresh and signs.
-  const discarded = await f.app.inject({
-    method: 'POST',
-    url: `${withdrawalPath(r.withdrawalId)}/cancel`,
-    headers: as('person-1'),
-    payload: '{}',
-  });
-  assert.equal(discarded.json().state, 'expired');
-  f.ops.state.sponsorValidUntil = () =>
-    Math.floor((f.clock.now + WITHDRAWAL_SIGNATURE_TTL_MS) / 1000);
-  const next = await rated(f, 2);
-  assert.notEqual(next.withdrawalId, r.withdrawalId);
-  assert.equal((await sign(f, next)).statusCode, 202);
+});
+
+test('lanes: a signed rating past its sponsorship is never expired or freed', async (t) => {
+  const f = await lanesSetup(t);
+  f.ops.state.sponsorValidUntil = () => Math.floor((f.clock.now + 60_000) / 1000);
+  const r = await rated(f, 1);
+  assert.equal((await sign(f, r)).statusCode, 202);
+  const held = await heldExposure(f);
+  f.clock.now = r.expiresAt + 5 * 60_000;
+  const view = (await read(f, r.withdrawalId)).json();
+  assert.equal(view.state, 'submitted');
+  assert.equal(await heldExposure(f), held);
+  f.ops.land(r.userOpHash, 'final');
+  assert.equal((await read(f, r.withdrawalId)).json().state, 'final');
 });
 
 test('lanes: a signed rating’s cancel is sponsored within its own fixed deadline, or not prepared', async (t) => {
@@ -2107,13 +2142,24 @@ test('lanes: a signed rating’s cancel is sponsored within its own fixed deadli
   const refused = await cancel();
   assert.equal(refused.statusCode, 503, refused.body);
   assert.equal(refused.json().code, 'sponsorship_unavailable');
-  f.ops.state.sponsorValidUntil = () => Math.floor(cancelDeadline / 1000);
+  // A paymaster window shorter than the deadline: the cancel can be signed only until it ends.
+  const shorter = Math.floor((f.clock.now + 90_000) / 1000);
+  f.ops.state.sponsorValidUntil = () => shorter;
+  const short = await cancel();
+  assert.equal(short.statusCode, 200, short.body);
+  assert.equal(short.json().cancel.expiresAt, shorter * 1000);
+  // Lapsed unsigned, the signed rating is untouched and a new cancel can be asked.
+  f.clock.now = shorter * 1000;
+  assert.equal((await read(f, r.withdrawalId)).json().state, 'submitted');
+  f.clock.now += 1_000;
+  const laterDeadline = f.clock.now + WITHDRAWAL_SIGNATURE_TTL_MS;
+  f.ops.state.sponsorValidUntil = () => Math.floor(laterDeadline / 1000);
   const asked = await cancel();
   assert.equal(asked.statusCode, 200, asked.body);
   assert.equal(asked.json().state, 'cancel_pending');
   assert.equal(asked.json().cancel.sponsored, true);
-  assert.equal(asked.json().cancel.expiresAt, cancelDeadline);
-  assert.ok(sponsoredUntil(asked.json().cancel.userOperation) <= cancelDeadline);
+  assert.equal(asked.json().cancel.expiresAt, Math.floor(laterDeadline / 1000) * 1000);
+  assert.ok(sponsoredUntil(asked.json().cancel.userOperation) <= laterDeadline);
 });
 
 test('migration 94 on an existing database: withdrawals stay as they were and keep working', async (t) => {

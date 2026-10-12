@@ -103,10 +103,8 @@ const breakages: Array<[string, (text: string) => string]> = [
   [
     'the docs checks disappear',
     (text) =>
-      text.replace(
-        '      - run: pnpm test:files tests/internal-references.test.ts tests/public-docs.test.ts tests/public-copy.test.ts tests/public-docs-private.test.ts\n',
-        '',
-      ),
+      // By pattern: the public copy of this workflow runs fewer docs files on the same line.
+      text.replace(/      - run: pnpm test:files [^\n]*tests\/public-docs\.test\.ts[^\n]*\n/, ''),
   ],
   [
     'verify ignores the postgres-races result',

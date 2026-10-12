@@ -31,6 +31,12 @@ export const SPONSOR_PAYMASTERS: SponsorAllowlist = {
 /** paymasterAndData of the pinned verifying paymaster: 129 bytes of fields + a 65-byte signature. */
 export const SPONSOR_DATA_BYTES = 194;
 const TOKEN = { from: 51, to: 71 };
+/** The signed validity window, uint48 seconds each (byte offsets in the layout above). */
+const VALID_UNTIL = { from: 20, to: 26 };
+const VALID_AFTER = { from: 26, to: 32 };
+/** A field of paymasterAndData (already checked to be the pinned layout), as a number. */
+const field = (data: string, at: { from: number; to: number }) =>
+  BigInt(`0x${data.slice(2 + at.from * 2, 2 + at.to * 2)}`);
 
 /**
  * Whether paymasterAndData names a paymaster allowed on that network, in its exact layout, with no
@@ -70,12 +76,24 @@ export function sponsoredWithinDeadline(
   )
     return false;
   const data = paymasterAndData!;
-  const validUntil = BigInt(`0x${data.slice(42, 54)}`) * 1000n;
-  const validAfter = BigInt(`0x${data.slice(54, 66)}`) * 1000n;
+  const validUntil = field(data, VALID_UNTIL) * 1000n;
+  const validAfter = field(data, VALID_AFTER) * 1000n;
   return (
     validUntil > BigInt(window.now) &&
     validUntil <= BigInt(window.deadline) &&
     validAfter <= BigInt(window.now) &&
     validAfter < validUntil
   );
+}
+
+/**
+ * When a sponsorship stops being valid, in milliseconds: the signed validUntil of paymasterAndData
+ * in the pinned layout (no allowlist check here; callers check that first). Null when the data
+ * isn't that layout, or validUntil is zero (unbounded to EntryPoint) or beyond a safe integer.
+ */
+export function sponsoredValidUntil(paymasterAndData: string | undefined): number | null {
+  const data = paymasterAndData ?? '0x';
+  if (!/^0x[0-9a-fA-F]*$/.test(data) || data.length !== 2 + SPONSOR_DATA_BYTES * 2) return null;
+  const until = field(data, VALID_UNTIL) * 1000n;
+  return until > 0n && until <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(until) : null;
 }

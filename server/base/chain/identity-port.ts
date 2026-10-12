@@ -35,12 +35,14 @@ import {
   nonceLaneFor,
   SubmitError,
   refreshFinality,
-  safeBlock,
+  safeHead,
+  headIsCanonical,
   type Bundler,
   type ChainOperationStore,
   type StoredOperation,
   type SubmitDeps,
 } from './submit.js';
+import { liveReads } from './rpc-budget.js';
 
 export interface IdentityPortDeps {
   network: BaseNetwork;
@@ -280,14 +282,21 @@ export function createIdentityChainPort(deps: IdentityPortDeps): IdentityEvidenc
       throw new IdentityPortError('WRONG_NETWORK', 'This port serves another network.');
   }
 
-  /** Final once the status says so; otherwise safe when the safe block has reached it. */
+  /**
+   * Final once the status says so; otherwise safe when the safe block has reached it AND that safe
+   * block is on the chain now (its hash, read live by number): a shared safe head from another fork
+   * or a rolled-back node never makes an inclusion look safe. Callers report 'safe' only together
+   * with the receipt's block canonical at its height (describe: canonicalBlockHash; mintEvidence:
+   * provenMint), so the receipt's block is an ancestor of the safe block.
+   */
   async function finalityOf(
     status: StoredOperation['status'],
     blockNumber: bigint,
   ): Promise<IdentityOpFinality> {
     if (status === 'final' || status === 'failed') return 'final';
-    const safe = await safeBlock(deps).catch(() => null);
-    return safe !== null && blockNumber <= safe ? 'safe' : 'included';
+    const safe = await safeHead(deps).catch(() => null);
+    if (safe === null || blockNumber > safe.number) return 'included';
+    return (await headIsCanonical(deps, safe).catch(() => false)) ? 'safe' : 'included';
   }
 
   /**
@@ -322,7 +331,8 @@ export function createIdentityChainPort(deps: IdentityPortDeps): IdentityEvidenc
     return {
       ...view(row),
       blockNumber,
-      finality,
+      // 'safe' needs the receipt's block canonical too (finalityOf): without it, only included.
+      finality: finality === 'safe' && blockHash === null ? 'included' : finality,
       blockHash,
       reverted: landedAt !== null && row.errorCode === 'USEROP_REVERTED',
     };
@@ -632,7 +642,10 @@ export function createIdentityChainPort(deps: IdentityPortDeps): IdentityEvidenc
           throw unavailable();
         }
       };
-      const block = await rpc(() => deps.client.getBlock({ blockTag: 'finalized' }));
+      // Live, never the shared head (rpc-budget.ts): the hand-over may have been declared final by
+      // another worker a moment ago, and an older finalized block would read as evidence_behind.
+      const client = liveReads(deps.client);
+      const block = await rpc(() => client.getBlock({ blockTag: 'finalized' }));
       if (block.number === null || block.number === undefined || !block.hash)
         throw new IdentityPortError('BLOCK_UNKNOWN', 'The finalized block has no number or hash.');
       const blockNumber: bigint = block.number;
@@ -640,7 +653,7 @@ export function createIdentityChainPort(deps: IdentityPortDeps): IdentityEvidenc
       // Checked after every read at this height: a node that served another block in between (a
       // lagging replica, another backend behind the same URL) makes the hash differ.
       const sameBlock = async () => {
-        const again = await rpc(() => deps.client.getBlock({ blockNumber }));
+        const again = await rpc(() => client.getBlock({ blockNumber }));
         if (!again.hash || !sameHex(again.hash, blockHash))
           throw new IdentityPortError('BLOCK_CHANGED', 'The block changed while it was read.');
       };
@@ -652,14 +665,14 @@ export function createIdentityChainPort(deps: IdentityPortDeps): IdentityEvidenc
       };
       let owner: Address;
       try {
-        owner = await deps.client.readContract({ ...at, functionName: 'ownerOf' } as const);
+        owner = await client.readContract({ ...at, functionName: 'ownerOf' } as const);
       } catch (error) {
         if (!reverted(error)) throw unavailable();
         await sameBlock();
         throw new IdentityPortError('NOT_FOUND', 'No such identity at the finalized block.');
       }
       const tokenUri = await rpc(() =>
-        deps.client.readContract({ ...at, functionName: 'tokenURI' } as const),
+        client.readContract({ ...at, functionName: 'tokenURI' } as const),
       );
       await sameBlock();
       return {
