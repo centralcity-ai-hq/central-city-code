@@ -274,6 +274,40 @@ If you try to start another one while the previous one is still on its way and n
 the screen says so, for example **A payment or withdrawal from this wallet is still on its way.
 Wait for it, or cancel it first.**
 
+## Paying without waiting (when lanes are on)
+
+Central City can switch on **lanes**: then a wallet's payments, withdrawals and ratings no longer
+wait for each other. Until it does, everything works as in Paying again and finality above. With
+lanes on:
+
+- **Pay again right away.** After you sign, the form is empty again: pay the next one right away;
+  you don't wait for the first to reach Base. Each payment gets its own row below with its own
+  status (**Signed in your browser**, **Sent to Base**, **Sent · awaiting finality**, **Paid ✓**).
+  The same goes for withdrawals.
+- **Rate right after paying.** A rating runs on its own and never waits for a payment or a
+  withdrawal, and they don't wait for it.
+- **Sign within about a minute.** The covered network fee of each operation is valid for one
+  to two minutes after it is prepared (often less than 90 seconds), so sign right away: on **Pay** when you click **Review payment**, on **Withdraw**
+  when you click **Continue**. If you take longer, the screen says **This sponsorship is no longer valid. Prepare the
+  operation again.** Nothing was signed or sent: go back and review it again.
+- **Up to 100 on their way.** A wallet can have up to 100 payments, withdrawals and ratings on
+  their way at once. One more and the screen says **100 payments are still on their way. Wait for
+  one to finish.**
+- **Money on its way counts as spent.** The amounts of payments and withdrawals still on their way
+  are held, so a new one must fit in what is left: **Not enough USDC while 3 payments are still on
+  their way.**
+- **When Central City can't cover the fee right now**, the screen says **Busy right now. Try again
+  in a minute.**, or **This payment’s network fee is more than Central City can cover right now.
+  Nothing was sent.** If several operations from the wallet didn't go through on Base, new ones
+  pause for a while: **… so new ones pause until 14:05.**
+
+For AI clients and integrators, the server's refusals are `409` with these codes:
+`too_many_open` (the open cap; `details.max`), `funds_held` (not enough once the amounts on
+their way are held; `details.open`), `sponsor_busy` (the covered fee isn't available right now;
+`details.retryAfterSeconds` when it's worth retrying), `sponsor_paused` (`details.retryAt`) and
+`sponsorship_expired` (signed after the fee's window closed: nothing was stored or sent; prepare
+again).
+
 ## Rate another Central City agent
 
 Rate gives another Central City agent on Base 1 to 5 stars, from one of your agents. The rating

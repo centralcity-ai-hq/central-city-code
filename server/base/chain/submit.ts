@@ -37,6 +37,7 @@ import type { ChainOpKind, ChainOpStatus } from '../../../shared/base/types.js';
 import { createAccountCall, type DerivationRecipe } from './derive.js';
 import { walletSignature } from './permissions.js';
 import { liveReads } from './rpc-budget.js';
+import { transientChainError } from './transient.js';
 
 export interface Call {
   target: Address;
@@ -72,6 +73,13 @@ export interface StoredOperation {
    */
   submittedBlock: string | null;
   errorCode: string | null;
+  /**
+   * When the row was last written (ms), read only. While it is 'submitted' this is when it was
+   * last sent (the claim right before a send, or the record of a rebroadcast; see
+   * REBROADCAST_MIN_MS). Absent from stores that do not keep it: then every reconcile may
+   * rebroadcast, as before.
+   */
+  updatedAt?: number;
 }
 
 /**
@@ -108,6 +116,19 @@ export interface ChainOperationStore {
     from: readonly ChainOpStatus[],
     patch: Partial<StoredOperation>,
     expect?: ReceiptIdentity,
+  ): Promise<StoredOperation | null>;
+  /**
+   * Claims the next send of an operation in flight before it is made (compare-and-set): only
+   * while the row is still in `status` with exactly the write time `seenUpdatedAt` the caller
+   * decided on, its write time moves to `at` (always forward, so a second claim on the same
+   * snapshot fails). Returns the claimed row, or null when another reader claimed or wrote it
+   * first. Optional: a store without it (or without updatedAt) sends on every reconcile, as before.
+   */
+  claimSend?(
+    idempotencyKey: string,
+    status: ChainOpStatus,
+    seenUpdatedAt: number,
+    at: number,
   ): Promise<StoredOperation | null>;
 }
 
@@ -424,6 +445,8 @@ export interface SubmitDeps {
   store: ChainOperationStore;
   bundler: Bundler;
   signer: OperationSigner;
+  /** The clock the rebroadcast pause is measured with (the store's clock; Date.now by default). */
+  now?: () => number;
 }
 
 /** Settled for good: never changed again by any reconcile (status only moves forward). */
@@ -589,14 +612,95 @@ const record = (deps: SubmitDeps, row: StoredOperation, receipt: BundlerReceipt)
     row.status === 'included' ? receiptOf(row) : undefined,
   );
 
-async function reconcile(deps: SubmitDeps, row: StoredOperation): Promise<StoredOperation> {
-  if (TERMINAL.includes(row.status)) return row;
-  // Stored but never authorized for broadcast: only the authorize-then-claim path may send it.
-  if (row.status === 'queued') return row;
-  const receipt = await deps.bundler.receipt(row.userOpHash).catch(() => null);
-  if (receipt) return record(deps, row, receipt);
-  if (row.status === 'included') return row;
+/**
+ * A receipt lookup the endpoint could not answer right now: a 429, a timeout, a 5xx or a dropped
+ * connection (transient.ts), the bundler unreachable or answering a non-OK HTTP status
+ * (rpc-bundler RPC_UNAVAILABLE), or a JSON-RPC "limit exceeded"/busy code. That is "unknown", not
+ * "no receipt": nothing may be concluded, searched, re-read or sent on it.
+ */
+export function receiptLookupNotNow(error: unknown): boolean {
+  if (transientChainError(error)) return true;
+  const e = error as { code?: unknown; rpcCode?: unknown } | null;
+  if (e?.code === 'RPC_UNAVAILABLE') return true;
+  return typeof e?.rpcCode === 'number' && transientChainError({ code: e.rpcCode });
+}
 
+/**
+ * The bundler's receipt: a receipt, null when it definitively has none, or 'unknown' when it
+ * could not answer right now (receiptLookupNotNow). Any other failure counts as no receipt, as
+ * before: the chain itself is asked instead (nonce, then the on-chain search).
+ */
+async function bundlerReceipt(
+  deps: SubmitDeps,
+  userOpHash: Hex,
+): Promise<BundlerReceipt | null | 'unknown'> {
+  try {
+    return await deps.bundler.receipt(userOpHash);
+  } catch (error) {
+    return receiptLookupNotNow(error) ? 'unknown' : null;
+  }
+}
+
+/**
+ * Least time between two sends of the same stored operation by reconcile (CDP call budget): a
+ * polling reader reconciles every 2–3 s, and every one rebroadcast an operation still waiting for
+ * its block. Only an operation the bundler accepted ('submitted') is held back: the bundler keeps
+ * what it took, and resending sooner only spends the endpoint's budget. The first send
+ * (authorizeAndSend), a send that failed ('unknown': the bundler may not have it) and the first
+ * rebroadcast after a dropped block ('reorged') are never held back, whatever the clock. Measured on the row's own
+ * updated_at: every write of a 'submitted' row is a send (the claim right before the first one,
+ * the claim right before a resend, or the record of a resend), durable and shared by every
+ * instance, no migration. Each resend is claimed first (claimSend: compare-and-set on the
+ * updated_at it was decided on), so readers racing on the same row send once between them; a
+ * claimed resend that fails leaves the row 'submitted' and the next window sends again. Sends
+ * that are never held back are claimed the same way, so racing readers do not double them either.
+ * A 'submitted' row is due only when now − updated_at reaches the window: a reader whose clock is
+ * behind the row's waits until it passes it (bounded by the window whatever the clock skew).
+ */
+export const REBROADCAST_MIN_MS = 45_000;
+
+/**
+ * Whether reconcile may send this in-flight operation again now (see REBROADCAST_MIN_MS). Only a
+ * time check on the row as read: the send itself is then claimed (ChainOperationStore.claimSend),
+ * which is what makes it at most one per window, also for readers racing on the same row.
+ */
+function rebroadcastDue(deps: SubmitDeps, row: StoredOperation): boolean {
+  if (row.updatedAt === undefined) return true;
+  if (row.status !== 'submitted') return true;
+  // Due only once the window since the row's last send is over. A clock behind the row's (another
+  // instance's, or the row's claim moved past it) is NOT due: claims only move updated_at forward,
+  // so such a reader sends at most once its clock passes updated_at + the window, whatever the
+  // skew; readers with a correct clock keep resending meanwhile.
+  return (deps.now ?? Date.now)() - row.updatedAt >= REBROADCAST_MIN_MS;
+}
+
+async function reconcile(deps: SubmitDeps, row: StoredOperation): Promise<StoredOperation> {
+  return (await reconcileStep(deps, row)).row;
+}
+
+/**
+ * Reconcile, telling the caller when the bundler could not be asked: `unknown` then means the row
+ * is returned exactly as stored and nothing else was read or sent. `receipt` is the bundler's
+ * answer this step read (a receipt or a definitive null), absent when it asked nothing: the caller
+ * of this one refresh decides on that same answer instead of asking again (CDP call budget). It is
+ * never kept beyond the refresh: a receipt can disappear on a reorg.
+ */
+async function reconcileStep(
+  deps: SubmitDeps,
+  row: StoredOperation,
+): Promise<{ row: StoredOperation; unknown: boolean; receipt?: BundlerReceipt | null }> {
+  if (TERMINAL.includes(row.status)) return { row, unknown: false };
+  // Stored but never authorized for broadcast: only the authorize-then-claim path may send it.
+  if (row.status === 'queued') return { row, unknown: false };
+  const receipt = await bundlerReceipt(deps, row.userOpHash);
+  if (receipt === 'unknown') return { row, unknown: true };
+  if (receipt) return { row: await record(deps, row, receipt), unknown: false, receipt };
+  if (row.status === 'included') return { row, unknown: false, receipt };
+  return { row: await afterNoReceipt(deps, row), unknown: false, receipt };
+}
+
+/** An operation in flight the bundler has no receipt for: look at its nonce, else resend it. */
+async function afterNoReceipt(deps: SubmitDeps, row: StoredOperation): Promise<StoredOperation> {
   // The nonce moved on without a receipt for us: either our op landed (look on-chain) or another
   // op used the nonce, in which case ours can never land. It becomes 'failed' only once the
   // consuming block is deep enough (refreshFinality), never immediately.
@@ -623,11 +727,31 @@ async function reconcile(deps: SubmitDeps, row: StoredOperation): Promise<Stored
     });
   }
 
-  // Not included yet: rebroadcast the exact stored operation, never a rebuilt one.
+  // Not included yet: rebroadcast the exact stored operation, never a rebuilt one, at most once
+  // per REBROADCAST_MIN_MS. Held back, the row stays exactly as stored.
+  if (!rebroadcastDue(deps, row)) return row;
+  // Claimed before it is sent: of concurrent readers holding the same snapshot (owner polls on
+  // several instances, the crons) exactly one sends; the others answer the row as stored.
+  let claimed = row;
+  if (row.updatedAt !== undefined && deps.store.claimSend) {
+    const won = await deps.store.claimSend(
+      row.idempotencyKey,
+      row.status,
+      row.updatedAt,
+      (deps.now ?? Date.now)(),
+    );
+    if (!won) return (await deps.store.get(row.idempotencyKey)) ?? row;
+    claimed = won;
+  }
   try {
     await deps.bundler.send(fromJson(row.signedOperation));
+    // Still 'submitted': the claim already recorded this send (no second write).
+    if (claimed !== row && row.status === 'submitted') return claimed;
     return move(deps, row.idempotencyKey, IN_FLIGHT, { status: 'submitted', errorCode: null });
   } catch {
+    // A resend of an operation the bundler already took: it stays 'submitted', its claim is the
+    // window's send, and the next window sends again. Any other failed send is ambiguous.
+    if (row.status === 'submitted') return claimed;
     return move(deps, row.idempotencyKey, IN_FLIGHT, {
       status: 'unknown',
       errorCode: 'BROADCAST_AMBIGUOUS',
@@ -833,11 +957,14 @@ export async function canonicalOutcome(
  * Moves an operation forward once it is deep enough (§11.1 finality): included + success → final,
  * included + revert → failed, nonce consumed by another operation → failed. On mainnet 'deep' means
  * at or below the finalized block; elsewhere the network's confirmation count. Before declaring
- * anything, the receipt is fetched again: a different block or transaction (reorg, re-inclusion)
- * is recorded and the depth count restarts. A receipt is declared gone (reorged) only by a node
+ * anything, the receipt this refresh read is compared with the stored one: a different block or
+ * transaction (reorg, re-inclusion) is recorded and the depth count restarts. One refresh asks the
+ * bundler for the receipt once; reconcile and the finality check decide on that same answer. A receipt is declared gone (reorged) only by a node
  * whose head has reached the recorded block. A deep receipt settles only once the chain itself
  * confirms it in the canonical block (canonicalOutcome); one the chain contradicts is reorged.
- * Never throws on a missing receipt or RPC hiccup.
+ * Never throws on a missing receipt or RPC hiccup. A receipt lookup the endpoint could not answer
+ * right now (receiptLookupNotNow) ends the refresh with the stored row as it is: no search, no
+ * nonce read, no resend, no state change.
  */
 export async function refreshFinality(
   deps: SubmitDeps,
@@ -846,7 +973,11 @@ export async function refreshFinality(
   const row = await deps.store.get(idempotencyKey);
   if (!row) return null;
   if (TERMINAL.includes(row.status)) return row;
-  const current = await reconcile(deps, row);
+  const step = await reconcileStep(deps, row);
+  // The bundler could not say right now (a 429, a timeout): the stored state stands, unchanged,
+  // and nothing else is read or sent before the next poll.
+  if (step.unknown) return step.row;
+  const current = step.row;
   const settled = await settledHead(deps);
   if (settled === null) return current;
 
@@ -874,9 +1005,13 @@ export async function refreshFinality(
   }
   if (current.status !== 'included' || current.blockNumber === null) return current;
 
-  let fresh: BundlerReceipt | null | undefined = await deps.bundler
-    .receipt(current.userOpHash)
-    .catch(() => null);
+  // The bundler's answer this refresh already read (reconcileStep), never a second lookup; asked
+  // here only when the step asked nothing.
+  const answered =
+    step.receipt !== undefined ? step.receipt : await bundlerReceipt(deps, current.userOpHash);
+  // Not answered right now: never searched for, never declared gone.
+  if (answered === 'unknown') return current;
+  let fresh: BundlerReceipt | null | undefined = answered;
   // The head the on-chain search covered (null when the bundler answered).
   let head: bigint | null = null;
   if (!fresh) {

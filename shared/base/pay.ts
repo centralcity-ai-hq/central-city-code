@@ -191,7 +191,7 @@ export interface PayIncoming {
   from: {
     /** The paying agent's public card name, '' while not public. Display only. */
     name: string;
-    /** Its passport when it is a Central City agent on the wallet network, else null. */
+    /** Its Base ID once its registration on the wallet network is final, else null (every payer is a Central City agent). */
     baseId: string | null;
     short: string | null;
     wallet: string;

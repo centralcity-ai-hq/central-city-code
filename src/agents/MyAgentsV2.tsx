@@ -130,7 +130,7 @@ export interface MyAgentsV2Props {
   claimRequested?: boolean;
   /** The requested claim sheet is open; the request can be cleared. */
   onClaimOpened?: () => void;
-  /** The console shows a dialog over the page (the agent's full settings, a new key, …). */
+  /** The console shows a dialog over the page (Add an agent, a new key, …). */
   dialogOpen?: boolean;
   /** Something outside asked to show this agent (the network map's "Open agent", a new template
    * agent), or one of its screens (an unread chip in Messages opens its Messages). */
@@ -258,8 +258,7 @@ export function MyAgentsV2({
       },
       paused ? 'Elric is paused.' : 'Elric is on again.',
     );
-  // A dialog or sheet over the page: the Base row stops reading until it is uncovered (the full
-  // Base panel in the agent's settings reads for itself meanwhile).
+  // A dialog or sheet over the page: the Base row stops reading until it is uncovered.
   const covered = dialogOpen || claiming || sheet !== null;
   const trigger = useRef<HTMLElement | null>(null);
   const panel = useRef<AgentPaneHandle>(null);

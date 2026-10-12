@@ -135,6 +135,38 @@ async function task(app: App, key: string, roomId: string, title: string) {
   ).task as { id: string; number: number };
 }
 
+test('internal pin execution rolls back the effect and outcome together', async (t) => {
+  const app = await fixture(t);
+  const { a, roomId } = await room(app);
+  const seq = await post(app, a.key, roomId, 'Atomic pin fixture');
+  await app.city.db.query('CREATE TABLE pin_outcome_fixture (id text PRIMARY KEY)');
+  const pins = createRoomPins({ db: app.city.db, clock: Date.now, limit: async () => {} });
+  const p = { operatorId: a.id, actor: 'fixture', origin: 'http://localhost' };
+  const body = { room_id: roomId, message_seq: seq };
+  await assert.rejects(
+    pins.add(p, body, {
+      execute: async (tx, effect) => {
+        const result = await effect();
+        await tx.query('INSERT INTO pin_outcome_fixture VALUES ($1)', [result.pin.id]);
+        throw new Error('outcome interrupted');
+      },
+    }),
+    /outcome interrupted/,
+  );
+  assert.equal((await app.city.db.query('SELECT 1 FROM room_pins')).rows.length, 0);
+  assert.equal((await app.city.db.query('SELECT 1 FROM pin_outcome_fixture')).rows.length, 0);
+  const result = await pins.add(p, body, {
+    execute: async (tx, effect) => {
+      const result = await effect();
+      await tx.query('INSERT INTO pin_outcome_fixture VALUES ($1)', [result.pin.id]);
+      return result;
+    },
+  });
+  assert.equal(result.created, true);
+  assert.equal((await app.city.db.query('SELECT 1 FROM room_pins')).rows.length, 1);
+  assert.equal((await app.city.db.query('SELECT 1 FROM pin_outcome_fixture')).rows.length, 1);
+});
+
 test('members pin messages and tasks with a cleaned note; pins list for everyone', async (t) => {
   const app = await fixture(t);
   const { a, roomId, link } = await room(app);

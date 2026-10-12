@@ -77,6 +77,13 @@ export const FINALIZE_CONCURRENCY = 5;
 export const FINALIZE_DEADLINE_MS = 45_000;
 /** A row claimed by a run is not claimed again for this long. */
 export const FINALIZE_RECLAIM_MS = 50_000;
+/**
+ * A row that moved this recently (updated_at moves only on a real change, service.ts) was just
+ * advanced by its owner's poll: the cron leaves it to that poll and takes it on a later run, still
+ * unclaimed and first in line. The cron has no deadline of its own (it only calls the same
+ * advance, never a retry), so nothing waits on it but the next run.
+ */
+export const FINALIZE_FRESH_MS = 30_000;
 
 /** Seconds a register call that met a transient database failure asks the caller to wait. */
 export const TRANSIENT_RETRY_AFTER_S = 5;
@@ -457,7 +464,7 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
   /*
    * Finalize cron (every minute): moves open registrations on until both operations are final,
    * also when nobody has the panel open. Only rows the owner started (op_id set) are touched; no
-   * retry is ever made here. Fails closed: without the bearer secret the route answers 404.
+   * retry is ever made here. Rows a poll moved within FINALIZE_FRESH_MS are left for a later run. Fails closed: without the bearer secret the route answers 404.
    */
   const cronSecret = deps.cronSecret;
   if (cronSecret !== undefined)
@@ -472,10 +479,11 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
            SELECT agent_id, chain_id FROM base_identities
            WHERE state IN ('pending','submitted') AND op_id IS NOT NULL
              AND (swept_at IS NULL OR swept_at <= $2::bigint)
+             AND updated_at <= $3::bigint
            ORDER BY swept_at NULLS FIRST, updated_at LIMIT ${FINALIZE_BATCH}
            FOR UPDATE SKIP LOCKED)
          RETURNING agent_id, chain_id`,
-        [started, started - FINALIZE_RECLAIM_MS],
+        [started, started - FINALIZE_RECLAIM_MS, started - FINALIZE_FRESH_MS],
       );
       const services = new Map<number, Promise<ReturnType<typeof createIdentityService>>>();
       const serviceFor = (chainId: number) => {

@@ -109,9 +109,7 @@ export function IncomingPayments({ agentId, name }: { agentId: string; name: str
                 {/* The money arrived; final is minutes away. No countdown: Base decides when. */}
                 {status.note ? <span className="w4-row-sub">{status.note}</span> : null}
                 <span className="w4-row-sub">
-                  {payment.from.baseId
-                    ? `Base ID ${payment.from.baseId}`
-                    : 'Not a Central City agent'}
+                  {payment.from.baseId ? `Base ID ${payment.from.baseId}` : 'Base ID not final yet'}
                   {status.onItsWay ? ' · on its way, not paid until final' : ''}
                   {/* A note shows once the payment is final: never from one that didn't land. */}
                   {payment.note && payment.state === 'final' ? ` · “${payment.note}”` : ''}

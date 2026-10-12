@@ -206,6 +206,43 @@ test('create/get/list: T-numbers, replay, untrusted titles verbatim', async (t) 
   assert.equal(conflict.statusCode, 409);
 });
 
+test('internal task execution commits its outcome with the task or rolls both back', async (t) => {
+  const { app, tasks, a, roomId } = await roomFixture(t);
+  await app.city.db.query('CREATE TABLE task_outcome_fixture (task_id text PRIMARY KEY)');
+  const input = { room_id: roomId, title: 'Atomic task', idempotency_key: randomUUID() };
+  await assert.rejects(
+    tasks.create(p(a.id), input, {
+      execute: async (tx, effect) => {
+        const result = await effect();
+        await tx.query('INSERT INTO task_outcome_fixture VALUES ($1)', [result.task.id]);
+        throw new Error('outcome commit failed');
+      },
+    }),
+    /outcome commit failed/,
+  );
+  assert.equal((await app.city.db.query('SELECT 1 FROM room_tasks')).rows.length, 0);
+  assert.equal((await app.city.db.query('SELECT 1 FROM task_outcome_fixture')).rows.length, 0);
+  const result = await tasks.create(p(a.id), input, {
+    execute: async (tx, effect) => {
+      const created = await effect();
+      await tx.query('INSERT INTO task_outcome_fixture VALUES ($1)', [created.task.id]);
+      return created;
+    },
+  });
+  assert.equal(result.task.number, 1);
+  assert.equal((await app.city.db.query('SELECT 1 FROM task_outcome_fixture')).rows.length, 1);
+  let replayChecked = false;
+  const replay = await tasks.create(p(a.id), input, {
+    execute: async (_tx, effect) => {
+      replayChecked = true;
+      return effect();
+    },
+  });
+  assert.equal(replayChecked, true, 'the internal guard also runs for a replay');
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.task.id, result.task.id);
+});
+
 test('create validates: 16 KB body cap, attachments fail closed without migration 27', async (t) => {
   const { app, tasks, a, roomId } = await roomFixture(t);
   await assert.rejects(

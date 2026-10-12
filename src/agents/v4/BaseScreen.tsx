@@ -158,7 +158,7 @@ function screenOf(registration: BaseRegistrationStatus, profile: AgentProfile, n
 /**
  * The agent's Base screen in My agents v4: start, registering, taking longer, finalizing, final,
  * re-checking and failed, as the mockup draws them. All data and requests come from
- * useBaseRegistration, the same logic the current Base tab runs on. A private agent with a profile
+ * useBaseRegistration. A private agent with a profile
  * gets the same start, and one question before its profile is made public (decision G4, option B).
  */
 export function BaseScreen({
@@ -534,6 +534,16 @@ function BaseBody({
   // With wallets on, the agent's wallet is also its money wallet: shown only as Add funds shows it.
   const reported = validAddress(wallet?.address);
   const { address: agentWallet, note: walletNote } = walletAddressShown(keyState, reported);
+  // Who controls the Base ID, said only when it is known: the wallet key held here (unlocked and
+  // the same address), or, for an agent registered before wallets, the person's own wallet outside
+  // Central City (as the Wallet screen says). While the key is locked: just the address.
+  const ownerLabel = !keyMode
+    ? 'You'
+    : keyState.k !== 'ready' || !boundOwner
+      ? null
+      : keyState.owner.toLowerCase() === boundOwner.toLowerCase()
+        ? 'Your wallet key'
+        : 'Your wallet outside Central City';
   const wallets =
     reported || boundOwner ? (
       <div className="v4b-group">
@@ -556,7 +566,7 @@ function BaseBody({
           <div className="v4b-row">
             <span className="v4b-k">Controlled by</span>
             <span className="v4b-v">
-              {keyMode ? 'Your wallet key' : 'You'} ·{' '}
+              {ownerLabel ? `${ownerLabel} · ` : null}
               <span className="v4b-mono" title={boundOwner}>
                 {short(boundOwner)}
               </span>

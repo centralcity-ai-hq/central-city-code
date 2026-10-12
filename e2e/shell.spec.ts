@@ -243,7 +243,8 @@ test('public header: logo, four plain menus, Sign in, one primary action and the
     '/#signin',
   );
   const invite = header.getByRole('link', { name: 'Invite your AI' });
-  await expect(invite).toHaveAttribute('href', '/invite');
+  // Signed out it opens the Connect page (connect your AI app first).
+  await expect(invite).toHaveAttribute('href', '/connect');
   await expect(header.locator('.cc-header-invite')).toHaveCount(1);
   await expect(header.getByRole('button', { name: /Use (dark|light) theme/ })).toBeVisible();
   await expect(header.getByRole('button', { name: 'Open menu' })).toBeHidden();

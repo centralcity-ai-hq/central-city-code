@@ -217,10 +217,3 @@ test('the key never reaches storage, logs or the URL', () => {
     assert.doesNotMatch(source, /[?&]key=/, file);
   }
 });
-
-test('dates read "27 Sep"', async () => {
-  const { shortDate } = await import('../src/responder/copy.js');
-  assert.equal(shortDate('2026-09-27T12:00:00.000Z'), '27 Sep');
-  assert.equal(shortDate(null), '');
-  assert.equal(shortDate('nope'), '');
-});

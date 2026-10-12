@@ -244,6 +244,8 @@ async function payServer(page: Page) {
     lanes: false,
     /** Lanes: what each next payment is read as, in turn (else `progress`). */
     progressQueue: [] as string[][],
+    /** K9: the prepared payment's signing deadline, this long from now (default 10 min). */
+    signWindowMs: 600_000,
     /** The next create is refused with this (too_many_open, funds_held). */
     refuse: null as null | { code: string; error: string; details?: unknown },
     /** The wallet isn't on Base yet: every operation also sets it up. */
@@ -449,7 +451,7 @@ async function payServer(page: Page) {
         userOpHash: state.hash,
         entryPoint: WITHDRAWAL_ENTRY_POINT,
         chainId: WITHDRAWAL_CHAIN_ID,
-        expiresAt: NOW + 600_000,
+        expiresAt: state.signWindowMs === 600_000 ? NOW + 600_000 : Date.now() + state.signWindowMs,
         summary: {
           kind: 'withdraw',
           token: 'USDC',
@@ -895,20 +897,28 @@ test('payments to this agent: paid only once final; on its way and failed say so
     payment('final', 'p-final', 30),
     payment('included', 'p-on-way', 2),
     payment('failed', 'p-failed', 60),
+    // A Central City agent whose Base ID isn't final yet: no Base ID, never "not an agent".
+    {
+      ...payment('included', 'p-new-payer', 4),
+      from: { name: 'Lantern', baseId: null, short: null, wallet: ELSEWHERE },
+    },
     // Another agent's payment never shows here.
     { ...payment('final', 'p-other', 1), to: { ...payment('final', 'x', 1).to, agentId: 'x' } },
   ];
   const panel = await openWallet(page);
   const list = panel.getByLabel('Payments to Research scout');
-  await expect(list.locator('.ap4-row')).toHaveCount(3);
+  await expect(list.locator('.ap4-row')).toHaveCount(4);
   await expect(list.locator('[data-state="final"]')).toContainText('Compass paid Research scout');
+  await expect(list.locator('[data-state="final"]')).toContainText('Base ID 98121');
+  const newPayer = list.locator('.ap4-row', { hasText: 'Lantern is sending Research scout' });
+  await expect(newPayer).toContainText('Base ID not final yet');
+  await expect(list).not.toContainText('Not a Central City agent');
   await expect(list.locator('[data-state="final"]')).toContainText('+2.5');
   await expect(list.locator('[data-state="final"]')).toContainText('“Chart pack”');
-  await expect(list.locator('[data-state="included"]')).toContainText(
-    'Compass is sending Research scout',
-  );
-  await expect(list.locator('[data-state="included"]')).toContainText('not paid until final');
-  await expect(list.locator('[data-state="included"]')).not.toContainText('+');
+  const onWay = list.locator('[data-state="included"]', { hasText: 'Compass' });
+  await expect(onWay).toContainText('Compass is sending Research scout');
+  await expect(onWay).toContainText('not paid until final');
+  await expect(onWay).not.toContainText('+');
   await expect(list.locator('[data-state="failed"]')).toContainText(
     'Compass’s payment didn’t go through',
   );
@@ -1726,6 +1736,113 @@ test('lanes: while one payment sets the wallet up, the next isn’t signed', asy
   expect(server.signatures).toHaveLength(1);
   // Prepared but never signed: discarded.
   expect(server.discarded).toEqual(['w-pay-2']);
+});
+
+test('lanes: the review step says how long is left to sign; at 0 nothing can be signed, Prepare again', async ({
+  page,
+}) => {
+  test.skip(!SIGNABLE, NOT_YET);
+  // The countdown runs on the server's clock (each answer's Date header), so it is real time here:
+  // a 23-second window keeps the test short.
+  test.setTimeout(90_000);
+  const server = await payServer(page);
+  server.lanes = true;
+  server.signWindowMs = 23_000;
+  const panel = await openPay(page);
+  await panel.getByRole('textbox', { name: /^To\b/ }).fill(HARBOR.baseId);
+  await expect(panel.getByRole('group', { name: 'Recipient' })).toBeVisible();
+  await panel.getByLabel('Amount in USDC').fill('1');
+  await panel.getByRole('button', { name: 'Review payment', exact: true }).click();
+  const timer = panel.getByRole('timer');
+  await expect(timer).toHaveText(/^Sign within 0:2[0-3]$/);
+  await expect(timer).toHaveAttribute('data-low', '', { timeout: 10_000 });
+  await shot(page, 'pay-sign-window-low');
+  // At 0: no password, no Pay; nothing was signed.
+  await expect(panel.getByText('Time to sign ran out. Nothing was signed.')).toBeVisible({
+    timeout: 30_000,
+  });
+  await expect(panel.getByLabel('Wallet password')).toHaveCount(0);
+  await expect(panel.getByRole('button', { name: 'Pay 1.00 USDC', exact: true })).toHaveCount(0);
+  expect(server.signatures).toHaveLength(0);
+  await shot(page, 'pay-sign-window-closed');
+  // Prepare again: the expired one is discarded, the same payment is prepared afresh.
+  server.signWindowMs = 600_000;
+  await panel.getByRole('button', { name: 'Prepare again' }).click();
+  await expect(panel.getByRole('heading', { name: 'Check and pay' })).toBeVisible();
+  await expect(panel.getByLabel('Wallet password')).toBeVisible();
+  await expect(panel.getByRole('timer')).toHaveText(/^Sign within \d+:\d\d$/);
+  expect(server.payments).toHaveLength(2);
+  expect(server.discarded).toHaveLength(1);
+});
+
+test('lanes: the page hidden while Prepare again discards: nothing new is prepared', async ({
+  page,
+}) => {
+  test.skip(!SIGNABLE, NOT_YET);
+  test.setTimeout(90_000);
+  const server = await payServer(page);
+  server.lanes = true;
+  server.signWindowMs = 8_000;
+  const panel = await openPay(page);
+  await panel.getByRole('textbox', { name: /^To\b/ }).fill(HARBOR.baseId);
+  await expect(panel.getByRole('group', { name: 'Recipient' })).toBeVisible();
+  await panel.getByLabel('Amount in USDC').fill('1');
+  await panel.getByRole('button', { name: 'Review payment', exact: true }).click();
+  await expect(panel.getByText('Time to sign ran out. Nothing was signed.')).toBeVisible({
+    timeout: 30_000,
+  });
+  // The discard is held until the page has been hidden (the password lock's session moves on).
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  let asked = false;
+  await page.route(/\/withdrawals\/[^/]+\/cancel$/, async (route) => {
+    asked = true;
+    await held;
+    await route.fallback();
+  });
+  server.signWindowMs = 600_000;
+  await panel.getByRole('button', { name: 'Prepare again' }).click();
+  await expect.poll(() => asked, { timeout: 10_000 }).toBe(true);
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  release();
+  await expect.poll(() => server.discarded.length, { timeout: 10_000 }).toBe(1);
+  // Back on the form; the expired one is gone and no new payment was prepared.
+  await expect(panel.getByRole('button', { name: 'Review payment', exact: true })).toBeVisible();
+  await page.waitForTimeout(1_000);
+  expect(server.payments).toHaveLength(1);
+  expect(server.signatures).toHaveLength(0);
+});
+
+test('lanes: a device clock 90 s fast still shows the time actually left (the server’s clock)', async ({
+  page,
+}) => {
+  test.skip(!SIGNABLE, NOT_YET);
+  const server = await payServer(page);
+  server.lanes = true;
+  server.signWindowMs = 60_000;
+  // The page's clock runs 90 s ahead; the server's Date headers do not.
+  await page.clock.setSystemTime(Date.now() + 90_000);
+  const panel = await openPay(page);
+  await panel.getByRole('textbox', { name: /^To\b/ }).fill(HARBOR.baseId);
+  await expect(panel.getByRole('group', { name: 'Recipient' })).toBeVisible();
+  await panel.getByLabel('Amount in USDC').fill('1');
+  await panel.getByRole('button', { name: 'Review payment', exact: true }).click();
+  // On the device clock the window closed 30 s ago; on the server's it is still open, so the
+  // screen doesn't say it ran out. The browser's own check (K8) tolerates 60 s, so it says why
+  // this device can't sign instead.
+  await expect(panel.getByText('Time to sign ran out. Nothing was signed.')).toHaveCount(0);
+  await expect(
+    panel.getByRole('status').filter({ hasText: 'clock is off by more than a minute' }),
+  ).toBeVisible();
+
+  // 30 s fast is within the tolerance: the countdown shows the server's time left.
+  await page.clock.setSystemTime(Date.now() + 30_000);
+  await panel.getByRole('button', { name: 'Back', exact: true }).click();
+  await panel.getByRole('button', { name: 'Review payment', exact: true }).click();
+  await expect(panel.getByRole('timer')).toHaveText(/^Sign within 0:5\d$/);
 });
 
 test('lanes absent: one payment at a time as before, and no open list is read', async ({

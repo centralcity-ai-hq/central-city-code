@@ -8,8 +8,13 @@ export const LINKS = {
   downtown: '/downtown',
   signIn: '/#signin',
   signUp: '/#signin',
-  /** "Invite your AI" (DESIGN_SYSTEM §3.2): sign in, then the room's Invite sheet. */
+  /** Sign in, then the room's Invite sheet (the step after connecting an AI app). */
   invite: '/invite',
+  /**
+   * Signed out, every "Invite your AI" button opens the Connect page (the product owner, 12 Oct):
+   * add Central City to your AI app first; that page then links to the invite step.
+   */
+  connect: '/connect',
   /** The no-account path (/mcp/open and the per-app setup): today's Connect page. */
   tryWithoutAccount: '/#connect',
   mcpConnection: '/#connect',

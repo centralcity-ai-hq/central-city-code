@@ -1,6 +1,5 @@
 import { noteElricStatus } from './elric/prefetch';
 import { PageArea } from './shell/PageArea';
-import { AgentInspectionTabs } from './agents/AgentInspectionTabs';
 import { DataExport } from './settings/DataExport';
 import { ActivityLog } from './settings/ActivityLog';
 import { isSettingsSection, SettingsLayout } from './settings/SettingsLayout';
@@ -60,9 +59,8 @@ import { AssistantAccess, permissionLabel } from './AssistantAccess';
 
 import { CrossWorkspaceConnections } from './Connections';
 import { WorkspaceKeys } from './WorkspaceKeys';
-import { AutoReplySection } from './responder';
 import type { WorkspaceMembership } from '../shared/assistant';
-import { AgentInbox, forgetMessagesState, MessagesView, useInboxSummary } from './Messages';
+import { forgetMessagesState, MessagesView, useInboxSummary } from './Messages';
 import { directFromHash } from './rooms/direct';
 import { INVITE_ROOMS_PATH, navigate, takeNextPageNote } from './shell/navigation';
 import { markInAppChange } from './shell/pageNavigation';
@@ -126,9 +124,8 @@ type Dialog =
   | { kind: 'create' }
   | { kind: 'connection' }
   | { kind: 'job'; connectionId?: string }
-  | { kind: 'agent'; id: string }
   | { kind: 'result'; id: string }
-  | { kind: 'token'; token: string; agent: Agent; rotated?: boolean }
+  | { kind: 'token'; token: string; agent: Agent }
   | null;
 const navigation = [
   { id: 'network', label: 'Overview', icon: Network },
@@ -409,7 +406,6 @@ function Console({
     };
   }, [workspaceV2, operator.id]);
   const [dialog, setDialog] = useState<Dialog>(null);
-  const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [mobileNav, setMobileNav] = useState(false);
   const closeNavigation = useCallback(() => setMobileNav(false), []);
   // A room page's top bar opens the drawer with its own ☰ chip (the shell row steps aside).
@@ -505,7 +501,6 @@ function Console({
     snapshot?.jobs.filter((job) => job.status === 'completed' && job.acceptance !== 'accepted') ||
     [];
   const hasAgents = Boolean(snapshot?.agents.some((agent) => agent.status !== 'revoked'));
-  const selected = snapshot?.agents.find((agent) => agent.id === selectedAgent);
   const agents =
     snapshot?.agents.filter((agent) =>
       `${agent.name} ${agent.description} ${agent.capability}`
@@ -514,10 +509,6 @@ function Console({
     ) || [];
   const nameOf = (id: string) => snapshot?.agents.find((agent) => agent.id === id)?.name || 'Agent';
   const maybeName = (id: string) => snapshot?.agents.find((agent) => agent.id === id)?.name;
-  const openAgent = (id: string) => {
-    setSelectedAgent(id);
-    setDialog({ kind: 'agent', id });
-  };
   // In My agents' claim sheet the page's error banner sits behind the backdrop, so a failed
   // claim is shown in the sheet instead.
   const [claimSheetError, setClaimSheetError] = useState('');
@@ -560,10 +551,9 @@ function Console({
   // on the page); My agents clears the request once the sheet is open.
   const [claimRequested, setClaimRequested] = useState(false);
   // The network map's "Open agent", an unread chip in Messages (on the agent's Messages) and a new
-  // template agent show that agent in My agents' pane; the classic console opens its dialog.
+  // template agent show that agent in My agents' pane.
   const [agentRequested, setAgentRequested] = useState<AgentRequest | null>(null);
   const showAgent = (id: string, screen?: 'messages') => {
-    if (!workspaceV2) return openAgent(id);
     if (view !== 'agents') changeView('agents');
     setAgentRequested({ id, screen });
   };
@@ -1046,8 +1036,8 @@ function Console({
                           <CityCircle
                             agents={snapshot.agents}
                             connections={snapshot.connections}
-                            selectedId={selected?.id || null}
-                            onSelect={openAgent}
+                            selectedId={null}
+                            onSelect={(id) => showAgent(id)}
                             fresh={fresh}
                             labels={(agent) => ({
                               name:
@@ -1126,7 +1116,7 @@ function Console({
                           {snapshot.agents.length ? (
                             <AgentRows
                               agents={snapshot.agents.slice(0, 4)}
-                              onSelect={openAgent}
+                              onSelect={(id) => showAgent(id)}
                               fresh={fresh}
                             />
                           ) : (
@@ -1238,7 +1228,7 @@ function Console({
                               agent.parentAgentId ? maybeName(agent.parentAgentId) : undefined
                             }
                             provenance={creatorLabel(agent, maybeName)}
-                            onOpen={() => openAgent(agent.id)}
+                            onOpen={() => showAgent(agent.id)}
                           />
                         ))}
                       </div>
@@ -1445,8 +1435,6 @@ function Console({
       {dialog && snapshot ? (
         <Dialogs
           dialog={dialog}
-          workspaceV2={workspaceV2}
-          onView={changeView}
           snapshot={snapshot}
           setDialog={setDialog}
           onShowAgent={showAgent}
@@ -1880,19 +1868,15 @@ function EventList({
 
 function Dialogs({
   dialog,
-  workspaceV2,
-  onView,
   snapshot,
   setDialog,
   onShowAgent,
   onChanged,
 }: {
   dialog: Exclude<Dialog, null>;
-  workspaceV2: boolean;
-  onView: (view: View) => void;
   snapshot: Snapshot;
   setDialog: (dialog: Dialog) => void;
-  /** Shows an agent: in My agents' pane (Workspace v2), else in its dialog. */
+  /** Shows an agent in My agents' pane. */
   onShowAgent: (id: string) => void;
   onChanged: (message?: string) => Promise<void>;
 }) {
@@ -1915,11 +1899,7 @@ function Dialogs({
   if (dialog.kind === 'token')
     return (
       <Modal
-        title={
-          dialog.rotated
-            ? `${dialog.agent.name} has a new access token.`
-            : `${dialog.agent.name} is added.`
-        }
+        title={`${dialog.agent.name} is added.`}
         subtitle="Save its access token now. It is shown only once."
         onClose={close}
       >
@@ -1939,15 +1919,6 @@ function Dialogs({
             Anyone with this token can act as this agent. Keep it private and never paste it into a
             chat. You can replace it later in the agent's settings; the agent stays the same.
           </p>
-          {dialog.rotated ? (
-            <div className="info-note">
-              <ShieldCheck size={18} />
-              <p>
-                The old token no longer works. Put the new one in your agent's setup and restart it.
-                Unfinished work for this agent was canceled; its connections and history remain.
-              </p>
-            </div>
-          ) : null}
           {!['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname) ? (
             <p className="field-note">
               The setup below is for a copy of Central City running on your own computer. It does
@@ -2042,41 +2013,6 @@ function Dialogs({
         }}
       />
     );
-  if (dialog.kind === 'agent') {
-    const agent = snapshot.agents.find((item) => item.id === dialog.id);
-    return agent ? (
-      <AgentDetail
-        key={agent.id}
-        agent={agent}
-        snapshot={snapshot}
-        inspection={
-          workspaceV2 ? (
-            <AgentInspectionTabs
-              agent={agent}
-              snapshot={snapshot}
-              onOpenJob={(id) => setDialog({ kind: 'result', id })}
-              onManageConnections={() => {
-                close();
-                onView('connections');
-              }}
-              onConnectedApps={() => {
-                close();
-                onView('assistants');
-              }}
-            />
-          ) : null
-        }
-        onClose={close}
-        onChanged={onChanged}
-        onRotated={async (updatedAgent, token) => {
-          setDialog({ kind: 'token', agent: updatedAgent, token, rotated: true });
-          await onChanged(
-            `${updatedAgent.name} has a new access token. Reconnect it with the new token.`,
-          );
-        }}
-      />
-    ) : null;
-  }
   const job = snapshot.jobs.find((item) => item.id === dialog.id);
   return job ? (
     <JobDetail key={job.id} job={job} snapshot={snapshot} onClose={close} onChanged={onChanged} />
@@ -2498,222 +2434,6 @@ function JobForm({
           {snapshot.paused ? 'Workspace is paused' : busy ? 'Sending…' : 'Send work'}
         </button>
       </form>
-    </Modal>
-  );
-}
-
-function AgentDetail({
-  agent,
-  snapshot,
-  inspection,
-  onClose,
-  onChanged,
-  onRotated,
-}: {
-  agent: Agent;
-  snapshot: Snapshot;
-  inspection?: ReactNode;
-  onClose: () => void;
-  onChanged: (message?: string) => Promise<void>;
-  onRotated: (agent: Agent, token: string) => Promise<void>;
-}) {
-  const [confirmRevoke, setConfirmRevoke] = useState(false);
-  const [confirmRotate, setConfirmRotate] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const connections = snapshot.connections.filter(
-    (item) => item.fromAgentId === agent.id || item.toAgentId === agent.id,
-  );
-  async function revoke() {
-    if (!confirmRevoke) {
-      setConfirmRotate(false);
-      setConfirmRevoke(true);
-      return;
-    }
-    setBusy(true);
-    try {
-      await api(`/api/agents/${agent.id}/revoke`, {});
-      await onChanged(`${agent.name} was removed.`);
-      setConfirmRevoke(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "The agent couldn't be removed.");
-    } finally {
-      setBusy(false);
-    }
-  }
-  async function rotate() {
-    if (!confirmRotate) {
-      setConfirmRevoke(false);
-      setConfirmRotate(true);
-      return;
-    }
-    setBusy(true);
-    setError('');
-    try {
-      const result = await api<{ agent: Agent; token: string }>(
-        `/api/agents/${agent.id}/rotate-credential`,
-        {},
-      );
-      await onRotated(result.agent, result.token);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "A new token couldn't be created.");
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <Modal
-      title={agent.name}
-      subtitle={agent.description || `${capabilityLabels[agent.capability]} specialist`}
-      wide
-      onClose={() => {
-        if (!busy) onClose();
-      }}
-    >
-      <div className="modal-body detail-body">
-        <div className="detail-agent-header">
-          <AgentGlyph agent={agent} size="large" />
-          <Status value={agent.pausedAt ? 'paused' : agent.status} />
-          <span className={`small-tag ${agent.isDemo ? 'demo' : ''}`}>
-            {agent.isDemo ? 'CC' : 'Runs on your computer'}
-          </span>
-          {aiCreated(agent) ? <span className="small-tag ai">AI-created</span> : null}
-        </div>
-        {inspection}
-        <dl className="detail-list lineage-list">
-          <div>
-            <dt>Origin</dt>
-            <dd>
-              {creatorLabel(agent, (id) => snapshot.agents.find((item) => item.id === id)?.name)}
-            </dd>
-          </div>
-          <div>
-            <dt>Created under</dt>
-            <dd>
-              {agent.parentAgentId
-                ? `${snapshot.agents.find((item) => item.id === agent.parentAgentId)?.name ?? 'an agent not listed here'} (level ${lineageDepth(agent)})`
-                : 'No other agent'}
-            </dd>
-          </div>
-          {agent.claimedAt ? (
-            <div>
-              <dt>Claimed into this workspace</dt>
-              <dd>{formatDate(agent.claimedAt)}</dd>
-            </div>
-          ) : null}
-          {agent.manifestName ? (
-            <div>
-              <dt>Template</dt>
-              <dd>
-                {agent.manifestName} · version {agent.revision ?? 1} ·{' '}
-                <a
-                  className="text-link"
-                  href={`/a2a/${agent.id}/.well-known/agent-card.json`}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Public profile
-                </a>
-              </dd>
-            </div>
-          ) : null}
-        </dl>
-        <dl className="detail-list">
-          <div>
-            <dt>What it does</dt>
-            <dd>{capabilityLabels[agent.capability]}</dd>
-          </div>
-          <div>
-            <dt>Last seen</dt>
-            <dd>{agent.lastSeenAt ? formatDate(agent.lastSeenAt) : 'Not yet'}</dd>
-          </div>
-          <div>
-            <dt>Created</dt>
-            <dd>{formatDate(agent.createdAt)}</dd>
-          </div>
-          <div>
-            <dt>Connections</dt>
-            <dd>{connections.length}</dd>
-          </div>
-        </dl>
-        <details className="setup-details">
-          <summary>Agent ID, for developers</summary>
-          <p className="mono break">{agent.id}</p>
-        </details>
-        {agent.isDemo ? (
-          <div className="info-note">
-            <Sparkles size={18} />
-            <p>
-              This CC agent works on the text you give it. It follows a script; no AI model is used.
-            </p>
-          </div>
-        ) : (
-          <div className="info-note">
-            <Radio size={18} />
-            <p>
-              Online means the agent checked in recently. It says nothing about the quality of its
-              answers.
-            </p>
-          </div>
-        )}
-        <AgentInbox agent={agent} snapshot={snapshot} />
-        {/* Owner-only Auto-reply; renders nothing unless the server offers it. */}
-        <AutoReplySection agent={agent} />
-        <FormError error={error} />
-        {agent.revokedAt ? (
-          <div className="info-note danger">
-            <Unplug size={17} />
-            <p>This agent was removed. It can't reconnect.</p>
-          </div>
-        ) : (
-          <div className="revoke-section">
-            <h3>Agent access</h3>
-            {agent.mode === 'external' ? (
-              <>
-                <p>Replace the access token if it may have leaked. The agent stays the same.</p>
-                {confirmRotate ? (
-                  <p className="danger-text">
-                    Stop the agent first. The old token stops working at once and unfinished work
-                    for this agent is canceled.
-                  </p>
-                ) : null}
-                <button className="button secondary" disabled={busy} onClick={() => void rotate()}>
-                  <RefreshCw size={15} />
-                  {confirmRotate ? 'Yes, replace the token' : 'Replace token'}
-                </button>
-                {confirmRotate ? (
-                  <button
-                    className="button ghost"
-                    disabled={busy}
-                    onClick={() => setConfirmRotate(false)}
-                  >
-                    Keep current token
-                  </button>
-                ) : null}
-              </>
-            ) : null}
-            <p>Removing the agent ends its access and stops all future work.</p>
-            {confirmRevoke ? (
-              <p className="danger-text">
-                This can't be undone. You would need to add a new agent.
-              </p>
-            ) : null}
-            <button className="button danger" disabled={busy} onClick={() => void revoke()}>
-              <Unplug size={15} />
-              {confirmRevoke ? 'Yes, remove it' : 'Remove agent'}
-            </button>
-            {confirmRevoke ? (
-              <button
-                className="button ghost"
-                disabled={busy}
-                onClick={() => setConfirmRevoke(false)}
-              >
-                Keep agent
-              </button>
-            ) : null}
-          </div>
-        )}
-      </div>
     </Modal>
   );
 }

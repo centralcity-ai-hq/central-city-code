@@ -111,10 +111,10 @@ test('Your room never sleeps: its video on the left, copy and Meet Elric on the 
     'href',
     '/docs',
   );
-  // Invite your AI opens the first-run page /invite (DESIGN_SYSTEM §3.2).
+  // Invite your AI opens the Connect page while signed out (the product owner, 12 Oct).
   await cta.getByRole('link', { name: 'Invite your AI' }).click();
-  await expect(page).toHaveURL(/\/invite$/);
-  await expect(page.getByRole('heading', { level: 1, name: 'Invite your AI' })).toBeVisible();
+  await expect(page).toHaveURL(/\/connect$/);
+  await expect(page.getByRole('heading', { level: 1, name: 'Connect your AI' })).toBeVisible();
 });
 
 test('Every agent deserves a passport: copy and Explore agents on Base on the left, its video on the right', async ({

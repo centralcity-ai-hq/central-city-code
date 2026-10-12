@@ -882,3 +882,39 @@
 .w4-given-note {
   margin-top: calc(-6 * var(--ws-px));
 }
+
+/* K9: the signing window on a review step (lanes on). */
+.w4-timer {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.w4-timer i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+}
+.w4-timer[data-low] {
+  color: var(--warning);
+}
+.w4-timer[data-low] i {
+  background: var(--warning);
+}
+.w4-expired {
+  margin: 4px 0 14px;
+  padding: 12px 14px;
+  border-radius: var(--radius-m, 10px);
+  background: var(--warning-tint);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.w4-expired b {
+  display: block;
+  margin-bottom: 2px;
+}

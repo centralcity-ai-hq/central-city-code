@@ -615,8 +615,27 @@ test('age confirmation (birthday flag on): the token is never stored; the date o
   const info = JSON.stringify(await linkInfo(f.app, a.cookie));
   for (const text of [dump, info, back.location ?? '', lines.join('\n')]) {
     assert.ok(!text.includes(token), 'no access token');
-    assert.ok(!/1987|11-23|23\.11|11\/23|19871123/.test(text), 'no plaintext birth date');
+    assert.ok(!BIRTH_DATE.test(text), 'no plaintext birth date');
   }
+});
+
+/**
+ * 23 Nov 1987 written as a date, in any common form, but not the same digits inside an id, a hash,
+ * a millisecond timestamp or today's ISO date (on 23 November, created_at holds "-11-23").
+ */
+const BIRTH_DATE =
+  /(?<![0-9a-z])(?:1987|19871123)(?![0-9a-z])|(?<![0-9a-z-])11-23(?![0-9a-z])|(?<![0-9a-z.])23\.11(?![0-9a-z])|(?<![0-9a-z/])11\/23(?![0-9a-z])/i;
+
+test('the birth-date scan finds the date, not the same digits elsewhere', () => {
+  for (const text of ['1987-11-23', '23.11.1987', '11/23/1987', '19871123', '{"year":1987}'])
+    assert.ok(BIRTH_DATE.test(text), text);
+  for (const text of [
+    'b7e1987c-0f2a-4c1e-9d11-23ab45cd67ef',
+    '"at":1791987123456',
+    '2026-11-23T10:00:00.000Z',
+    '9f1987aa11-23ee',
+  ])
+    assert.ok(!BIRTH_DATE.test(text), text);
 });
 
 test('relink cooldown: an unlinked Google account cannot move to another account for 30 days', async (t) => {

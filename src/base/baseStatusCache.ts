@@ -8,8 +8,8 @@ import type { View } from './baseRegistrationModel';
  * only the most recent few are kept. All of it is forgotten when the signed-in person changes.
  *
  * Display only: just the read-only status (the agent's home row, which offers no action) starts
- * from it. The Base screen and the classic panel always wait for their own fresh read before they
- * offer anything (register, make public, retry), as without it.
+ * from it. The Base screen always waits for its own fresh read before it
+ * offers anything (register, make public, retry), as without it.
  */
 
 export interface KnownStatus {

@@ -581,6 +581,12 @@ interface Row {
   lane_key: string | null;
   /** The hold on the wallet's ETH for an owner-funded cancel's gas, while one is asked for. */
   cancel_fee_reservation_id: string | null;
+  /**
+   * When this included operation was proven settled at Base's safe head for the receipt it holds
+   * now (migration 96). The row clears it itself when that receipt, the state or the error changes
+   * (a dropped block sends the operation back to submitted), so a stored one is that proof.
+   */
+  safe_at: string | number | null;
   created_at: string | number;
   updated_at: string | number;
 }
@@ -593,7 +599,7 @@ const COLUMNS = `withdrawal_id, wallet_id, owner_account_id, kind, token,
   cancel_signature, cancel_chain_op_key, cancel_submitted_at, cancel_state, cancel_tx_hash,
   sponsored, max_fee_wei::text AS max_fee_wei, fee_reservation_id, cancel_sponsored,
   cancel_max_fee_wei::text AS cancel_max_fee_wei, error_code, lane_key::text AS lane_key, cancel_fee_reservation_id,
-  created_at, updated_at`;
+  safe_at, created_at, updated_at`;
 
 /** Open states a signature has already authorized: their operations are followed on-chain. */
 const SIGNED_OPEN: readonly WithdrawalState[] = ['submitted', 'included', 'cancel_pending'];
@@ -1630,7 +1636,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
       row.state === 'final' ||
       (row.state === 'included' &&
         row.error_code === null &&
-        isSettled(await settledIncluded(wallet, row), row));
+        isSettled(await settledIncluded(wallet, row, true), row));
     return view(wallet, row, safe);
   }
 
@@ -1851,12 +1857,18 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
    * (owner-ops.ts settledAtSafe: this operation's own receipt in the canonical block, at or below
    * the safe head, its lane's nonce used), each with the receipt it was proven for. Anything Base
    * can't tell right now is left out, so it keeps blocking.
+   *
+   * `display` (the `safe` an answer shows, never a decision about money): an operation whose proof
+   * is already stored for the receipt it holds now (`safe_at`, see Row) is answered from it, with
+   * no call to Base; one proven now gets it stored, exactly as markSafe stores it; reverted ones
+   * are never shown safe, so they are not proven here at all. Without `display` (admission,
+   * openOn, and the holds a balance read leaves out, settledHeld) every proof is made live, as
+   * before: a stored proof never frees a nonce or an amount.
    */
   async function settledIncluded(
     wallet: WalletRow,
     only?: Row,
-    /** Proofs already made in this request, by withdrawal id, transaction and block. */
-    memo: Map<string, boolean> = new Map(),
+    display = false,
   ): Promise<Settled[]> {
     const { rows } = only
       ? { rows: only.state === 'included' ? [only] : [] }
@@ -1866,38 +1878,57 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
            ORDER BY created_at, withdrawal_id LIMIT $2`,
           [wallet.wallet_id, CATCH_UP_MAX],
         );
-    if (!rows.length) return [];
+    const settled: Settled[] = [];
+    const proofOf = (row: Row & { tx_hash: string }): Settled => ({
+      withdrawalId: row.withdrawal_id,
+      txHash: row.tx_hash,
+      blockNumber: String(row.block_number),
+    });
+    const toProve: Array<Row & { tx_hash: string }> = [];
+    for (const row of rows) {
+      if (!row.tx_hash || row.block_number === null) continue;
+      const withReceipt = row as Row & { tx_hash: string };
+      if (display && row.error_code !== null) continue;
+      if (display && row.safe_at !== null) settled.push(proofOf(withReceipt));
+      else toProve.push(withReceipt);
+    }
+    if (!toProve.length) return settled;
     let port: OwnerOperationsPort;
     try {
       port = await deps.operations();
     } catch {
-      return [];
+      return settled;
     }
-    if (!port.settledAtSafe) return [];
-    const settled: Settled[] = [];
-    for (const row of rows) {
-      if (!row.tx_hash || row.block_number === null) continue;
-      const memoKey = `${row.withdrawal_id}:${row.tx_hash}:${row.block_number}`;
-      const known = memo.get(memoKey);
+    if (!port.settledAtSafe) return settled;
+    for (const row of toProve) {
       const proven =
-        known ??
         (await port.settledAtSafe({
           sender: getAddress(wallet.address),
           nonce: BigInt(row.nonce),
           userOpHash: row.user_op_hash as Hex,
           txHash: row.tx_hash as Hex,
-          blockNumber: BigInt(row.block_number),
+          blockNumber: BigInt(row.block_number!),
           success: row.error_code !== 'reverted',
         })) === true;
-      memo.set(memoKey, proven);
-      if (proven)
-        settled.push({
-          withdrawalId: row.withdrawal_id,
-          txHash: row.tx_hash,
-          blockNumber: String(row.block_number),
-        });
+      if (!proven) continue;
+      settled.push(proofOf(row));
+      if (display) await storeSafe(row).catch(() => undefined);
     }
     return settled;
+  }
+
+  /**
+   * Stores a proof just made (display reads only, outside any transaction), as markSafe does:
+   * once, only while the row still holds the receipt it was proven for, included and not
+   * reverted; updated_at is left alone (a concurrent advance() is never made to retry).
+   */
+  async function storeSafe(row: Row & { tx_hash: string }): Promise<void> {
+    await db.query(
+      `UPDATE base_wallet_withdrawals SET safe_at = $4
+       WHERE withdrawal_id = $1 AND state = 'included' AND error_code IS NULL
+         AND safe_at IS NULL AND tx_hash = $2 AND block_number = $3::bigint`,
+      [row.withdrawal_id, row.tx_hash, String(row.block_number), now()],
+    );
   }
 
   /**
@@ -2754,7 +2785,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
           Math.max(OPEN_LIST_MAX, deps.openCap?.() ?? LANES_CAP_DEFAULT),
         ],
       );
-      const settled = await settledIncluded(wallet);
+      const settled = await settledIncluded(wallet, undefined, true);
       return {
         withdrawals: await Promise.all(
           rows.map(async (row) => ({

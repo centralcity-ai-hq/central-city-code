@@ -59,6 +59,11 @@ export const OAUTH_LIFETIMES = {
   codeGraceMs: 60_000,
 } as const;
 /**
+ * The one advisory lock every dynamic client registration takes first, so the capacity count,
+ * eviction and insert are serialized across instances ("cc-oadcr" as a 64-bit key).
+ */
+export const CLIENT_REGISTRATION_LOCK_KEY = '7161617788847809394';
+/**
  * Global table bounds. Unauthenticated state never refuses service at these bounds: the oldest
  * unauthenticated pending requests and never-used registrations are evicted instead.
  */
@@ -399,6 +404,9 @@ export async function registerOAuthRoutes(
     const time = d.clock();
     const clientId = `ccc_${randomBytes(18).toString('base64url')}`;
     await d.db.transaction(async (tx) => {
+      // Taken first: without it, concurrent registrations each count the table, see room and
+      // insert, overrunning the bound. Under it the sweep, eviction and insert are one step.
+      await tx.query('SELECT pg_advisory_xact_lock($1::bigint)', [CLIENT_REGISTRATION_LOCK_KEY]);
       // Unused self-registrations are disposable; clients with tokens remain registered.
       await tx.query(
         `DELETE FROM oauth_clients c WHERE c.created_at<$1

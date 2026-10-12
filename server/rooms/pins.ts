@@ -149,9 +149,16 @@ export interface PinView {
   task: { id: string; number: number; title: string; status: string } | null;
 }
 
+export type PinAddResult = { pin: PinView; created: boolean };
+
+/** Internal only: durable actions wrap the effect under the room lock, in the same transaction. */
+export interface PinAddOptions {
+  execute?: (tx: Pick<Tx, 'query'>, effect: () => Promise<PinAddResult>) => Promise<PinAddResult>;
+}
+
 export interface RoomPins {
   list(p: RoomPrincipal, body: unknown): Promise<{ room_id: string; pins: PinView[]; cap: number }>;
-  add(p: RoomPrincipal, body: unknown): Promise<{ pin: PinView; created: boolean }>;
+  add(p: RoomPrincipal, body: unknown, options?: PinAddOptions): Promise<PinAddResult>;
   remove(
     p: RoomPrincipal,
     body: unknown,
@@ -502,7 +509,7 @@ export function createRoomPins(d: PinDependencies): RoomPins {
     });
   }
 
-  async function add(p: RoomPrincipal, body: unknown) {
+  async function add(p: RoomPrincipal, body: unknown, options: PinAddOptions = {}) {
     const values = pinAddInput.parse(body);
     const note = cleanName(values.note ?? '', PIN_LIMITS.noteChars);
     if (note && partsContainCredential([{ type: 'text', text: note }]))
@@ -520,64 +527,67 @@ export function createRoomPins(d: PinDependencies): RoomPins {
       );
       // The room row lock serializes the cap check (the order posts and task creates use).
       await tx.query('SELECT 1 FROM rooms WHERE id=$1 FOR UPDATE', [room.id]);
-      if (values.message_seq !== undefined) {
-        // Only a message the caller may read (the same 404 for hidden and missing ones).
-        const message = (
-          await tx.query<{ sender_kind: string | null }>(
-            'SELECT sender_kind FROM room_messages WHERE room_id=$1 AND seq=$2',
-            [room.id, values.message_seq],
+      const effect = async (): Promise<PinAddResult> => {
+        if (values.message_seq !== undefined) {
+          // Only a message the caller may read (the same 404 for hidden and missing ones).
+          const message = (
+            await tx.query<{ sender_kind: string | null }>(
+              'SELECT sender_kind FROM room_messages WHERE room_id=$1 AND seq=$2',
+              [room.id, values.message_seq],
+            )
+          ).rows[0];
+          if (!message || values.message_seq <= visibleFrom)
+            refuse(404, 'message_not_found', 'Message not found in this room.');
+        } else {
+          const task = (
+            await tx.query('SELECT 1 FROM room_tasks WHERE room_id=$1 AND id=$2', [
+              room.id,
+              values.task_id,
+            ])
+          ).rows[0];
+          if (!task) refuse(404, 'task_not_found', 'Task not found in this room.');
+        }
+        const existing = (
+          await tx.query<PinRow>(
+            `${PIN_SELECT} WHERE p.room_id=$1 AND (p.message_seq=$2 OR p.task_id=$3)`,
+            [room.id, values.message_seq ?? null, values.task_id ?? null],
           )
         ).rows[0];
-        if (!message || values.message_seq <= visibleFrom)
-          refuse(404, 'message_not_found', 'Message not found in this room.');
-      } else {
-        const task = (
-          await tx.query('SELECT 1 FROM room_tasks WHERE room_id=$1 AND id=$2', [
-            room.id,
-            values.task_id,
-          ])
-        ).rows[0];
-        if (!task) refuse(404, 'task_not_found', 'Task not found in this room.');
-      }
-      const existing = (
-        await tx.query<PinRow>(
-          `${PIN_SELECT} WHERE p.room_id=$1 AND (p.message_seq=$2 OR p.task_id=$3)`,
-          [room.id, values.message_seq ?? null, values.task_id ?? null],
-        )
-      ).rows[0];
-      if (existing) return { pin: await projectPin(tx, existing, p.operatorId), created: false };
-      const count = Number(
-        (
-          await tx.query<{ n: string | number }>(
-            'SELECT count(*) AS n FROM room_pins WHERE room_id=$1',
-            [room.id],
-          )
-        ).rows[0]!.n,
-      );
-      if (count >= PIN_LIMITS.perRoom)
-        refuse(
-          409,
-          'pin_limit',
-          `This room already has ${PIN_LIMITS.perRoom} pins; unpin one first.`,
+        if (existing) return { pin: await projectPin(tx, existing, p.operatorId), created: false };
+        const count = Number(
+          (
+            await tx.query<{ n: string | number }>(
+              'SELECT count(*) AS n FROM room_pins WHERE room_id=$1',
+              [room.id],
+            )
+          ).rows[0]!.n,
         );
-      const id = randomUUID();
-      await tx.query(
-        `INSERT INTO room_pins(id,room_id,kind,message_seq,task_id,note,pinned_by_agent_id,pinned_by_owner_id,created_at)
+        if (count >= PIN_LIMITS.perRoom)
+          refuse(
+            409,
+            'pin_limit',
+            `This room already has ${PIN_LIMITS.perRoom} pins; unpin one first.`,
+          );
+        const id = randomUUID();
+        await tx.query(
+          `INSERT INTO room_pins(id,room_id,kind,message_seq,task_id,note,pinned_by_agent_id,pinned_by_owner_id,created_at)
           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-        [
-          id,
-          room.id,
-          values.message_seq !== undefined ? 'message' : 'task',
-          values.message_seq ?? null,
-          values.task_id ?? null,
-          note,
-          member.agent_id,
-          p.operatorId,
-          d.clock(),
-        ],
-      );
-      const row = (await tx.query<PinRow>(`${PIN_SELECT} WHERE p.id=$1`, [id])).rows[0]!;
-      return { pin: await projectPin(tx, row, p.operatorId), created: true };
+          [
+            id,
+            room.id,
+            values.message_seq !== undefined ? 'message' : 'task',
+            values.message_seq ?? null,
+            values.task_id ?? null,
+            note,
+            member.agent_id,
+            p.operatorId,
+            d.clock(),
+          ],
+        );
+        const row = (await tx.query<PinRow>(`${PIN_SELECT} WHERE p.id=$1`, [id])).rows[0]!;
+        return { pin: await projectPin(tx, row, p.operatorId), created: true };
+      };
+      return options.execute ? options.execute(tx, effect) : effect();
     });
   }
 

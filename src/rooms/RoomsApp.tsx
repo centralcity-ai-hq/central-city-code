@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { applyPageTitle } from '../shell/usePageTitle';
 import {
   ChevronDown,
   ChevronRight,
@@ -665,6 +666,16 @@ export function RoomsApp({
     },
     [workspaceId, sendSeen],
   );
+
+  // The tab is named after the page: the open room's name, or Rooms on the list.
+  const titleRoom =
+    view.kind === 'rooms' && view.id
+      ? (rooms?.find((room) => room.id === view.id || room.slug === view.id)?.name ?? '')
+      : '';
+  useEffect(() => {
+    if (view.kind === 'join') return;
+    return applyPageTitle(document, `${titleRoom || 'Rooms'} · Central City`);
+  }, [view.kind, titleRoom]);
 
   if (view.kind === 'join')
     return (

@@ -70,6 +70,7 @@ import {
   walletAccountIndex,
   WithdrawalCheckError,
   WithdrawalWaitError,
+  SIGNING_CLOCK_SKEW_MS,
 } from '../src/base/wallet/withdraw.js';
 
 /*
@@ -796,8 +797,12 @@ test('lanes on: a rating whose sponsorship window closed refuses to sign', () =>
   const request = windowed(NOW + 60_000);
   // Within the window: nothing to refuse.
   assert.doesNotThrow(() => checkRatingWindow(request, NOW, SPONSORS));
-  // Past the paymaster's validUntil (the rating itself not expired yet): refused, never signed.
-  for (const at of [NOW + 60_000, NOW + 61_000, NOW + 600_000])
+  // Past the paymaster's validUntil by less than SIGNING_CLOCK_SKEW_MS: this device may simply run
+  // fast, so the browser leaves it to the server (which answers 409 sponsorship_expired).
+  for (const at of [NOW + 60_000, NOW + 61_000])
+    assert.doesNotThrow(() => checkRatingWindow(request, at, SPONSORS));
+  // Further past it (the rating itself not expired yet): refused, never signed.
+  for (const at of [NOW + 60_000 + SIGNING_CLOCK_SKEW_MS, NOW + 600_000])
     assert.throws(
       () => checkRatingWindow(request, at, SPONSORS),
       (error: unknown) =>

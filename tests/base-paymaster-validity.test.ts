@@ -2,12 +2,18 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   sponsoredValidUntil,
+  MAX_EXPIRY_SKEW_MS,
   sponsoredWithinDeadline,
   SPONSOR_DATA_BYTES,
 } from '../shared/base/paymasters.js';
 import type { Address } from '../shared/base/chains.js';
 import type { RpcUserOperation } from '../shared/base/withdraw.js';
-import { checkSigningWindow } from '../src/base/wallet/withdraw.js';
+import {
+  checkSigningWindow,
+  SIGNING_CLOCK_BEHIND,
+  SIGNING_CLOCK_SKEW_MS,
+  SIGNING_WINDOW_EXPIRED,
+} from '../src/base/wallet/withdraw.js';
 
 const address = `0x${'12'.repeat(20)}` as Address;
 const sponsors = { 84532: [address] };
@@ -29,7 +35,9 @@ test('browser rechecks the fixed sponsorship window after an asynchronous unlock
     userOperation: { paymasterAndData: data(seconds + 60) } as RpcUserOperation,
   };
   assert.doesNotThrow(() => checkSigningWindow(request, now, sponsors));
-  assert.throws(() => checkSigningWindow(request, now + 61_000, sponsors));
+  // Expired by Base's clock but within a fast device's tolerance: the server decides.
+  assert.doesNotThrow(() => checkSigningWindow(request, now + 61_000, sponsors));
+  assert.throws(() => checkSigningWindow(request, now + 61_000 + SIGNING_CLOCK_SKEW_MS, sponsors));
   assert.throws(() => checkSigningWindow({ ...request, expiresAt: null }, now, sponsors));
   assert.doesNotThrow(() =>
     checkSigningWindow({ ...request, lanes: false }, now + 61_000, sponsors),
@@ -81,4 +89,73 @@ test('sponsoredValidUntil reads the signed validUntil in ms, or null when there 
   assert.equal(sponsoredValidUntil('0x'), null);
   assert.equal(sponsoredValidUntil(data(seconds + 90).slice(0, -2)), null);
   assert.equal(sponsoredValidUntil(`${data(seconds + 90).slice(0, -2)}zz`), null);
+});
+
+test('the browser tolerates a device clock up to a minute fast; the deadline stays the bound', () => {
+  // Sponsorship valid for ~2 minutes from prepare, as measured on mainnet.
+  const request = {
+    lanes: true,
+    chainId: 84532,
+    expiresAt: now + 120_000,
+    userOperation: { paymasterAndData: data(seconds + 120) } as RpcUserOperation,
+  };
+  // A device 90 s fast signs 40 s after prepare: Base says 40 s, the device says 130 s.
+  assert.doesNotThrow(() => checkSigningWindow(request, now + 130_000, sponsors));
+  // 60 s fast, right at the end of the real window: still within the tolerance.
+  assert.doesNotThrow(() => checkSigningWindow(request, now + 119_000 + 60_000, sponsors));
+  // More than a minute past the deadline by this clock: refused as expired.
+  assert.throws(
+    () => checkSigningWindow(request, now + 120_000 + SIGNING_CLOCK_SKEW_MS, sponsors),
+    { message: SIGNING_WINDOW_EXPIRED },
+  );
+  // The tolerance never lets validUntil pass the server's deadline.
+  assert.throws(
+    () =>
+      checkSigningWindow(
+        {
+          ...request,
+          userOperation: { paymasterAndData: data(seconds + 121) } as RpcUserOperation,
+        },
+        now,
+        sponsors,
+      ),
+    { message: SIGNING_WINDOW_EXPIRED },
+  );
+});
+
+test('a slow device clock is not tolerated: it is told its clock is behind', () => {
+  // Prepared at `now` on the server, validAfter = now; this device runs 30 s behind.
+  const request = {
+    lanes: true,
+    chainId: 84532,
+    expiresAt: now + 120_000,
+    userOperation: { paymasterAndData: data(seconds + 120, seconds) } as RpcUserOperation,
+  };
+  assert.throws(() => checkSigningWindow(request, now - 30_000, sponsors), {
+    message: SIGNING_CLOCK_BEHIND,
+  });
+  // Far behind (validAfter more than a minute ahead): a plain refusal.
+  assert.throws(() => checkSigningWindow(request, now - 61_000 - 1_000, sponsors), {
+    message: SIGNING_WINDOW_EXPIRED,
+  });
+  assert.doesNotThrow(() => checkSigningWindow(request, now, sponsors));
+});
+
+test('the expiry skew is bounded and leaves validAfter strict', () => {
+  const value = data(seconds + 600);
+  const at = (now0: number, expirySkewMs?: number, after = seconds - 1) =>
+    sponsoredWithinDeadline(
+      84532,
+      data(seconds + 600, after),
+      { now: now0, deadline, expirySkewMs },
+      sponsors,
+    );
+  assert.equal(at(now + 600_000), false, 'no skew: expired');
+  assert.equal(at(now + 600_000, 60_000), true, 'fast clock within the skew');
+  assert.equal(at(now + 660_000, 60_000), false, 'beyond the skew');
+  assert.equal(at(now, 60_000, seconds + 1), false, 'validAfter in the future stays refused');
+  for (const bad of [-1, 0.5, MAX_EXPIRY_SKEW_MS + 1, NaN])
+    assert.equal(at(now, bad), false, String(bad));
+  assert.equal(at(now, MAX_EXPIRY_SKEW_MS), true);
+  assert.equal(check(value), true, 'the server path (no skew) is unchanged');
 });

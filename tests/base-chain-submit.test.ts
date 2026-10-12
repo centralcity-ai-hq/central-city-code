@@ -337,27 +337,26 @@ test('finality decided on one receipt never lands on a newer re-inclusion', asyn
     submittedBlock: '1',
     errorCode: null,
   });
-  const client = {
-    readContract: async () => 4n,
-    getBlockNumber: async () => 100n,
-    getBlock: async () => ({ number: 90n }),
-  } as never;
-  const signer = { address: `0x${'6'.repeat(40)}`, signUserOperation: async () => '0x' } as never;
-  // Worker A: the first receipt read sees R1; the finality read pauses, then still answers R1.
-  let calls = 0;
+  // Worker A: its one receipt read sees R1; the settled-head read after it pauses.
+  let headReads = 0;
   let resume!: () => void;
   const paused = new Promise<void>((resolve) => (resume = resolve));
   let reachedFinalityRead!: () => void;
   const atFinalityRead = new Promise<void>((resolve) => (reachedFinalityRead = resolve));
-  const bundler = {
-    receipt: async () => {
-      calls++;
-      if (calls === 2) {
+  const client = {
+    readContract: async () => 4n,
+    getBlockNumber: async () => {
+      if (++headReads === 1) {
         reachedFinalityRead();
         await paused;
       }
-      return { ...r1, actualGasUsed: 1n, actualGasCost: 1n, success: true };
+      return 100n;
     },
+    getBlock: async () => ({ number: 90n }),
+  } as never;
+  const signer = { address: `0x${'6'.repeat(40)}`, signUserOperation: async () => '0x' } as never;
+  const bundler = {
+    receipt: async () => ({ ...r1, actualGasUsed: 1n, actualGasCost: 1n, success: true }),
     send: async () => `0x${'aa'.repeat(32)}`,
   } as unknown as Bundler;
   const workerA = refreshFinality({ network, client, store, bundler, signer }, 'k:r');

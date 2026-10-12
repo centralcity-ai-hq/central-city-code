@@ -1,7 +1,6 @@
 /*
- * The Base registration as the client sees it: the server's identity view and the pure rules both
- * Base panels follow (the current one in src/base/BaseRegistration.tsx and My agents v4). No React,
- * no requests.
+ * The Base registration as the client sees it: the server's identity view and the pure rules the
+ * Base screen in My agents v4 follows. No React, no requests.
  */
 
 /** Base mainnet: the only network the register route serves. */

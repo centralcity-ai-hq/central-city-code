@@ -22,6 +22,8 @@ export class BundlerError extends Error {
     message: string,
     /** For RPC_ERROR: the classified rejection (the upstream text itself is never kept). */
     readonly rejection?: BundlerRejection,
+    /** For RPC_ERROR: the numeric JSON-RPC error code, when the bundler gave one. */
+    readonly rpcCode?: number,
   ) {
     super(message);
   }
@@ -109,12 +111,14 @@ export function bundlerRejection(
     : NONCE_INVALID.test(text)
       ? 'nonce_invalid'
       : 'other';
-  const rpcCode = Number.isSafeInteger(error.code) ? ` ${error.code as number}` : '';
+  const code = Number.isSafeInteger(error.code) ? (error.code as number) : undefined;
+  const rpcCode = code === undefined ? '' : ` ${code}`;
   const aa = AA_CODE.exec(text)?.[0];
   return new BundlerError(
     'RPC_ERROR',
     `${method}: bundler rejected the request (code${rpcCode || ' unknown'}${aa ? `, ${aa}` : ''}).`,
     rejection,
+    code,
   );
 }
 

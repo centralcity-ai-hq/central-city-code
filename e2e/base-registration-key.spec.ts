@@ -5,7 +5,6 @@ import { privateKeyToAccount } from 'viem/accounts';
 import type { Agent, Snapshot } from '../shared/types';
 import { sealKey } from '../src/base/vault/crypto';
 import { expectedWallet } from '../src/base/wallet/derive';
-import { NO_AGENT_DIALOG, openAgentDialog } from './my-agents-open';
 
 /*
  * Registering an agent on Base with the person's own wallet key (decision A, one wallet), on the
@@ -244,31 +243,6 @@ test('wallets off: the address field stays exactly as before', async ({ page }) 
   expect(state.sent[0]).toEqual({ ownerAddress: OTHER_OWNER });
 });
 
-test('the classic Base panel never asks for an address with wallets on: it points to the Base screen', async ({
-  page,
-}) => {
-  test.skip(true, NO_AGENT_DIALOG);
-  const state = await server(page, 'ready');
-  await page.goto('/?workspace=v2&theme=light#connect');
-  await expect(page.locator('.app-shell')).toBeVisible();
-  const menu = page.getByRole('button', { name: 'Open navigation', exact: true });
-  if (await menu.isVisible()) await menu.click();
-  await page
-    .getByRole('navigation', { name: 'Workspace', exact: true })
-    .getByRole('button', { name: /^My agents/ })
-    .first()
-    .click();
-  await openAgentDialog(page, 'Compass');
-  const dialog = page.getByRole('dialog', { name: 'Compass', exact: true });
-  await dialog.getByRole('tab', { name: 'Base', exact: true }).click();
-  const panel = dialog.getByRole('tabpanel', { name: 'Base' });
-  await expect(panel.locator('[data-k="key-elsewhere"]')).toContainText(
-    'Compass registers with your wallet key on its Base screen',
-  );
-  await expect(panel.getByRole('textbox')).toHaveCount(0);
-  expect(state.sent).toHaveLength(0);
-});
-
 test('a registered agent’s wallet address shows only against the key held here, as on Add funds', async ({
   page,
 }) => {
@@ -317,33 +291,21 @@ test('while the key’s state is still unknown, the agent’s wallet address isn
   await expect(screen).not.toContainText(WALLET.slice(2, 8));
 });
 
-test('until it is known whether wallets are on, the classic panel offers nothing to click', async ({
+test('until it is known whether wallets are on, the Base screen offers nothing to click', async ({
   page,
 }) => {
-  test.skip(true, NO_AGENT_DIALOG);
   const state = await server(page, 'off');
   let release = () => {};
   state.vaultHold = new Promise<void>((resolve) => (release = resolve));
-  await page.goto('/?workspace=v2&theme=light#connect');
-  await expect(page.locator('.app-shell')).toBeVisible();
-  const menu = page.getByRole('button', { name: 'Open navigation', exact: true });
-  if (await menu.isVisible()) await menu.click();
-  await page
-    .getByRole('navigation', { name: 'Workspace', exact: true })
-    .getByRole('button', { name: /^My agents/ })
-    .first()
-    .click();
-  await openAgentDialog(page, 'Compass');
-  const dialog = page.getByRole('dialog', { name: 'Compass', exact: true });
-  await dialog.getByRole('tab', { name: 'Base', exact: true }).click();
-  const panel = dialog.getByRole('tabpanel', { name: 'Base' });
-  await expect(panel.getByRole('status')).toHaveText('Loading…');
-  await expect(panel.getByRole('textbox')).toHaveCount(0);
+  const { screen } = await openBaseScreen(page);
+  await page.waitForTimeout(300);
+  await expect(screen.getByRole('textbox')).toHaveCount(0);
+  await expect(screen.getByRole('button', { name: 'Continue', exact: true })).toHaveCount(0);
   // Known now (wallets off): the address field, and its Continue registers.
   state.vaultHold = null;
   release();
-  await panel.getByRole('textbox').fill(OTHER_OWNER);
-  await panel.getByRole('button', { name: /Make it a Base agent|Continue/ }).click();
+  await screen.getByLabel('Your wallet address').fill(OTHER_OWNER);
+  await screen.getByRole('button', { name: 'Continue', exact: true }).click();
   await expect.poll(() => state.sent.length).toBe(1);
   expect(state.sent[0]).toEqual({ ownerAddress: OTHER_OWNER });
 });

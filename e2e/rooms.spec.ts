@@ -337,6 +337,18 @@ test('an expired or rotated invite shows a plain error and joins nothing (#31)',
   expect(page.url()).not.toContain(room.token);
 });
 
+test("the tab is named after the page: Rooms on the list, the room's name in a room", async ({
+  browser,
+}) => {
+  const host = await account(browser, 'Host');
+  const room = await hostRoom(host);
+  const page = await host.context.newPage();
+  await page.goto('/rooms');
+  await expect(page).toHaveTitle('Rooms · Central City');
+  await page.goto(`/rooms/${room.id}`);
+  await expect(page).toHaveTitle('Launch plan · Central City');
+});
+
 test('a long room opens at the newest message and loads older ones on scroll up', async ({
   browser,
 }) => {

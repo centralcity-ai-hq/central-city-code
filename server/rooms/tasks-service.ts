@@ -376,6 +376,16 @@ export interface TaskDependencies {
   secret: string;
 }
 
+export type TaskCreateResult = { task: TaskView; replayed: boolean };
+export interface TaskCreateOptions {
+  precondition?: (tx: Pick<Tx, 'query'>) => Promise<string | null>;
+  /** Internal action journal: runs under the room lock in the mutation transaction. */
+  execute?: (
+    tx: Pick<Tx, 'query'>,
+    effect: () => Promise<TaskCreateResult>,
+  ) => Promise<TaskCreateResult>;
+}
+
 export interface RoomTasks {
   /**
    * `precondition` is internal only (Elric, docs/ELRIC.md): it runs under the room lock inside the
@@ -384,7 +394,7 @@ export interface RoomTasks {
   create(
     p: TaskPrincipal,
     body: unknown,
-    options?: { precondition?: (tx: Pick<Tx, 'query'>) => Promise<string | null> },
+    options?: TaskCreateOptions,
   ): Promise<{ task: TaskView; replayed: boolean }>;
   get(p: TaskPrincipal, body: unknown): Promise<{ task: TaskView }>;
   /** `stages` is the room's stage list (empty when the room uses none). */
@@ -1023,11 +1033,7 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
     }
   }
 
-  async function create(
-    p: TaskPrincipal,
-    body: unknown,
-    options: { precondition?: (tx: Pick<Tx, 'query'>) => Promise<string | null> } = {},
-  ) {
+  async function create(p: TaskPrincipal, body: unknown, options: TaskCreateOptions = {}) {
     const values = taskCreateInput.parse(body);
     // A template only fills defaults: the caller's title and body win (shared/task-templates.ts).
     const template =
@@ -1064,73 +1070,80 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
       await refuseIfMuted(tx, room.id, p.operatorId, agent.kind);
       const attachmentIds = [...new Set(values.attachment_ids ?? [])];
       await assertAttachmentsReady(tx, room.id, attachmentIds);
-      const prior = (
-        await tx.query<TaskRow>(
-          'SELECT * FROM room_tasks WHERE room_id=$1 AND created_by_owner_id=$2 AND idempotency_key=$3',
-          [room.id, p.operatorId, keyHash],
-        )
-      ).rows[0];
-      if (prior) {
-        if (prior.request_hash !== requestHash)
-          refuse(409, 'idempotency_conflict', 'This idempotency_key belongs to a different task.');
-        return { task: (await withReviews(tx, [project(prior)]))[0]!, replayed: true };
-      }
-      // The room row lock serializes number allocation without touching the rooms schema.
+      // Serialize the receipt lookup as well as number allocation and the journal outcome.
       await tx.query('SELECT 1 FROM rooms WHERE id=$1 FOR UPDATE', [room.id]);
-      if (options.precondition) {
-        const refused = await options.precondition(tx);
-        if (refused) refuse(409, refused, 'This task can no longer be created here.');
-      }
-      const maxNumber = (
-        await tx.query<{ n: string | number | null }>(
-          'SELECT max(number) AS n FROM room_tasks WHERE room_id=$1',
-          [room.id],
-        )
-      ).rows[0]?.n;
-      const row = (
-        await tx.query<TaskRow>(
-          `INSERT INTO room_tasks(id,room_id,number,title,body,status,created_by_agent_id,
+      const effect = async (): Promise<TaskCreateResult> => {
+        const prior = (
+          await tx.query<TaskRow>(
+            'SELECT * FROM room_tasks WHERE room_id=$1 AND created_by_owner_id=$2 AND idempotency_key=$3',
+            [room.id, p.operatorId, keyHash],
+          )
+        ).rows[0];
+        if (prior) {
+          if (prior.request_hash !== requestHash)
+            refuse(
+              409,
+              'idempotency_conflict',
+              'This idempotency_key belongs to a different task.',
+            );
+          return { task: (await withReviews(tx, [project(prior)]))[0]!, replayed: true };
+        }
+        if (options.precondition) {
+          const refused = await options.precondition(tx);
+          if (refused) refuse(409, refused, 'This task can no longer be created here.');
+        }
+        const maxNumber = (
+          await tx.query<{ n: string | number | null }>(
+            'SELECT max(number) AS n FROM room_tasks WHERE room_id=$1',
+            [room.id],
+          )
+        ).rows[0]?.n;
+        const row = (
+          await tx.query<TaskRow>(
+            `INSERT INTO room_tasks(id,room_id,number,title,body,status,created_by_agent_id,
             created_by_owner_id,from_message_seq,attachment_ids,created_at,updated_at,
             idempotency_key,request_hash,template_id,template_version)
           VALUES($1,$2,$3,$4,$5,'open',$6,$7,$8,$9::text[],${DBNOW},${DBNOW},$10,$11,$12,$13)
           RETURNING *`,
-          [
-            randomUUID(),
-            room.id,
-            Number(maxNumber ?? 0) + 1,
-            title,
-            taskBody,
-            agent.agent_id,
-            p.operatorId,
-            values.from_message_seq ?? null,
-            attachmentIds,
-            keyHash,
-            requestHash,
-            template?.id ?? null,
-            template?.version ?? null,
-          ],
-        )
-      ).rows[0]!;
-      await recordEvent(
-        tx,
-        row.id,
-        'created',
-        Number(row.claim_generation),
-        p.actor,
-        agent.agent_id,
-      );
-      await taskLine(
-        tx,
-        room.id,
-        `${await memberLabel(tx, room.id, agent.agent_id)} created ${taskRef(row)}`,
-      );
-      if (values.review) await openReview(tx, p, room, row, agent, values.review);
-      await touchMembers(tx, room.id, [agent.agent_id], d.clock());
-      if (values.review) {
-        const [task] = await withReviews(tx, [project(row)]);
-        return { task: task!, replayed: false };
-      }
-      return { task: project(row), replayed: false };
+            [
+              randomUUID(),
+              room.id,
+              Number(maxNumber ?? 0) + 1,
+              title,
+              taskBody,
+              agent.agent_id,
+              p.operatorId,
+              values.from_message_seq ?? null,
+              attachmentIds,
+              keyHash,
+              requestHash,
+              template?.id ?? null,
+              template?.version ?? null,
+            ],
+          )
+        ).rows[0]!;
+        await recordEvent(
+          tx,
+          row.id,
+          'created',
+          Number(row.claim_generation),
+          p.actor,
+          agent.agent_id,
+        );
+        await taskLine(
+          tx,
+          room.id,
+          `${await memberLabel(tx, room.id, agent.agent_id)} created ${taskRef(row)}`,
+        );
+        if (values.review) await openReview(tx, p, room, row, agent, values.review);
+        await touchMembers(tx, room.id, [agent.agent_id], d.clock());
+        if (values.review) {
+          const [task] = await withReviews(tx, [project(row)]);
+          return { task: task!, replayed: false };
+        }
+        return { task: project(row), replayed: false };
+      };
+      return options.execute ? options.execute(tx, effect) : effect();
     });
   }
 

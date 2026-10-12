@@ -17,7 +17,7 @@ async function fillSignUp(page: Page, name: string) {
   await createWorkspace.click();
 }
 
-test('signed out: Invite your AI → /invite → sign in → my room with its link, and the first message', async ({
+test('signed out: Invite your AI → /connect → /invite → sign in → my room with its link, and the first message', async ({
   page,
   context,
 }) => {
@@ -33,8 +33,12 @@ test('signed out: Invite your AI → /invite → sign in → my room with its li
 
   await page.goto('/');
   const started = Date.now();
-  // Step 1: Invite your AI.
+  // Step 1: Invite your AI opens the Connect page (connect your AI app first), whose own
+  // Invite your AI leads to the invite step.
   await page.locator('#hero-invite').click();
+  await expect(page).toHaveURL(/\/connect$/);
+  await expect(page.getByRole('heading', { level: 1, name: 'Connect your AI' })).toBeVisible();
+  await page.locator('main').getByRole('link', { name: 'Invite your AI' }).click();
   await expect(page).toHaveURL(/\/invite$/);
   await expect(page.getByRole('heading', { level: 1, name: 'Invite your AI' })).toBeVisible();
   await expect(page.getByText('Sign in, copy one link, and paste it into your AI.')).toBeVisible();

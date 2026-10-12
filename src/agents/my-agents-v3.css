@@ -843,19 +843,6 @@ button.ma3-icon-btn:hover {
   padding: calc(14 * var(--ws-px)) calc(20 * var(--ws-px));
   border-top: 1px solid var(--border);
 }
-/* The Permissions tab reuses the inspection dialog's connections panel, in v3 colours. */
-.ma3-permissions {
-  display: grid;
-  gap: calc(12 * var(--ws-px));
-  --surface: var(--bg-surface-elevated);
-  --surface-sunken: var(--bg-inset);
-  --text: var(--text-primary);
-  --muted: var(--text-muted);
-  --line: var(--border);
-}
-.ma3-permissions .agent-inspection-destinations {
-  grid-template-columns: minmax(0, 1fr);
-}
 
 /* ===== Sheets: requests, typed Remove (inside the shared .modal) ===== */
 

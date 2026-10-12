@@ -49,11 +49,14 @@ function subscribe(listener: () => void) {
   return () => listeners.delete(listener);
 }
 
-/** Where "Invite your AI" goes: the first-run Connect page, or the person's room when signed in. */
-export function useInviteHref() {
+/**
+ * Where "Invite your AI" goes: the Connect page while signed out (`signedOut`, default /connect),
+ * or the person's room with its Invite sheet when signed in.
+ */
+export function useInviteHref(signedOut: string = LINKS.connect) {
   return useSyncExternalStore(
     subscribe,
-    () => (signedIn ? INVITE_ROOMS_PATH : LINKS.invite),
-    () => LINKS.invite,
+    () => (signedIn ? INVITE_ROOMS_PATH : signedOut),
+    () => signedOut,
   );
 }

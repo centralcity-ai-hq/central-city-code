@@ -101,6 +101,7 @@ import {
   RatingWindowError,
   type RateSigningRequest,
 } from '../src/base/wallet/rate.js';
+import { SIGNING_CLOCK_SKEW_MS } from '../src/base/wallet/withdraw.js';
 import { WALLET_EXPECTED, WALLET_NET } from './wallet-network-fixture.js';
 
 /**
@@ -2061,12 +2062,23 @@ test('lanes: a rating can be signed only until its sponsorship ends; then it exp
   assert.equal(full.statusCode, 409, full.body);
   assert.equal(full.json().code, 'too_many_open');
   f.clock.now = r.expiresAt;
-  // The browser refuses it first (checkRatingWindow, before signing and before sending) ...
+  // The browser tolerates a device clock up to SIGNING_CLOCK_SKEW_MS fast, so at the end of the
+  // window it leaves the call to the server; beyond that it refuses itself (checkRatingWindow,
+  // before signing and before sending) ...
+  assert.doesNotThrow(() =>
+    checkRatingWindow(r as unknown as RateSigningRequest, f.clock.now, SPONSORS),
+  );
   assert.throws(
-    () => checkRatingWindow(r as unknown as RateSigningRequest, f.clock.now, SPONSORS),
+    () =>
+      checkRatingWindow(
+        r as unknown as RateSigningRequest,
+        f.clock.now + SIGNING_CLOCK_SKEW_MS,
+        SPONSORS,
+      ),
     (error: unknown) => error instanceof RatingWindowError,
   );
-  // ... and the server has expired it: nothing stored or sent, its exposure released.
+  // ... and the server, whose clock is the authority, has expired it: nothing stored or sent,
+  // its exposure released.
   const refused = await sign(f, r);
   assert.equal(refused.statusCode, 410, refused.body);
   assert.equal(refused.json().code, 'expired');

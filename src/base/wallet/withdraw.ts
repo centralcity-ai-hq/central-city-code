@@ -40,6 +40,7 @@ import {
 import {
   sponsoredWithoutCharge,
   sponsoredWithinDeadline,
+  sponsorshipWindow,
   type SponsorAllowlist,
 } from '../../../shared/base/paymasters';
 import { unlockVault } from '../vault';
@@ -134,6 +135,17 @@ export interface WithdrawalView {
 /** Refused before anything is signed; the message says what didn't match. */
 export class WithdrawalCheckError extends Error {}
 
+/**
+ * How far ahead of Base this device's clock may run before a sponsorship looks expired here. The
+ * server's deadline stays the authority (it answers 409 sponsorship_expired once it has passed).
+ */
+export const SIGNING_CLOCK_SKEW_MS = 60_000;
+
+export const SIGNING_CLOCK_BEHIND =
+  'This device’s clock is behind, so the sponsorship hasn’t started here yet. Set the clock to automatic time and prepare the operation again.';
+export const SIGNING_WINDOW_EXPIRED =
+  'This sponsorship is no longer valid. Prepare the operation again.';
+
 /** Rechecked before signing and before sending; the server's original deadline never slides. */
 export function checkSigningWindow(
   request: {
@@ -146,17 +158,16 @@ export function checkSigningWindow(
   sponsors?: SponsorAllowlist,
 ) {
   if (request.lanes !== true || request.userOperation.paymasterAndData === '0x') return;
-  if (
-    !sponsoredWithinDeadline(
-      request.chainId,
-      request.userOperation.paymasterAndData,
-      { now, deadline: request.expiresAt ?? 0 },
-      sponsors,
-    )
-  )
-    throw new WithdrawalCheckError(
-      'This sponsorship is no longer valid. Prepare the operation again.',
-    );
+  const data = request.userOperation.paymasterAndData;
+  const window = { now, deadline: request.expiresAt ?? 0, expirySkewMs: SIGNING_CLOCK_SKEW_MS };
+  if (sponsoredWithinDeadline(request.chainId, data, window, sponsors)) return;
+  // A sponsorship that would be valid a little later: this clock is behind Base, not expired.
+  const later = { ...window, now: now + SIGNING_CLOCK_SKEW_MS };
+  const startsLater =
+    typeof data === 'string' &&
+    sponsorshipWindow(data).validAfter > BigInt(now) &&
+    sponsoredWithinDeadline(request.chainId, data, later, sponsors);
+  throw new WithdrawalCheckError(startsLater ? SIGNING_CLOCK_BEHIND : SIGNING_WINDOW_EXPIRED);
 }
 
 /** Not signed for now: something on its way has to land first. The message says what. */

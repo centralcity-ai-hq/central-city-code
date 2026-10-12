@@ -118,11 +118,3 @@ export function consentNotice(agentName: string, provider: Provider): string {
   const name = providerName(provider);
   return `When someone @mentions ${agentName} in a room, Central City sends that room's recent messages and your instructions to ${name} with your key, and posts the answer as ${agentName}, labelled Auto-reply. ${name} bills you. Room members see that ${agentName} replies automatically.`;
 }
-
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-/** "27 Sep" (fixed three-letter months; Intl renders "Sept" in some locales). */
-export function shortDate(iso: string | null): string {
-  if (!iso) return '';
-  const date = new Date(iso);
-  return Number.isNaN(date.getTime()) ? '' : `${date.getDate()} ${MONTHS[date.getMonth()]}`;
-}

@@ -60,18 +60,27 @@ export function sponsoredWithoutCharge(
  * Times are milliseconds; the signed paymaster fields are uint48 seconds. Zero validUntil means
  * unbounded validity to EntryPoint, so it is deliberately refused. Callers supply a fixed deadline,
  * including any explicit allowance, rather than extending it on each retry.
+ *
+ * `expirySkewMs` (browser only; the server passes none) tolerates a device clock that runs that
+ * much ahead: the "not expired yet" checks use `now - expirySkewMs`. It never loosens the other
+ * bounds: validUntil stays within the deadline, and validAfter must have passed by `now` itself,
+ * so a sponsorship that starts in the future is still refused.
  */
 export function sponsoredWithinDeadline(
   chainId: number,
   paymasterAndData: string | undefined,
-  window: { now: number; deadline: number },
+  window: { now: number; deadline: number; expirySkewMs?: number },
   allowlist: SponsorAllowlist = SPONSOR_PAYMASTERS,
 ): boolean {
+  const skew = window.expirySkewMs ?? 0;
   if (
     !Number.isSafeInteger(window.now) ||
     !Number.isSafeInteger(window.deadline) ||
+    !Number.isSafeInteger(skew) ||
+    skew < 0 ||
+    skew > MAX_EXPIRY_SKEW_MS ||
     window.now < 0 ||
-    window.deadline <= window.now ||
+    window.deadline <= window.now - skew ||
     !sponsoredWithoutCharge(chainId, paymasterAndData, allowlist)
   )
     return false;
@@ -79,7 +88,7 @@ export function sponsoredWithinDeadline(
   const validUntil = field(data, VALID_UNTIL) * 1000n;
   const validAfter = field(data, VALID_AFTER) * 1000n;
   return (
-    validUntil > BigInt(window.now) &&
+    validUntil > BigInt(window.now - skew) &&
     validUntil <= BigInt(window.deadline) &&
     validAfter <= BigInt(window.now) &&
     validAfter < validUntil
@@ -96,4 +105,24 @@ export function sponsoredValidUntil(paymasterAndData: string | undefined): numbe
   if (!/^0x[0-9a-fA-F]*$/.test(data) || data.length !== 2 + SPONSOR_DATA_BYTES * 2) return null;
   const until = field(data, VALID_UNTIL) * 1000n;
   return until > 0n && until <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(until) : null;
+}
+
+/** The most a caller may tolerate a fast device clock (see sponsoredWithinDeadline). */
+export const MAX_EXPIRY_SKEW_MS = 120_000;
+
+/**
+ * validUntil and validAfter of paymasterAndData in the pinned layout, in milliseconds; both zero
+ * when it isn't that layout (no allowlist check here).
+ */
+export function sponsorshipWindow(paymasterAndData: string | undefined): {
+  validUntil: bigint;
+  validAfter: bigint;
+} {
+  const data = paymasterAndData ?? '0x';
+  if (!/^0x[0-9a-fA-F]*$/.test(data) || data.length !== 2 + SPONSOR_DATA_BYTES * 2)
+    return { validUntil: 0n, validAfter: 0n };
+  return {
+    validUntil: field(data, VALID_UNTIL) * 1000n,
+    validAfter: field(data, VALID_AFTER) * 1000n,
+  };
 }

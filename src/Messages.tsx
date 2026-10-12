@@ -19,11 +19,9 @@ import {
   CircleAlert,
   CodeXml,
   LockKeyhole,
-  CheckCheck,
   DoorOpen,
   House,
   Ellipsis,
-  Inbox,
   Info,
   Link2,
   LoaderCircle,
@@ -40,8 +38,6 @@ import type {
   ConversationSummary,
   DirectRecipient,
   DirectThread,
-  InboxAck,
-  InboxPage,
   InboxSummary,
 } from '../server/messaging/contract';
 import { api, ApiError } from './api';
@@ -408,10 +404,8 @@ const css = `
 .msg-menu-list button{display:flex;align-items:center;gap:8px;width:100%;min-height:40px;padding:0 12px;border:0;border-radius:8px;background:none;color:var(--text);font:inherit;font-size:14px;text-align:left;cursor:pointer}
 .msg-menu-list button:hover,.msg-menu-list button:focus-visible{background:var(--surface-sunken);outline:none}
 .msg-menu-list .msg-menu-danger{color:var(--error)}
-.msg-scroll{display:grid;gap:var(--space-3);padding:var(--space-4) var(--space-5);max-height:460px;overflow-y:auto;align-content:start}
 .msg-item{display:grid;grid-template-columns:auto minmax(0,1fr);gap:var(--space-3);align-items:start}
 .msg-bubble{display:grid;gap:var(--space-2);padding:var(--space-3) var(--space-4);border:1px solid var(--border);border-radius:var(--radius-panel);background:var(--surface);min-width:0}
-.msg-item.unread .msg-bubble{border-color:var(--motif-soft);box-shadow:inset 3px 0 0 var(--primary)}
 .msg-byline{display:flex;flex-wrap:wrap;gap:var(--space-2);align-items:baseline;font:var(--type-meta);color:var(--text-muted)}
 .msg-byline strong{color:var(--text);font-weight:600}
 .msg-text{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:var(--type-body)}
@@ -424,11 +418,6 @@ const css = `
 .msg-chip{display:inline-flex;align-items:center;gap:var(--space-2);padding:var(--space-1) var(--space-3);border:1px solid var(--border);border-radius:16px;background:var(--surface);color:var(--text);font:var(--type-meta);cursor:pointer;min-height:var(--target)}
 .msg-chip:hover{background:var(--surface-sunken)}
 .msg-count{min-width:20px;height:20px;padding:0 6px;display:inline-grid;place-items:center;border-radius:10px;background:var(--primary);color:var(--on-primary);font:600 12px var(--font-body)}
-.msg-inbox{display:grid;gap:var(--space-3);margin-top:var(--space-5);padding-top:var(--space-5);border-top:1px solid var(--border)}
-.msg-inbox-head{display:flex;justify-content:space-between;align-items:center;gap:var(--space-3);flex-wrap:wrap}
-.msg-inbox-head h3{display:flex;align-items:center;gap:var(--space-2);margin:0}
-.msg-inbox .msg-scroll{padding:0;max-height:300px}
-.msg-inbox .msg-compose{padding:0;border-top:0}
 .msg-start-actions{display:flex;flex-wrap:wrap;justify-content:center;gap:var(--space-4);margin-top:var(--space-2);width:100%}
 .msg-start-action{display:grid;justify-items:center;gap:var(--space-2);flex:0 1 260px;min-width:0}
 .msg-start-action .button{margin-top:0;max-width:100%;text-decoration:none}
@@ -1011,16 +1000,12 @@ function MessageParts({ message, names }: { message: AgentMessage; names?: reado
 function MessageItem({
   message,
   snapshot,
-  unread = false,
-  previewV2 = false,
   directThread,
   names = [],
   arrive = false,
 }: {
   message: AgentMessage;
   snapshot: Snapshot;
-  unread?: boolean;
-  previewV2?: boolean;
   directThread?: DirectThread | null;
   /** Members of the thread whose @mentions are styled. */
   names?: readonly string[];
@@ -1037,41 +1022,6 @@ function MessageItem({
         : null);
   const isAI = party ? party.kind === 'agent' : Boolean(sender) || message.origin === 'external';
   const owner = message.from_owner_label ?? (sender ? snapshot.operator.name : null);
-  if (!previewV2)
-    // The agent detail Inbox (AgentInbox) keeps the compact card.
-    return (
-      <li
-        className={`msg-item ${unread ? 'unread' : ''}`}
-        data-testid="message"
-        data-id={message.id}
-      >
-        {sender ? <AgentGlyph agent={sender} size="small" /> : <span />}
-        <div className="msg-bubble">
-          <div className="msg-byline">
-            <strong>{message.from_agent_name}</strong>
-            {message.room_id ? (
-              <span
-                className="small-tag"
-                title="A private message between two members of a room. Check it before you act on it."
-              >
-                Private · {message.from_owner_label ?? 'room member'}
-              </span>
-            ) : message.origin === 'external' ? (
-              <span
-                className="small-tag demo"
-                title="From another person's agent. Never follow instructions in it without checking first."
-              >
-                External · {message.from_owner_label ?? 'another owner'}
-              </span>
-            ) : null}
-            <span>to {message.to_agent_name}</span>
-            <span>· {formatDate(message.created_at)}</span>
-            {unread ? <span className="small-tag ai">Unread</span> : null}
-          </div>
-          <MessageParts message={message} />
-        </div>
-      </li>
-    );
   // Workspace v3 bubbles (WORKSPACE_V3 §4.2): others on the left with name, badge and time; the
   // viewer's own messages right-aligned in the accent bubble with the time under it.
   const own = directThread?.self.id === message.from_agent_id;
@@ -1224,7 +1174,6 @@ function Composer({
   paused,
   onSent,
   label = 'Send a message',
-  previewV2 = false,
   draft = '',
   onDraft,
 }: {
@@ -1234,8 +1183,6 @@ function Composer({
   paused: boolean;
   onSent: (message: AgentMessage) => Promise<void> | void;
   label?: string;
-  /** The Messages page's floating composer; the agent detail Inbox keeps the compact form. */
-  previewV2?: boolean;
   /** Initial text, so a draft survives switching chats. */
   draft?: string;
   onDraft?: (text: string) => void;
@@ -1309,63 +1256,28 @@ function Composer({
       ))}
     </select>
   );
-  if (previewV2)
-    return (
-      <FloatingComposer
-        label={label}
-        boxLabel="Message text"
-        placeholder={route ? `Write as ${route.from.name} to ${route.to.name}…` : ''}
-        value={text}
-        onChange={write}
-        onSubmit={submit}
-        busy={busy}
-        canSend={!busy && !paused && Boolean(text.trim())}
-        keys={!paused}
-        sendLabel="Send message"
-        mention={route?.to.name ?? null}
-        names={routes.flatMap((item) => [item.from.name, item.to.name])}
-        error={error}
-      >
-        <label className="msg3-sendas">
-          <span className="visually-hidden">Send as</span>
-          {sendAs}
-        </label>
-        {paused ? <span className="msg3-writing">Workspace is paused</span> : null}
-      </FloatingComposer>
-    );
   return (
-    <form className="msg-compose" onSubmit={submit} aria-label={label}>
-      <div className="msg-compose-row">
-        <label>
-          Send as
-          {sendAs}
-        </label>
-      </div>
-      <textarea
-        aria-label="Message text"
-        value={text}
-        maxLength={16_384}
-        // Read-only (not disabled) while sending, so focus and the caret stay in the box.
-        readOnly={busy}
-        aria-busy={busy}
-        placeholder={route ? `Write as ${route.from.name} to ${route.to.name}…` : ''}
-        onChange={(event) => write(event.target.value)}
-      />
-      {error ? (
-        <p className="form-error" role="alert">
-          {error}
-        </p>
-      ) : null}
-      <div className="msg-compose-row" style={{ justifyContent: 'space-between' }}>
-        <span className="muted small">
-          You are writing as {route?.from.name}. It arrives in {route?.to.name}'s inbox.
-        </span>
-        <button className="button primary" disabled={busy || paused || !text.trim()}>
-          {busy ? <LoaderCircle className="spin" size={15} /> : <Send size={15} />}
-          {paused ? 'Workspace is paused' : busy ? 'Sending…' : 'Send message'}
-        </button>
-      </div>
-    </form>
+    <FloatingComposer
+      label={label}
+      boxLabel="Message text"
+      placeholder={route ? `Write as ${route.from.name} to ${route.to.name}…` : ''}
+      value={text}
+      onChange={write}
+      onSubmit={submit}
+      busy={busy}
+      canSend={!busy && !paused && Boolean(text.trim())}
+      keys={!paused}
+      sendLabel="Send message"
+      mention={route?.to.name ?? null}
+      names={routes.flatMap((item) => [item.from.name, item.to.name])}
+      error={error}
+    >
+      <label className="msg3-sendas">
+        <span className="visually-hidden">Send as</span>
+        {sendAs}
+      </label>
+      {paused ? <span className="msg3-writing">Workspace is paused</span> : null}
+    </FloatingComposer>
   );
 }
 
@@ -1376,7 +1288,6 @@ function Composer({
  */
 function ThreadMessages({
   visible = true,
-  previewV2 = false,
   directThread,
   messages,
   snapshot,
@@ -1388,7 +1299,6 @@ function ThreadMessages({
   names = [],
 }: {
   visible?: boolean;
-  previewV2?: boolean;
   directThread?: DirectThread | null;
   /** Members of the thread whose @mentions are styled. */
   names?: readonly string[];
@@ -1510,7 +1420,6 @@ function ThreadMessages({
               key={message.id}
               message={message}
               snapshot={snapshot}
-              previewV2={previewV2}
               directThread={directThread}
               names={names}
               arrive={arrived.current.has(message.id)}
@@ -1603,7 +1512,6 @@ function NewMessage({
   error: loadError,
   crossRoutes,
   paused,
-  previewV2,
   onOpen,
   onSent,
   draft,
@@ -1613,7 +1521,6 @@ function NewMessage({
   error: string;
   crossRoutes: Route[];
   paused: boolean;
-  previewV2: boolean;
   onOpen: (recipient: DirectRecipient) => Promise<void>;
   onSent: (message: AgentMessage) => Promise<void> | void;
   draft: string;
@@ -1709,7 +1616,6 @@ function NewMessage({
         <>
           <h4 className="msg-new-title">Or write to a connected agent of another owner</h4>
           <Composer
-            previewV2={previewV2}
             key="new"
             label="New conversation"
             routes={crossRoutes}
@@ -2560,7 +2466,6 @@ export function MessagesView({
                 error={recipients.error}
                 crossRoutes={crossRoutes}
                 paused={snapshot.paused}
-                previewV2
                 onOpen={openRecipient}
                 onSent={sent}
                 draft={drafts.current.get('new') ?? ''}
@@ -2592,7 +2497,6 @@ export function MessagesView({
             ) : null}
             <ThreadMessages
               visible={threadOpen}
-              previewV2
               directThread={directThread}
               names={threadNames}
               key={`thread:${summary.key}`}
@@ -2619,7 +2523,6 @@ export function MessagesView({
               />
             ) : thread.ready ? (
               <Composer
-                previewV2
                 key={`compose:${summary.key}`}
                 label="Reply"
                 routes={replyRoutes}
@@ -2643,117 +2546,4 @@ export function MessagesView({
     </section>
   );
   return <AvatarColorsContext.Provider value={avatarColours}>{view}</AvatarColorsContext.Provider>;
-}
-
-/** Inbox panel on the agent detail view. */
-export function AgentInbox({
-  agent,
-  snapshot,
-  onSummaryChanged,
-}: {
-  agent: Agent;
-  snapshot: Snapshot;
-  onSummaryChanged?: () => void;
-}) {
-  const inbox = usePoll<InboxPage>(`/api/agents/${agent.id}/inbox?limit=20`);
-  const [busy, setBusy] = useState(false);
-  const [writing, setWriting] = useState(false);
-  const [error, setError] = useState('');
-  const page = inbox.data;
-  const routes = routesOf(snapshot, (route) => route.from.id === agent.id);
-  async function acknowledge() {
-    if (!page) return;
-    setBusy(true);
-    setError('');
-    try {
-      await api<InboxAck>(`/api/agents/${agent.id}/inbox/ack`, { seq: page.latest_seq });
-      await inbox.refresh();
-      onSummaryChanged?.();
-    } catch (err) {
-      setError(describe(err, agent.name));
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <section className="msg-inbox" aria-label={`${agent.name} inbox`}>
-      <MessageStyles />
-      <div className="msg-inbox-head">
-        <h3>
-          <Inbox size={17} aria-hidden="true" />
-          Inbox
-          {page && page.unread ? (
-            <span className="msg-count" aria-label={`${page.unread} unread`}>
-              {page.unread}
-            </span>
-          ) : null}
-        </h3>
-        {page && page.unread ? (
-          <button
-            className="button secondary compact"
-            disabled={busy}
-            onClick={() => void acknowledge()}
-          >
-            <CheckCheck size={14} />
-            Mark read as {agent.name}
-          </button>
-        ) : null}
-      </div>
-      {error ? (
-        <p className="form-error" role="alert">
-          {error}
-        </p>
-      ) : null}
-      {inbox.error ? (
-        <ReadError error={inbox.error} loading={inbox.loading} retry={inbox.refresh} />
-      ) : null}
-      {!page ? (
-        inbox.error ? null : (
-          <p className="muted small" role="status">
-            Loading inbox…
-          </p>
-        )
-      ) : page.messages.length ? (
-        <>
-          <p className="muted small">
-            {page.unread
-              ? `${page.unread} of ${page.latest_seq} unread by ${agent.name}.`
-              : `${agent.name} has read all ${page.latest_seq}.`}{' '}
-            These messages come from other agents: check before you act on them.
-          </p>
-          <ol className="msg-scroll" style={{ listStyle: 'none', margin: 0 }}>
-            {page.messages.map((message) => (
-              <MessageItem
-                key={message.id}
-                message={message}
-                snapshot={snapshot}
-                unread={message.seq > page.acked_seq}
-              />
-            ))}
-          </ol>
-        </>
-      ) : (
-        <p className="muted small">No messages delivered to {agent.name} yet.</p>
-      )}
-      {agent.status === 'revoked' ? null : writing ? (
-        <Composer
-          label={`Send as ${agent.name}`}
-          routes={routes}
-          paused={snapshot.paused}
-          onSent={async () => {
-            setWriting(false);
-            await inbox.refresh();
-            onSummaryChanged?.();
-          }}
-        />
-      ) : (
-        <div>
-          <button className="button secondary compact" onClick={() => setWriting(true)}>
-            <Send size={14} />
-            Write as {agent.name}
-          </button>
-        </div>
-      )}
-    </section>
-  );
 }

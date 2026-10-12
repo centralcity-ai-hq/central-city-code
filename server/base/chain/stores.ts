@@ -29,12 +29,13 @@ interface OpRow {
   fee_wei: string | null;
   error_code: string | null;
   submitted_block: string | null;
+  updated_at: string;
 }
 
 const OP_COLUMNS = `idempotency_key, intent_hash, chain_id, kind, status, signed_operation,
   signer_address, nonce::text AS nonce, user_op_hash, tx_hash, block_number::text AS block_number,
   gas_used::text AS gas_used, fee_wei::text AS fee_wei, error_code,
-  submitted_block::text AS submitted_block`;
+  submitted_block::text AS submitted_block, updated_at::text AS updated_at`;
 
 function opView(row: OpRow): StoredOperation {
   // A tombstone (submission abandoned before anything was stored) carries no operation.
@@ -85,6 +86,7 @@ function opView(row: OpRow): StoredOperation {
     // Rows stored before migration 82 have none: absence is then never concluded for them.
     submittedBlock: row.submitted_block,
     errorCode: row.error_code,
+    updatedAt: Number(row.updated_at),
   };
 }
 
@@ -157,7 +159,7 @@ export function pgChainOperationStore(
         sets.push(`${column} = $${params.length}`);
       }
       params.push(now());
-      sets.push(`updated_at = $${params.length}`);
+      sets.push(`updated_at = GREATEST($${params.length}::bigint, updated_at)`);
       const { rows } = await db.query<OpRow>(
         `UPDATE base_chain_ops SET ${sets.join(', ')} WHERE idempotency_key = $1 RETURNING ${OP_COLUMNS}`,
         params,
@@ -176,7 +178,9 @@ export function pgChainOperationStore(
         sets.push(`${column} = $${params.length}`);
       }
       params.push(now());
-      sets.push(`updated_at = $${params.length}`);
+      // Never back (a writer whose clock is behind the row's): the rebroadcast window counts from
+      // it (submit.ts REBROADCAST_MIN_MS).
+      sets.push(`updated_at = GREATEST($${params.length}::bigint, updated_at)`);
       // The receipt the write was decided on must still be the stored one.
       const guards: string[] = [];
       if (expect) {
@@ -193,6 +197,18 @@ export function pgChainOperationStore(
          WHERE idempotency_key = $1 AND status = ANY($2::text[])
            ${guards.map((guard) => `AND ${guard}`).join(' ')} RETURNING ${OP_COLUMNS}`,
         params,
+      );
+      return rows[0] ? opView(rows[0]) : null;
+    },
+
+    async claimSend(key, status, seenUpdatedAt, at) {
+      // One statement: of concurrent claimers on the same snapshot exactly one matches; the
+      // write time always moves forward, also under a clock behind the row's.
+      const { rows } = await db.query<OpRow>(
+        `UPDATE base_chain_ops SET updated_at = GREATEST($4::bigint, updated_at + 1)
+         WHERE idempotency_key = $1 AND status = $2 AND updated_at = $3::bigint
+         RETURNING ${OP_COLUMNS}`,
+        [key, status, seenUpdatedAt, at],
       );
       return rows[0] ? opView(rows[0]) : null;
     },

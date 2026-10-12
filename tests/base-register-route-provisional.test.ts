@@ -10,6 +10,7 @@ import {
   baseShortIdsMigration,
 } from '../server/base/schema.js';
 import {
+  FINALIZE_FRESH_MS,
   IDENTITY_FINALIZE_PATH,
   registerBaseRegistrationRoutes,
   type ChainRuntime,
@@ -180,6 +181,11 @@ test('the finalize cron needs its secret and moves owner-started rows to confirm
      VALUES ('orphan', 8453, 'ws-1', $1, 'https://centralcity.ai/a/orph00', $2, 'submitted',
        'identity:register:8453:orphan', 1)`,
     [REGISTRY, SPENDER],
+  );
+  // Its owner's last poll moved it longer ago than FINALIZE_FRESH_MS (a fresh one waits a run).
+  await db.query(
+    `UPDATE base_identities SET updated_at = updated_at - $1::bigint WHERE agent_id = $2`,
+    [FINALIZE_FRESH_MS, AGENT],
   );
   const before = runtimes();
   const run = await cron(`Bearer ${SECRET}`);

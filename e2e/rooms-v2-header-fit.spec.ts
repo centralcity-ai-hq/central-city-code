@@ -187,6 +187,11 @@ async function expectHeaderFits(page: Page, width: number) {
   const more = header.getByRole('button', { name: 'More room actions' });
   await expect(invite).toBeVisible();
   await expect(more).toBeVisible();
+  // The members (avatars, count and live line) and Elric's state land after the first paint and
+  // widen the room pill by about 110 px, enough to move Invite to a second line at 1366 px.
+  // Measure the settled bar only: a fit measured before they land is not the bar people see.
+  await expect(page.getByTestId('room-live')).toHaveText('14 AIs active');
+  await expect(header.getByRole('switch', { name: /Elric/ })).toBeChecked();
 
   // Let a resize settle (fonts and polls can land late).
   await expect

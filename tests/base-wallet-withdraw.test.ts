@@ -3791,3 +3791,153 @@ test('migration 99 only adds the ratings-by-Base-ID index, after 98', () => {
   // An index only: nothing altered, dropped or written.
   assert.doesNotMatch(sql, /\b(ALTER|DROP|INSERT|UPDATE|DELETE)\b/i);
 });
+
+/** Counts the safe-head proofs the service asks Base for (owner-ops.ts settledAtSafe). */
+function countProofs(f: Fixture) {
+  const prove = f.port.settledAtSafe!;
+  const counter = { proofs: 0 };
+  f.port.settledAtSafe = async (input) => {
+    counter.proofs++;
+    return prove(input);
+  };
+  return counter;
+}
+
+const safeAt = async (f: Fixture, id: string) =>
+  (
+    await f.pg.query<{ safe_at: string | null }>(
+      'SELECT safe_at::text AS safe_at FROM base_wallet_withdrawals WHERE withdrawal_id = $1',
+      [id],
+    )
+  ).rows[0].safe_at;
+
+test('a safe-head proof is made once and stored: later GET :id reads answer from it without asking Base', async (t) => {
+  const f = await setup(t);
+  f.chain.state.safeDepth = 1n;
+  const first = await signedWithdrawal(f, 1);
+  f.chain.include(first.userOpHash);
+  f.chain.mine(1);
+  const count = countProofs(f);
+  const proven = (await read(f, first.withdrawalId)).json();
+  assert.equal(proven.state, 'included');
+  assert.equal(proven.safe, true);
+  assert.equal(count.proofs, 1);
+  assert.notEqual(await safeAt(f, first.withdrawalId), null, 'stored with the proof');
+  // Every later read: safe from the stored proof, no proof asked of Base.
+  for (let i = 0; i < 3; i++) {
+    const again = (await read(f, first.withdrawalId)).json();
+    assert.equal(again.safe, true);
+    assert.deepEqual(again, proven);
+  }
+  assert.equal(count.proofs, 1, 'GET :id reuses the stored proof');
+  // Not final: a stored safe proof never makes it final.
+  assert.equal((await read(f, first.withdrawalId)).json().state, 'included');
+  // A decision about money (the next operation's admission, the holds a balance read leaves out)
+  // still proves live: a stored proof never frees a nonce or an amount.
+  await created(f, 2);
+  assert.equal(count.proofs, 2, 'admission proved again, live');
+});
+
+test('a stored safe proof is cleared when Base drops the block, and the next read proves again', async (t) => {
+  const f = await setup(t);
+  f.chain.state.safeDepth = 1n;
+  const first = await signedWithdrawal(f, 1);
+  f.chain.include(first.userOpHash);
+  f.chain.mine(1);
+  const count = countProofs(f);
+  assert.equal((await read(f, first.withdrawalId)).json().safe, true);
+  assert.notEqual(await safeAt(f, first.withdrawalId), null);
+  // Base drops the block (the receipt is gone): back on its way, never safe, the proof cleared.
+  f.chain.uninclude(first.userOpHash);
+  const back = (await read(f, first.withdrawalId)).json();
+  assert.equal(back.state, 'submitted');
+  assert.equal(back.safe, false);
+  assert.equal(await safeAt(f, first.withdrawalId), null, 'cleared by the row (migration 96)');
+  // It lands again in a new block: in it, but not at the safe head yet, so not safe.
+  f.chain.include(first.userOpHash);
+  const relanded = (await read(f, first.withdrawalId)).json();
+  assert.equal(relanded.state, 'included');
+  assert.notEqual(relanded.blockNumber, null);
+  assert.equal(relanded.safe, false);
+  const before = count.proofs;
+  assert.ok(before >= 2, 'the new receipt was proven live, not answered from the old proof');
+  // Safe again for the new receipt: proven once more and stored for it.
+  f.chain.mine(1);
+  const safeAgain = (await read(f, first.withdrawalId)).json();
+  assert.equal(safeAgain.safe, true);
+  assert.equal(count.proofs, before + 1);
+  assert.notEqual(await safeAt(f, first.withdrawalId), null);
+  assert.equal((await read(f, first.withdrawalId)).json().safe, true);
+  assert.equal(count.proofs, before + 1, 'and reused');
+});
+
+test('a stored safe proof is cleared when the receipt moves to another block between two reads', async (t) => {
+  const f = await setup(t);
+  f.chain.state.safeDepth = 1n;
+  const first = await signedWithdrawal(f, 1);
+  f.chain.include(first.userOpHash);
+  f.chain.mine(1);
+  const count = countProofs(f);
+  const proven = (await read(f, first.withdrawalId)).json();
+  assert.equal(proven.safe, true);
+  // Dropped and re-mined in a later block before anyone read it: the row takes the new receipt.
+  f.chain.uninclude(first.userOpHash);
+  f.chain.mine(1);
+  f.chain.include(first.userOpHash);
+  const moved = (await read(f, first.withdrawalId)).json();
+  assert.equal(moved.state, 'included');
+  assert.notEqual(moved.blockNumber, proven.blockNumber);
+  assert.equal(moved.safe, false, 'the old proof is never carried over to the new block');
+  assert.equal(await safeAt(f, first.withdrawalId), null);
+  assert.equal(count.proofs, 2);
+});
+
+test('the stored proof is written only by a display read, never for a reverted operation', async (t) => {
+  const f = await setup(t);
+  f.chain.state.safeDepth = 1n;
+  const first = await signedWithdrawal(f, 1);
+  f.chain.include(first.userOpHash, false);
+  f.chain.mine(1);
+  const count = countProofs(f);
+  const reverted = (await read(f, first.withdrawalId)).json();
+  assert.equal(reverted.errorCode, 'reverted');
+  assert.equal(reverted.safe, false);
+  assert.equal(count.proofs, 0, 'a revert is never shown safe, so it is not proven for a read');
+  assert.equal(await safeAt(f, first.withdrawalId), null);
+  // Admission still proves it live (its nonce is used for good) and stores nothing.
+  await created(f, 2);
+  assert.equal(count.proofs, 1);
+  assert.equal(await safeAt(f, first.withdrawalId), null);
+});
+
+test('lanes: GET ?open=1 answers a stored safe proof without asking Base, and proves only the rest', async (t) => {
+  const f = await lanesSetup(t);
+  f.chain.state.safeDepth = 1n;
+  const a = await created(f, 1, { amount: '1000' });
+  f.clock.now += 1_000;
+  const b = await created(f, 2, { amount: '1000' });
+  await signIt(f, a);
+  await signIt(f, b);
+  f.chain.include(a.userOpHash);
+  f.chain.include(b.userOpHash);
+  f.chain.mine(1);
+  const count = countProofs(f);
+  const safeOf = async () =>
+    Object.fromEntries(
+      (
+        (await openList(f)).json().withdrawals as Array<{ withdrawalId: string; safe: boolean }>
+      ).map((view) => [view.withdrawalId, view.safe]),
+    );
+  assert.deepEqual(await safeOf(), { [a.withdrawalId]: true, [b.withdrawalId]: true });
+  assert.equal(count.proofs, 2, 'one proof per included operation, stored');
+  for (let i = 0; i < 3; i++)
+    assert.deepEqual(await safeOf(), { [a.withdrawalId]: true, [b.withdrawalId]: true });
+  assert.equal((await read(f, a.withdrawalId)).json().safe, true);
+  assert.equal(count.proofs, 2, 'every later list and read answers from the stored proofs');
+  // One of them loses its block: only that one goes back and is proven again once it lands.
+  f.chain.uninclude(b.userOpHash);
+  assert.deepEqual(await safeOf(), { [a.withdrawalId]: true, [b.withdrawalId]: false });
+  assert.equal(count.proofs, 2);
+  assert.equal(await safeAt(f, b.withdrawalId), null);
+  assert.notEqual(await safeAt(f, a.withdrawalId), null);
+});

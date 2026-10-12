@@ -7,6 +7,7 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from 'react';
+import { LINKS } from './shell/links';
 import { useInviteHref } from './shell/navigation';
 import { usePageTitle } from './shell/usePageTitle';
 import { PAGE_TITLES } from '../shared/page-titles';
@@ -672,7 +673,8 @@ export function ConnectPage() {
   const open = mode === 'open';
   const { local, endpoint, serverName } = connectTarget(open);
   const panels = connectPanels({ open, endpoint, serverName, local });
-  const inviteHref = useInviteHref();
+  // On the Connect page itself, the next step: sign in and get the room's link (/invite).
+  const inviteHref = useInviteHref(LINKS.invite);
 
   function onTileKey(event: KeyboardEvent<HTMLButtonElement>) {
     const next = nextApp(app, event.key);

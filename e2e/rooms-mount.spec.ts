@@ -171,9 +171,10 @@ test('signed out: room pages offer sign-in and "Invite your AI" goes to /invite'
   await page.getByRole('button', { name: 'Sign in' }).click();
   await expect(page).toHaveURL(/\/signin\?next=%2Frooms$/);
   await page.goto('/');
+  // Signed out, Invite your AI opens the Connect page.
   await expect(page.getByRole('link', { name: 'Invite your AI' }).first()).toHaveAttribute(
     'href',
-    '/invite',
+    '/connect',
   );
   // An unsafe next is ignored: the new account stays on this site, on its Overview.
   await page.goto('/signin?next=https%3A%2F%2Fexample.com');

@@ -12,6 +12,7 @@ import {
   baseShortIdsMigration,
 } from '../server/base/schema.js';
 import {
+  FINALIZE_FRESH_MS,
   IDENTITY_FINALIZE_PATH,
   registerBaseRegistrationRoutes,
   TRANSIENT_RETRY_AFTER_S,
@@ -152,7 +153,12 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }, wallets
       )
     ).rows[0];
   const fault = (match: RegExp, error: Error, times = 1) => faults.push({ match, error, times });
-  return { app, pg, chain, events, statements, faults, fault, register, cron, row };
+  /** The row's last change moved back past FINALIZE_FRESH_MS: no poll moved it just now. */
+  const age = () =>
+    pg.query('UPDATE base_identities SET updated_at = updated_at - $1::bigint', [
+      FINALIZE_FRESH_MS,
+    ]);
+  return { app, pg, chain, events, statements, faults, fault, register, cron, row, age };
 }
 
 type Setup = Awaited<ReturnType<typeof setup>>;
@@ -455,6 +461,8 @@ test('the owner’s call and the finalize cron advance the same row at once: no 
   const transfers = s.chain.calls.transfer.length;
   const owner = s.register();
   while (s.chain.calls.transfer.length === transfers) await new Promise((r) => setImmediate(r));
+  // As if the owner's call had stalled past FINALIZE_FRESH_MS: the cron takes the row meanwhile.
+  await s.age();
   const run = await s.cron();
   assert.deepEqual(run.json(), { advanced: 1, confirmed: 1, errors: 0 });
   release();
@@ -484,4 +492,22 @@ test('transient database errors are told apart from real ones', () => {
     'text',
   ])
     assert.equal(transientDatabaseError(error), false, String(error));
+});
+
+test('the finalize cron leaves a row a poll just moved to that poll, and takes it on a later run', async (t) => {
+  const s = await setup(t);
+  await registeredAwaitingFinality(s);
+  // The owner's poll moved the row a moment ago: the cron neither claims it nor reads Base for it.
+  const calls = JSON.stringify(s.chain.calls);
+  assert.deepEqual((await s.cron()).json(), { advanced: 0, confirmed: 0, errors: 0 });
+  assert.equal(JSON.stringify(s.chain.calls), calls, 'no Base read for a fresh row');
+  const swept = await s.pg.query<{ swept_at: string | null }>(
+    'SELECT swept_at::text AS swept_at FROM base_identities',
+  );
+  assert.equal(swept.rows[0].swept_at, null, 'not claimed: first in line next run');
+  assert.equal((await s.row()).state, 'submitted');
+  // Once its last change is older than FINALIZE_FRESH_MS, the next run moves it on.
+  await s.age();
+  assert.deepEqual((await s.cron()).json(), { advanced: 1, confirmed: 1, errors: 0 });
+  assert.equal((await s.row()).state, 'confirmed');
 });

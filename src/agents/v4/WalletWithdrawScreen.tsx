@@ -40,6 +40,7 @@ import { SettingsError, SettingsFrame, SettingsLoading } from './settingsShared'
 import { SentLines, WithdrawalStatus } from './WithdrawalStatus';
 import { WalletHistory, type SignedNow } from './WalletHistory';
 import './wallet-screen.css';
+import { SignWindowClosed, SignWithin, useSecondsLeft } from './SignWindow';
 
 /*
  * Withdraw from an agent's wallet (Operation Base Wallet W2). The owner types where and how much;
@@ -220,6 +221,49 @@ export function WalletWithdrawScreen({ agent, onBack, backLabel }: AgentScreenPr
         if (read.kind === 'wallet' && read.wallet.address) setWallet(read.wallet);
       })
       .catch(() => {});
+  }
+
+  // K9: with lanes on, how long is left to sign the prepared withdrawal (the server's fixed deadline).
+  const signLeft = useSecondsLeft(
+    phase.k === 'review' && phase.request.lanes === true && !phase.unconfirmed
+      ? phase.request.expiresAt
+      : null,
+  );
+
+  /**
+   * At 0: the expired unsigned withdrawal goes, and the same one is prepared afresh. One run at a
+   * time; a run the owner has moved on from (Back, a new withdrawal, leaving) prepares nothing.
+   */
+  const prepareRun = useRef(0);
+  useEffect(
+    () => () => {
+      prepareRun.current += 1;
+    },
+    [],
+  );
+  async function prepareAgain() {
+    if (phase.k !== 'review' || busy) return;
+    const run = ++prepareRun.current;
+    // Marked before anything else: hidden or locked during the discard, nothing is prepared.
+    const mark = alive();
+    setPassword('');
+    setError('');
+    setBusy(true);
+    try {
+      await startOver(phase.request.withdrawalId);
+    } catch {
+      // Discarding is best effort: the server expires it anyway.
+    }
+    if (run !== prepareRun.current) return;
+    if (!mark()) {
+      // The page was hidden or locked meanwhile: the expired one is gone, nothing new is prepared.
+      setBusy(false);
+      setPhase({ k: 'form' });
+      return;
+    }
+    // The expired one is gone; the form keeps what was typed and prepares it again.
+    setPhase({ k: 'form' });
+    await prepare({ preventDefault() {} } as FormEvent);
   }
 
   async function prepare(event: FormEvent) {
@@ -517,32 +561,57 @@ export function WalletWithdrawScreen({ agent, onBack, backLabel }: AgentScreenPr
           <p className="w4-caution">
             <b>Withdrawals can’t be undone.</b>
           </p>
-          {passwordField}
-          {errorLine}
-          <div className="ap4-actions">
-            <button type="submit" className="ap4-btn" disabled={busy || !password} aria-busy={busy}>
-              {busy ? 'Signing…' : 'Sign and send'}
-            </button>
-            <button
-              type="button"
-              className="ap4-btn ap4-ghost"
-              disabled={busy}
-              onClick={() => {
-                // Maybe already taken: kept in History as it is, never discarded from here.
-                if (phase.unconfirmed) return newWithdrawal();
+          {signLeft === 0 && !busy ? (
+            <SignWindowClosed
+              what="send the same withdrawal"
+              busy={busy}
+              onPrepareAgain={() => void prepareAgain()}
+              onBack={() => {
+                prepareRun.current += 1;
                 const unsigned = phase.request.withdrawalId;
-                setPassword('');
-                setError('');
                 setBusy(true);
                 void startOver(unsigned).finally(() => {
                   setBusy(false);
                   setPhase({ k: 'form' });
                 });
               }}
-            >
-              Back
-            </button>
-          </div>
+            />
+          ) : (
+            <>
+              {passwordField}
+              {errorLine}
+              <div className="ap4-actions">
+                <button
+                  type="submit"
+                  className="ap4-btn"
+                  disabled={busy || !password}
+                  aria-busy={busy}
+                >
+                  {busy ? 'Signing…' : 'Sign and send'}
+                </button>
+                <button
+                  type="button"
+                  className="ap4-btn ap4-ghost"
+                  disabled={busy}
+                  onClick={() => {
+                    // Maybe already taken: kept in History as it is, never discarded from here.
+                    if (phase.unconfirmed) return newWithdrawal();
+                    const unsigned = phase.request.withdrawalId;
+                    setPassword('');
+                    setError('');
+                    setBusy(true);
+                    void startOver(unsigned).finally(() => {
+                      setBusy(false);
+                      setPhase({ k: 'form' });
+                    });
+                  }}
+                >
+                  Back
+                </button>
+                {signLeft !== null && signLeft > 0 ? <SignWithin seconds={signLeft} /> : null}
+              </div>
+            </>
+          )}
         </form>
       ) : phase.k === 'status' && wallet ? (
         <div className="w4-steps">

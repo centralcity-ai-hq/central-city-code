@@ -2681,12 +2681,6 @@ input[type='radio'] {
 .detail-pair code {
   color: var(--text);
 }
-.detail-agent-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  flex-wrap: wrap;
-}
 .detail-list {
   margin: 0;
   display: grid;
@@ -2709,23 +2703,6 @@ input[type='radio'] {
 }
 .detail-list dd {
   margin: 0;
-}
-.lineage-list {
-  border-style: dashed;
-}
-.revoke-section {
-  display: grid;
-  gap: var(--space-3);
-  justify-items: start;
-  padding-top: var(--space-4);
-  border-top: 1px solid var(--border);
-}
-.revoke-section p {
-  font: var(--type-meta);
-  color: var(--text-muted);
-}
-.revoke-section p.danger-text {
-  color: var(--error);
 }
 
 /* Exchange detail */

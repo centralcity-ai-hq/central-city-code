@@ -89,12 +89,6 @@ export const saveKey = (
     timeoutMs: KEY_CHECK_TIMEOUT_MS,
   });
 
-export const removeKey = (agentId: string) =>
-  call<{ agent_id: string; removed: boolean }>(
-    `/api/agents/${encodeURIComponent(agentId)}/responder/key`,
-    { method: 'DELETE' },
-  );
-
 /**
  * The requests the setup sheet sends (AutoReplySheet). A failure is a ResponderError, so the sheet
  * reads only its code. This client sends them as they are; the v4 Auto-reply screen has its own,

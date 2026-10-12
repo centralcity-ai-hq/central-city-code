@@ -1675,6 +1675,14 @@ test('incoming proves at most INCOMING_SAFE_MAX included payments per read, each
     assert.equal(read.json().state, 'included');
     sent.push(body);
   }
+  // The payer's own reads proved each one and stored the proof (safe_at, reused by every later
+  // read). Cleared here, as if no reader had proven them yet: what is measured is the
+  // recipient's read alone.
+  const stored = await f.pg.query<{ n: number }>(
+    'SELECT count(*)::int AS n FROM base_wallet_withdrawals WHERE safe_at IS NOT NULL',
+  );
+  assert.equal(stored.rows[0].n, INCOMING_SAFE_MAX + 1);
+  await f.pg.query('UPDATE base_wallet_withdrawals SET safe_at = NULL');
   const proofs: string[] = [];
   const prove = f.ops.port.settledAtSafe!;
   f.ops.port.settledAtSafe = async (input) => {

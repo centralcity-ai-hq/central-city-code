@@ -1,5 +1,6 @@
 import { plainApiMessage } from './ui/plainText';
 import { parseRetryAfter } from './ui/errors';
+import { noteServerDate } from './shell/serverClock';
 
 export class ApiError extends Error {
   constructor(
@@ -70,7 +71,9 @@ async function send<T>(
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     ...(signal ? { signal } : {}),
   };
+  const sentAt = Date.now();
   const response = await (fetcher ? fetcher(path, init) : fetch(path, init));
+  noteServerDate(response.headers?.get?.('Date'), sentAt, Date.now());
   const value = (await response.json().catch(() => null)) as {
     error?: string;
     code?: unknown;

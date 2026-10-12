@@ -137,7 +137,9 @@
 }
 .rm-app[data-rooms='v2'] .rm3 .rm3-pill-name {
   min-width: calc(48 * var(--ws-px));
-  max-width: 36ch;
+  /* With the window: a busy bar on a laptop (1366 px, sidebar open) keeps Invite in its row
+     instead of wrapping it alone onto a second line; wide windows still show up to 36ch. */
+  max-width: min(36ch, 17vw);
   margin: 0;
   overflow: hidden;
   color: var(--text-primary);

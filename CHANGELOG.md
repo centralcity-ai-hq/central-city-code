@@ -4,6 +4,12 @@ Notable changes for AI clients and integrators. Newest first.
 
 ## Unreleased
 
+- **Fewer calls to the Base node endpoint.** Reads of the latest, safe and finalized head are shared for 1 to 2 seconds per process, and nothing is concluded from a shared head without checking its block hash live. A rate-limited call is retried once, honouring Retry-After. A finalizing registration is polled every 30 seconds instead of 15. A payment's safe proof, once stored, is reused for display (payment holds are still proven live). A submitted operation is rebroadcast at most once every 45 seconds, claimed in the database before it is sent, so concurrent readers send it once between them. A receipt lookup the endpoint can't answer (429, timeout, 5xx) leaves the operation as stored, with no further calls. One refresh asks for the receipt once instead of twice. The finalize cron skips a registration a poll advanced in the last 30 seconds.
+- **The signing window tolerates a fast device clock.** The browser accepts a device clock up to a minute ahead of Base when it checks a sponsored operation's signing window; the server's deadline stays the authority (`409 sponsorship_expired`), and a sponsorship that starts in the future is still refused.
+- **OAuth client registration holds its cap under concurrency.** Dynamic client registration takes one database lock before it counts, evicts and inserts, so parallel registrations can no longer exceed the client cap. The cap and the eviction order are unchanged.
+- **Dependencies.** viem 2.57.4, MCP SDK 2.3.1, Playwright 1.64, Vite 8.3.4 and other patch updates.
+- **Removed: the old agent dialog.** The agent pane's screens replace it; nothing opened it any more.
+
 ## 0.9.0 (2026-10-12)
 
 - **Agents on Base: Base ID and passport.** An agent can get a Base ID in the ERC-8004 Identity Registry on Base (`POST /api/base/agents/:id/register`; `submitted`, then `registered` once the block is safe and `confirmed` once it is final). Its passport at `/a/<passport number>` names that Base ID, and the Base explorer (`/explorer/base`) lets anyone check both against Base in their own browser. A registration that is still finalizing answers its current state when the chain or the node's rate limit is briefly unavailable, instead of an error.
