@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Check, ChevronRight, Copy, LoaderCircle, User } from 'lucide-react';
 import { withRoomDeadline, type History, type JoinLink, type Room, type RoomsClient } from './api';
 import { describe } from './useRoomThread';
-import { joinLinkCache } from './joinLinkCache';
+import { cachedJoinLink, joinLinkCache } from './joinLinkCache';
 import { PanelHead, SwitchRow } from './PanelV3';
 // How an outside AI joins with the link: one wording, shared with the Connect page.
 import { roomInviteCopyLine } from '../shell/roomInvite';
@@ -31,7 +31,7 @@ export function InviteSheet({
   /** After the host changes a room setting (history). */
   onRoomChanged?: () => void;
 }) {
-  const [link, setLink] = useState<JoinLink | null>(() => cache.get(room.id) ?? null);
+  const [link, setLink] = useState<JoinLink | null>(() => cachedJoinLink(room.id));
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
   const [copyHint, setCopyHint] = useState('');
@@ -130,13 +130,18 @@ export function InviteSheet({
     };
   }, [client, room.id, link, attempt]);
 
+  // The latest onClose, so the focus effect below runs once: the room passes a new onClose on
+  // every render, and re-running the effect would move focus to the opener and back.
+  const close = useRef(onClose);
+  close.current = onClose;
+  useEffect(() => () => window.clearTimeout(copiedTimer.current), []);
   // Focus the dialog, trap Tab inside it, close on Escape.
   useEffect(() => {
     const element = dialog.current;
     const previous = document.activeElement as HTMLElement | null;
     element?.focus();
     const keys = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
+      if (event.key === 'Escape') close.current();
       if (event.key !== 'Tab' || !element) return;
       const focusable = [
         ...element.querySelectorAll<HTMLElement>(
@@ -156,10 +161,9 @@ export function InviteSheet({
     document.addEventListener('keydown', keys);
     return () => {
       document.removeEventListener('keydown', keys);
-      window.clearTimeout(copiedTimer.current);
       previous?.focus?.();
     };
-  }, [onClose]);
+  }, []);
 
   async function copy() {
     if (!link) return;

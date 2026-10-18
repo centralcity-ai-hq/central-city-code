@@ -196,7 +196,7 @@ export function cleanBullet(raw: unknown): string | null {
  * kept only with at least one seq among `given` (the messages the model saw). Anything else is
  * dropped, never repaired by guessing. Null when the answer is unusable (no JSON object, invalid
  * JSON, or neither list present): the caller reports it as unavailable, never as "nothing
- * important", so it is not cached and the allowance is refunded.
+ * important", so it is not cached (the allowance comes back only if nothing was paid).
  */
 export function parseModelSections(
   raw: string | null,
@@ -678,8 +678,9 @@ export function createCatchUp(d: CatchUpDependencies) {
             day,
             reserved: units,
             spent: answered.units,
-            // No usable answer gives the allowance back (its cost, if any, still counts).
-            refund: !parsed,
+            // The allowance comes back only when nothing reached the model: a paid answer that
+            // could not be used still counts, so unusable answers cannot buy unlimited calls.
+            refund: !parsed && answered.units === 0,
           };
           try {
             await d.db.transaction((tx) => settle(tx, settlement));

@@ -221,6 +221,8 @@ export interface Wake {
     tool: WakeToolName,
     body: unknown,
     guard: WakeGuard,
+    /** Aborts when the caller disconnects: ends a city_mentions wait early. */
+    signal?: AbortSignal,
   ): Promise<unknown>;
   /** Triggers a webhook drain now (after-commit and opportunistic). */
   kick(): void;
@@ -510,9 +512,15 @@ export function createWake(d: WakeDependencies): Wake {
     const events = [...new Set(body.events ?? ['message', 'mention'])].sort() as WakeEventKind[];
     // Charged before the transaction (the hosted limiter needs its own pool client).
     await d.limit(`wake-webhook:${p.operatorId}`, WAKE_LIMITS.webhookSetsPerHour, 3_600_000);
-    return db.transaction(async (tx) => {
+    const set = db.transaction(async (tx) => {
       const time = d.clock();
       await scopesOf(tx, time, guard);
+      // One set per owner at a time: the replace below and the per-owner count are read-then-write,
+      // so two overlapping sets (a double submit, a retry) would collide on the unique agent row or
+      // pass the cap together.
+      await tx.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        `wake-webhook\n${p.operatorId}`,
+      ]);
       await ownAgent(tx, p.operatorId, agentId, true);
       // Replaces the agent's HTTPS webhook only; a hosted responder target is separate.
       await tx.query("DELETE FROM wake_webhooks WHERE agent_id=$1 AND kind='https'", [agentId]);
@@ -546,6 +554,14 @@ export function createWake(d: WakeDependencies): Wake {
         verify: VERIFY_HINT,
       };
     });
+    try {
+      return await set;
+    } catch (error) {
+      // Backstop for any other writer of the agent's row: a clear answer, never a 500.
+      if ((error as { code?: string }).code === '23505')
+        fail(409, 'webhook_conflict', 'The webhook changed at the same time. Try again.');
+      throw error;
+    }
   }
   async function clearWebhook(p: WakePrincipal, agentId: string, guard?: WakeGuard) {
     return db.transaction(async (tx) => {
@@ -633,6 +649,7 @@ export function createWake(d: WakeDependencies): Wake {
     tool: WakeToolName,
     body: unknown,
     guard: WakeGuard,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     if (tool === 'city_mentions') {
       const { agent_id, wait, ...query } = mentionsToolInput.parse(body);
@@ -640,7 +657,7 @@ export function createWake(d: WakeDependencies): Wake {
         wait,
         () => mentions(p, agent_id, query, guard),
         (page) => idleKeys('mention', page.agent_id, page, page.mentions.length),
-        undefined,
+        signal,
         { owner: p.operatorId, agent: agent_id },
         true,
       );

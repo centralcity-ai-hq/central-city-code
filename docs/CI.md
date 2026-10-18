@@ -32,7 +32,7 @@ A second `portability` job runs `pnpm install --frozen-lockfile`, `pnpm build` a
 
 GitHub bills macOS runner minutes at 10x and Windows at 2x the Linux rate for private repositories; public repositories on standard runners are not billed. Restricting macOS to pushes to `main` removes that leg from pull requests and other branch pushes.
 
-The workflow-level `concurrency` group cancels an in-progress run when a newer one starts for the same branch or pull request ref. Each `main` run gets its own group (keyed by run ID), so runs on `main` are never canceled or superseded.
+The workflow-level `concurrency` group cancels an in-progress run when a newer one starts for the same branch or pull request ref. This includes `main`: when merges land close together, only the newest `main` is tested. It contains every earlier merge, so a break between two PRs (each green alone) still shows on `main`; a superseded `main` run ends as canceled, not failed. A full code run costs about 166 billed Linux minutes, so this saves one run per merge that lands while an earlier one is still testing.
 
 ## Documentation-only pull requests
 

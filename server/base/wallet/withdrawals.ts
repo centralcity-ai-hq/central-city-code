@@ -66,7 +66,7 @@ import { BASE_NETWORKS, NATIVE_ETH, type Address } from '../../../shared/base/ch
 import type { WalletDerivation } from '../../../shared/base/types.js';
 import { WALLET_EXPLORER, WALLET_TESTNET } from '../../../shared/base/wallet-network.js';
 import { laneKey, LaneKeyError } from '../../../shared/base/lanes.js';
-import { sponsoredValidUntil } from '../../../shared/base/paymasters.js';
+import { sponsoredValidUntil, sponsorshipEnding } from '../../../shared/base/paymasters.js';
 import {
   decodeOwnerCall,
   noopCall,
@@ -1463,7 +1463,10 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
   /**
    * The chain operation of a signed withdrawal (or cancel), brought up to date. Signed and stored
    * here but never stored by the chain module (a crash or an outage in between): sent now, exactly
-   * as signed. Null when the chain cannot be reached; the next read tries again.
+   * as signed. Stored there but never claimed for its first send (a crash or a database error
+   * between that store and the claim): resumed the same way, since refresh never sends a queued
+   * operation; submit's compare-and-set claim lets exactly one worker send the stored bytes. Null
+   * when the chain cannot be reached; the next read tries again.
    */
   async function follow(
     port: OwnerOperationsPort,
@@ -1474,11 +1477,11 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
     const input = submission(wallet, row, kind);
     if (!input) return null;
     let op = await port.refresh(input.idempotencyKey);
-    if (!op) {
+    if (!op || op.status === 'queued') {
       try {
         op = await port.submit(input);
       } catch {
-        return null;
+        return op;
       }
     }
     await markSubmitted(wallet, row, kind, op);
@@ -2933,6 +2936,11 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
               'sponsorship_expired',
               'The sponsorship is no longer valid; nothing was sent. Prepare again.',
             );
+          if (sponsorshipEnding(row.user_operation.paymasterAndData, at))
+            throw new WithdrawalError(
+              'sponsorship_expired',
+              'The sponsorship is no longer valid; nothing was sent. Prepare again.',
+            );
           const { rows } = await tx.query<Row>(
             `UPDATE base_wallet_withdrawals SET state = 'submitted', owner_signature = $3,
                chain_op_key = $4, signed_at = $2, updated_at = $2
@@ -3208,6 +3216,11 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
               Number(row.cancel_expires_at),
             ) !== true
           )
+            throw new WithdrawalError(
+              'sponsorship_expired',
+              'The cancellation sponsorship is no longer valid; nothing was sent. Prepare again.',
+            );
+          if (sponsorshipEnding(row.cancel_user_operation?.paymasterAndData, at))
             throw new WithdrawalError(
               'sponsorship_expired',
               'The cancellation sponsorship is no longer valid; nothing was sent. Prepare again.',

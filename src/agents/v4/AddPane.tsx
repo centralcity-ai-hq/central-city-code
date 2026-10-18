@@ -1,18 +1,11 @@
-import {
-  Check,
-  ChevronLeft,
-  ChevronRight,
-  Copy,
-  LayoutGrid,
-  Link2,
-  Plug,
-  Sparkles,
-} from 'lucide-react';
+import { ChevronLeft, ChevronRight, LayoutGrid, Link2, Plug, Sparkles } from 'lucide-react';
 import { useState, type ReactNode } from 'react';
+import { AGENT_NAME_MAX } from '../../../shared/agent-name';
 import type { Agent, Capability } from '../../../shared/types';
 import { api } from '../../api';
 import { connectPanels, connectTarget, type AppId } from '../../Connect';
 import { WorkspaceKeys } from '../../WorkspaceKeys';
+import { CustomScreen, Row } from './AddCustom';
 import '../../connect.css';
 
 /** The apps "Connect your AI" lists, in the mockup's order; Custom follows. */
@@ -38,6 +31,8 @@ export interface AddPaneProps {
   onOwnAgent: () => void;
   /** A new agent was created; the list opens it. */
   onCreated: (agent: Agent) => Promise<void> | void;
+  /** Workspace keys exist only for AI-owned workspaces; a person workspace never sees them. */
+  workspaceKeys?: boolean;
 }
 
 /**
@@ -45,7 +40,14 @@ export interface AddPaneProps {
  * (each app's existing steps from Connect.tsx, plus Custom), Create a CC agent, Claim from a link,
  * Try example agents. Every screen has a back link; nothing here is new server behaviour.
  */
-export function AddPane({ busy, claimForm, onTryExamples, onOwnAgent, onCreated }: AddPaneProps) {
+export function AddPane({
+  busy,
+  claimForm,
+  onTryExamples,
+  onOwnAgent,
+  onCreated,
+  workspaceKeys = false,
+}: AddPaneProps) {
   const [stack, setStack] = useState<string[]>(['add']);
   const top = stack[stack.length - 1]!;
   const go = (screen: string) => setStack((s) => [...s, screen]);
@@ -141,27 +143,15 @@ export function AddPane({ busy, claimForm, onTryExamples, onOwnAgent, onCreated 
   } else if (top === 'custom') {
     const { endpoint } = connectTarget(false);
     body = (
-      <>
-        {header('Custom', 'Any MCP client or your own agent')}
-        <div className="ap4-group">
-          <div className="ap4-row ap4-static">
-            <span className="ap4-k">Server</span>
-            <span className="ap4-v ap4-mono">{endpoint.replace(/^https:\/\//, '')}</span>
-            <CopyButton value={endpoint} label="Copy server address" />
-          </div>
-          <div className="ap4-row ap4-static">
-            <span className="ap4-k">Sign-in</span>
-            <span className="ap4-v">OAuth</span>
-          </div>
-        </div>
-        <p className="ap4-note">Most clients sign in by themselves. No OAuth? Use a key.</p>
-        <div className="ap4-group">
-          <Row label="Workspace keys" onClick={() => go('keys')} />
-          <Row label="An agent you run yourself" onClick={onOwnAgent} />
-        </div>
-      </>
+      <CustomScreen
+        header={header('Custom', 'Any MCP client or your own agent')}
+        endpoint={endpoint}
+        workspaceKeys={workspaceKeys}
+        onKeys={() => go('keys')}
+        onOwnAgent={onOwnAgent}
+      />
     );
-  } else if (top === 'keys') {
+  } else if (top === 'keys' && workspaceKeys) {
     body = <KeysScreen header={header('Workspace keys')} />;
   } else if (top === 'cc') {
     body = <CreateCc header={header('Create a CC agent')} onCreated={onCreated} />;
@@ -219,39 +209,6 @@ function Choice({
   );
 }
 
-function Row({ label, value, onClick }: { label: string; value?: string; onClick: () => void }) {
-  return (
-    <button type="button" className="ap4-row" onClick={onClick}>
-      <span className="ap4-k">{label}</span>
-      {value ? <span className="ap4-v">{value}</span> : null}
-      <ChevronRight className="ap4-chev" size={14} aria-hidden="true" />
-    </button>
-  );
-}
-
-/** Copies a value; says "Copied" only after the clipboard accepted it. */
-function CopyButton({ value, label }: { value: string; label: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      type="button"
-      className="ap4-cp"
-      aria-label={copied ? 'Copied' : label}
-      onClick={() => {
-        void navigator.clipboard?.writeText(value).then(
-          () => {
-            setCopied(true);
-            window.setTimeout(() => setCopied(false), 1600);
-          },
-          () => undefined,
-        );
-      }}
-    >
-      {copied ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
-    </button>
-  );
-}
-
 /** A scripted agent from a template (POST /api/agents, mode 'hosted', private card). */
 function CreateCc({
   header,
@@ -295,7 +252,7 @@ function CreateCc({
           aria-label="Name"
           placeholder="Name"
           autoFocus
-          maxLength={80}
+          maxLength={AGENT_NAME_MAX}
           value={name}
           onChange={(event) => setName(event.target.value)}
         />

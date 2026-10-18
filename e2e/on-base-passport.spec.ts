@@ -164,7 +164,7 @@ const fact = (page: Page, label: string) =>
 test('a final passport shows its name, status and every fact', async ({ page }) => {
   await openPassport(page, '99268', pinako());
 
-  await expect(main(page).getByRole('link', { name: 'Agent Explorer · On Base' })).toHaveAttribute(
+  await expect(main(page).getByRole('link', { name: 'Base Agents' })).toHaveAttribute(
     'href',
     '/explorer/base',
   );
@@ -217,9 +217,118 @@ test('a final passport shows its name, status and every fact', async ({ page }) 
     'Read from Base at block 52,431,007. Anyone can give an agent feedback on Base; only Central City agents are named.',
   );
 
-  const later = main(page).locator('.ob-pp-later');
-  await expect(later).toContainText("Payments · this agent's payments on Base appear here later.");
-  await expect(later).toContainText('Coming later');
+  // A server without the earnings route: no Payments section at all.
+  await expect(main(page).getByRole('heading', { name: 'Payments' })).toHaveCount(0);
+  // Nor, without its route, a Paid for services section.
+  await expect(main(page).getByRole('heading', { name: 'Paid for services' })).toHaveCount(0);
+});
+
+test('Payments: totals through Central City, or none yet', async ({ page }) => {
+  const asked: string[] = [];
+  let answer: unknown = {
+    paidTimes: 41,
+    totalUsdc: '1250.5',
+    lastPaidAt: Date.UTC(2026, 9, 12, 7, 10),
+  };
+  await page.route('**/api/public/passports/*/earnings', (route) => {
+    asked.push(new URL(route.request().url()).pathname);
+    return route.fulfill({ json: answer });
+  });
+  await openPassport(page, '99268', pinako());
+  const payments = main(page).locator('section', {
+    has: page.getByRole('heading', { name: 'Payments' }),
+  });
+  await expect(payments).toContainText('Through Central City');
+  await expect(payments).toContainText('41 times');
+  await expect(payments).toContainText('1,250.5 USDC');
+  await expect(payments).toContainText('12 Oct 2026, 09:10');
+  await expect(payments).toContainText('Totals only');
+  expect(asked).toContain('/api/public/passports/R6IsTd/earnings');
+
+  answer = { paidTimes: 0, totalUsdc: '0', lastPaidAt: null };
+  await page.reload();
+  await expect(payments).toContainText('No payments through Central City yet.');
+});
+
+test('Paid for services: totals of its paid service calls after Payments, none shown with none', async ({
+  page,
+}) => {
+  const asked: string[] = [];
+  let answer: unknown = {
+    paidCalls: 3,
+    totalUsdc: '1250.06',
+    totalFeeUsdc: '0.0062',
+    lastPaidAt: Date.UTC(2026, 9, 15, 7, 27),
+  };
+  await page.route('**/api/public/passports/*/earnings', (route) =>
+    route.fulfill({ json: { paidTimes: 2, totalUsdc: '1', lastPaidAt: Date.UTC(2026, 9, 1) } }),
+  );
+  await page.route('**/api/public/passports/*/service-payments', (route) => {
+    asked.push(new URL(route.request().url()).pathname);
+    return route.fulfill({ json: answer });
+  });
+  await openPassport(page, '99268', pinako());
+  const services = main(page).getByRole('region', { name: 'Paid for services' });
+  await expect(services).toContainText('Through Central City');
+  const total = (label: string) =>
+    services.locator('div').filter({ has: page.locator('dt', { hasText: label }) });
+  await expect(total('Paid calls').locator('dd')).toHaveText('3 calls');
+  await expect(total('Total').locator('dd')).toHaveText('1,250.06 USDC');
+  await expect(total('Central City fee').locator('dd')).toHaveText('0.0062 USDC');
+  await expect(total('Last paid').locator('dd')).toHaveText('15 Oct 2026, 09:27');
+  await expect(services).toContainText('Totals only');
+  expect(asked).toContain('/api/public/passports/R6IsTd/service-payments');
+  // Next to the agent's earnings: right after Payments.
+  const headings = await main(page).getByRole('heading', { level: 2 }).allTextContents();
+  expect(headings.indexOf('Paid for services')).toBe(headings.indexOf('Payments') + 1);
+
+  // One paid call: "1 call".
+  answer = { paidCalls: 1, totalUsdc: '0.002', totalFeeUsdc: '0.0002', lastPaidAt: 1 };
+  await page.reload();
+  await expect(total('Paid calls').locator('dd')).toHaveText('1 call');
+
+  // None yet: no section at all (Payments still shows).
+  answer = { paidCalls: 0, totalUsdc: '0', totalFeeUsdc: '0', lastPaidAt: null };
+  const answered = page.waitForResponse('**/api/public/passports/*/service-payments');
+  await page.reload();
+  await answered;
+  await expect(main(page).getByRole('region', { name: 'Payments' })).toContainText('2 times');
+  await expect(main(page).getByRole('heading', { name: 'Paid for services' })).toHaveCount(0);
+});
+
+test('Paid for services: four totals in a row, two by two, then stacked; nothing scrolls sideways', async ({
+  page,
+}) => {
+  await page.route('**/api/public/passports/*/service-payments', (route) =>
+    route.fulfill({
+      json: {
+        paidCalls: 1234,
+        totalUsdc: '98765.432101',
+        totalFeeUsdc: '9876.54321',
+        lastPaidAt: Date.UTC(2026, 9, 15, 7, 27),
+      },
+    }),
+  );
+  for (const [width, rows] of [
+    [1440, 1],
+    [700, 2],
+    [390, 4],
+  ] as const) {
+    await page.setViewportSize({ width, height: 900 });
+    await openPassport(page, '99268', pinako());
+    const cells = main(page).getByRole('region', { name: 'Paid for services' }).locator('dl > div');
+    await expect(cells).toHaveCount(4);
+    const tops = new Set<number>();
+    for (const box of await Promise.all((await cells.all()).map((cell) => cell.boundingBox())))
+      tops.add(Math.round(box!.y));
+    expect(tops.size, `${width} px`).toBe(rows);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      ),
+      `${width} px`,
+    ).toBeLessThanOrEqual(0);
+  }
 });
 
 test('without a recorded mint transaction the passport says so, with no Basescan link', async ({

@@ -24,6 +24,7 @@ import { chargeShortCodeAttempt } from '../links/invites.js';
 import { isStressTestHost, stressTestMaxRooms } from '../stress-allowlist.js';
 import { lineName, memberLabel, postSystemLine } from './system-lines.js';
 import { roomPosted } from '../wake/hooks.js';
+import { lockMentionCursor } from '../wake/cursor-lock.js';
 import { nameKeyOf, slugOf } from '../wake/mentions.js';
 import { highlighted, roomSearchSql, type RoomSearchRow } from './search-schema.js';
 import {
@@ -89,6 +90,7 @@ import {
 } from './contract.js';
 import { memberStatuses, mentionedMessages, touchMembers } from './member-status.js';
 import { cleanSays, memberSays, writeSays } from './member-says.js';
+import { purgeRoomMentions } from './mention-purge.js';
 import {
   NEEDS_YOU_PAGE_DEFAULT,
   decodeNeedsYouCursor,
@@ -658,7 +660,52 @@ export interface Rooms {
     roomLinkId: string,
     time: number,
   ): Promise<{ name: string; slug: string } | null>;
+  /**
+   * Room invitations (rooms/invitations.ts): the room as its host writes to it (host only, never a
+   * private room; 'room_not_found' for anyone outside, 'host_required' for other members), with its
+   * active member count and member cap. `lock` takes the room row lock (inside a transaction).
+   */
+  invitationRoom(
+    q: Pick<Tx, 'query'>,
+    p: RoomPrincipal,
+    roomRef: string,
+    lock?: boolean,
+  ): Promise<InvitationRoom>;
+  /**
+   * Room invitations: the invited agent joins (its owner, or its connected AI, accepted). In one
+   * transaction over the agent owner's and the host's workspaces: the room row lock, the room
+   * still open (409 room_closed), `recheck` (the invitation's own conditions), the agent live,
+   * then the same membership step as an invite-link join (admitMember), then `after` (`joined`
+   * false: the agent was already a member, so no join line).
+   */
+  acceptInvitation(
+    p: RoomPrincipal,
+    input: {
+      roomId: string;
+      agentId: string;
+      recheck(tx: Tx, room: InvitationRoom, time: number): Promise<void>;
+      after(
+        tx: Tx,
+        room: InvitationRoom,
+        time: number,
+        agentName: string,
+        joined: boolean,
+      ): Promise<void>;
+    },
+    guard?: RoomGuard,
+  ): Promise<{ room_id: string; joined: boolean }>;
   limits: RoomLimits;
+}
+
+/** What room invitations read of a room (rooms/invitations.ts). */
+export interface InvitationRoom {
+  id: string;
+  name: string;
+  hostOwnerId: string;
+  closed: boolean;
+  /** Active members (people and AIs) and the cap new members must stay under. */
+  members: number;
+  cap: number;
 }
 
 /** Parses a room link, join link or bare token into what it presents. */
@@ -1081,11 +1128,17 @@ export function createRooms(d: RoomDependencies): Rooms {
     return roomNotFound();
   }
   async function view(q: Pick<Tx, 'query'>, room: RoomRow, p: RoomPrincipal): Promise<RoomView> {
+    // A viewer with a person member writes as that person, whom a bulk "Mute all AIs" (mute_scope
+    // 'ai') never silences (refuseIfMuted): such a mute counts only for an owner without one.
+    const personSpared = `(mute_scope IS DISTINCT FROM 'ai' OR NOT EXISTS (SELECT 1 FROM room_members p
+            WHERE p.room_id=$1 AND p.owner_id=$2 AND p.kind='person' AND p.removed_at IS NULL))`;
     const stats = (
       await q.query<{
         n: string | number;
         role: RoomRole | null;
         muted: boolean | null;
+        muted_all: boolean | null;
+        ai_muted: boolean | null;
         mute_reason: string | null;
         notifications_muted: boolean | null;
         person: { id: string; name: string | null } | null;
@@ -1094,9 +1147,13 @@ export function createRooms(d: RoomDependencies): Rooms {
         `SELECT count(*) AS n, (SELECT role FROM room_members WHERE room_id=$1 AND owner_id=$2 AND removed_at IS NULL
           ORDER BY (role='host') DESC, joined_at LIMIT 1) AS role,
           (SELECT mute_reason FROM room_members WHERE room_id=$1 AND owner_id=$2
-            AND muted_at IS NOT NULL ORDER BY muted_at DESC LIMIT 1) AS mute_reason,
+            AND muted_at IS NOT NULL AND ${personSpared} ORDER BY muted_at DESC LIMIT 1) AS mute_reason,
           EXISTS (SELECT 1 FROM room_members WHERE room_id=$1 AND owner_id=$2
-            AND muted_at IS NOT NULL) AS muted,
+            AND muted_at IS NOT NULL AND ${personSpared}) AS muted,
+          EXISTS (SELECT 1 FROM room_members WHERE room_id=$1 AND owner_id=$2
+            AND muted_at IS NOT NULL AND mute_scope IS DISTINCT FROM 'ai') AS muted_all,
+          EXISTS (SELECT 1 FROM room_members WHERE room_id=$1 AND owner_id=$2
+            AND muted_at IS NOT NULL AND mute_scope='ai' AND kind<>'person') AS ai_muted,
           EXISTS (SELECT 1 FROM room_members WHERE room_id=$1 AND owner_id=$2
             AND notifications_muted) AS notifications_muted,
           (SELECT json_build_object('id', agent_id, 'name', display_name) FROM room_members
@@ -1119,7 +1176,15 @@ export function createRooms(d: RoomDependencies): Rooms {
       read_only: closed || role === 'guest',
       history: room.history,
       member_count: Number(stats?.n ?? 0),
-      member_cap: room.member_cap,
+      // The host reads the real cap. Everyone else reads it no higher than the standard cap (or
+      // the member count already shown), so a raised cap says nothing about who the host is.
+      member_cap:
+        role === 'host'
+          ? room.member_cap
+          : Math.min(
+              room.member_cap,
+              Math.max(ROOM_LIMITS.memberCapStandard, Number(stats?.n ?? 0)),
+            ),
       latest_seq: Number(room.next_seq) - 1,
       url: roomUrl(p.origin, room),
       created_at: iso(Number(room.created_at)),
@@ -1148,6 +1213,17 @@ export function createRooms(d: RoomDependencies): Rooms {
         ? {
             muted: stats?.muted === true,
             mute_reason: stats?.muted === true ? (stats.mute_reason ?? null) : null,
+            // 'ai': only a bulk "Mute all AIs" applies, so the owner still posts as a person
+            // (refuseIfMuted); 'all': it cannot post at all. 'ai' also when not muted because the
+            // person member is spared: its AIs still may not post. Null otherwise.
+            mute_scope:
+              stats?.muted === true
+                ? stats.muted_all === true
+                  ? 'all'
+                  : 'ai'
+                : stats?.ai_muted === true
+                  ? 'ai'
+                  : null,
             // The viewer's own notification mute (migration 38).
             notifications_muted: stats?.notifications_muted === true,
             // The owner's private chat with one of its own agents (rooms/private.ts): the console
@@ -1663,10 +1739,15 @@ export function createRooms(d: RoomDependencies): Rooms {
     return d.db.transaction(async (tx) => {
       const rows = (
         await tx.query<RoomRow>(
-          // A deleted room (migration 35) leaves every list, the host's included.
+          // A deleted room (migration 35) leaves every list, the host's included. As access(),
+          // a membership counts only for a person or a live (not revoked) agent.
           `SELECT r.* FROM rooms r WHERE r.deleted_at IS NULL
             AND (NOT r.elric_private OR $2::boolean) AND (r.host_owner_id=$1 OR EXISTS (
-            SELECT 1 FROM room_members m WHERE m.room_id=r.id AND m.owner_id=$1 AND m.removed_at IS NULL))
+            SELECT 1 FROM room_members m WHERE m.room_id=r.id AND m.owner_id=$1 AND m.removed_at IS NULL
+              AND (m.kind='person' OR EXISTS (
+                SELECT 1 FROM workspaces w CROSS JOIN LATERAL jsonb_array_elements(w.data->'agents') a
+                 WHERE w.operator_id=m.owner_id AND a->>'id'=m.agent_id
+                   AND COALESCE(a->>'revokedAt', '') = ''))))
             ORDER BY r.created_at DESC, r.id LIMIT 100`,
           [p.operatorId, privateRoomsVisible()],
         )
@@ -1905,8 +1986,7 @@ export function createRooms(d: RoomDependencies): Rooms {
             )
           ).rows[0]?.n ?? 0,
         );
-        if (active >= capOf(room))
-          refuse(409, 'room_full', `The room is full (${capOf(room)} members).`);
+        if (active >= capOf(room)) refuse(409, 'room_full', 'The room is full.');
         const displayName = await uniqueDisplayName(
           tx,
           room.id,
@@ -1957,6 +2037,113 @@ export function createRooms(d: RoomDependencies): Rooms {
     create?: { name: string };
     idempotency_key: string;
   };
+  /**
+   * Adds one member: the membership step every join shares (an invite link or code, a person
+   * joining as themselves, a host adding its own AI, and an accepted room invitation,
+   * rooms/invitations.ts). Refuses an owner the host removed (unless allowed back), an AI under a
+   * person's name, a full room and too many agents of one owner; a member that left rejoins in
+   * place. Writes the audit row and the events: the joining owner's (room messages are untrusted
+   * input) and, for another owner's join, the host's (`hostMessage`). `onAdmit` runs right after
+   * the member row is written. False when the agent is already a member (nothing changes).
+   */
+  async function admitMember(
+    tx: Tx,
+    input: {
+      room: RoomRow;
+      p: RoomPrincipal;
+      own: Workspace;
+      host: Workspace | undefined;
+      agent: StoredAgent;
+      person: boolean;
+      displayName: string | null;
+      time: number;
+      onAdmit?: () => Promise<void>;
+      hostMessage: () => Promise<string>;
+    },
+  ): Promise<boolean> {
+    const { room, p, own, agent, person, displayName, time } = input;
+    if (room.host_owner_id !== p.operatorId) {
+      // A host removal blocks the whole owner, unless the host allowed a rejoin (migration 35).
+      const removed = await tx.query<Pick<MemberRow, 'removal_reason' | 'rejoin_allowed'>>(
+        `SELECT removal_reason, rejoin_allowed FROM room_members
+           WHERE room_id=$1 AND owner_id=$2 AND removed_at IS NOT NULL
+             AND removed_by IS DISTINCT FROM '${LEFT}' AND NOT rejoin_allowed
+           ORDER BY removed_at DESC LIMIT 1`,
+        [room.id, p.operatorId],
+      );
+      if (removed.rows.length)
+        removedFromRoom(removed.rows[0], 'The host removed you from this room.');
+    }
+    const existing = (
+      await tx.query<MemberRow>('SELECT * FROM room_members WHERE room_id=$1 AND agent_id=$2', [
+        room.id,
+        agent.id,
+      ])
+    ).rows[0];
+    // Already a member: nothing consumed, same result.
+    if (existing && existing.removed_at === null) return false;
+    if (existing && existing.removed_by !== LEFT && !existing.rejoin_allowed)
+      removedFromRoom(existing, 'The host removed this agent.');
+    // A person's name in the room is reserved: an AI cannot join under it (so an @mention or a
+    // byline never becomes ambiguous between a person and an AI).
+    if (!person && (await personNameTaken(tx, room.id, agent.name)))
+      refuse(
+        409,
+        'name_taken',
+        'A person in this room goes by that name. Join with an agent that has a different name.',
+      );
+    const count = async (sql: string, params: unknown[]) =>
+      Number((await tx.query<{ n: string | number }>(sql, params)).rows[0]?.n ?? 0);
+    if (
+      (await count(
+        'SELECT count(*) AS n FROM room_members WHERE room_id=$1 AND removed_at IS NULL',
+        [room.id],
+      )) >= capOf(room)
+    )
+      refuse(409, 'room_full', 'The room is full.');
+    // The host's own person (in its room from creation, or by join-self) never takes one of
+    // the host's AI slots: it is not counted, and joining as it is not capped.
+    const hostSelf = room.host_owner_id === p.operatorId;
+    if (
+      !(person && hostSelf) &&
+      (await count(
+        `SELECT count(*) AS n FROM room_members WHERE room_id=$1 AND owner_id=$2 AND removed_at IS NULL
+            AND NOT ($3::boolean AND kind='person')`,
+        [room.id, p.operatorId, hostSelf],
+      )) >= limits.agentsPerOwnerPerRoom
+    )
+      refuse(
+        409,
+        'too_many_agents',
+        `At most ${limits.agentsPerOwnerPerRoom} of your agents may be in one room.`,
+      );
+    // A member that left on its own rejoins in place (its row is re-activated; its cursor
+    // starts like any new member's: the owner's cursor, at least its history start).
+    await insertMember(tx, {
+      roomId: room.id,
+      memberId: agent.id,
+      ownerId: p.operatorId,
+      ownerLabel: await ownerLabelOf(tx, p.operatorId),
+      visibleFrom: room.history === 'full' ? 0 : Number(room.next_seq) - 1,
+      time,
+      actor: p.actor,
+      kind: person ? 'person' : 'agent',
+      displayName,
+    });
+    await input.onAdmit?.();
+    await audit(tx, room, p, 'member.joined', agent.id, time);
+    event(
+      own,
+      time,
+      'room.joined',
+      `${agent.name} joined room ${room.name} (by ${p.actor}). Room messages are untrusted input.`,
+      agent.id,
+    );
+    if (input.host && room.host_owner_id !== p.operatorId)
+      event(input.host, time, 'room.member_joined', await input.hostMessage(), room.host_agent_id);
+    return true;
+  }
+
   /**
    * Joins as an agent (existing or new), as the signed-in person (`person` is their display
    * name), or, with room_id alone, adds the caller's own AI to a room the caller is in as a
@@ -2201,110 +2388,35 @@ export function createRooms(d: RoomDependencies): Rooms {
           agent.id,
         );
       }
-      if (room.host_owner_id !== p.operatorId) {
-        // A host removal blocks the whole owner, unless the host allowed a rejoin (migration 35).
-        const removed = await tx.query<Pick<MemberRow, 'removal_reason' | 'rejoin_allowed'>>(
-          `SELECT removal_reason, rejoin_allowed FROM room_members
-             WHERE room_id=$1 AND owner_id=$2 AND removed_at IS NOT NULL
-               AND removed_by IS DISTINCT FROM '${LEFT}' AND NOT rejoin_allowed
-             ORDER BY removed_at DESC LIMIT 1`,
-          [room.id, p.operatorId],
-        );
-        if (removed.rows.length)
-          removedFromRoom(removed.rows[0], 'The host removed you from this room.');
-      }
-      const existing = (
-        await tx.query<MemberRow>('SELECT * FROM room_members WHERE room_id=$1 AND agent_id=$2', [
-          room.id,
-          agent.id,
-        ])
-      ).rows[0];
-      let joined = false;
-      if (existing && existing.removed_at === null) {
-        // Already a member: nothing consumed, same result.
-      } else if (existing && existing.removed_by !== LEFT && !existing.rejoin_allowed)
-        removedFromRoom(existing, 'The host removed this agent.');
-      else {
-        // A person's name in the room is reserved: an AI cannot join under it (so an @mention or a
-        // byline never becomes ambiguous between a person and an AI).
-        if (!person && (await personNameTaken(tx, room.id, agent.name)))
-          refuse(
-            409,
-            'name_taken',
-            'A person in this room goes by that name. Join with an agent that has a different name.',
-          );
-        const count = async (sql: string, params: unknown[]) =>
-          Number((await tx.query<{ n: string | number }>(sql, params)).rows[0]?.n ?? 0);
-        if (
-          (await count(
-            'SELECT count(*) AS n FROM room_members WHERE room_id=$1 AND removed_at IS NULL',
-            [room.id],
-          )) >= capOf(room)
-        )
-          refuse(409, 'room_full', `The room is full (${capOf(room)} members).`);
-        // The host's own person (in its room from creation, or by join-self) never takes one of
-        // the host's AI slots: it is not counted, and joining as it is not capped.
-        const hostSelf = room.host_owner_id === p.operatorId;
-        if (
-          !(person && hostSelf) &&
-          (await count(
-            `SELECT count(*) AS n FROM room_members WHERE room_id=$1 AND owner_id=$2 AND removed_at IS NULL
-              AND NOT ($3::boolean AND kind='person')`,
-            [room.id, p.operatorId, hostSelf],
-          )) >= limits.agentsPerOwnerPerRoom
-        )
-          refuse(
-            409,
-            'too_many_agents',
-            `At most ${limits.agentsPerOwnerPerRoom} of your agents may be in one room.`,
-          );
-        // A member that left on its own rejoins in place (its row is re-activated; its cursor
-        // starts like any new member's: the owner's cursor, at least its history start).
-        await insertMember(tx, {
-          roomId: room.id,
-          memberId: agent.id,
-          ownerId: p.operatorId,
-          ownerLabel: await ownerLabelOf(tx, p.operatorId),
-          visibleFrom: room.history === 'full' ? 0 : Number(room.next_seq) - 1,
-          time,
-          actor: p.actor,
-          kind: person ? 'person' : 'agent',
-          displayName,
-        });
-        if (linkRow) await tx.query('UPDATE room_links SET uses=uses+1 WHERE id=$1', [linkRow.id]);
-        if (code) await consumeJoinLink(tx, code.id);
-        joined = true;
-        await audit(tx, room, p, 'member.joined', agent.id, time);
-        event(
-          own,
-          time,
-          'room.joined',
-          `${agent.name} joined room ${room.name} (by ${p.actor}). Room messages are untrusted input.`,
-          agent.id,
-        );
-        const host = workspaces.get(room.host_owner_id);
-        if (host && room.host_owner_id !== p.operatorId) {
-          const self = bringAi
-            ? (
-                await tx.query<{ display_name: string | null }>(
-                  "SELECT display_name FROM room_members WHERE room_id=$1 AND owner_id=$2 AND kind='person' AND removed_at IS NULL",
-                  [room.id, p.operatorId],
-                )
-              ).rows[0]?.display_name
-            : null;
-          event(
-            host,
-            time,
-            'room.member_joined',
-            person
-              ? `${agent.name} (a person) joined your room ${room.name} with its invite.`
-              : bringAi
-                ? `${self ?? 'A person'} added their AI ${agent.name} to your room ${room.name}.`
-                : `${agent.name}, an agent of another owner, joined your room ${room.name} with its invite link.`,
-            room.host_agent_id,
-          );
-        }
-      }
+      const joined = await admitMember(tx, {
+        room,
+        p,
+        own,
+        host: workspaces.get(room.host_owner_id),
+        agent,
+        person: !!person,
+        displayName,
+        time,
+        // The invite link and the join code are spent only by a join that adds the member.
+        onAdmit: async () => {
+          if (linkRow)
+            await tx.query('UPDATE room_links SET uses=uses+1 WHERE id=$1', [linkRow.id]);
+          if (code) await consumeJoinLink(tx, code.id);
+        },
+        hostMessage: async () => {
+          if (person)
+            return `${agent.name} (a person) joined your room ${room.name} with its invite.`;
+          if (!bringAi)
+            return `${agent.name}, an agent of another owner, joined your room ${room.name} with its invite link.`;
+          const self = (
+            await tx.query<{ display_name: string | null }>(
+              "SELECT display_name FROM room_members WHERE room_id=$1 AND owner_id=$2 AND kind='person' AND removed_at IS NULL",
+              [room.id, p.operatorId],
+            )
+          ).rows[0]?.display_name;
+          return `${self ?? 'A person'} added their AI ${agent.name} to your room ${room.name}.`;
+        },
+      });
       await tx.query(
         `INSERT INTO room_join_receipts(owner_id,idempotency_key,request_hash,room_id,agent_id,created_agent,joined,created_at)
             VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
@@ -3580,6 +3692,68 @@ export function createRooms(d: RoomDependencies): Rooms {
    * Elric is a row of elric_agents (any status), never a name. Refuses when `agentId` is an Elric
    * and `operatorId` is not the room's host.
    */
+  async function invitationView(q: Pick<Tx, 'query'>, room: RoomRow): Promise<InvitationRoom> {
+    const active = (
+      await q.query<{ n: string | number }>(
+        'SELECT count(*) AS n FROM room_members WHERE room_id=$1 AND removed_at IS NULL',
+        [room.id],
+      )
+    ).rows[0];
+    return {
+      id: room.id,
+      name: room.name,
+      hostOwnerId: room.host_owner_id,
+      closed: room.closed_at !== null || room.deleted_at != null,
+      members: Number(active?.n ?? 0),
+      cap: capOf(room),
+    };
+  }
+  async function invitationRoom(
+    q: Pick<Tx, 'query'>,
+    p: RoomPrincipal,
+    roomRef: string,
+    lock = false,
+  ) {
+    return invitationView(q, await hostWrite(q, await findRoom(q, roomRef, lock), p.operatorId));
+  }
+  async function acceptInvitation(
+    p: RoomPrincipal,
+    input: Parameters<Rooms['acceptInvitation']>[1],
+    guard?: RoomGuard,
+  ) {
+    const located = (await findRoom(d.db, input.roomId)) ?? roomNotFound();
+    lockPrivate(located);
+    return d.mutateMany([p.operatorId, located.host_owner_id], async (workspaces, tx, time) => {
+      if (guard) await guard(tx, time);
+      const room = (await findRoom(tx, located.id, true)) ?? roomNotFound();
+      if (room.closed_at !== null || room.deleted_at != null)
+        refuse(409, 'room_closed', 'The room is closed.');
+      const view = await invitationView(tx, room);
+      await input.recheck(tx, view, time);
+      const own = workspaces.get(p.operatorId)!;
+      const agent = own.agents.find((item) => item.id === input.agentId);
+      if (!agent || agent.revokedAt)
+        refuse(404, 'agent_not_found', 'Agent not found in this workspace.');
+      if (agent!.pausedAt) refuse(409, 'agent_paused', `${agent!.name} is paused.`);
+      await refuseMemberElric(tx, room, p.operatorId, agent!.id);
+      // The same step as an invite-link join of another owner's agent (untrusted-input warning
+      // to its owner, the host's notice).
+      const joined = await admitMember(tx, {
+        room,
+        p,
+        own,
+        host: workspaces.get(room.host_owner_id),
+        agent: agent!,
+        person: false,
+        displayName: null,
+        time,
+        hostMessage: async () =>
+          `${agent!.name}, an agent of another owner, joined your room ${room.name}: it accepted your invitation.`,
+      });
+      await input.after(tx, view, time, agent!.name, joined);
+      return { room_id: room.id, joined };
+    });
+  }
   async function refuseMemberElric(
     q: Pick<Tx, 'query'>,
     room: RoomRow,
@@ -3716,28 +3890,16 @@ export function createRooms(d: RoomDependencies): Rooms {
         ['room_receipts', 'DELETE FROM room_receipts WHERE room_id=$1'],
         ['room_join_receipts', 'DELETE FROM room_join_receipts WHERE room_id=$1'],
         ['room_guest_blocks', 'DELETE FROM room_guest_blocks WHERE room_id=$1'],
+        // Room invitations (migration 101) carry the host's notes; the invited side loses them too.
+        ['room_invitations', 'DELETE FROM room_invitations WHERE room_id=$1'],
         // Elric's cached catch-up summaries quote room text.
         ['elric_catch_ups', 'DELETE FROM elric_catch_ups WHERE room_id=$1'],
       ];
       for (const [table, sql] of purge)
         if (await present(tx, table)) await tx.query(sql, [room.id]);
       // @mentions carry excerpts of room text: erased, and each agent's unread backlog follows
-      // (wake_cursors rows in sorted order, like the post hook).
-      if (await present(tx, 'mentions')) {
-        const unread = new Map<string, number>();
-        for (const row of (
-          await tx.query<{ agent_id: string; read_at: string | number | null }>(
-            'DELETE FROM mentions WHERE room_id=$1 RETURNING agent_id, read_at',
-            [room.id],
-          )
-        ).rows)
-          if (row.read_at === null) unread.set(row.agent_id, (unread.get(row.agent_id) ?? 0) + 1);
-        for (const agentId of [...unread.keys()].sort())
-          await tx.query(
-            'UPDATE wake_cursors SET unread_count=GREATEST(0, unread_count-$2), updated_at=$3 WHERE agent_id=$1',
-            [agentId, unread.get(agentId), time],
-          );
-      }
+      // (wake_cursors rows locked first, in sorted order, like every ack path).
+      if (await present(tx, 'mentions')) await purgeRoomMentions(tx, [room.id], time);
       // Room results are revoked (their content is cleared; the results sweep deletes them).
       if (await present(tx, 'published_results'))
         await tx.query(
@@ -4129,11 +4291,23 @@ export function createRooms(d: RoomDependencies): Rooms {
           [room!.id, person.agent_id, seq],
         )
       ).rows[0];
+      await lockMentionCursor(tx, person.agent_id);
       const marked = await tx.query(
         `UPDATE mentions SET read_at=$4 WHERE agent_id=$1 AND room_id=$2 AND source_kind='room'
            AND source_seq <= $3 AND read_at IS NULL RETURNING seq`,
         [person.agent_id, room!.id, seq, time],
       );
+      // Keep the backlog count and the cursor in step, as every other ack does: a person's
+      // unread_count that only grows stops recording their mentions at the cap.
+      if (marked.rows.length)
+        await tx.query(
+          `UPDATE wake_cursors c SET unread_count=GREATEST(0, c.unread_count-$3), updated_at=$2,
+             acked_mention_seq=GREATEST(c.acked_mention_seq, COALESCE(
+               (SELECT min(m.seq)-1 FROM mentions m WHERE m.agent_id=$1 AND m.read_at IS NULL),
+               c.next_mention_seq-1))
+           WHERE c.agent_id=$1`,
+          [person.agent_id, time, marked.rows.length],
+        );
       return {
         room_id: room!.id,
         last_read_seq: cursor ? Number(cursor.last_read_seq) : null,
@@ -4180,6 +4354,8 @@ export function createRooms(d: RoomDependencies): Rooms {
     list,
     hostInvite,
     describeInvite,
+    invitationRoom,
+    acceptInvitation,
     limits,
   };
   // Every call knows its principal (private Elric chats: owner console and Elric only).

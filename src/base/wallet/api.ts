@@ -3,7 +3,7 @@
  * server/base/wallet/routes.ts, behind CITY_BASE_WALLET). Balances are what the server read on
  * Base, with the block and time; nothing here is ever a promise of money.
  */
-import { getAddress, isAddress } from 'viem';
+import { formatUnits, getAddress, isAddress } from 'viem';
 import { api, ApiError } from '../../api';
 import { WALLET_CHAIN_ID } from '../../../shared/base/wallet-network';
 import { pageOutOfDate, STALE_PAGE, UNSUPPORTED_NETWORK } from '../stalePage';
@@ -206,3 +206,24 @@ export async function readHistory(agentId: string): Promise<WalletHistory | null
 
 /** A signed USDC amount for the line and the list (6 decimals; display string as the server sent it). */
 export const usdcNumber = (amount: Amount) => Number(amount.raw) / 10 ** amount.decimals;
+
+/**
+ * A USDC amount as text, exact to its base units with at least two decimals ("1.234567", "0.007",
+ * "20.00"). For every amount a person reads: service payments are sub-cent, so rounding to cents
+ * would show them as 0.00 or 0.01. usdcNumber stays for chart geometry only.
+ */
+export function usdcAmountText(amount: Pick<Amount, 'raw' | 'decimals'>): string {
+  const text = formatUnits(BigInt(amount.raw), amount.decimals);
+  const [whole, fraction = ''] = text.split('.');
+  return `${whole}.${fraction.padEnd(2, '0')}`;
+}
+
+/** A USDC value the balance line computed (a number) as text, exact to the 6 decimals of USDC. */
+export const usdcValueText = (value: number) =>
+  usdcAmountText({ raw: String(Math.round(value * 1e6)), decimals: 6 });
+
+/** ETH for gas, to four decimals without trailing zeros: 1 reads "1", never "1.". */
+export const ethAmountText = (display: string) => {
+  const value = Number(display);
+  return value === 0 ? '0' : value < 0.0001 ? '<0.0001' : value.toFixed(4).replace(/\.?0+$/, '');
+};

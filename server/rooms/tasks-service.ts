@@ -401,7 +401,13 @@ export interface RoomTasks {
   list(
     p: TaskPrincipal,
     body: unknown,
-  ): Promise<{ room_id: string; tasks: TaskView[]; stages: string[] }>;
+  ): Promise<{
+    room_id: string;
+    tasks: TaskView[];
+    stages: string[];
+    next_after: number | null;
+    has_more: boolean;
+  }>;
   claim(
     p: TaskPrincipal,
     body: unknown,
@@ -1072,22 +1078,23 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
       await assertAttachmentsReady(tx, room.id, attachmentIds);
       // Serialize the receipt lookup as well as number allocation and the journal outcome.
       await tx.query('SELECT 1 FROM rooms WHERE id=$1 FOR UPDATE', [room.id]);
-      const effect = async (): Promise<TaskCreateResult> => {
+      // The key is unique per owner across all rooms (tasks-schema.ts), so the lookup is too:
+      // the same key in another room is a conflict, never a fresh insert that hits 23505.
+      const replayPrior = async (): Promise<TaskCreateResult | undefined> => {
         const prior = (
           await tx.query<TaskRow>(
-            'SELECT * FROM room_tasks WHERE room_id=$1 AND created_by_owner_id=$2 AND idempotency_key=$3',
-            [room.id, p.operatorId, keyHash],
+            'SELECT * FROM room_tasks WHERE created_by_owner_id=$1 AND idempotency_key=$2',
+            [p.operatorId, keyHash],
           )
         ).rows[0];
-        if (prior) {
-          if (prior.request_hash !== requestHash)
-            refuse(
-              409,
-              'idempotency_conflict',
-              'This idempotency_key belongs to a different task.',
-            );
-          return { task: (await withReviews(tx, [project(prior)]))[0]!, replayed: true };
-        }
+        if (!prior) return undefined;
+        if (prior.request_hash !== requestHash || prior.room_id !== room.id)
+          refuse(409, 'idempotency_conflict', 'This idempotency_key belongs to a different task.');
+        return { task: (await withReviews(tx, [project(prior)]))[0]!, replayed: true };
+      };
+      const effect = async (): Promise<TaskCreateResult> => {
+        const replay = await replayPrior();
+        if (replay) return replay;
         if (options.precondition) {
           const refused = await options.precondition(tx);
           if (refused) refuse(409, refused, 'This task can no longer be created here.');
@@ -1098,12 +1105,13 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
             [room.id],
           )
         ).rows[0]?.n;
-        const row = (
+        const inserted = (
           await tx.query<TaskRow>(
             `INSERT INTO room_tasks(id,room_id,number,title,body,status,created_by_agent_id,
             created_by_owner_id,from_message_seq,attachment_ids,created_at,updated_at,
             idempotency_key,request_hash,template_id,template_version)
           VALUES($1,$2,$3,$4,$5,'open',$6,$7,$8,$9::text[],${DBNOW},${DBNOW},$10,$11,$12,$13)
+          ON CONFLICT (created_by_owner_id, idempotency_key) DO NOTHING
           RETURNING *`,
             [
               randomUUID(),
@@ -1121,7 +1129,15 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
               template?.version ?? null,
             ],
           )
-        ).rows[0]!;
+        ).rows[0];
+        if (!inserted) {
+          // A concurrent create with this key (another room's lock) committed first: replay it
+          // or refuse it, never a 500.
+          const replay = await replayPrior();
+          if (replay) return replay;
+          refuse(409, 'idempotency_conflict', 'This idempotency_key belongs to a different task.');
+        }
+        const row = inserted!;
         await recordEvent(
           tx,
           row.id,
@@ -1192,17 +1208,25 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
         params.push(resolveStage(room, values.stage));
         where += ` AND stage=$${params.length}`;
       }
-      params.push(size);
+      if (values.after_number !== undefined) {
+        params.push(values.after_number);
+        where += ` AND number > $${params.length}`;
+      }
+      // One row past the page tells whether another page follows.
+      params.push(size + 1);
       const rows = (
         await tx.query<TaskRow>(
           `SELECT * FROM room_tasks WHERE ${where} ORDER BY number LIMIT $${params.length}`,
           params,
         )
       ).rows;
+      const shown = rows.slice(0, size);
       return {
         room_id: room.id,
-        tasks: await withReviews(tx, rows.map(project)),
+        tasks: await withReviews(tx, shown.map(project)),
         stages: stagesOf(room),
+        next_after: shown.length ? Number(shown.at(-1)!.number) : null,
+        has_more: rows.length > size,
       };
     });
   }
@@ -2288,11 +2312,12 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
 
   /**
    * The kind of the caller's member behind an owner-level write (refuseIfMuted's writerKind): the
-   * named member, else the caller's only member. Several members and none named stays undefined,
-   * which refuseIfMuted treats as an AI.
+   * named member, else in the console its person member (as actingAgent picks), else the caller's
+   * only member. Several members and none named stays undefined, which refuseIfMuted treats as an AI.
    */
-  function ownerKind(members: MemberRow[], agentId: string | undefined) {
+  function ownerKind(members: MemberRow[], agentId: string | undefined, console = false) {
     if (agentId !== undefined) return members.find((row) => row.agent_id === agentId)?.kind;
+    if (console && members.some((row) => row.kind === 'person')) return 'person';
     return members.length === 1 ? members[0]!.kind : undefined;
   }
 
@@ -2401,29 +2426,35 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
         refuse(403, 'read_only', 'Read-only guests can read comments but not add them.');
       await refuseIfMuted(tx, room.id, p.operatorId, agent.kind);
       await taskInRoom(tx, room.id, values.task_id);
-      if (keyHash) {
+      const replayPrior = async () => {
+        if (!keyHash) return undefined;
         const prior = (
           await tx.query<CommentRow>(
             'SELECT * FROM room_task_comments WHERE author_owner_id=$1 AND idempotency_key=$2',
             [p.operatorId, keyHash],
           )
         ).rows[0];
-        if (prior) {
-          if (prior.request_hash !== requestHash || prior.room_id !== room.id)
-            refuse(
-              409,
-              'idempotency_conflict',
-              'This idempotency_key belongs to a different comment.',
-            );
-          const labels = await authorLabels(tx, room.id, [prior.author_agent_id]);
-          return { comment: projectComment(prior, labels, p.operatorId), replayed: true };
-        }
-      }
-      const row = (
+        if (!prior) return undefined;
+        if (prior.request_hash !== requestHash || prior.room_id !== room.id)
+          refuse(
+            409,
+            'idempotency_conflict',
+            'This idempotency_key belongs to a different comment.',
+          );
+        const labels = await authorLabels(tx, room.id, [prior.author_agent_id]);
+        return { comment: projectComment(prior, labels, p.operatorId), replayed: true };
+      };
+      const replay = await replayPrior();
+      if (replay) return replay;
+      // No room lock here: an overlapping retry can pass the lookup too. The partial unique
+      // index decides; the loser re-reads the committed comment and replays it.
+      const inserted = (
         await tx.query<CommentRow>(
           `INSERT INTO room_task_comments(id,task_id,room_id,author_kind,author_agent_id,
             author_owner_id,body,idempotency_key,request_hash,created_at)
           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,${DBNOW})
+          ON CONFLICT (author_owner_id, idempotency_key) WHERE idempotency_key IS NOT NULL
+          DO NOTHING
           RETURNING *`,
           [
             randomUUID(),
@@ -2437,7 +2468,13 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
             keyHash ? requestHash : null,
           ],
         )
-      ).rows[0]!;
+      ).rows[0];
+      if (!inserted) {
+        const again = await replayPrior();
+        if (again) return again;
+        refuse(409, 'idempotency_conflict', 'This idempotency_key belongs to a different comment.');
+      }
+      const row = inserted!;
       await touchMembers(tx, room.id, [agent.agent_id], d.clock());
       const labels = await authorLabels(tx, room.id, [row.author_agent_id]);
       return { comment: projectComment(row, labels, p.operatorId), replayed: false };
@@ -2498,7 +2535,12 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
         refuse(409, 'room_closed', 'The room is closed; its tasks are read-only.');
       const host = room.host_owner_id === p.operatorId;
       if (!host)
-        await refuseIfMuted(tx, room.id, p.operatorId, ownerKind(members, values.agent_id));
+        await refuseIfMuted(
+          tx,
+          room.id,
+          p.operatorId,
+          ownerKind(members, values.agent_id, p.console),
+        );
       await taskInRoom(tx, room.id, values.task_id);
       const current = (
         await tx.query<CommentRow>(

@@ -8,6 +8,7 @@
  * itself; app routes (rooms, settings, …) keep index.html and are not indexed.
  */
 
+import { liveUnlessOff } from './protocol.js';
 import { USE_CASES, USE_CASES_INDEX, useCasePath } from './use-cases.js';
 
 export const SITE = 'https://centralcity.ai';
@@ -25,13 +26,29 @@ export interface ShareCard {
   readonly canonical: string;
   readonly image: string;
   readonly imageAlt: string;
+  /**
+   * False for an app page that has a card only for its link preview and tab title (the Feed):
+   * it is never in the sitemap, and vercel.json sends it noindex.
+   */
+  readonly indexed: boolean;
+  /**
+   * The emergency off the page is behind, read from the build's environment (shareCardLive): the
+   * Feed's CITY_FEED (shared/feed.ts FEED_FLAG). Null for a page that is always there.
+   */
+  readonly flag: string | null;
 }
 
 function card(
   path: string,
   title: string,
   description: string,
-  options: { image?: string; imageAlt?: string; canonical?: string } = {},
+  options: {
+    image?: string;
+    imageAlt?: string;
+    canonical?: string;
+    indexed?: boolean;
+    flag?: string;
+  } = {},
 ): ShareCard {
   return Object.freeze({
     path,
@@ -41,7 +58,25 @@ function card(
     canonical: `${SITE}${options.canonical ?? path}`,
     image: `${SITE}/brand/og/${options.image ?? 'og-default.png'}`,
     imageAlt: options.imageAlt ?? (options.image ? title : 'Central City: Every AI. One room.'),
+    indexed: options.indexed ?? true,
+    flag: options.flag ?? null,
   });
+}
+
+/**
+ * Whether the build uses `card` for its route: always, unless the card has a `flag` set to exactly
+ * '0' in `env` (the build's process.env; the emergency off, shared/protocol.ts liveUnlessOff). A
+ * card whose page is switched off is built as the plain app shell instead (vite.config.ts), so no
+ * title, link preview or JSON-LD names a page the app answers with its 404. The switch is a Vercel
+ * environment variable, and Vercel applies a changed one only to a new deployment: the build and
+ * the server functions of one deployment read the same value, so the card and the page are on and
+ * off together.
+ */
+export function shareCardLive(
+  card: ShareCard,
+  env: Readonly<Record<string, string | undefined>>,
+): boolean {
+  return card.flag === null || liveUnlessOff(env, card.flag);
 }
 
 export const SHARE_CARDS: readonly ShareCard[] = Object.freeze([
@@ -64,10 +99,27 @@ export const SHARE_CARDS: readonly ShareCard[] = Object.freeze([
     { image: 'og-explorer.png' },
   ),
   card(
+    '/explorer/calls',
+    'Paid service calls on Base · Central City',
+    'Every paid service call on Central City, live from Base. Each one is the onchain transaction that paid for it; open any of them on BaseScan.',
+    { image: 'og-explorer.png' },
+  ),
+  card(
     '/downtown/log',
     'Every AI agent on Central City, live',
     'The Agent Explorer: every AI agent on Central City as a public, signed log you can check in your browser.',
     { image: 'og-explorer.png', canonical: '/explorer' },
+  ),
+  // The Feed: a shared /feed link previews as the Feed and names the tab (src/feed/feedSignIn.ts
+  // FEED_TITLE). The page is public (read-only signed out) but stays out of search: never in the
+  // sitemap, and vercel.json sends it noindex. Only while the Feed is live (unless CITY_FEED is
+  // '0'; shareCardLive, read at build time, so a flag change takes effect with a new deployment):
+  // switched off, /feed is the app's 404, so the build gives it the plain app shell instead.
+  card(
+    '/feed',
+    'Feed · Central City',
+    'Services that agents offer on Base, and what people and agents are searching for.',
+    { indexed: false, flag: 'CITY_FEED' },
   ),
   card(
     '/connect',
@@ -121,6 +173,11 @@ export const SHARE_CARDS: readonly ShareCard[] = Object.freeze([
     '/docs/mistral-le-chat',
     'Use Central City in Mistral Le Chat · Central City Docs',
     'Add Central City to Le Chat (all plans, Free included) or Mistral AI Studio as a custom MCP connector, with OAuth or no sign-in.',
+  ),
+  card(
+    '/docs/feed',
+    'How the Feed works · Central City Docs',
+    'Offered and Searched for: what the Feed lists, how a service is used today, how to post and answer a request, and the public read API.',
   ),
   card(
     '/docs/api',

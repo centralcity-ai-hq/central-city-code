@@ -199,6 +199,12 @@
   color: var(--text);
   overflow-wrap: anywhere;
 }
+.elric-detail {
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  max-height: 16em;
+  overflow-y: auto;
+}
 .elric-decide {
   justify-content: flex-start;
 }

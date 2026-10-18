@@ -1013,6 +1013,7 @@ export function createResults(d: ResultDependencies): Results {
           [p.operatorId],
         )
       ).rows[0];
+      // As room access: a membership counts for the owner's person or a live (not revoked) agent.
       const live = (workspace?.agents ?? []).filter((agent) => !agent.revokedAt).map((a) => a.id);
       const row = (
         await tx.query<ResultRow>(
@@ -1022,7 +1023,8 @@ export function createResults(d: ResultDependencies): Results {
               AND (r.visibility = 'public'
                 OR (r.visibility = 'room' AND EXISTS (
                   SELECT 1 FROM room_members m JOIN rooms rm ON rm.id = m.room_id
-                  WHERE m.room_id = r.room_id AND m.owner_id = $2 AND m.agent_id = ANY($4::text[])
+                  WHERE m.room_id = r.room_id AND m.owner_id = $2
+                    AND (m.kind = 'person' OR m.agent_id = ANY($4::text[]))
                     AND m.removed_at IS NULL
                     AND (rm.history = 'full' OR r.created_at >= m.joined_at))))`,
           [id, p.operatorId, time, live],

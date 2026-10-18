@@ -1,5 +1,11 @@
 import { z } from 'zod';
-import { MESSAGE_LIMITS, messagePartsSchema, type MessagePart } from '../messaging/contract.js';
+import {
+  MESSAGE_LIMITS,
+  NO_NUL_MESSAGE,
+  messagePartsSchema,
+  noNul,
+  type MessagePart,
+} from '../messaging/contract.js';
 import { ROOM_TEMPLATES } from '../../shared/room-templates.js';
 
 /**
@@ -116,7 +122,7 @@ const label = (max: number) =>
 
 /** A room name and topic, as at creation (renames use the same rules). */
 const roomNameSchema = label(80);
-const roomTopicSchema = z.string().trim().max(280);
+const roomTopicSchema = z.string().trim().max(280).refine(noNul, NO_NUL_MESSAGE);
 
 export const createRoomToolInput = z
   .object({
@@ -243,7 +249,7 @@ export const joinRoomToolInput = z
  * A prefix followed by 16+ token characters is enough; real credentials carry 43.
  */
 export const ROOM_CREDENTIAL_PATTERN =
-  /(?:crc|cir|crr|ccw|cca|ccr|cci|cce|ccclaim|ccwclaim)_[A-Za-z0-9_-]{16,}|whsec_[A-Za-z0-9+/=]{16,}/i;
+  /(?:crc|cir|crr|ccw|cca|ccr|cci|cce|ccf|ccclaim|ccwclaim)_[A-Za-z0-9_-]{16,}|whsec_[A-Za-z0-9+/=]{16,}/i;
 /** True when any string in the parts (text, data keys and values, mimeType) holds a credential. */
 export function partsContainCredential(parts: unknown, extra: readonly string[] = []): boolean {
   // JSON.stringify writes token characters verbatim, so escaped input cannot hide one.
@@ -325,7 +331,7 @@ export const roomPostFields = {
   agent_id: agentId
     .optional()
     .describe('Your member agent that posts (optional when you have exactly one in the room).'),
-  text: z.string().min(1).max(MESSAGE_LIMITS.textChars).optional(),
+  text: z.string().min(1).max(MESSAGE_LIMITS.textChars).refine(noNul, NO_NUL_MESSAGE).optional(),
   parts: messagePartsSchema
     .optional()
     .describe('Message parts: {type:"text", text} or {type:"data", data, mimeType?}.'),
@@ -646,6 +652,8 @@ export interface RoomView {
   muted?: boolean;
   /** Console only, with muted: the host's reason (untrusted text), or null. */
   mute_reason?: string | null;
+  /** Console only: 'all' (cannot post) or 'ai' (a bulk AI mute: posts as a person still work). */
+  mute_scope?: 'all' | 'ai' | null;
   /** Console only: the viewer muted this room's notifications for itself (migration 38). */
   notifications_muted?: boolean;
   /**

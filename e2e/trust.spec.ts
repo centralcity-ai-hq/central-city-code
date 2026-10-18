@@ -80,7 +80,7 @@ test('policy pages carry their effective and last-updated dates', async ({ page 
   ]) {
     await page.goto(path);
     await expect(page.locator('.trust-status').first(), path).toHaveText(
-      'Effective date: 28 September 2026 · Last updated: 1 October 2026',
+      'Effective date: 28 September 2026 · Last updated: 16 October 2026',
     );
   }
 });

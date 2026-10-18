@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { eraseElricOwner } from '../server/elric/erase.js';
+import { eraseElricOwner, purgeElricConversation } from '../server/elric/erase.js';
 import { elricFixture } from './elric-fixture.js';
 
 /**
@@ -178,4 +178,149 @@ test('eraseElricOwner: hard-deletes the private Elric chat room and its messages
   assert.ok((await rows('room_messages', b.roomId)) > 0);
   // Idempotent.
   assert.equal((await eraseElricOwner(f.db, a.owner.operatorId)).private_rooms, 0);
+});
+
+/**
+ * An invocation still holding a reservation (deferred, or running with a model call in flight)
+ * when its rows are erased: the reservation leaves the global ceiling, what it spent counts.
+ */
+async function holdReservation(
+  f: Awaited<ReturnType<typeof elricFixture>>,
+  roomId: string,
+  units: { spent: number; inflight: number } = { spent: 10, inflight: 5 },
+) {
+  const inv = (
+    await f.db.query<{ owner_id: string; source_seq: string; kind: string; usage_day: string }>(
+      'SELECT * FROM elric_invocations WHERE room_id=$1 AND kind IS NOT NULL AND usage_day IS NOT NULL',
+      [roomId],
+    )
+  ).rows[0]!;
+  assert.ok(inv, 'an invocation with a usage day');
+  await f.db.query(
+    `UPDATE elric_invocations SET status='queued', reserved_units=40, spent_units=$3,
+       inflight_units=$4 WHERE room_id=$1 AND source_seq=$2`,
+    [roomId, inv.source_seq, units.spent, units.inflight],
+  );
+  await f.db.query(
+    'UPDATE elric_usage SET reserved_units=reserved_units+40 WHERE owner_id=$1 AND day=$2',
+    [inv.owner_id, inv.usage_day],
+  );
+  await f.db.query('UPDATE elric_global_usage SET reserved_units=reserved_units+40 WHERE day=$1', [
+    inv.usage_day,
+  ]);
+  const global = async () =>
+    (
+      await f.db.query<{ reserved_units: string; spent_units: string }>(
+        'SELECT reserved_units, spent_units FROM elric_global_usage WHERE day=$1',
+        [inv.usage_day],
+      )
+    ).rows[0]!;
+  return { inv, global, before: await global() };
+}
+
+test('eraseElricOwner: a held reservation is released from the global ceiling', async (t) => {
+  const f = await elricFixture(t);
+  const s = await f.scene('Room R');
+  f.small.push({ text: 'An answer.' });
+  await f.say(s.owner, s.room, '@Elric what is next?', s.person);
+  await f.elric.drain();
+  const held = await holdReservation(f, s.room.id);
+  await eraseElricOwner(f.db, s.owner.operatorId);
+  const after = await held.global();
+  assert.equal(Number(after.reserved_units), Number(held.before.reserved_units) - 40);
+  assert.equal(Number(after.spent_units), Number(held.before.spent_units) + 15);
+});
+
+async function purgeWithHeld(
+  t: Parameters<typeof elricFixture>[0],
+  units: { spent: number; inflight: number },
+) {
+  const f = await elricFixture(t);
+  const owner = await f.account('Purge owner');
+  await f.verify(owner);
+  assert.ok((await f.call(owner.cookie, 'POST', '/api/elric', {})).statusCode < 300);
+  const conv = (await f.call(owner.cookie, 'POST', '/api/elric/conversations', {})).json();
+  f.small.push({ text: 'An answer.' });
+  const post = await f.call(owner.cookie, 'POST', `/api/rooms/${conv.id}/messages`, {
+    agent_id: conv.person_member_id,
+    text: '@Elric hello there',
+    idempotency_key: randomUUID(),
+  });
+  assert.ok(post.statusCode < 300, post.body);
+  await f.elric.drain();
+  const held = await holdReservation(f, conv.id, units);
+  const usage = async () =>
+    (
+      await f.db.query<{ reserved_units: string; used: number }>(
+        `SELECT reserved_units, ${held.inv.kind} AS used FROM elric_usage
+          WHERE owner_id=$1 AND day=$2`,
+        [held.inv.owner_id, held.inv.usage_day],
+      )
+    ).rows[0]!;
+  const usageBefore = await usage();
+  assert.ok(Number(usageBefore.used) > 0, 'the run counted against the allowance');
+  assert.equal(await purgeElricConversation(f.db, owner.operatorId, conv.id), true);
+  const after = await held.global();
+  assert.equal(Number(after.reserved_units), Number(held.before.reserved_units) - 40);
+  assert.equal(
+    Number(after.spent_units),
+    Number(held.before.spent_units) + units.spent + units.inflight,
+  );
+  const usageAfter = await usage();
+  assert.equal(Number(usageAfter.reserved_units), Number(usageBefore.reserved_units) - 40);
+  return { before: Number(usageBefore.used), after: Number(usageAfter.used) };
+}
+
+test('purgeElricConversation: a run that spent or has a call in flight keeps the allowance count', async (t) => {
+  const used = await purgeWithHeld(t, { spent: 10, inflight: 5 });
+  assert.equal(used.after, used.before);
+});
+
+test('purgeElricConversation: a model call in flight alone keeps the allowance count', async (t) => {
+  const used = await purgeWithHeld(t, { spent: 0, inflight: 5 });
+  assert.equal(used.after, used.before);
+});
+
+test('purgeElricConversation: a run that spent nothing gets the allowance back', async (t) => {
+  const used = await purgeWithHeld(t, { spent: 0, inflight: 0 });
+  assert.equal(used.after, used.before - 1);
+});
+
+test('purgeElricConversation: a pending owner post leaves no unread mention counted', async (t) => {
+  const f = await elricFixture(t);
+  const owner = await f.account('Purge unread owner');
+  await f.verify(owner);
+  assert.ok((await f.call(owner.cookie, 'POST', '/api/elric', {})).statusCode < 300);
+  const conv = (await f.call(owner.cookie, 'POST', '/api/elric/conversations', {})).json();
+  const post = await f.call(owner.cookie, 'POST', `/api/rooms/${conv.id}/messages`, {
+    agent_id: conv.person_member_id,
+    text: '@Elric are you there?',
+    idempotency_key: randomUUID(),
+  });
+  assert.ok(post.statusCode < 300, post.body);
+  // No drain: the run is still queued and the mention unread.
+  const unread = (
+    await f.db.query<{ agent_id: string }>(
+      'SELECT agent_id FROM mentions WHERE room_id=$1 AND read_at IS NULL',
+      [conv.id],
+    )
+  ).rows;
+  assert.ok(unread.length > 0, 'an unread mention of the pending post');
+  const agentId = unread[0]!.agent_id;
+  const count = async () =>
+    Number(
+      (
+        await f.db.query<{ unread_count: number }>(
+          'SELECT unread_count FROM wake_cursors WHERE agent_id=$1',
+          [agentId],
+        )
+      ).rows[0]!.unread_count,
+    );
+  const before = await count();
+  const mine = unread.filter((r) => r.agent_id === agentId).length;
+  assert.ok(before >= mine);
+  assert.equal(await purgeElricConversation(f.db, owner.operatorId, conv.id), true);
+  assert.equal(await count(), before - mine);
+  const left = await f.db.query('SELECT 1 FROM mentions WHERE room_id=$1', [conv.id]);
+  assert.equal(left.rows.length, 0);
 });

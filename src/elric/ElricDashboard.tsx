@@ -45,7 +45,14 @@ import { ElricMark } from './ElricMark';
 import { ElricSheet } from './ElricSheet';
 import { ElricFirstVisit } from './ElricFirstVisit';
 import { ManageElricSheet } from './ManageElricSheet';
-import { liveLine, messageClock, waitingLabel } from './elricV3';
+import {
+  isOpenChat,
+  liveLine,
+  messageClock,
+  sendAttempt,
+  waitingLabel,
+  type SendAttempt,
+} from './elricV3';
 import type { ElricStatus } from './prefetch';
 import './dashboard.css';
 import './elric-v3.css';
@@ -95,6 +102,8 @@ type Pending = {
   id: string;
   tool?: string;
   summary: string | null;
+  /** The task description the action would create (cleaned by the server). */
+  detail?: string | null;
   args_hash: string;
   room: { id: string; name: string } | null;
 };
@@ -213,8 +222,8 @@ const shown = (text: string) => text.replace(/^@Elric\s+/i, '');
 const revealKey = (room: string, post: number | string) => `chat:${room}:${post}`;
 
 /**
- * Elric's name row above its bubble (WORKSPACE_V3.md §4.2): the name, one "built in" badge that
- * still says "AI" to assistive technology (AI transparency), and the time. The tooltip names the
+ * Elric's name row above its bubble (WORKSPACE_V3.md §4.2): the name, one "built-in AI" badge
+ * (EU AI Act Art. 50: visible, not only for assistive technology), and the time. The tooltip names the
  * version. A Tier 0 reply says "· automated" instead of AI.
  */
 function ElricByline({ model, at }: { model?: string | null | undefined; at?: string }) {
@@ -224,9 +233,7 @@ function ElricByline({ model, at }: { model?: string | null | undefined; at?: st
     <div className="elx3-meta">
       <p className="elx-meta elx-byline" title={elricTooltip()}>
         <span className="elx3-name">{ELRIC_NAME}</span>{' '}
-        <span className="elx-tag">
-          built in{tag ? <span className="visually-hidden"> {tag}</span> : null}
-        </span>
+        <span className="elx-tag">{tag ? `built-in ${tag}` : 'built in'}</span>
         {tag ? null : <span className="elx3-automated"> · automated</span>}
       </p>
       {clock ? <time dateTime={at}>{clock}</time> : null}
@@ -376,6 +383,11 @@ function ActionBubble({
                 Waiting for your approval
               </span>
               <p className="elx-card-title elx3-action-title">{actionTitle(item)}</p>
+              {item.detail ? (
+                <p className="elx3-action-detail" data-testid="elric-pending-detail">
+                  {item.detail}
+                </p>
+              ) : null}
               {item.room ? <p className="elx-meta">In # {item.room.name}</p> : null}
               <div className="elx-card-actions elx3-action-buttons">
                 <button
@@ -748,9 +760,14 @@ export function ElricDashboard({
   // history, a reload and another conversation show at once.
   const arrived = useRef(new Set<string>());
   const latest = useRef(opened ? Math.max(0, ...opened.messages.map((item) => item.seq)) : 0);
+  // The chat on screen, updated before any await that switches it: a late read or post for
+  // another chat is dropped (isOpenChat).
+  const openRoom = useRef(chat?.room_id ?? '');
   const conversationsOn = useRef(false);
   conversationsOn.current = conversations !== null;
   const pendingCount = useRef(0);
+  // The last send that did not succeed: a resend of the same text to the same room reuses its key.
+  const lastAttempt = useRef<SendAttempt | null>(null);
   const input = useRef<HTMLTextAreaElement>(null);
 
   // The smooth reveal is ready before the first answer.
@@ -813,6 +830,7 @@ export function ElricDashboard({
         // One render: the chat list, the chat and its messages arrive together (nothing shifts).
         setConversations(loaded.conversations);
         setChat(loaded.chat);
+        openRoom.current = loaded.chat.room_id;
         merge(loaded.messages);
         setPhase('ready');
         if (loaded.pendingCount) void loadPending();
@@ -1053,12 +1071,17 @@ export function ElricDashboard({
         const check = await api<{ room_id: string; person_member_id: string }>('/api/elric/ask', {
           room_id: target.id,
         });
+        const attempt = sendAttempt(lastAttempt.current, check.room_id, body, () =>
+          crypto.randomUUID(),
+        );
+        lastAttempt.current = attempt;
         await rooms.post({
           room_id: check.room_id,
           text: `${MENTION}${body}`,
           agent_id: check.person_member_id,
-          idempotency_key: crypto.randomUUID(),
+          idempotency_key: attempt.key,
         });
+        lastAttempt.current = null;
         setNotice(`Posted in ${target.name}. Elric replies there.`);
       } else {
         // A new chat is created with its first message, so no empty chat is ever stored.
@@ -1078,20 +1101,28 @@ export function ElricDashboard({
               : current,
           );
           open = { room_id: created.id, person_member_id: created.person_member_id };
+          openRoom.current = created.id;
         }
+        const attempt = sendAttempt(lastAttempt.current, open.room_id, body, () =>
+          crypto.randomUUID(),
+        );
+        lastAttempt.current = attempt;
         const message = (await rooms.post({
           room_id: open.room_id,
           text: `${MENTION}${body}`,
           agent_id: open.person_member_id,
-          idempotency_key: crypto.randomUUID(),
+          idempotency_key: attempt.key,
         })) as Message & { elric_notice?: { text?: string; code?: string } };
+        lastAttempt.current = null;
         arrived.current.add(message.id);
-        merge([message]);
+        // Another chat opened meanwhile: the message stays in its own chat, never in this one.
+        const stillOpen = isOpenChat(openRoom.current, open.room_id);
+        if (stillOpen) merge([message]);
         // The first message names a new conversation: refresh the titles.
         if (conversations !== null) void refreshConversations();
         lastText.current = body;
         setSentAt(Date.now());
-        setSentSeq(message.seq);
+        if (stillOpen) setSentSeq(message.seq);
         if (message.elric_notice?.text) {
           setNotice(message.elric_notice.text);
           if (message.elric_notice.code === 'elric_limit')
@@ -1192,6 +1223,7 @@ export function ElricDashboard({
   async function selectConversation(conversation: Conversation) {
     setSideOpen(false);
     if (chat?.room_id === conversation.id) return;
+    openRoom.current = conversation.id;
     setMessages([]);
     latest.current = 0;
     setSentSeq(null);
@@ -1215,8 +1247,11 @@ export function ElricDashboard({
     );
     try {
       const page = await rooms.read({ room_id: conversation.id, limit: 50 });
+      // Another chat was picked before this one loaded: drop it.
+      if (!isOpenChat(openRoom.current, conversation.id)) return;
       merge(page.messages as Message[]);
     } catch {
+      if (!isOpenChat(openRoom.current, conversation.id)) return;
       setError('This chat couldn’t be loaded. Try again.');
     }
   }
@@ -1236,6 +1271,7 @@ export function ElricDashboard({
     // Only a fresh composer: the chat is created on the server with its first message, so an
     // unused "New chat" (or the view left after deleting the open chat) never lists as empty.
     setSideOpen(false);
+    openRoom.current = '';
     setMessages([]);
     latest.current = 0;
     setSentSeq(null);
@@ -1374,7 +1410,7 @@ export function ElricDashboard({
               </button>
             </h1>
             <span className="elx-tag" title={elricTooltip()}>
-              built in<span className="visually-hidden"> {ELRIC_AI_TAG}</span>
+              built-in {ELRIC_AI_TAG}
             </span>
             {phase === 'ready' && live ? (
               <span className="elx3-live" data-live={live.live ? 'true' : undefined}>

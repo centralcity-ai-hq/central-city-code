@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { LoaderCircle } from 'lucide-react';
-import { api } from './api';
+import { api, ApiError } from './api';
 import { NEWSLETTER_CONFIRMED_TEXT, NEWSLETTER_UNSUBSCRIBED_TEXT } from '../shared/newsletter';
 import { PublicFooter } from './shell/PublicFooter';
 import { PublicHeader } from './shell/PublicHeader';
@@ -35,7 +35,9 @@ export function NewsletterLinkPage({ action }: { action: 'confirm' | 'unsubscrib
   const copy = COPY[action];
   usePageTitle(`${copy.title} · Central City`);
   const token = new URLSearchParams(window.location.search).get('t') ?? '';
-  const [state, setState] = useState<'idle' | 'busy' | 'done' | 'invalid'>(
+  // 'error': the request failed for another reason (rate limit, server, network). The link may
+  // still be good, so the button stays and can be pressed again.
+  const [state, setState] = useState<'idle' | 'busy' | 'done' | 'invalid' | 'error'>(
     token ? 'idle' : 'invalid',
   );
   async function submit() {
@@ -43,8 +45,10 @@ export function NewsletterLinkPage({ action }: { action: 'confirm' | 'unsubscrib
     try {
       await api(`/api/newsletter/${action}?t=${encodeURIComponent(token)}`, {});
       setState('done');
-    } catch {
-      setState('invalid');
+    } catch (err) {
+      const invalid =
+        err instanceof ApiError && (err.status === 400 || err.code === 'newsletter_link_invalid');
+      setState(invalid ? 'invalid' : 'error');
     }
   }
   return (
@@ -57,8 +61,9 @@ export function NewsletterLinkPage({ action }: { action: 'confirm' | 'unsubscrib
           <p role={state === 'done' || state === 'invalid' ? 'status' : undefined}>
             {state === 'done' ? copy.done : state === 'invalid' ? copy.invalid : copy.text}
           </p>
+          {state === 'error' ? <p role="alert">That didn't go through. Try again.</p> : null}
           <div className="cc-not-found-actions">
-            {state === 'idle' || state === 'busy' ? (
+            {state === 'idle' || state === 'busy' || state === 'error' ? (
               <button
                 type="button"
                 className="button primary large"

@@ -196,6 +196,8 @@ test('schema rejects unknown keys, wrong versions and invalid values with paths 
     agent({ ...hosted, instructions: 'x'.repeat(MANIFEST_LIMITS.instructionsCharacters + 1) }),
     'TOO_LARGE',
   );
+  // U+0000 cannot be stored in jsonb: refused here with a hint, never a failed save.
+  rejects(agent({ ...hosted, instructions: 'a\u0000b' }), 'INVALID_VALUE', 'spec.instructions');
   assert.deepEqual(codes(parseManifest({ kind: 'Robot' })), ['KIND_UNSUPPORTED']);
 });
 

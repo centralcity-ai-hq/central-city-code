@@ -215,7 +215,9 @@ test('guests of a stress-test host skip the unclaimed caps, not the room cap or 
   assert.equal((await join(stress.main.code)).statusCode, 200);
   const ceiling = await join(stress.main.code);
   assert.equal(ceiling.statusCode, 429, ceiling.body);
-  assert.equal(ceiling.json().code, 'stress_test_capacity');
+  // The same neutral answer as any full host: a public caller learns nothing about the host.
+  assert.equal(ceiling.json().code, 'invite_host_capacity');
+  assert.doesNotMatch(ceiling.body, /stress|load.?test/i);
 
   // With the allowlist emptied, the stress host's room is back to the public limits.
   process.env[STRESS_TEST_OPERATORS_ENV] = '';

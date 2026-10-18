@@ -23,6 +23,22 @@ const KINDS = [
   ['tool', 'Tasks'],
 ] as const;
 
+/** The settings could not be read: say so and offer a way to read them again. */
+export function ManageElricLoadFailed({ onRetry }: { onRetry: () => void }) {
+  return (
+    <>
+      <p className="elx3-sheet-text" role="alert">
+        Elric’s settings couldn’t be loaded.
+      </p>
+      <div className="elx3-sheet-foot">
+        <button type="button" className="elx3-btn is-primary" onClick={onRetry}>
+          Try again
+        </button>
+      </div>
+    </>
+  );
+}
+
 /**
  * Manage Elric (WORKSPACE_V3_ELRIC_AGENTS.md §1): the owner's Elric settings that exist today,
  * read fresh from GET /api/elric when the sheet opens.
@@ -46,15 +62,19 @@ export function ManageElricSheet({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const hostsId = useId();
+  // Bumped by "Try again" after a failed load: the effect reads the settings again.
+  const [reload, setReload] = useState(0);
   useEffect(() => {
     let live = true;
+    setFailed(false);
+    setStatus(null);
     api<Status>('/api/elric', undefined, 'GET')
       .then((value) => live && setStatus(value))
       .catch(() => live && setFailed(true));
     return () => {
       live = false;
     };
-  }, []);
+  }, [reload]);
 
   async function power(action: 'pause' | 'resume') {
     setBusy(true);
@@ -95,9 +115,7 @@ export function ManageElricSheet({
   return (
     <ElricSheet title="Manage Elric" onClose={onClose} className="elx3-manage">
       {failed ? (
-        <p className="elx3-sheet-text" role="alert">
-          Elric’s settings couldn’t be loaded. Try again.
-        </p>
+        <ManageElricLoadFailed onRetry={() => setReload((n) => n + 1)} />
       ) : !status ? (
         <p className="elx3-sheet-text" role="status">
           Loading…

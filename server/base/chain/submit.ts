@@ -33,10 +33,11 @@ import {
   type UserOperation,
 } from 'viem/account-abstraction';
 import { BASE_MAINNET, type Address, type BaseNetwork } from '../../../shared/base/chains.js';
+import { sponsoredValidUntil } from '../../../shared/base/paymasters.js';
 import type { ChainOpKind, ChainOpStatus } from '../../../shared/base/types.js';
 import { createAccountCall, type DerivationRecipe } from './derive.js';
 import { walletSignature } from './permissions.js';
-import { liveReads } from './rpc-budget.js';
+import { liveReads, MAX_LOG_RANGE_BLOCKS } from './rpc-budget.js';
 import { transientChainError } from './transient.js';
 
 export interface Call {
@@ -72,6 +73,13 @@ export interface StoredOperation {
    * on-chain search for it starts here; when unknown, absence can never be proven (stays reconciling).
    */
   submittedBlock: string | null;
+  /**
+   * How far the current on-chain search for the operation's event got without finding it (decimal,
+   * inclusive), through settled blocks only: the next search resumes after it (searchOnChain). Null
+   * or absent: the next search starts at `submittedBlock`. Read only; written through
+   * ChainOperationStore.recordSearched, never with update or transition.
+   */
+  searchedBlock?: string | null;
   errorCode: string | null;
   /**
    * When the row was last written (ms), read only. While it is 'submitted' this is when it was
@@ -130,6 +138,13 @@ export interface ChainOperationStore {
     seenUpdatedAt: number,
     at: number,
   ): Promise<StoredOperation | null>;
+  /**
+   * Records how far the on-chain search for an operation got (`searchedBlock`; null clears it, so
+   * the next search starts over at the submission block). Writes nothing else: never the status,
+   * the receipt or the write time (updatedAt). An advance never moves it back. Optional: without
+   * it every search starts at the submission block, still within the per-refresh page budget.
+   */
+  recordSearched?(idempotencyKey: string, block: string | null): Promise<void>;
 }
 
 export interface BundlerReceipt {
@@ -447,6 +462,13 @@ export interface SubmitDeps {
   signer: OperationSigner;
   /** The clock the rebroadcast pause is measured with (the store's clock; Date.now by default). */
   now?: () => number;
+  /**
+   * The caller's current authority, checked before an operation whose first send may never have
+   * reached the bundler ('unknown', BROADCAST_AMBIGUOUS) is sent again, exactly as before a first
+   * send: a consent, grant or limit withdrawn meanwhile stops it. Throws to refuse; nothing is sent
+   * and the row stays as stored. Absent: such an operation is sent again as before.
+   */
+  beforeRebroadcast?: (row: StoredOperation) => Promise<void>;
 }
 
 /** Settled for good: never changed again by any reconcile (status only moves forward). */
@@ -459,28 +481,66 @@ const TERMINAL: readonly ChainOpStatus[] = ['final', 'failed'];
 export const nonceLaneFor = (idempotencyKey: string): bigint =>
   BigInt(keccak256(stringToHex(idempotencyKey))) >> 64n;
 
-/** Blocks per getLogs page when searching for an operation's event. */
-const LOG_PAGE_BLOCKS = 10_000n;
+/** Blocks per getLogs page when searching for an operation's event (the endpoint's range cap). */
+const LOG_PAGE_BLOCKS = MAX_LOG_RANGE_BLOCKS;
+
+/**
+ * The most getLogs pages one refresh asks for (refreshFinality, or one reconcile), whatever the
+ * span since the submission block: about 3,000 blocks, an hour and a half of Base blocks. Every
+ * refresh of an operation still in flight (owner polls every few seconds, the crons every minute)
+ * pays it at most once. A longer search continues on the next refresh where this one stopped
+ * (StoredOperation.searchedBlock); until it has covered the whole span, nothing is concluded.
+ */
+export const SEARCH_PAGES_PER_REFRESH = 3;
+
+/** What is left of one refresh's getLogs pages; every search of that refresh draws from it. */
+interface PageBudget {
+  pages: number;
+}
+const pageBudget = (): PageBudget => ({ pages: SEARCH_PAGES_PER_REFRESH });
 
 /** Looks for the operation's UserOperationEvent on the chain itself, not trusting the bundler. */
 type Search =
   | { kind: 'found'; receipt: BundlerReceipt }
   | { kind: 'absent' }
-  | { kind: 'unknown'; reason: 'NO_START_BLOCK' | 'LOOKUP_FAILED' };
+  | { kind: 'unknown'; reason: 'NO_START_BLOCK' | 'LOOKUP_FAILED' | 'SEARCH_INCOMPLETE' };
 
 /**
  * Searches the chain itself for the operation's UserOperationEvent, from the block it was stored at
- * up to `toBlock`, in pages. 'absent' is returned only with complete coverage of that interval;
- * an unknown start block or any failed page gives 'unknown', never 'absent'.
+ * up to `toBlock`, in pages of at most LOG_PAGE_BLOCKS, drawing on the refresh's page budget. It
+ * resumes after `searchedBlock`, the settled blocks an earlier refresh already searched without
+ * finding it. 'absent' is returned only once every block of that interval was searched; an unknown
+ * start block, a failed page or a spent budget gives 'unknown', never 'absent'.
+ *
+ * With `settled` (the caller's settled head) the cursor is kept: a search cut short is resumed after
+ * the last block it searched, but never past a settled block that is on the chain now (a block
+ * above it can still change, so it is searched again); a search that ended (found, or every block
+ * searched) clears it, so the next one starts over at the submission block and reads every page
+ * again (a log index that lagged the first time has caught up by then).
  */
 async function searchOnChain(
   deps: SubmitDeps,
   row: StoredOperation,
   toBlock: bigint,
+  budget: PageBudget,
+  settled?: ChainHead,
 ): Promise<Search> {
   if (row.submittedBlock === null) return { kind: 'unknown', reason: 'NO_START_BLOCK' };
+  const first = BigInt(row.submittedBlock);
+  const resume = row.searchedBlock ? BigInt(row.searchedBlock) + 1n : first;
+  let from = resume > first ? resume : first;
+  let search: Search;
   try {
-    for (let from = BigInt(row.submittedBlock); from <= toBlock; from += LOG_PAGE_BLOCKS) {
+    for (;;) {
+      if (from > toBlock) {
+        search = { kind: 'absent' };
+        break;
+      }
+      if (budget.pages <= 0) {
+        search = { kind: 'unknown', reason: 'SEARCH_INCOMPLETE' };
+        break;
+      }
+      budget.pages -= 1;
       const to = from + LOG_PAGE_BLOCKS - 1n < toBlock ? from + LOG_PAGE_BLOCKS - 1n : toBlock;
       const logs = await deps.client.getLogs({
         address: deps.network.contracts.entryPointV06,
@@ -490,8 +550,8 @@ async function searchOnChain(
         toBlock: to,
       });
       const log = logs.at(-1);
-      if (log)
-        return {
+      if (log) {
+        search = {
           kind: 'found',
           receipt: {
             success: log.args.success!,
@@ -501,11 +561,42 @@ async function searchOnChain(
             actualGasCost: log.args.actualGasCost!,
           },
         };
+        break;
+      }
+      from = to + 1n;
     }
-    return { kind: 'absent' };
   } catch {
-    return { kind: 'unknown', reason: 'LOOKUP_FAILED' };
+    search = { kind: 'unknown', reason: 'LOOKUP_FAILED' };
   }
+  // `from - 1` is the last block searched without finding the event (every block before it, too).
+  if (settled) await rememberSearch(deps, row, search, from - 1n, settled);
+  return search;
+}
+
+/**
+ * Keeps the search cursor (StoredOperation.searchedBlock), best effort: a failed write only means
+ * the next refresh searches those pages again. A search cut short records the last block it
+ * searched, capped at the settled block and only while that block is on the chain now
+ * (headIsCanonical); one that ended clears it.
+ */
+async function rememberSearch(
+  deps: SubmitDeps,
+  row: StoredOperation,
+  search: Search,
+  searchedThrough: bigint,
+  settled: ChainHead,
+): Promise<void> {
+  if (!deps.store.recordSearched || row.submittedBlock === null) return;
+  const stored = row.searchedBlock ? BigInt(row.searchedBlock) : null;
+  if (search.kind !== 'unknown') {
+    if (stored !== null)
+      await deps.store.recordSearched(row.idempotencyKey, null).catch(() => undefined);
+    return;
+  }
+  const through = searchedThrough < settled.number ? searchedThrough : settled.number;
+  if (through < BigInt(row.submittedBlock) || (stored !== null && through <= stored)) return;
+  if (!(await headIsCanonical(deps, settled).catch(() => false))) return;
+  await deps.store.recordSearched(row.idempotencyKey, through.toString(10)).catch(() => undefined);
 }
 
 export type ChainReader = Pick<SubmitDeps, 'network' | 'client'>;
@@ -534,7 +625,7 @@ async function taggedHead(deps: ChainReader, blockTag: 'safe' | 'finalized') {
  * head: anything concluded from it checks headIsCanonical first), the live head − confirmations
  * elsewhere.
  */
-async function settledHead(deps: ChainReader): Promise<ChainHead | null> {
+export async function settledHead(deps: ChainReader): Promise<ChainHead | null> {
   if (deps.network.chainId === BASE_MAINNET) return taggedHead(deps, 'finalized');
   const head = await headBlock(deps).catch(() => null);
   if (head === null) return null;
@@ -569,6 +660,45 @@ export async function headIsCanonical(deps: ChainReader, head: ChainHead): Promi
 
 /** Sent and not settled: the states a broadcast or a receipt lookup may still move forward. */
 const IN_FLIGHT: readonly ChainOpStatus[] = ['submitted', 'unknown', 'reconciling', 'reorged'];
+
+/**
+ * Whether a sponsored operation in flight can never land any more. EntryPoint refuses an operation
+ * once the block time is past its paymaster's signed validUntil (AA32), and block time only grows;
+ * so a settled block that is canonical now, whose time is past validUntil, and at which the
+ * operation's nonce was still unused, proves it never landed and never will. Anything Base cannot
+ * tell right now (a failed read, no timestamp, a head from another fork) answers false, and an
+ * operation without a bounded sponsorship (owner-funded) is never concluded here.
+ */
+async function sponsorshipLapsed(
+  deps: ChainReader,
+  row: StoredOperation,
+  settled: ChainHead,
+): Promise<boolean> {
+  let until: number | null;
+  try {
+    until = sponsoredValidUntil(fromJson(row.signedOperation).paymasterAndData);
+  } catch {
+    return false;
+  }
+  if (until === null) return false;
+  const block = await liveReads(deps.client)
+    .getBlock({ blockNumber: settled.number })
+    .catch(() => null);
+  const time = (block as { timestamp?: unknown } | null)?.timestamp;
+  if (typeof time !== 'bigint' || time * 1000n <= BigInt(until)) return false;
+  const nonce = BigInt(row.nonce);
+  const atSettled = await deps.client
+    .readContract({
+      address: deps.network.contracts.entryPointV06,
+      abi: entryPointAbi,
+      functionName: 'getNonce',
+      args: [getAddress(row.sender), nonce >> 64n],
+      blockNumber: settled.number,
+    })
+    .catch(() => null);
+  if (atSettled === null || atSettled > nonce) return false;
+  return headIsCanonical(deps, settled);
+}
 
 /**
  * A guarded write: applied only while the row is still in one of `from` (compare-and-set). A slow
@@ -613,16 +743,24 @@ const record = (deps: SubmitDeps, row: StoredOperation, receipt: BundlerReceipt)
   );
 
 /**
+ * JSON-RPC codes on which a receipt lookup (a read; nothing is sent or decided on its answer) is
+ * "could not answer right now": limit exceeded, resource unavailable, internal error, whatever
+ * their text. Wider than transient.ts on purpose: a register or send treats only rate limits as
+ * "not now", while a read that could not be answered concludes nothing either way.
+ */
+const RECEIPT_NOT_NOW_RPC = new Set([-32005, -32002, -32603]);
+
+/**
  * A receipt lookup the endpoint could not answer right now: a 429, a timeout, a 5xx or a dropped
  * connection (transient.ts), the bundler unreachable or answering a non-OK HTTP status
- * (rpc-bundler RPC_UNAVAILABLE), or a JSON-RPC "limit exceeded"/busy code. That is "unknown", not
- * "no receipt": nothing may be concluded, searched, re-read or sent on it.
+ * (rpc-bundler RPC_UNAVAILABLE), or a JSON-RPC "limit exceeded"/busy code (RECEIPT_NOT_NOW_RPC).
+ * That is "unknown", not "no receipt": nothing may be concluded, searched, re-read or sent on it.
  */
 export function receiptLookupNotNow(error: unknown): boolean {
   if (transientChainError(error)) return true;
   const e = error as { code?: unknown; rpcCode?: unknown } | null;
   if (e?.code === 'RPC_UNAVAILABLE') return true;
-  return typeof e?.rpcCode === 'number' && transientChainError({ code: e.rpcCode });
+  return typeof e?.rpcCode === 'number' && RECEIPT_NOT_NOW_RPC.has(e.rpcCode);
 }
 
 /**
@@ -675,7 +813,7 @@ function rebroadcastDue(deps: SubmitDeps, row: StoredOperation): boolean {
 }
 
 async function reconcile(deps: SubmitDeps, row: StoredOperation): Promise<StoredOperation> {
-  return (await reconcileStep(deps, row)).row;
+  return (await reconcileStep(deps, row, pageBudget())).row;
 }
 
 /**
@@ -688,6 +826,7 @@ async function reconcile(deps: SubmitDeps, row: StoredOperation): Promise<Stored
 async function reconcileStep(
   deps: SubmitDeps,
   row: StoredOperation,
+  budget: PageBudget,
 ): Promise<{ row: StoredOperation; unknown: boolean; receipt?: BundlerReceipt | null }> {
   if (TERMINAL.includes(row.status)) return { row, unknown: false };
   // Stored but never authorized for broadcast: only the authorize-then-claim path may send it.
@@ -696,11 +835,15 @@ async function reconcileStep(
   if (receipt === 'unknown') return { row, unknown: true };
   if (receipt) return { row: await record(deps, row, receipt), unknown: false, receipt };
   if (row.status === 'included') return { row, unknown: false, receipt };
-  return { row: await afterNoReceipt(deps, row), unknown: false, receipt };
+  return { row: await afterNoReceipt(deps, row, budget), unknown: false, receipt };
 }
 
 /** An operation in flight the bundler has no receipt for: look at its nonce, else resend it. */
-async function afterNoReceipt(deps: SubmitDeps, row: StoredOperation): Promise<StoredOperation> {
+async function afterNoReceipt(
+  deps: SubmitDeps,
+  row: StoredOperation,
+  budget: PageBudget,
+): Promise<StoredOperation> {
   // The nonce moved on without a receipt for us: either our op landed (look on-chain) or another
   // op used the nonce, in which case ours can never land. It becomes 'failed' only once the
   // consuming block is deep enough (refreshFinality), never immediately.
@@ -714,13 +857,16 @@ async function afterNoReceipt(deps: SubmitDeps, row: StoredOperation): Promise<S
     })
     .catch(() => null);
   if (current !== null && current > nonce) {
+    // Already known to be consumed: the settled search (refreshFinality) looks for the event with
+    // the refresh's page budget and resumes where the last one stopped; searching here as well
+    // would spend that budget on the same blocks every time.
+    if (row.status === 'reconciling' && row.errorCode === 'NONCE_CONSUMED') return row;
     // The nonce was just read at the newest block: the (live) search must reach at least as far.
     const head = await headBlock(deps);
-    const search = await searchOnChain(deps, row, head);
+    const search = await searchOnChain(deps, row, head, budget);
     if (search.kind === 'found') return record(deps, row, search.receipt);
     // Absent or unknown: probably consumed by another operation. Not failed yet: that needs the
     // consumption to be final and complete canonical absence (refreshFinality).
-    if (row.status === 'reconciling' && row.errorCode === 'NONCE_CONSUMED') return row;
     return move(deps, row.idempotencyKey, IN_FLIGHT, {
       status: 'reconciling',
       errorCode: 'NONCE_CONSUMED',
@@ -730,6 +876,16 @@ async function afterNoReceipt(deps: SubmitDeps, row: StoredOperation): Promise<S
   // Not included yet: rebroadcast the exact stored operation, never a rebuilt one, at most once
   // per REBROADCAST_MIN_MS. Held back, the row stays exactly as stored.
   if (!rebroadcastDue(deps, row)) return row;
+  // A first send that may never have reached the bundler is sent again only past the caller's
+  // current authority (SubmitDeps.beforeRebroadcast). Refused: nothing is sent; a sponsored one
+  // then lapses and is retired as not sent (refreshFinality, retireLapsed).
+  if (row.status === 'unknown' && deps.beforeRebroadcast) {
+    try {
+      await deps.beforeRebroadcast(row);
+    } catch {
+      return row;
+    }
+  }
   // Claimed before it is sent: of concurrent readers holding the same snapshot (owner polls on
   // several instances, the crons) exactly one sends; the others answer the row as stored.
   let claimed = row;
@@ -964,22 +1120,63 @@ export async function canonicalOutcome(
  * confirms it in the canonical block (canonicalOutcome); one the chain contradicts is reorged.
  * Never throws on a missing receipt or RPC hiccup. A receipt lookup the endpoint could not answer
  * right now (receiptLookupNotNow) ends the refresh with the stored row as it is: no search, no
- * nonce read, no resend, no state change.
+ * nonce read, no resend, no state change. The on-chain search asks for at most
+ * SEARCH_PAGES_PER_REFRESH getLogs pages per refresh; a longer one continues on the next refresh
+ * (searchOnChain), and nothing is concluded from it before it has covered every block.
  */
 export async function refreshFinality(
   deps: SubmitDeps,
   idempotencyKey: string,
+  options: {
+    /**
+     * Retire an operation in flight whose sponsorship lapsed before it landed (sponsorshipLapsed):
+     * failed with SPONSORSHIP_LAPSED, nothing sent, so its holds can be released. Without it such an
+     * operation (a rejected first send, an initCode another operation made stale, a sponsorship
+     * that ran out before the bundler took it) stays in flight forever, rebroadcast and refused.
+     */
+    retireLapsed?: boolean;
+    /**
+     * The operation runs on its own nonce lane (nonceLaneFor of its key) and nothing else is ever
+     * signed there (agent payments): a used nonce on that lane means it landed. An empty log search
+     * (a lagging or incomplete log index) is then never taken as absence, so a payment that moved
+     * money is never failed and its hold never released; it stays reconciling until its event is
+     * found. Never applied to an operation in another lane.
+     */
+    ownLane?: boolean;
+  } = {},
 ): Promise<StoredOperation | null> {
   const row = await deps.store.get(idempotencyKey);
   if (!row) return null;
   if (TERMINAL.includes(row.status)) return row;
-  const step = await reconcileStep(deps, row);
+  // At most SEARCH_PAGES_PER_REFRESH getLogs pages for this whole refresh, however old it is.
+  const budget = pageBudget();
+  const step = await reconcileStep(deps, row, budget);
   // The bundler could not say right now (a 429, a timeout): the stored state stands, unchanged,
   // and nothing else is read or sent before the next poll.
   if (step.unknown) return step.row;
-  const current = step.row;
+  let current = step.row;
+  // Our event found on the chain itself by the settled search below: the receipt this refresh
+  // reads (never a second search over the same blocks).
+  let found: BundlerReceipt | undefined;
+  // Only an inclusion, a consumed nonce and a lapsed sponsorship are decided against the settled
+  // block: anything else in flight returns unchanged below, so its head is not read (CDP budget).
+  const needsSettled =
+    current.status === 'included' ||
+    (current.status === 'reconciling' && current.errorCode === 'NONCE_CONSUMED') ||
+    (options.retireLapsed === true && IN_FLIGHT.includes(current.status));
+  if (!needsSettled) return current;
   const settled = await settledHead(deps);
   if (settled === null) return current;
+
+  if (
+    options.retireLapsed &&
+    IN_FLIGHT.includes(current.status) &&
+    (await sponsorshipLapsed(deps, current, settled))
+  )
+    return move(deps, idempotencyKey, IN_FLIGHT, {
+      status: 'failed',
+      errorCode: 'SPONSORSHIP_LAPSED',
+    });
 
   // Nonce consumed by something else: failed only when the consumption itself is settled (nonce
   // read AT the settled block) and the chain shows no event for us from submission to that block.
@@ -995,20 +1192,28 @@ export async function refreshFinality(
       })
       .catch(() => null);
     if (atSettled === null || atSettled <= nonce) return current;
-    const search = await searchOnChain(deps, current, settled.number);
-    if (search.kind === 'found') return record(deps, current, search.receipt);
-    if (search.kind === 'unknown') return current;
-    // Only a settled block still on the chain (its hash, read live by number) proves anything: a
-    // shared finalized head from another fork or a rolled-back node does not.
-    if (!(await headIsCanonical(deps, settled))) return current;
-    return move(deps, idempotencyKey, ['reconciling'], { status: 'failed' }, receiptOf(current));
+    // Every block searched is settled: a search cut short resumes there on the next refresh.
+    const search = await searchOnChain(deps, current, settled.number, budget, settled);
+    if (search.kind === 'found') {
+      // Recorded as included; settled below in this same refresh when its block is.
+      current = await record(deps, current, search.receipt);
+      found = search.receipt;
+    } else {
+      if (search.kind === 'unknown') return current;
+      if (options.ownLane && nonce >> 64n === nonceLaneFor(idempotencyKey)) return current;
+      // Only a settled block still on the chain (its hash, read live by number) proves anything: a
+      // shared finalized head from another fork or a rolled-back node does not.
+      if (!(await headIsCanonical(deps, settled))) return current;
+      return move(deps, idempotencyKey, ['reconciling'], { status: 'failed' }, receiptOf(current));
+    }
   }
   if (current.status !== 'included' || current.blockNumber === null) return current;
 
-  // The bundler's answer this refresh already read (reconcileStep), never a second lookup; asked
-  // here only when the step asked nothing.
+  // The receipt this refresh already has: found on chain above, or the bundler's answer read in
+  // reconcileStep; the bundler is asked here only when neither exists.
   const answered =
-    step.receipt !== undefined ? step.receipt : await bundlerReceipt(deps, current.userOpHash);
+    found ??
+    (step.receipt !== undefined ? step.receipt : await bundlerReceipt(deps, current.userOpHash));
   // Not answered right now: never searched for, never declared gone.
   if (answered === 'unknown') return current;
   let fresh: BundlerReceipt | null | undefined = answered;
@@ -1018,7 +1223,7 @@ export async function refreshFinality(
     try {
       // Read live (headBlock): an absent result up to this head declares the receipt gone.
       head = await headBlock(deps);
-      const search = await searchOnChain(deps, current, head);
+      const search = await searchOnChain(deps, current, head, budget, settled);
       fresh =
         search.kind === 'found' ? search.receipt : search.kind === 'absent' ? null : undefined;
     } catch {
@@ -1061,6 +1266,11 @@ export async function refreshFinality(
     );
   // Final only under a settled block that is on the chain now (hash read live by number): the
   // receipt's block is canonical (above) and so is the settled block, hence its ancestor.
+  // With the identity port's client these reads (receipt, block by number) may be answered by the
+  // second endpoint (read-transport.ts preferSecond): presence only, each bound to a hash the
+  // bundler or the settled head already named, so an honest node on another fork or behind only
+  // says "not yet". Reading them from the CDP endpoint alone would also trust nothing of a
+  // dishonest second endpoint, at a few CDP calls per settled operation; not done here.
   if (!(await headIsCanonical(deps, settled))) return current;
   return move(
     deps,

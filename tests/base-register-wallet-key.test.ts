@@ -6,6 +6,8 @@ import type { Database } from '../server/database.js';
 import {
   BASE_MIGRATION_SQL,
   BASE_IDENTITY_PROVISIONAL_SQL,
+  BASE_IDENTITY_HANDOVER_BACKOFF_SQL,
+  BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL,
   BASE_PAYMENTS_MIGRATION_SQL,
   BASE_WALLET_VAULT_SQL,
   baseShortIdsMigration,
@@ -49,6 +51,8 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }, opts: S
   await pg.exec(BASE_PAYMENTS_MIGRATION_SQL);
   await pg.exec(baseShortIdsMigration.sql);
   await pg.exec(BASE_IDENTITY_PROVISIONAL_SQL);
+  await pg.exec(BASE_IDENTITY_HANDOVER_BACKOFF_SQL);
+  await pg.exec(BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL);
   await pg.exec(BASE_WALLET_VAULT_SQL);
   const vault = opts.vault ?? 'confirmed';
   if (vault !== 'none')

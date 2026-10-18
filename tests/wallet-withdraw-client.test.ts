@@ -17,7 +17,10 @@ import {
   addressOrNull,
   checkedIntent,
   checkOperation,
+  clearAnchor,
   decodedAmount,
+  keyFor,
+  newRequestKey,
   readAnchor,
   saveAnchor,
   signAndSend,
@@ -570,4 +573,54 @@ test('a substituted wallet is refused even when the operation is its own, hash a
       error instanceof WithdrawalCheckError &&
       error.message === 'This isn’t the wallet your wallet key makes for this agent.',
   );
+});
+
+test('idempotency key: a retry of the same body keeps it, an edited body gets a new one', () => {
+  const held = newRequestKey();
+  const first = held.key;
+  const body = {
+    token: 'USDC',
+    amount: '12500000',
+    to: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC',
+  };
+  // Sent, answer lost: the same form again replays under the same key.
+  assert.equal(keyFor(held, body), first);
+  assert.equal(keyFor(held, { ...body }), first);
+  // Edited (amount changed): a new key, so the server never sees it as another use of the old one.
+  const edited = keyFor(held, { ...body, amount: '13000000' });
+  assert.notEqual(edited, first);
+  assert.equal(keyFor(held, { ...body, amount: '13000000' }), edited);
+  // Back to the first body: still a new key, never the one an edited body replaced.
+  assert.notEqual(keyFor(held, body), first);
+  assert.notEqual(newRequestKey().key, held.key);
+});
+
+test('a rating keeps its anchor apart: Withdraw and Pay never read it as a transfer', () => {
+  const rating = {
+    withdrawalId: 'r-1',
+    userOperation: userOperationToRpc(operation(execute(withdrawalCall('USDC', TO, 1n)))),
+    userOpHash: `0x${'33'.repeat(32)}` as Hex,
+  };
+  const globals = globalThis as { localStorage?: unknown };
+  const before = globals.localStorage;
+  try {
+    const store = new Map<string, string>();
+    globals.localStorage = {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => void store.set(key, value),
+      removeItem: (key: string) => void store.delete(key),
+    };
+    saveAnchor('agent-1', rating, 'rating');
+    // The transfer store (what Withdraw, Pay and carryAnchorOver read) stays empty.
+    assert.equal(readAnchor('agent-1'), null);
+    assert.equal(readAnchor('agent-1', 'rating')?.withdrawalId, 'r-1');
+    // A transfer's clear never touches the rating, and the rating's own clear does.
+    clearAnchor('agent-1', rating);
+    assert.equal(readAnchor('agent-1', 'rating')?.withdrawalId, 'r-1');
+    clearAnchor('agent-1', rating, 'rating');
+    assert.equal(readAnchor('agent-1', 'rating'), null);
+    assert.equal(store.size, 0);
+  } finally {
+    globals.localStorage = before;
+  }
 });

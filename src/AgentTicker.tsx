@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  fetchAgentCount,
   markPrerenderedAgentCountShown,
   prerenderedAgentCount,
   readStoredAgentCount,
+  STATS_POLL_MS,
   storeAgentCount,
-  takePrefetchedAgentCount,
+  subscribeStats,
   type AgentCount,
 } from './agentCount';
 
@@ -22,9 +22,10 @@ import {
  * number appears at once (and the dot stays still). The digits use tabular figures and keep the
  * width of the final number (min-width in ch), so nothing moves while they change.
  *
- * Data: GET /api/public/stats (server/stats/public-stats.ts), cached for 15 s at the edge. The
- * ticker polls every 15 s while the tab is visible and stops while it is hidden. A response older
- * than the one shown is ignored, so a stale edge copy never makes the number go backwards.
+ * Data: GET /api/public/stats (server/stats/public-stats.ts), cached for 15 s at the edge, through
+ * the page's one shared poller (src/agentCount.ts subscribeStats, shared with PaidCallsTicker):
+ * every 15 s while the tab is visible, stopped while it is hidden. A response older than the one
+ * shown is ignored, so a stale edge copy never makes the number go backwards.
  *
  * Shown at once: the first value is the response the entry chunk already requested at startup
  * (src/agentCount.ts prefetchAgentCount), and until it arrives the last number this browser saw
@@ -36,15 +37,17 @@ import {
  * count's own time `data-build-at` (the number as of the build), so crawlers and visitors without
  * JavaScript read a real number. When the build had none (the endpoint failed), the HTML keeps
  * the empty, reserved line as before; it never bakes in a 0. The app reads the build's number
- * before it mounts (src/main.tsx) and starts from it with no count from 0, since it is already
- * on screen: the live number then counts up from it (or appears, when lower or with reduced
- * motion).
+ * before it mounts (src/main.tsx) and counts in from 0 to it like the hero's other counts
+ * (src/PaidCallsTicker.tsx), so they move together; the prerendered digits stay hidden until then
+ * (html[data-count-in], set by src/shell/theme-boot.js, removed when this ticker mounts), so the
+ * number never shows and drops to 0. With reduced motion the marker is never set: the build's
+ * number shows at once, then the live one.
  *
  * Accessibility: the animated digits are hidden from assistive technology. The full sentence with
  * the final number is read in place (never an intermediate value), and a polite live region
  * announces a new total at most once a minute.
  */
-export const TICKER_POLL_MS = 15_000;
+export const TICKER_POLL_MS = STATS_POLL_MS;
 const COUNT_UP_MS = 400;
 /** The count from 0 on the first view. */
 export const COUNT_IN_MS = 1_800;
@@ -90,7 +93,7 @@ function countsIn(): boolean {
 
 const easeOut = (t: number) => 1 - Math.pow(1 - t, 3);
 
-export function AgentTicker({ pollMs = TICKER_POLL_MS }: { pollMs?: number }) {
+export function AgentTicker() {
   // The build's number (in the HTML) or the last number this browser saw, until the live one
   // arrives.
   const [initial] = useState(startingCount);
@@ -99,78 +102,39 @@ export function AgentTicker({ pollMs = TICKER_POLL_MS }: { pollMs?: number }) {
   const [total, setTotal] = useState<number | null>(stored?.total ?? null);
   // The count from 0 is pending until the ticker scrolls into view, then runs, then is done. Not
   // when the build's number is already on screen: that would take it down to 0 and back up.
+  // The build's number counts in from 0 too, so all the hero's counts count in together (the
+  // prerendered digits stay hidden until then: html[data-count-in], src/shell/theme-boot.js).
   const [countIn, setCountIn] = useState<'pending' | 'running' | 'done'>(() =>
-    countsIn() && !build ? 'pending' : 'done',
+    countsIn() ? 'pending' : 'done',
   );
   const [shown, setShown] = useState<number | null>(() =>
-    build ? build.total : stored ? (countIn === 'pending' ? 0 : stored.total) : null,
+    countIn === 'pending' && (build || stored) ? 0 : (build?.total ?? stored?.total ?? null),
   );
-  // This ticker has replaced the prerendered one: a later landing view counts from 0 as usual.
-  useEffect(() => markPrerenderedAgentCountShown(), []);
+  // This ticker has replaced the prerendered one: a later landing view counts from 0 as usual, and
+  // the boot-time rule that hid the prerendered digits is no longer needed.
+  useEffect(() => {
+    markPrerenderedAgentCountShown();
+    delete document.documentElement.dataset.countIn;
+  }, []);
   const [live, setLive] = useState(false);
   const [announcement, setAnnouncement] = useState('');
   const shownRef = useRef<number | null>(null);
   shownRef.current = shown;
 
-  // Poll while the page is visible.
+  // The shared poller (one request for every ticker on the page, paused while it is hidden).
   useEffect(() => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let controller: AbortController | null = null;
     let latestAt = stored?.at ?? -Infinity;
-    let lastFetch = 0;
-    let stopped = false;
-    let first = true;
-    const schedule = (delay: number) => {
-      clearTimeout(timer);
-      if (!stopped && !document.hidden) timer = setTimeout(load, delay);
-    };
-    async function load() {
-      clearTimeout(timer);
-      controller?.abort();
-      const mine = new AbortController();
-      controller = mine;
-      lastFetch = Date.now();
-      try {
-        // The first load takes the request the entry chunk started at startup, when there is one.
-        const prefetched = first ? takePrefetchedAgentCount() : null;
-        first = false;
-        const stats = await (prefetched ?? fetchAgentCount(mine.signal));
-        if (stopped || controller !== mine) return;
-        if (stats) setLive(true);
-        if (stats && stats.at >= latestAt) {
-          latestAt = stats.at;
-          setTotal(stats.total);
-          storeAgentCount(stats);
-        }
-      } catch {
-        // Offline or aborted: keep the last number and try again on the next tick.
-      } finally {
-        if (controller === mine) {
-          controller = null;
-          schedule(pollMs);
-        }
+    return subscribeStats((response) => {
+      const stats = response?.agents ?? null;
+      if (stats) setLive(true);
+      if (stats && stats.at >= latestAt) {
+        latestAt = stats.at;
+        setTotal(stats.total);
+        storeAgentCount(stats);
       }
-    }
-    function onVisibility() {
-      if (document.hidden) {
-        clearTimeout(timer);
-        controller?.abort();
-        return;
-      }
-      const since = Date.now() - lastFetch;
-      if (since >= pollMs) void load();
-      else schedule(pollMs - since);
-    }
-    void load();
-    document.addEventListener('visibilitychange', onVisibility);
-    return () => {
-      stopped = true;
-      clearTimeout(timer);
-      controller?.abort();
-      document.removeEventListener('visibilitychange', onVisibility);
-    };
+    });
     // `stored` is read once, on mount, and never changes.
-  }, [pollMs, stored]);
+  }, [stored]);
 
   // The count from 0: start when the ticker first scrolls into view.
   const tickerRef = useRef<HTMLParagraphElement>(null);

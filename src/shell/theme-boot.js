@@ -26,6 +26,15 @@
     }
   }
   document.documentElement.dataset.theme = theme;
+  // The hero's counts count in from 0 once the app runs (src/AgentTicker.tsx): keep the
+  // prerendered digits hidden until then (src/landing/landing.css), except with reduced motion,
+  // where the number simply shows. The app removes this marker when it mounts.
+  try {
+    if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches)
+      document.documentElement.dataset.countIn = '1';
+  } catch (error) {
+    // No matchMedia: show the number.
+  }
   document.documentElement.style.colorScheme = theme;
   // The home, Elric, Connect and Invite pages arrive with their signed-out copy
   // (#root[data-session-gated], shared/share-cards.ts). A browser that was signed in last time

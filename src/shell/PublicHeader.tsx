@@ -1,5 +1,6 @@
 import {
   lazy,
+  useCallback,
   Suspense,
   useEffect,
   useId,
@@ -12,7 +13,7 @@ import {
   type ComponentProps,
   type ComponentType,
 } from 'react';
-import { ChevronDown, Menu, X } from 'lucide-react';
+import { ChevronDown, Menu, Search, X } from 'lucide-react';
 import { Lockup, SkipLink } from '../brand';
 import { ThemeToggle } from './theme';
 import { LINKS, NAV_GROUPS, sectionsOf, type NavGroup, type NavItem } from './links';
@@ -31,6 +32,10 @@ const loadPhoneMenu = () =>
     loadedPhoneMenu = module.default;
     return module;
   });
+// The finder (Cmd/Ctrl+K or the search button) loads only when it is first opened.
+const AgentFinder = lazy(() => import('./AgentFinder'));
+const isMac = () => /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+
 const LazyPhoneMenu = lazy(() => loadPhoneMenu().catch(() => ({ default: PlainLinksMenu })));
 
 /** Moves focus to the fallback menu's first link once, when it mounts (a stable ref callback). */
@@ -328,6 +333,23 @@ export function PublicHeader({ current }: { current: PublicPage }) {
   const menuButton = useRef<HTMLButtonElement>(null);
   const timer = useRef<number | undefined>(undefined);
   const inviteHref = useInviteHref();
+  const [finder, setFinder] = useState(false);
+  const findButton = useRef<HTMLButtonElement>(null);
+  const closeFinder = useCallback(() => {
+    setFinder(false);
+    findButton.current?.focus();
+  }, []);
+  // Cmd/Ctrl+K opens the finder on any public page.
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.key.toLowerCase() !== 'k')
+        return;
+      event.preventDefault();
+      setFinder(true);
+    };
+    document.addEventListener('keydown', keydown);
+    return () => document.removeEventListener('keydown', keydown);
+  }, []);
 
   // Hover intent and the close delay share one timer.
   const cancelTimers = () => {
@@ -378,6 +400,14 @@ export function PublicHeader({ current }: { current: PublicPage }) {
     const idle = window.requestIdleCallback ?? ((run: () => void) => window.setTimeout(run, 1200));
     const cancel = window.cancelIdleCallback ?? window.clearTimeout;
     const handle = idle(prefetchPhoneMenu);
+    return () => cancel(handle);
+  }, []);
+  // The finder's chunk comes in while the page is idle, so what someone types right after Cmd/Ctrl+K
+  // or the search button lands in its field instead of being lost while it loads.
+  useEffect(() => {
+    const idle = window.requestIdleCallback ?? ((run: () => void) => window.setTimeout(run, 2500));
+    const cancel = window.cancelIdleCallback ?? window.clearTimeout;
+    const handle = idle(() => void import('./AgentFinder').catch(() => undefined));
     return () => cancel(handle);
   }, []);
 
@@ -473,6 +503,19 @@ export function PublicHeader({ current }: { current: PublicPage }) {
           intendOpen={intendOpen}
         />
         <div className="cc-header-actions nav-actions">
+          <button
+            ref={findButton}
+            type="button"
+            className="cc-header-find"
+            aria-label="Search Base agents"
+            aria-haspopup="dialog"
+            aria-expanded={finder}
+            title={`Search Base agents (${isMac() ? '⌘' : 'Ctrl+'}K)`}
+            onPointerEnter={() => void import('./AgentFinder')}
+            onClick={() => setFinder(true)}
+          >
+            <Search size={18} strokeWidth={2.2} aria-hidden="true" />
+          </button>
           <span className="cc-header-wide">{signIn}</span>
           <a
             className={`btn ${heroInviteVisible ? 'btn-secondary secondary' : 'btn-primary primary'} btn-sm button cc-header-invite`}
@@ -515,6 +558,11 @@ export function PublicHeader({ current }: { current: PublicPage }) {
         onPointerMove={(event) => timer.current === undefined && closeSoon(event)}
         onClick={hide}
       />
+      {finder ? (
+        <Suspense fallback={null}>
+          <AgentFinder onClose={closeFinder} />
+        </Suspense>
+      ) : null}
       {menu !== 'closed' ? (
         <Suspense fallback={null}>
           <PhoneMenu.current

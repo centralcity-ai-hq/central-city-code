@@ -94,6 +94,7 @@ test('offline recovery lifecycle and adversarial boundaries', async (t) => {
     agent.lastSeenAt = iso;
     agent.lastSequence = 44;
     agent.announcedOnline = true;
+    agent.credentialHint = 'abcd';
   }
   data.jobs = ['completed', 'running', 'queued'].map(
     (status, index) =>
@@ -133,6 +134,10 @@ test('offline recovery lifecycle and adversarial boundaries', async (t) => {
     await app.city.db.query(`SELECT ${OPERATOR_COLUMNS} FROM operators ORDER BY id`)
   ).rows;
 
+  // Derived counts (here the paid service calls count, migration 125) are recognized and skipped.
+  await app.city.db.query(
+    "INSERT INTO paid_call_count (chain_id, total, recent, updated_at) VALUES (8453, 7, '{1}', 1)",
+  );
   await t.test('open application excludes backup and a second application', async () => {
     await assert.rejects(backupDatabase(source, backup), /locked/);
     await assert.rejects(createApp({ dataDir: source, startWorkers: false }), /locked/);
@@ -148,6 +153,7 @@ test('offline recovery lifecycle and adversarial boundaries', async (t) => {
       assert.ok(!text.includes(external.token));
       assert.ok(!text.includes(sha(external.token)));
       assert.ok(!text.includes('token_hash'));
+      assert.ok(!text.includes('paid_call_count'));
       if (process.platform !== 'win32') assert.equal((await stat(backup)).mode & 0o777, 0o600);
       await assert.rejects(backupDatabase(source, backup), /EEXIST/);
       await assert.rejects(backupDatabase(source, join(source, 'backup.json')), /outside/);
@@ -189,7 +195,10 @@ test('offline recovery lifecycle and adversarial boundaries', async (t) => {
         assert.ok(
           recovered.agents.every(
             (agent) =>
-              agent.lastSeenAt === null && agent.lastSequence === -1 && !agent.announcedOnline,
+              agent.lastSeenAt === null &&
+              agent.lastSequence === -1 &&
+              !agent.announcedOnline &&
+              agent.credentialHint === undefined,
           ),
         );
         assert.deepEqual(recovered.jobs[0], {

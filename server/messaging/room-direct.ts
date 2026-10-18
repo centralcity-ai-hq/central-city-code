@@ -186,9 +186,11 @@ export async function authorizeRoomPair(
         'Elric is not messaged privately from a room. Your own chat with Elric is at /elric.',
       );
   }
-  if (from.muted_at !== null)
+  // A mute of any member silences its whole owner in the room (refuseIfMuted), not only the
+  // muted row: a muted owner can't message through, or be messaged at, another of its members.
+  if (from.muted_at !== null || (await ownerMuted(tx, room.id, from.owner_id, from.kind)))
     refuse(403, 'muted', 'The host muted you in this room, so you cannot message from it.');
-  if (to!.muted_at !== null)
+  if (to!.muted_at !== null || (await ownerMuted(tx, room.id, to!.owner_id, to!.kind)))
     refuse(
       403,
       'recipient_muted',
@@ -222,6 +224,25 @@ export async function authorizeRoomPair(
     quiet: to!.notifications_muted === true,
     sameOwner,
   };
+}
+
+/**
+ * Whether the host's mute (migrations 35 and 65) silences this owner writing as a member of
+ * `kind` in the room: the same rule as rooms/service.ts refuseIfMuted. A bulk "Mute all AIs"
+ * (mute_scope 'ai') never silences the owner's person member.
+ */
+async function ownerMuted(
+  tx: Tx,
+  roomId: string,
+  ownerId: string,
+  kind: string | null,
+): Promise<boolean> {
+  const rows = await tx.query(
+    `SELECT 1 FROM room_members WHERE room_id=$1 AND owner_id=$2 AND muted_at IS NOT NULL
+       AND ($3::text <> 'person' OR mute_scope IS DISTINCT FROM 'ai') LIMIT 1`,
+    [roomId, ownerId, kind ?? 'agent'],
+  );
+  return rows.rows.length > 0;
 }
 
 async function party(tx: Tx, row: MemberRow, callerId: string): Promise<RoomParty> {

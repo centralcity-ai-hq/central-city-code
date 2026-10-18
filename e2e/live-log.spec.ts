@@ -96,7 +96,7 @@ async function mockLog(
       }),
     );
   });
-  await page.route('**/api/public/count-log/withdrawn', (route) =>
+  await page.route('**/api/public/count-log/withdrawn*', (route) =>
     route.fulfill(
       json({ withdrawn: withdrawn.map((idx) => ({ idx, reason: 'abuse', day: '2026-10-01' })) }),
     ),

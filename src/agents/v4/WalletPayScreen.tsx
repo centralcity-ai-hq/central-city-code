@@ -24,10 +24,12 @@ import {
   checkSigningWindow,
   discardUnsigned,
   dropLaneRecord,
+  keyFor,
   laneFor,
   laneRefusal,
   lanesOnServer,
   lanesRemembered,
+  newRequestKey,
   readAnchor,
   readLaneRecords,
   reconcileSignature,
@@ -200,7 +202,7 @@ export function WalletPayScreen({ agent, onBack, onOpen, backLabel }: AgentScree
   /** The payment signed just now, for its History line to show at once. */
   const [signed, setSigned] = useState<SignedNow | null>(null);
   // One key per payment the owner means: a retry of the same form never makes a second one.
-  const key = useRef(crypto.randomUUID());
+  const key = useRef(newRequestKey());
   // The latest lookup wins: an older answer arriving late is dropped.
   const lookup = useRef(0);
   const { password, setPassword, alive } = usePasswordLock(busy);
@@ -273,6 +275,10 @@ export function WalletPayScreen({ agent, onBack, onOpen, backLabel }: AgentScree
       setRecipient({ k: 'idle' });
       return;
     }
+    // The recipient checked for the text before is no longer the one typed: it can't be paid
+    // while the new lookup waits (and an answer for the old text arriving late is dropped).
+    lookup.current += 1;
+    setRecipient({ k: 'checking' });
     const timer = window.setTimeout(() => void find(text), LOOKUP_DELAY_MS);
     return () => window.clearTimeout(timer);
   }, [to, find]);
@@ -292,7 +298,7 @@ export function WalletPayScreen({ agent, onBack, onOpen, backLabel }: AgentScree
    * key: with the old key, an edited payment would be refused as another use of it.
    */
   async function startOver(unsigned: string | null) {
-    key.current = crypto.randomUUID();
+    key.current = newRequestKey();
     if (unsigned) await discardUnsigned(agent.id, unsigned);
   }
 
@@ -355,7 +361,10 @@ export function WalletPayScreen({ agent, onBack, onOpen, backLabel }: AgentScree
       setPhase({ k: 'form' });
       return;
     }
-    // The expired one is gone; the form keeps what was typed and prepares it again.
+    // The expired one is gone; the form keeps what was typed and prepares it again. Not busy
+    // before it: prepare marks itself busy once the form passes its checks, and a check that
+    // refuses (say, more than is available now) leaves the form ready to correct.
+    setBusy(false);
     setPhase({ k: 'form' });
     await prepare({ preventDefault() {} } as FormEvent);
   }
@@ -388,11 +397,10 @@ export function WalletPayScreen({ agent, onBack, onOpen, backLabel }: AgentScree
         );
       }
       const target = found;
+      const body = { to: payTo(target), amount: raw, note: text };
       const request = await createPayment(agent.id, {
-        idempotencyKey: key.current,
-        to: payTo(target),
-        amount: raw,
-        note: text,
+        idempotencyKey: keyFor(key.current, body),
+        ...body,
       });
       prepared = request.withdrawalId;
       const laned = request.lanes === true;
@@ -504,7 +512,7 @@ export function WalletPayScreen({ agent, onBack, onOpen, backLabel }: AgentScree
       }
       setSent(view);
       // A new payment from here on gets a new key.
-      key.current = crypto.randomUUID();
+      key.current = newRequestKey();
       setPhase({
         k: 'status',
         withdrawalId: phase.request.withdrawalId,

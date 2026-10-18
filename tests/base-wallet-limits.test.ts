@@ -15,6 +15,8 @@ import {
   registerBaseMigration,
 } from '../server/base/schema.js';
 import { listMigrations } from '../server/migrations.js';
+import { FEED_PAY_FEE_SQL } from '../server/feed/pay/fee-schema.js';
+import { FEED_PAY_SQL } from '../server/feed/pay/schema.js';
 import { registerBaseWalletRoutes } from '../server/base/wallet/routes.js';
 import type { ChainRuntime } from '../server/base/identity/routes.js';
 import type {
@@ -32,6 +34,7 @@ import type { SpendPermission } from '../shared/base/types.js';
 import {
   LIMIT_PERIOD_SECONDS,
   LIMIT_PERMISSION_END,
+  berlinDayStart,
   checkRevokeOperation,
   nextBerlinMidnight,
   permissionFromJson,
@@ -55,6 +58,7 @@ const OUTSIDE_AGENT = '2b3c4d5e-6f7a-4b1c-9d2e-4f5a6b7c8d9e';
 const SPENDER = getAddress(`0x${'3'.repeat(40)}`);
 // Saturday 10 Oct 2026, 14:00 in Berlin (CEST).
 const NOW = Date.UTC(2026, 9, 10, 12, 0, 0);
+const TODAY = Date.UTC(2026, 9, 9, 22, 0, 0) / 1000; // Saturday 10 Oct, 00:00 Berlin
 const MIDNIGHT = Date.UTC(2026, 9, 10, 22, 0, 0) / 1000; // Sunday 11 Oct, 00:00 Berlin
 const ERC6492_SUFFIX = '6492649264926492649264926492649264926492649264926492649264926492';
 const json = { 'content-type': 'application/json' };
@@ -80,6 +84,7 @@ interface Options {
   backup?: boolean;
   /** No Base reader configured at all. */
   noReader?: boolean;
+  limit?: (key: string, max: number, windowMs: number) => Promise<void>;
 }
 
 /** Base as the fake reader shows it: per permission hash, at head and at the settled block. */
@@ -230,6 +235,9 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }, options
   await pg.exec(BASE_PAYMENTS_MIGRATION_SQL);
   await pg.exec(BASE_WALLET_VAULT_SQL);
   await pg.exec(BASE_WALLET_LIMITS_SQL);
+  // The Berlin counter also sums the protocol fees of Feed pay calls (migrations 112 and 114).
+  await pg.exec(FEED_PAY_SQL);
+  await pg.exec(FEED_PAY_FEE_SQL);
   const db: Database = {
     query: (sql, params) => pg.query(sql, params) as never,
     exec: (sql) => pg.exec(sql),
@@ -306,6 +314,7 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }, options
     runtime: async () => ({}) as ChainRuntime,
     permissions: options.noReader ? undefined : base.reader,
     limitOperations: async () => port,
+    limit: options.limit,
     now: () => clock.now,
   });
   return { app, pg, owner, wallets, chain: base.chain, ops, clock };
@@ -384,6 +393,7 @@ const list = async (f: Fixture, person = 'person-1', agent = AGENT) => {
 };
 
 test('migration 90 is registered after 88 and only adds to base_spend_permissions', () => {
+  assert.equal(berlinDayStart(NOW), TODAY);
   assert.equal(nextBerlinMidnight(NOW), MIDNIGHT);
   registerBaseMigration();
   const versions = listMigrations().map((m) => m.version);
@@ -428,7 +438,9 @@ test('half model: prepare, sign in the browser, store; ERC-6492 while undeployed
   assert.equal(permission.token, getAddress(USDC));
   assert.equal(permission.allowance, 10_000_000n);
   assert.equal(permission.period, LIMIT_PERIOD_SECONDS.day);
-  assert.equal(permission.start, MIDNIGHT);
+  // 00:00 Berlin today: the first Base day is the current one, so the limit works at once.
+  assert.equal(permission.start, TODAY);
+  assert.ok(permission.start * 1000 <= NOW);
   assert.equal(permission.end, LIMIT_PERMISSION_END);
   assert.equal(permission.extraData, '0x');
   // What the browser recomputes before signing: the hash and the wallet wrapper around it.
@@ -446,7 +458,7 @@ test('half model: prepare, sign in the browser, store; ERC-6492 while undeployed
   assert.equal(limit.capRaw, '20000000');
   assert.equal(limit.allowanceRaw, '10000000');
   assert.equal(limit.onchainModel, 'half');
-  assert.equal(limit.start, MIDNIGHT);
+  assert.equal(limit.start, TODAY);
   // A retry of the same signed limit is answered with the stored one, never a second row.
   const retried = await store(f, prepared);
   assert.equal(retried.statusCode, 201, retried.body);
@@ -567,10 +579,14 @@ test('wrong signer, tampered permission and a wrong cap are refused with 422', a
   assert.equal(swappedRes.statusCode, 422);
   assert.equal(swappedRes.json().code, 'permission_mismatch');
 
-  // A start that is not the next Berlin midnight, an end, a period or extra data of its own.
+  // A start that is not 00:00 Berlin today (an hour off, the next midnight as before, yesterday,
+  // the epoch), an end, a period or extra data of its own.
   for (const change of [
-    { start: MIDNIGHT - 3600 },
-    { start: MIDNIGHT + 86_400 },
+    { start: TODAY - 3600 },
+    { start: TODAY + 3600 },
+    { start: MIDNIGHT },
+    { start: TODAY - 86_400 },
+    { start: 0 },
     { end: MIDNIGHT + 30 * 86_400 },
     { period: 3600 },
     { extraData: '0x01' as Hex },
@@ -615,12 +631,25 @@ test('wrong signer, tampered permission and a wrong cap are refused with 422', a
   const none = await f.pg.query('SELECT 1 FROM base_spend_permissions');
   assert.equal(none.rows.length, 0);
   assert.equal((await store(f, prepared)).statusCode, 201);
-  // Signed just before midnight and sent just after: the start that was prepared still counts.
+  // Prepared just before midnight and stored just after: the day it was prepared on still counts
+  // (within the signing window), and so does the new day's start.
   const late = await setup(t);
   late.clock.now = Date.UTC(2026, 9, 10, 21, 55);
   const preparedLate = (await prepare(late)).json() as Prepared;
+  assert.equal(permissionFromJson(preparedLate.permission)!.start, TODAY);
   late.clock.now = Date.UTC(2026, 9, 10, 22, 3);
-  assert.equal((await store(late, preparedLate)).statusCode, 201);
+  const lateStored = await store(late, preparedLate);
+  assert.equal(lateStored.statusCode, 201, lateStored.body);
+  assert.equal(lateStored.json().start, TODAY);
+  // Past the signing window, the previous day's start is refused.
+  const stale = await setup(t);
+  stale.clock.now = Date.UTC(2026, 9, 10, 21, 55);
+  const preparedStale = (await prepare(stale)).json() as Prepared;
+  stale.clock.now = Date.UTC(2026, 9, 10, 22, 11);
+  const refused = await store(stale, preparedStale);
+  assert.equal(refused.statusCode, 422);
+  assert.equal(refused.json().code, 'permission_mismatch');
+  assert.equal((await stale.pg.query('SELECT 1 FROM base_spend_permissions')).rows.length, 0);
 });
 
 test('one active limit per token; a new one only after Base shows the old one revoked', async (t) => {
@@ -868,6 +897,38 @@ test('revoke: a stop between linking and sending resumes the SAME signed operati
   }
 });
 
+test('revoke: one stored but never claimed for its first send is resumed by the next read, as signed', async (t) => {
+  const f = await setup(t);
+  const { created } = await storedLimit(f);
+  const revokeUrl = `${limitsUrl()}/${created.permissionId}/revoke`;
+  const post = (url: string, payload: unknown = {}) =>
+    f.app.inject({
+      method: 'POST',
+      url,
+      headers: as('person-1'),
+      payload: JSON.stringify(payload),
+    });
+  const key = `base-wallet:limit-revoke:${created.permissionId}:1`;
+  const request = (await post(revokeUrl)).json();
+  const signature = await f.owner.sign({ hash: request.userOpHash });
+  // The chain module stored it (queued) and the process stopped before its claim and send.
+  f.ops.status = 'queued';
+  f.ops.crash = 'after-store';
+  assert.equal((await post(`${revokeUrl}/signature`, { signature })).statusCode, 503);
+  assert.equal(f.ops.submitted.length, 1);
+
+  // A queued operation is never sent by a refresh: the read hands it back to submit, which claims
+  // and sends exactly the stored, signed operation.
+  await list(f);
+  assert.equal(f.ops.submitted.length, 2);
+  for (const input of f.ops.submitted) {
+    assert.equal(input.idempotencyKey, key);
+    assert.equal(input.signature, signature);
+    assert.equal(input.userOpHash, request.userOpHash);
+  }
+  assert.equal(f.ops.prepared.length, 1, 'never prepared again');
+});
+
 test('revoke: an unsigned operation expires; a failed or outdated one is prepared again', async (t) => {
   const f = await setup(t);
   const { created } = await storedLimit(f);
@@ -936,17 +997,29 @@ test('the view: Base at one block, the Berlin counter, honest when Base cannot b
   assert.equal(empty.json().stale, false);
 
   const { created } = await storedLimit(f);
-  // Before the first Berlin midnight Base allows nothing yet: no current period, never zeros
-  // invented for one.
+  // Signed at 14:00: Base's first day is today's, so its whole allowance is there at once (half
+  // the cap: never more in this first period, and the Berlin day's count still stops at the cap).
   let view = (await list(f)).json();
   let limit = view.limits[0];
   assert.equal(view.stale, false);
   assert.equal(view.readAtBlock, 1000);
-  assert.equal(limit.onchain.phase, 'before_start');
-  assert.equal(limit.onchain.start, MIDNIGHT);
+  assert.equal(limit.onchain.phase, 'active');
+  assert.equal(limit.onchain.start, TODAY);
   assert.equal(limit.onchain.end, LIMIT_PERMISSION_END);
+  assert.equal(limit.onchain.currentPeriodStart, TODAY);
+  assert.equal(limit.onchain.currentPeriodEnd, MIDNIGHT);
+  assert.equal(limit.onchain.spentRaw, '0');
+  assert.equal(limit.onchain.leftRaw, '10000000');
+  assert.equal(limit.calendar.leftRaw, '20000000');
+  // A limit signed before this change starts at its next midnight: before it, Base allows
+  // nothing yet (no current period, never zeros invented for one).
+  f.chain.time = TODAY - 3600;
+  view = (await list(f)).json();
+  limit = view.limits[0];
+  assert.equal(limit.onchain.phase, 'before_start');
   assert.equal(limit.onchain.currentPeriodStart, null);
   assert.equal(limit.onchain.leftRaw, '0');
+  f.chain.time = NOW / 1000;
   assert.equal(limit.calendar.timeZone, 'Europe/Berlin');
   assert.equal(limit.calendar.periodStart, Date.UTC(2026, 9, 9, 22) / 1000);
   assert.equal(limit.calendar.periodEnd, MIDNIGHT);
@@ -1124,4 +1197,22 @@ test('contract: the browser reads the wallet spender, checks the real prepared l
     }),
   });
   assert.equal(stored.statusCode, 201, stored.body);
+});
+
+test('the limits list is rate limited per person before Base is read', async (t) => {
+  const calls: string[] = [];
+  let refuse = false;
+  const f = await setup(t, {
+    limit: async (key, max, windowMs) => {
+      calls.push(`${key}|${max}|${windowMs}`);
+      if (refuse) throw Object.assign(new Error('Too many requests.'), { statusCode: 429 });
+    },
+  });
+  const ok = await list(f);
+  assert.equal(ok.statusCode, 200, ok.body);
+  assert.deepEqual(calls, ['wallet-limits-read:person-1|30|60000']);
+  refuse = true;
+  const limited = await list(f);
+  assert.equal(limited.statusCode, 429);
+  assert.equal(limited.json().limits, undefined);
 });

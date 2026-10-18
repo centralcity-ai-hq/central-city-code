@@ -15,7 +15,6 @@ import {
 } from 'react';
 import {
   Activity,
-  ArrowDownLeft,
   ArrowRight,
   ArrowUpRight,
   Bot,
@@ -43,7 +42,6 @@ import {
   Sparkles,
   Square,
   Terminal,
-  Unplug,
   X,
 } from 'lucide-react';
 import type { Agent, Capability, Job, Operator, Snapshot } from '../shared/types';
@@ -51,13 +49,16 @@ import { api, selectWorkspace, selectedWorkspaceId } from './api';
 import { useWorkspaceV2 } from './shell/workspaceV2';
 import { setSidebarOpen } from './shell/sidebarRooms';
 import { MyAgentsV2, type AgentRequest } from './agents/MyAgentsV2';
-import { unreadMessagesLabel, WorkspaceNavigation } from './shell/WorkspaceNavigation';
+import { messagesBadgeLabel, WorkspaceNavigation } from './shell/WorkspaceNavigation';
 import { openWorkspaceView, workspaceView } from './shell/workspaceDestinations';
 import { useSnapshot } from './useSnapshot';
+import { pageSummary, snapshotPage } from './agents/agentPages';
+import { usePagedAgents } from './agents/usePagedAgents';
 import { Workflows } from './Workflows';
 import { AssistantAccess, permissionLabel } from './AssistantAccess';
 
-import { CrossWorkspaceConnections } from './Connections';
+import { AgentPermissions } from './permissions/AgentPermissions';
+import { ConnectionSheet } from './permissions/ConnectionSheet';
 import { WorkspaceKeys } from './WorkspaceKeys';
 import type { WorkspaceMembership } from '../shared/assistant';
 import { forgetMessagesState, MessagesView, useInboxSummary } from './Messages';
@@ -122,7 +123,8 @@ type View =
   | 'elric';
 type Dialog =
   | { kind: 'create' }
-  | { kind: 'connection' }
+  /** New connection; "Let B send work back" opens it prefilled reversed. */
+  | { kind: 'connection'; from?: string; to?: string }
   | { kind: 'job'; connectionId?: string }
   | { kind: 'result'; id: string }
   | { kind: 'token'; token: string; agent: Agent }
@@ -287,11 +289,14 @@ function useTransmutations(snapshot: Snapshot | null) {
   useEffect(() => () => timers.current.forEach((timer) => window.clearTimeout(timer)), []);
   useEffect(() => {
     if (!snapshot) return;
+    // A paged snapshot's list is its page (src/agents/agentPages.ts): the agents after it are
+    // there for their names and are not new.
+    const listed = snapshotPage(snapshot);
     if (!known.current) {
-      known.current = new Set(snapshot.agents.map((agent) => agent.id));
+      known.current = new Set(listed.map((agent) => agent.id));
       return;
     }
-    const added = snapshot.agents.filter((agent) => !known.current!.has(agent.id));
+    const added = listed.filter((agent) => !known.current!.has(agent.id));
     if (!added.length) return;
     for (const agent of added) known.current.add(agent.id);
     setFresh((current) => new Set([...current, ...added.map((agent) => agent.id)]));
@@ -500,15 +505,24 @@ function Console({
   const reviewJobs =
     snapshot?.jobs.filter((job) => job.status === 'completed' && job.acceptance !== 'accepted') ||
     [];
-  const hasAgents = Boolean(snapshot?.agents.some((agent) => agent.status !== 'revoked'));
-  const agents =
-    snapshot?.agents.filter((agent) =>
-      `${agent.name} ${agent.description} ${agent.capability}`
-        .toLowerCase()
-        .includes(query.toLowerCase()),
-    ) || [];
-  const nameOf = (id: string) => snapshot?.agents.find((agent) => agent.id === id)?.name || 'Agent';
-  const maybeName = (id: string) => snapshot?.agents.find((agent) => agent.id === id)?.name;
+  const hasAgents = Boolean(
+    snapshot?.agentsPage
+      ? snapshot.agentsPage.live > 0
+      : snapshot?.agents.some((agent) => agent.status !== 'revoked'),
+  );
+  // The legacy All agents list of a paged workspace (src/agents/agentPages.ts): its pages, Load
+  // more and the search run on the server. Elsewhere it is the snapshot's agents, as before.
+  const legacyList = !workspaceV2 && view === 'agents';
+  const pages = usePagedAgents(snapshot ?? { agents: [] }, legacyList ? query : '', null);
+  const agents = pages.paged
+    ? pages.listed
+    : snapshot?.agents.filter((agent) =>
+        `${agent.name} ${agent.description} ${agent.capability}`
+          .toLowerCase()
+          .includes(query.toLowerCase()),
+      ) || [];
+  const nameOf = (id: string) => pages.known.find((agent) => agent.id === id)?.name || 'Agent';
+  const maybeName = (id: string) => pages.known.find((agent) => agent.id === id)?.name;
   // In My agents' claim sheet the page's error banner sits behind the backdrop, so a failed
   // claim is shown in the sheet instead.
   const [claimSheetError, setClaimSheetError] = useState('');
@@ -728,6 +742,8 @@ function Console({
             }}
             view={pageContent ? null : view}
             unreadMessages={inboxes.total}
+            requestResponses={inboxes.requestResponses}
+            roomInvitations={inboxes.invited}
             onView={changeView}
             showElric={elric === 'activity' || elric === 'setup'}
             mobileOpen={mobileNav}
@@ -766,9 +782,20 @@ function Console({
                 >
                   <item.icon size={18} strokeWidth={1.6} aria-hidden="true" />
                   <span>{item.label}</span>
-                  {item.id === 'messages' && inboxes.total ? (
-                    <span className="nav-count" aria-label={unreadMessagesLabel(inboxes.total)}>
-                      {inboxes.total}
+                  {item.id === 'agents' && inboxes.invited ? (
+                    <span
+                      className="nav-count"
+                      aria-label={`${inboxes.invited} room ${inboxes.invited === 1 ? 'invitation' : 'invitations'}`}
+                    >
+                      {inboxes.invited}
+                    </span>
+                  ) : null}
+                  {item.id === 'messages' && inboxes.badge ? (
+                    <span
+                      className="nav-count"
+                      aria-label={messagesBadgeLabel(inboxes.total, inboxes.requestResponses)}
+                    >
+                      {inboxes.badge}
                     </span>
                   ) : null}
                   {item.id === 'jobs' && activeJobs.length + reviewJobs.length ? (
@@ -810,10 +837,14 @@ function Console({
         {!workspaceV2 ? accountControls : null}
       </aside>
       <div className="workspace-content">
-        {/* Messages' own pill already names the page on a phone: the top row shows only ☰. */}
+        {/* Messages' own pill already names the page on a phone, as the Feed's heading does: the
+            top row shows only ☰. */}
         <AppHeader
           title={headerTitle}
-          showTitle={!(workspaceV2 && !pageContent && (view === 'messages' || view === 'agents'))}
+          showTitle={
+            !(workspaceV2 && !pageContent && (view === 'messages' || view === 'agents')) &&
+            !(pageContent && pageTitle === 'Feed')
+          }
           onOpenNavigation={() => setMobileNav(true)}
         />
         {pageContent ? (
@@ -825,9 +856,11 @@ function Console({
             className={`main-content${advancedV2 ? ' adv2' : ''}`}
             data-adv2-view={advancedV2 ? view : undefined}
           >
-            {/* Settings sections and Messages (its floating top bar) render their own header. */}
+            {/* Settings sections, Messages and Agent permissions (their floating top bars) render
+                their own header. */}
             {settingsSection ||
-            (workspaceV2 && (view === 'messages' || view === 'agents')) ? null : (
+            (workspaceV2 &&
+              (view === 'messages' || view === 'agents' || view === 'connections')) ? null : (
               <div className="page-heading">
                 <div>
                   {/* The calm canvas (Workspace v3) has no breadcrumb label above the title;
@@ -1192,6 +1225,7 @@ function Console({
                     onClaimOpened={() => setClaimRequested(false)}
                     agentRequested={agentRequested}
                     onAgentOpened={() => setAgentRequested(null)}
+                    workspaceKeys={kind === 'ai'}
                     onTryExamples={() =>
                       void action(
                         'demo',
@@ -1205,7 +1239,8 @@ function Console({
                     <div className="list-toolbar">
                       <div className="filter-label">
                         <Layers3 size={16} aria-hidden="true" />
-                        All agents<span>{snapshot.agents.length}</span>
+                        All agents
+                        <span>{snapshot.agentsPage?.total ?? snapshot.agents.length}</span>
                       </div>
                       <label className="search-field">
                         <Search size={16} aria-hidden="true" />
@@ -1239,6 +1274,26 @@ function Console({
                           : 'Start from a template, connect your AI, or run an agent on your own computer.'}
                       </EmptyState>
                     )}
+                    {pages.paged ? (
+                      <div className="list-pager" aria-label="More agents">
+                        {pages.searching && pages.loading ? null : (
+                          <p role="status">
+                            {pageSummary(pages.listed.length, pages.of, pages.searching)}
+                          </p>
+                        )}
+                        {pages.error ? <p role="alert">{pages.error}</p> : null}
+                        {pages.hasMore || pages.error ? (
+                          <button
+                            type="button"
+                            className="text-link"
+                            disabled={pages.loading}
+                            onClick={pages.error ? pages.retry : pages.loadMore}
+                          >
+                            {pages.loading ? 'Loading…' : pages.error ? 'Try again' : 'Load more'}
+                          </button>
+                        ) : null}
+                      </div>
+                    ) : null}
                     {agentsFooter}
                   </section>
                 ) : null}
@@ -1267,104 +1322,27 @@ function Console({
                   </>
                 ) : null}
                 {view === 'connections' ? (
-                  <>
-                    <section className="panel" aria-label="Connections">
-                      <div className="list-toolbar">
-                        <div className="filter-label">
-                          <Link2 size={16} aria-hidden="true" />
-                          Connections<span>{snapshot.connections.length}</span>
-                        </div>
-                        <span className="muted small">
-                          A connection lets one agent send work to another. It shares no tools or
-                          passwords.
-                        </span>
-                      </div>
-                      {snapshot.connections.length ? (
-                        <div className="connection-list">
-                          {snapshot.connections.map((connection) => {
-                            const from = snapshot.agents.find(
-                              (agent) => agent.id === connection.fromAgentId,
-                            );
-                            const to = snapshot.agents.find(
-                              (agent) => agent.id === connection.toAgentId,
-                            );
-                            return (
-                              <div className="connection-row" key={connection.id}>
-                                <div className="connection-path">
-                                  <span>
-                                    {from ? <AgentGlyph agent={from} /> : null}
-                                    <strong>{nameOf(connection.fromAgentId)}</strong>
-                                  </span>
-                                  <svg className="route-arc" viewBox="0 0 64 24" aria-hidden="true">
-                                    <path d="M4 18 Q32 -2 58 16" />
-                                    <path d="M52 11 L58 16 L51 19" />
-                                  </svg>
-                                  <span className="visually-hidden">sends work to</span>
-                                  <span>
-                                    {to ? <AgentGlyph agent={to} /> : null}
-                                    <strong>{nameOf(connection.toAgentId)}</strong>
-                                  </span>
-                                </div>
-                                <span className="connection-capability">
-                                  {to ? capabilityLabels[to.capability] : ''}
-                                </span>
-                                <div className="row-actions">
-                                  <button
-                                    className="button secondary compact"
-                                    disabled={snapshot.paused}
-                                    onClick={() =>
-                                      setDialog({ kind: 'job', connectionId: connection.id })
-                                    }
-                                  >
-                                    Send work
-                                    <ArrowUpRight size={14} />
-                                  </button>
-                                  <button
-                                    className="icon-button danger-text"
-                                    disabled={Boolean(busy)}
-                                    aria-label={`Remove connection from ${nameOf(connection.fromAgentId)} to ${nameOf(connection.toAgentId)}`}
-                                    onClick={() =>
-                                      void action(
-                                        connection.id,
-                                        () =>
-                                          api(`/api/connections/${connection.id}`, {}, 'DELETE'),
-                                        'Connection removed. No new work can be sent this way.',
-                                      )
-                                    }
-                                  >
-                                    <Unplug size={16} />
-                                  </button>
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      ) : (
-                        <EmptyState
-                          icon={<Link2 size={25} />}
-                          title="Connect two agents"
-                          live={workspaceV2}
-                          action={
-                            <button
-                              className="button primary"
-                              disabled={!hasAgents}
-                              onClick={() => setDialog({ kind: 'connection' })}
-                            >
-                              <Plus size={15} />
-                              New connection
-                            </button>
-                          }
-                        >
-                          Choose which agent asks and which one does the work. Work only travels in
-                          the direction you allow.
-                        </EmptyState>
-                      )}
-                    </section>
-                    <CrossWorkspaceConnections
-                      agents={snapshot.agents}
-                      onChanged={() => void refresh()}
-                    />
-                  </>
+                  <AgentPermissions
+                    snapshot={snapshot}
+                    busy={Boolean(busy)}
+                    hasAgents={hasAgents}
+                    onNewConnection={(prefill) =>
+                      setDialog({ kind: 'connection', from: prefill?.from, to: prefill?.to })
+                    }
+                    onSendWork={(connectionId) => setDialog({ kind: 'job', connectionId })}
+                    onEndConnection={async (connection) => {
+                      const failure = await attempt(
+                        connection.id,
+                        () => api(`/api/connections/${connection.id}`, {}, 'DELETE'),
+                        'Connection ended. No new work can be sent this way.',
+                      );
+                      // The page's banner sits behind the confirm: the confirm shows the failure.
+                      if (failure) setActionError('');
+                      return failure;
+                    }}
+                    onSeeWork={() => changeView('collaborations')}
+                    onChanged={() => void refresh()}
+                  />
                 ) : null}
                 {view === 'jobs' ? (
                   <ExchangeLedger
@@ -1992,13 +1970,16 @@ function Dialogs({
     );
   if (dialog.kind === 'connection')
     return (
-      <ConnectionForm
+      <ConnectionSheet
         snapshot={snapshot}
+        initialFrom={dialog.from}
+        initialTo={dialog.to}
         onClose={close}
-        onCreated={async () => {
-          await onChanged('Connection created.');
+        onCreated={async (message) => {
+          await onChanged(message);
           close();
         }}
+        onPartial={() => onChanged()}
       />
     );
   if (dialog.kind === 'job')
@@ -2177,113 +2158,6 @@ function CreateAgent({
   );
 }
 
-function ConnectionForm({
-  snapshot,
-  onClose,
-  onCreated,
-}: {
-  snapshot: Snapshot;
-  onClose: () => void;
-  onCreated: () => Promise<void>;
-}) {
-  const candidates = snapshot.agents.filter((agent) => !agent.revokedAt);
-  const [from, setFrom] = useState(candidates[0]?.id || '');
-  const [to, setTo] = useState(candidates[1]?.id || '');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    setBusy(true);
-    setError('');
-    try {
-      await api('/api/connections', { fromAgentId: from, toAgentId: to });
-      await onCreated();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "These agents couldn't be connected.");
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <Modal
-      title="Create a connection."
-      subtitle="Give one agent permission to send work to another."
-      onClose={() => {
-        if (!busy) onClose();
-      }}
-    >
-      <form className="form-stack modal-body" onSubmit={submit}>
-        {candidates.length < 2 ? (
-          <div className="info-note">
-            <CircleHelp size={18} />
-            <p>Add at least two agents to create a connection.</p>
-          </div>
-        ) : null}
-        <label>
-          From · asks for the work
-          <select
-            disabled={busy}
-            required
-            value={from}
-            onChange={(event) => {
-              setFrom(event.target.value);
-              if (to === event.target.value) setTo('');
-            }}
-          >
-            <option value="" disabled>
-              Choose an agent
-            </option>
-            {candidates.map((agent) => (
-              <option key={agent.id} value={agent.id}>
-                {agent.name} · {capabilityLabels[agent.capability]}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="form-route-arrow">
-          <ArrowDownLeft size={21} />
-          One way only
-        </div>
-        <label>
-          To · does the work
-          <select
-            disabled={busy}
-            required
-            value={to}
-            onChange={(event) => setTo(event.target.value)}
-          >
-            <option value="" disabled>
-              Choose an agent
-            </option>
-            {candidates
-              .filter((agent) => agent.id !== from)
-              .map((agent) => (
-                <option key={agent.id} value={agent.id}>
-                  {agent.name} · {capabilityLabels[agent.capability]}
-                </option>
-              ))}
-          </select>
-        </label>
-        <div className="info-note">
-          <ShieldCheck size={18} />
-          <p>
-            The first agent may send work to the second. No passwords or tools are shared. You can
-            remove the connection at any time.
-          </p>
-        </div>
-        <FormError error={error} />
-        <button
-          className="button primary large"
-          disabled={busy || candidates.length < 2 || !from || !to}
-        >
-          <Link2 size={16} />
-          {busy ? 'Connecting…' : 'Connect'}
-        </button>
-      </form>
-    </Modal>
-  );
-}
-
 function JobForm({
   snapshot,
   connectionId,
@@ -2353,7 +2227,7 @@ function JobForm({
             </option>
             {candidates.map((item) => (
               <option key={item.id} value={item.id}>
-                {snapshot.agents.find((agent) => agent.id === item.fromAgentId)?.name} →{' '}
+                {snapshot.agents.find((agent) => agent.id === item.fromAgentId)?.name} to{' '}
                 {snapshot.agents.find((agent) => agent.id === item.toAgentId)?.name}
               </option>
             ))}

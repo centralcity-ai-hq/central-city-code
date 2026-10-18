@@ -452,6 +452,7 @@ test('mute: host only; a muted owner cannot post (any agent, after rejoin) and s
     .rooms.find((r: { id: string }) => r.id === roomId);
   assert.equal(listed.muted, true);
   assert.equal(listed.mute_reason, 'Too many pings');
+  assert.equal(listed.mute_scope, 'all');
   const hostView = (await rest(app, a, 'GET', '/api/rooms'))
     .json()
     .rooms.find((r: { id: string }) => r.id === roomId);
@@ -1649,6 +1650,15 @@ test('mute all AIs: host only; never people or the host own members; idempotent;
   assert.match(bravoPost.body, /Quiet please/);
   assert.equal((await post(b, bea, self)).statusCode, 201);
   assert.equal((await post(a, hostAgent)).statusCode, 201);
+  // The console view tells the composer which: b still posts as a person, c cannot post at all.
+  const consoleView = async (who: Owner) =>
+    (await rest(app, who, 'GET', '/api/rooms'))
+      .json()
+      .rooms.find((r: { id: string }) => r.id === roomId);
+  assert.equal((await consoleView(b)).muted, true);
+  assert.equal((await consoleView(b)).mute_scope, 'ai');
+  assert.equal((await consoleView(c)).mute_scope, 'all');
+  assert.equal((await consoleView(a)).mute_scope, null);
 
   // Unmute all lifts the bulk mutes only; include_individual lifts single mutes too.
   const unmuted = await bulk(a, { muted: false });
@@ -1907,6 +1917,98 @@ test('mute all AIs: a person whose AI was bulk-muted still renews, reports, revi
     }),
     'comment delete by individually muted person',
   );
+});
+
+test('mute all AIs: a person who also brought their own AI keeps the person controls', async (t) => {
+  const app = await fixture(t);
+  const { a, b, hostAgent, roomId, link } = await room(app);
+  // Bea joins as a person from her own account, then brings her own AI from that account: her
+  // owner has a person row and an AI row in the room.
+  await joinAsPerson(app, b, link, roomId, 'Bea');
+  const granted = await self(app, b, 'POST', '/api/assistant-access', {
+    label: 'Bea assistant',
+    scopes: [...ASSISTANT_SCOPES],
+    expiresInDays: 1,
+  });
+  assert.equal(granted.statusCode, 201, granted.body);
+  const grant = granted.json().token as string;
+  const beaAi = await agent(app, grant, 'Bea desk');
+  await ok(app, grant, 'city_join_room', { link, agent_id: beaAi, idempotency_key: randomUUID() });
+  const bulk = await rest(app, a, 'POST', `/api/rooms/${roomId}/mute-ais`, {
+    muted: true,
+    reason: 'Quiet please',
+  });
+  assert.equal(bulk.json().changed, 2, bulk.body);
+  const viewOf = async (send: typeof self, who: Owner) => {
+    const res = await send(app, who, 'GET', '/api/rooms');
+    assert.equal(res.statusCode, 200, res.body);
+    return (res.json().rooms as Array<{ id: string; muted: boolean; mute_reason: string | null }>)
+      .filter((r) => r.id === roomId)
+      .map((r) => [r.muted, r.mute_reason])[0];
+  };
+
+  // The console shows Bea unmuted: she writes as her person, which the bulk mute spares.
+  assert.deepEqual(await viewOf(self, b), [false, null]);
+  // The AI workspace's console has no person member: its AI's bulk mute shows.
+  assert.deepEqual(await viewOf(rest, b), [true, 'Quiet please']);
+
+  // She pins and unpins as her person; her AI over its key is still refused.
+  const posted = await ok(app, a.key, 'city_room_post', {
+    room_id: roomId,
+    agent_id: hostAgent,
+    text: 'Worth keeping',
+    idempotency_key: randomUUID(),
+  });
+  const seq = posted.message.seq as number;
+  const pinned = await self(app, b, 'POST', `/api/rooms/${roomId}/pins`, { message_seq: seq });
+  assert.equal(pinned.statusCode, 201, pinned.body);
+  const unpinned = await self(
+    app,
+    b,
+    'DELETE',
+    `/api/rooms/${roomId}/pins/${pinned.json().pin.id as string}`,
+  );
+  assert.equal(unpinned.statusCode, 200, unpinned.body);
+  const aiPin = await call(app, grant, 'city_room_pin', {
+    room_id: roomId,
+    agent_id: beaAi,
+    message_seq: seq,
+  });
+  assert.equal(aiPin.json().code, 'muted_in_room', aiPin.body);
+
+  // Her console adds and deletes a task comment as her person, naming no agent.
+  const tasks = createRoomTasks({
+    db: app.city.db,
+    clock: () => Date.now(),
+    limit: async () => {},
+    secret: 'synthetic-room-management-tasks-secret',
+  });
+  const p = (operatorId: string) => ({
+    operatorId,
+    actor: 'the test owner',
+    origin: 'http://localhost',
+    console: true,
+  });
+  const taskId = (
+    await tasks.create(p(a.id), {
+      room_id: roomId,
+      agent_id: hostAgent,
+      title: 'Person comments',
+      idempotency_key: randomUUID(),
+    })
+  ).task.id as string;
+  const beaOwner = await accountOf(app, b);
+  const added = await tasks.commentAdd(p(beaOwner), {
+    room_id: roomId,
+    task_id: taskId,
+    body: 'A note',
+  });
+  const deleted = await tasks.commentDelete(p(beaOwner), {
+    room_id: roomId,
+    task_id: taskId,
+    comment_id: added.comment.id as string,
+  });
+  assert.equal(deleted.deleted, true);
 });
 
 test('DELETE /api/rooms/:room erases peer reviews, comments, pins and caches; private messages stay', async (t) => {

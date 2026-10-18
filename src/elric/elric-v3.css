@@ -510,6 +510,16 @@
   font-weight: 600;
   line-height: 1.45;
 }
+.elx3 .elx3-action-detail {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 12em;
+  overflow-y: auto;
+}
 .elx3 .elx3-action .elx-meta {
   margin: calc(-4 * var(--ws-px)) 0 0;
   color: var(--text-muted);

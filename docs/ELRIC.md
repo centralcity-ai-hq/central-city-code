@@ -87,7 +87,7 @@ Owner console routes (session cookie only):
 - `PUT /api/elric/settings` `{ host_may_invoke }`
 - `GET /api/elric/turns`
 - `POST /api/elric/pending/:id/approve` `{ args_hash }`
-- `GET /api/elric/pending`: the owner's open, unexpired pending actions. Each has the tool name, a safe summary (a task title only, cleaned and capped at 120 characters, never the stored arguments), the `args_hash` to approve with, the room (name only while visible), and the created and expiry times.
+- `GET /api/elric/pending`: the owner's open, unexpired pending actions. Each has the tool name, a safe summary (the task title, cleaned and capped at 200 characters), the task description it would create as `detail` (control and bidi characters removed, line breaks kept, capped at 4,000 characters; no other stored argument), the `args_hash` to approve with, the room (name only while visible), and the created and expiry times.
 - `POST /api/elric/pending/:id/reject`: owner session only. A repeated reject answers like the first. A rejected action can't be approved (`not_pending`).
 
 ## Owner console

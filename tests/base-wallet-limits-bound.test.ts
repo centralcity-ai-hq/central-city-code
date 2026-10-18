@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   LIMIT_PERIOD_SECONDS,
+  berlinDayStart,
   berlinMidnight,
   calendarPeriod,
   nextBerlinMidnight,
@@ -14,8 +15,9 @@ import {
  * decision of 11 October 2026: Base enforces fixed periods of 24 hours, 7 days and 31 days at half
  * the limit; the app counts Berlin days, weeks and months).
  *
- * A grant's first Base period starts at the next 00:00 Berlin (`nextBerlinMidnight`, the only start
- * the server prepares and accepts), and every period is a whole number of days. So every period
+ * A grant's first Base period starts at 00:00 Berlin of the day it is signed (`berlinDayStart`, the
+ * only start the server prepares and accepts; grants signed before 14 October 2026 start at the next
+ * midnight, `nextBerlinMidnight`), and every period is a whole number of days. So every period
  * boundary lies a whole number of hours from a Berlin midnight. A calendar interval is at most one
  * hour longer than its period (a 25-hour day, the week holding it, October), so it could overlap
  * three periods only with a boundary strictly inside its first hour, which a whole-hour offset never
@@ -56,9 +58,42 @@ test('every possible grant start is a Berlin midnight on a whole hour (UTC)', ()
     ms < Date.UTC(2031, 0, 1);
     ms += 7 * 3_600_000 + 13 * 60_000
   ) {
+    // Today's (every grant from now on): at or before the signature, so it works at once.
+    const today = berlinDayStart(ms);
+    assert.ok(today * 1000 <= ms, 'at or before the grant');
+    assert.equal(today % 3_600, 0, `${new Date(today * 1000).toISOString()} is on a whole hour`);
+    // The next one (grants signed before this change).
     const start = nextBerlinMidnight(ms);
     assert.ok(start * 1000 > ms, 'strictly after the grant');
     assert.equal(start % 3_600, 0, `${new Date(start * 1000).toISOString()} is on a whole hour`);
+  }
+});
+
+test('a grant from 00:00 Berlin today: the rest of the signing day, week or month meets at most two periods', () => {
+  // Every signing instant: the grant starts at the day's 00:00 Berlin (at or before it, so it works
+  // at once), and from the signature to the end of that Berlin interval at most two Base periods
+  // start or run: at most twice half the limit, so never more than the limit. For a day limit it is
+  // one period, except on the 25-hour days (its last hour is the next Base day's).
+  for (const kind of KINDS) {
+    const length = LIMIT_PERIOD_SECONDS[kind];
+    for (
+      let ms = Date.UTC(2026, 2, 1);
+      ms < Date.UTC(2028, 0, 1);
+      ms += 2 * 3_600_000 + 17 * 60_000
+    ) {
+      const start = berlinDayStart(ms);
+      const signed = Math.floor(ms / 1000);
+      assert.ok(start <= signed);
+      const rest = { start: signed, end: calendarPeriod(kind, ms).end };
+      const met = periodsMet(start, length, rest);
+      const at = new Date(ms).toISOString();
+      assert.ok(met >= 1 && met <= 2, `${kind} signed ${at}: ${met} periods`);
+      if (kind === 'day') {
+        const day = calendarPeriod('day', ms);
+        const long = day.end - day.start === 25 * 3_600;
+        assert.equal(met, long && signed < start + length ? 2 : 1, `day signed ${at}`);
+      }
+    }
   }
 });
 

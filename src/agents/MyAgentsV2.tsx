@@ -40,6 +40,7 @@ import { BaseRowSummary, BaseScreen } from './v4/BaseScreen';
 import { baseProfileOf } from './v4/baseScreenModel';
 import { DeveloperScreen } from './v4/DeveloperScreen';
 import { ElricPane, type ElricPlace } from './v4/ElricPane';
+import { InvitationsScreen } from './v4/InvitationsScreen';
 import { MessagesScreen } from './v4/MessagesScreen';
 import { ConnectAgentScreen, PermissionsScreen } from './v4/PermissionsScreen';
 import { AddToRoomScreen, RoomsScreen } from './v4/RoomsScreen';
@@ -75,6 +76,7 @@ const SCREENS: AgentScreens = {
   'wallet-pay': (props) => <WalletPayScreen {...props} />,
   'wallet-rate': (props) => <WalletRateScreen {...props} />,
   permissions: (props) => <PermissionsScreen {...props} />,
+  invitations: (props) => <InvitationsScreen {...props} />,
   'permissions-add': (props) => <ConnectAgentScreen {...props} />,
 };
 import { AvatarColorsContext, useAvatarColors } from '../shell/avatarColor';
@@ -90,6 +92,9 @@ import {
   type PendingRequestV2,
 } from './myAgentsModel';
 import { useAgentRooms } from './useAgentRooms';
+import { noteOpenAgent, pagedRosterCounts, pageSummary } from './agentPages';
+import { usePagedAgents } from './usePagedAgents';
+import { timeoutSignal } from '../shell/timeoutSignal';
 import { useInboxSummary } from '../Messages';
 import './my-agents-v3.css';
 import './my-agents-v4.css';
@@ -105,7 +110,7 @@ export interface AgentRequest {
 }
 
 export interface MyAgentsV2Props {
-  snapshot: Pick<Snapshot, 'agents' | 'connections' | 'paused' | 'events'>;
+  snapshot: Pick<Snapshot, 'agents' | 'agentsPage' | 'connections' | 'paused' | 'events'>;
   /** Shared busy flag of the console (any running action disables the others). */
   busy: boolean;
   /** Runs an action through the console: busy state, error banner, refresh and notice. */
@@ -141,6 +146,8 @@ export interface MyAgentsV2Props {
   onTryExamples?: () => void;
   /** Re-reads the workspace after the pane changed an agent (renamed it, made it public). */
   onChanged?: () => void;
+  /** The workspace is AI-owned: only then does Add an agent > Custom offer Workspace keys. */
+  workspaceKeys?: boolean;
 }
 
 type RequestRead =
@@ -164,7 +171,7 @@ function useIncomingRequests() {
         `${REQUESTS}?${query}`,
         undefined,
         'GET',
-        AbortSignal.any([abort.signal, AbortSignal.timeout(12_000)]),
+        timeoutSignal(abort.signal, 12_000),
       );
       if (abort.signal.aborted || selectedWorkspaceId() !== workspace) return;
       setRead({ state: 'ready', items: result.incoming });
@@ -210,6 +217,7 @@ export function MyAgentsV2({
   dialogOpen = false,
   onTryExamples,
   onChanged,
+  workspaceKeys = false,
 }: MyAgentsV2Props) {
   const [searching, setSearching] = useState(false);
   // A claim link (#claim=…) opens the claim sheet with its code filled in.
@@ -265,15 +273,27 @@ export function MyAgentsV2({
   const focusPanel = useRef(false);
   const panelId = useId();
   const { read, reload } = useIncomingRequests();
-  const agentKey = snapshot.agents.map((agent) => agent.id).join(',');
+  // A workspace of more than 500 agents is paged (src/agents/agentPages.ts): `listed` is what the
+  // list shows (loaded pages or the server's search results), `known` every agent read so far.
+  // Otherwise both are snapshot.agents and nothing below changes.
+  const pages = usePagedAgents(snapshot, query, openId);
+  // The console's snapshot poll includes the open agent (a page-2 agent's status stays fresh).
+  useEffect(() => {
+    noteOpenAgent(openId);
+    return () => noteOpenAgent(null);
+  }, [openId]);
+  const listed = pages.listed;
+  const known = pages.known;
+  const agentKey = listed.map((agent) => agent.id).join(',');
   const rooms = useAgentRooms(agentKey);
   const now = Date.now();
-  const pending = read.state === 'ready' ? pendingRequests(read.items, snapshot.agents, now) : [];
-  const counts = rosterCounts(snapshot.agents, elricAgentId);
-  const shown = rosterAgents(snapshot.agents, 'all', query, elricAgentId);
+  const pending = read.state === 'ready' ? pendingRequests(read.items, known, now) : [];
+  const counts = snapshot.agentsPage
+    ? pagedRosterCounts(snapshot.agentsPage, known, elricAgentId)
+    : rosterCounts(snapshot.agents, elricAgentId);
+  const shown = rosterAgents(listed, 'all', query, elricAgentId);
   const elricRow = Boolean(elricAgentId) && showElricRow(elricStatus, 'all', query);
-  const elricAgent = snapshot.agents.find((agent) => isElricAgent(agent, elricAgentId));
-  const others = snapshot.agents.filter((agent) => !isElricAgent(agent, elricAgentId));
+  const others = listed.filter((agent) => !isElricAgent(agent, elricAgentId));
   // Every agent in the list gets its own colour (src/shell/avatarColor.ts), oldest first, so a new
   // agent never changes the colour of the ones already there.
   const avatarColours = useAvatarColors(
@@ -281,7 +301,7 @@ export function MyAgentsV2({
   );
   // Elric opens its own pane (ElricPane), never an agent's, and only while it is on or paused.
   const open = openId
-    ? snapshot.agents.find((agent) => agent.id === openId && !isElricAgent(agent, elricAgentId))
+    ? known.find((agent) => agent.id === openId && !isElricAgent(agent, elricAgentId))
     : undefined;
   const elricOpen =
     Boolean(elricAgentId) &&
@@ -372,7 +392,7 @@ export function MyAgentsV2({
     return () => window.removeEventListener('hashchange', fromHash);
   }, []);
   // On a wide screen the detail side is never blank: the first agent opens once, on arrival.
-  const firstLive = snapshot.agents.find(
+  const firstLive = listed.find(
     (agent) => !isElricAgent(agent, elricAgentId) && agentStateV2(agent) !== 'revoked',
   )?.id;
   useEffect(() => {
@@ -436,7 +456,8 @@ export function MyAgentsV2({
     await reload();
   }
 
-  const empty = !others.length;
+  // A paged workspace is never empty (it has over 500 agents), even when a search finds none.
+  const empty = !pages.paged && !others.length;
   const live = shown.filter((agent) => agentStateV2(agent) !== 'revoked');
   const removed = shown.filter((agent) => agentStateV2(agent) === 'revoked');
   // The Removed group is part of the full list only, never of a search.
@@ -529,6 +550,7 @@ export function MyAgentsV2({
                 now={now}
                 unread={inbox.unread.get(agent.id) ?? 0}
                 capped={inbox.capped.has(agent.id)}
+                invitations={inbox.invitations.get(agent.id) ?? 0}
                 open={open?.id === agent.id}
                 panelId={panelId}
                 onToggle={(from) => openAgent(agent.id, from)}
@@ -571,10 +593,43 @@ export function MyAgentsV2({
               Claim from a link
             </button>
           </div>
-        ) : !live.length && !removedShown.length && !elricRow ? (
+        ) : pages.searching && pages.loading && !live.length ? (
+          <p className="ma4-none" role="status">
+            Searching all agents…
+          </p>
+        ) : !live.length && !removedShown.length && !elricRow && !pages.error ? (
           <p className="ma4-none" role="status">
             No agent called “{query}”.
           </p>
+        ) : null}
+
+        {pages.paged ? (
+          <div className="ma4-pager" aria-label="More agents">
+            {pages.searching && pages.loading ? null : (
+              <p role="status">
+                {pageSummary(
+                  pages.listed.filter((agent) => !isElricAgent(agent, elricAgentId)).length,
+                  pages.of,
+                  pages.searching,
+                )}
+              </p>
+            )}
+            {pages.error ? (
+              <p className="ma4-pager-error" role="alert">
+                {pages.error}
+              </p>
+            ) : null}
+            {pages.hasMore || pages.error ? (
+              <button
+                type="button"
+                className="ma3-btn ma3-btn-ghost ma3-btn-sm"
+                disabled={pages.loading}
+                onClick={pages.error ? pages.retry : pages.loadMore}
+              >
+                {pages.loading ? 'Loading…' : pages.error ? 'Try again' : 'Load more'}
+              </button>
+            ) : null}
+          </div>
         ) : null}
 
         {read.state === 'error' ? (
@@ -637,6 +692,7 @@ export function MyAgentsV2({
                 claimForm={claimForm?.(() => setSide(null))}
                 onTryExamples={onTryExamples}
                 onOwnAgent={onAddAgent}
+                workspaceKeys={workspaceKeys}
                 onCreated={async (agent) => {
                   await run(`create-${agent.id}`, async () => undefined, `${agent.name} is ready.`);
                   setSide(null);
@@ -670,12 +726,16 @@ export function MyAgentsV2({
               ref={panel}
               id={panelId}
               agent={open}
-              snapshot={snapshot}
+              snapshot={pages.paged ? { ...snapshot, agents: known } : snapshot}
               rooms={rooms.read.state === 'ready' ? (rooms.read.byAgent.get(open.id) ?? []) : null}
               busy={busy}
               screens={SCREENS}
               initialScreen={requested?.id === open.id ? requested.screen : undefined}
-              onChanged={onChanged}
+              onChanged={() => {
+                // A screen changed the agent or its rooms: the Rooms row is read here, not there.
+                onChanged?.();
+                void rooms.reload();
+              }}
               onOpenRoom={onOpenRoom}
               onOpenElric={() => onOpenElric('chat')}
               unread={inbox.unread.get(open.id) ?? 0}
@@ -768,6 +828,7 @@ function RosterRow({
   now,
   unread,
   capped,
+  invitations,
   open,
   panelId,
   onToggle,
@@ -777,19 +838,32 @@ function RosterRow({
   /** Messages the owner has not read in this agent's inbox (GET /api/messages/summary). */
   unread: number;
   capped: boolean;
+  /** Open room invitations to this agent (the same summary), answered in its pane. */
+  invitations: number;
   open: boolean;
   panelId: string;
   onToggle: (from: HTMLElement) => void;
 }) {
   const state = agentStateV2(agent);
-  const line = rowLine(agent, now);
-  const count = capped || unread > 99 ? '99+' : unread ? String(unread) : '';
+  // Open invitation requests (answered in the agent's Messages) say so on the row, and count in
+  // its badge with the unread messages: with many agents, the one that needs you stands out.
+  const invited = invitations
+    ? invitations === 1
+      ? 'Invitation request'
+      : `${invitations} invitation requests`
+    : '';
+  const line = invited || rowLine(agent, now);
+  const waiting = unread + invitations;
+  const count = capped || waiting > 99 ? '99+' : waiting ? String(waiting) : '';
+  const spoken = [unread || capped ? `${capped ? '99+' : unread} unread` : '', invited]
+    .filter(Boolean)
+    .join(', ');
   return (
     <li className="ma4-row" data-state={state} data-open={open ? 'true' : undefined}>
       <button
         type="button"
         className="ma4-row-open"
-        aria-label={`${agent.name}, ${line}${count ? `, ${count} unread` : ''}`}
+        aria-label={`${agent.name}, ${invited ? rowLine(agent, now) : line}${spoken ? `, ${spoken}` : ''}`}
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
         onClick={(event) => onToggle(event.currentTarget)}
@@ -800,7 +874,7 @@ function RosterRow({
         </span>
         <span className="ma4-who">
           <span className="ma4-name">{agent.name}</span>
-          <small>{line}</small>
+          <small data-invited={invited ? '' : undefined}>{line}</small>
         </span>
         {count ? (
           <span className="ma4-badge" aria-hidden="true">

@@ -6,6 +6,8 @@ import type { Database } from '../server/database.js';
 import {
   BASE_MIGRATION_SQL,
   BASE_IDENTITY_PROVISIONAL_SQL,
+  BASE_IDENTITY_HANDOVER_BACKOFF_SQL,
+  BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL,
   BASE_PAYMENTS_MIGRATION_SQL,
   baseShortIdsMigration,
 } from '../server/base/schema.js';
@@ -21,19 +23,23 @@ async function setup(
   t: { after: (fn: () => Promise<unknown>) => void },
   runtimeOk = true,
   visibility = 'public',
+  revokedAt: string | null = null,
 ) {
+  const revoked = revokedAt ? `,"revokedAt":"${revokedAt}"` : '';
   const pg = await PGlite.create('memory://');
   t.after(() => pg.close());
   await pg.exec(`CREATE TABLE operators (id text PRIMARY KEY);
     INSERT INTO operators VALUES ('ws-1'), ('ws-2');
     CREATE TABLE workspaces (operator_id text PRIMARY KEY, data jsonb NOT NULL);
     CREATE TABLE agent_manifests (agent_id text, operator_id text, revision integer, manifest jsonb);
-    INSERT INTO workspaces VALUES ('ws-1', '{"agents":[{"id":"${AGENT}","revision":1}]}');
+    INSERT INTO workspaces VALUES ('ws-1', '{"agents":[{"id":"${AGENT}","revision":1${revoked}}]}');
     INSERT INTO agent_manifests VALUES ('${AGENT}', 'ws-1', 1, '{"spec":{"visibility":"${visibility}"}}');`);
   await pg.exec(BASE_MIGRATION_SQL);
   await pg.exec(BASE_PAYMENTS_MIGRATION_SQL);
   await pg.exec(baseShortIdsMigration.sql);
   await pg.exec(BASE_IDENTITY_PROVISIONAL_SQL);
+  await pg.exec(BASE_IDENTITY_HANDOVER_BACKOFF_SQL);
+  await pg.exec(BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL);
   const db: Database = {
     query: (sql, params) => pg.query(sql, params) as never,
     exec: (sql) => pg.exec(sql),
@@ -170,6 +176,19 @@ test('a private profile is refused before anything starts', async (t) => {
     error: "Make the agent's profile public first.",
     code: 'profile_private',
   });
+  const status = await app.inject({
+    url: `/api/base/agents/${AGENT}/registration`,
+    headers: { 'x-test-operator': 'ws-1' },
+  });
+  assert.deepEqual(status.json(), { identities: [] });
+});
+
+test('a revoked agent is refused even when its last profile was public', async (t) => {
+  // Its card (/a/<id>) answers 404, so a Base ID pointing there would never resolve.
+  const app = await setup(t, true, 'public', '2026-10-01T00:00:00.000Z');
+  const refused = await register(app, 'ws-1');
+  assert.equal(refused.statusCode, 409);
+  assert.equal(refused.json().code, 'profile_private');
   const status = await app.inject({
     url: `/api/base/agents/${AGENT}/registration`,
     headers: { 'x-test-operator': 'ws-1' },

@@ -65,9 +65,7 @@ export function ElricSkeleton({
         <div className="elx-skel-title" aria-hidden="true">
           <ElricMark size="sm" />
           <h1>{ELRIC_NAME}</h1>
-          <span className="elx-skel-tag">
-            built in<span className="visually-hidden"> {ELRIC_AI_TAG}</span>
-          </span>
+          <span className="elx-skel-tag">built-in {ELRIC_AI_TAG}</span>
         </div>
         {/* Manage Elric and New chat as placeholders (their icons come with the dashboard). */}
         <span className="elx-skel-chip elx-skel-manage" aria-hidden="true">

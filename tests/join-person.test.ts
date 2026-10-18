@@ -10,6 +10,7 @@ import {
   SHORT_CODE_LIMITS,
 } from '../server/links/short-code.js';
 import { cleanDisplayName, personMemberId, uuidV5 } from '../server/rooms/person.js';
+import { taskReviewNotice } from '../server/wake/hooks.js';
 
 process.env.CITY_INVITE_FLOW = '1';
 process.env.CITY_RATE_LIMIT_KEY ??= 'synthetic-join-person-test-root-secret';
@@ -588,4 +589,102 @@ test('a person who joined by invite adds and takes room tasks as themselves', as
     { cookie },
   );
   assert.equal(review.statusCode, 403, review.body);
+});
+
+test('"Mute all AIs" with the person spared: the view still says mute_scope "ai" so the composer drops the AI', async (t) => {
+  const f = await fixture(t);
+  const cy = await f.account('Cy');
+  assert.equal((await f.joinPerson(cy.cookie, { link: f.joinUrl, name: 'Cy' })).statusCode, 200);
+  const brought = await f.post(
+    `/api/rooms/${f.roomId}/join`,
+    { agent_id: cy.agentId, idempotency_key: randomUUID() },
+    { cookie: cy.cookie },
+  );
+  assert.equal(brought.statusCode, 200, brought.body);
+  const view = async () =>
+    (await f.get('/api/rooms', { cookie: cy.cookie }))
+      .json()
+      .rooms.find((r: { id: string }) => r.id === f.roomId);
+  assert.equal((await view()).mute_scope, null);
+  const muted = await f.post(
+    `/api/rooms/${f.roomId}/mute-ais`,
+    { muted: true },
+    { cookie: f.host.cookie },
+  );
+  assert.equal(muted.statusCode, 200, muted.body);
+  // Cy still posts as the person, so it is not muted; but its AI is, and the view says so.
+  const room = await view();
+  assert.equal(room.muted, false);
+  assert.equal(room.mute_scope, 'ai');
+  const post = (agentId: string) =>
+    f.post(
+      `/api/rooms/${f.roomId}/messages`,
+      { agent_id: agentId, text: 'Hello', idempotency_key: randomUUID() },
+      { cookie: cy.cookie },
+    );
+  const asAi = await post(cy.agentId);
+  assert.equal(asAi.json().code, 'muted_in_room', asAi.body);
+  const person = (await f.members(cy.cookie)).find((m) => m.own && m.kind === 'person')!;
+  assert.equal((await post(person.id)).statusCode, 201);
+  // Unmuted again, nothing is reported.
+  await f.post(`/api/rooms/${f.roomId}/mute-ais`, { muted: false }, { cookie: f.host.cookie });
+  assert.equal((await view()).mute_scope, null);
+});
+
+test('"Mute all AIs" keeps the person member mentionable (posts and peer-review notices), not its AI', async (t) => {
+  const f = await fixture(t);
+  const cy = await f.account('Cy', 'Cy helper');
+  assert.equal((await f.joinPerson(cy.cookie, { link: f.joinUrl, name: 'Cy' })).statusCode, 200);
+  const brought = await f.post(
+    `/api/rooms/${f.roomId}/join`,
+    { agent_id: cy.agentId, idempotency_key: randomUUID() },
+    { cookie: cy.cookie },
+  );
+  assert.equal(brought.statusCode, 200, brought.body);
+  const person = (await f.members(cy.cookie)).find((m) => m.own && m.kind === 'person')!;
+  const muted = await f.post(
+    `/api/rooms/${f.roomId}/mute-ais`,
+    { muted: true },
+    { cookie: f.host.cookie },
+  );
+  assert.equal(muted.statusCode, 200, muted.body);
+  const mentioned = async (seq: number) =>
+    (
+      await f.app.city.db.query<{ agent_id: string }>(
+        'SELECT agent_id FROM mentions WHERE room_id=$1 AND source_seq=$2 ORDER BY agent_id',
+        [f.roomId, seq],
+      )
+    ).rows.map((row) => row.agent_id);
+  // An @mention of both: the person gets a mention row, the bulk-muted AI none.
+  const posted = await f.post(
+    `/api/rooms/${f.roomId}/messages`,
+    {
+      text: 'Hi @Cy and @Cy-helper',
+      agent_id: f.host.agentId,
+      idempotency_key: randomUUID(),
+    },
+    { cookie: f.host.cookie },
+  );
+  assert.equal(posted.statusCode, 201, posted.body);
+  assert.deepEqual(await mentioned(posted.json().message.seq), [person.id]);
+  // A peer-review notice naming both: the same.
+  const line = await f.post(
+    `/api/rooms/${f.roomId}/messages`,
+    { text: 'Review requested', agent_id: f.host.agentId, idempotency_key: randomUUID() },
+    { cookie: f.host.cookie },
+  );
+  assert.equal(line.statusCode, 201, line.body);
+  const seq = line.json().message.seq as number;
+  await f.app.city.db.transaction((tx) =>
+    taskReviewNotice(tx, {
+      roomId: f.roomId,
+      seq,
+      agentIds: [person.id, cy.agentId],
+      fromAgentId: f.host.agentId,
+      fromName: 'Alex',
+      text: 'Review requested',
+      time: Date.now(),
+    }),
+  );
+  assert.deepEqual(await mentioned(seq), [person.id]);
 });

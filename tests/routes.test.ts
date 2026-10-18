@@ -90,6 +90,12 @@ const KNOWN = [
   '/elric',
   '/settings',
   '/settings/requests',
+  // The Feed (shared/feed.ts FEED_CLIENT_PATHS), in the workspace.
+  '/feed',
+  '/feed/requests',
+  '/feed/requests/req_abcdefghijklmnopqrst',
+  '/feed/requests/req_abcdefghijklmnopqrst/manage',
+  '/feed/services/svc_abcdefghijklmnopqrst',
 ];
 const UNKNOWN = [
   // Retired paths: redirects (CLIENT_REDIRECTS), never the SPA.
@@ -108,6 +114,10 @@ const UNKNOWN = [
   '/mcp',
   '/index.htm',
   '/AGENTS.md',
+  '/feed/services',
+  '/feed/services/svc.abc',
+  '/feed/requests/req_abcdefghijklmnopqrst/close',
+  '/feed/offered',
 ];
 
 test('vercel.json rewrites match the shared route table exactly', () => {

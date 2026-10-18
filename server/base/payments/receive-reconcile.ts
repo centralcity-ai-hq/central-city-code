@@ -1,4 +1,5 @@
 import { getAddress, parseAbi, type Hex, type PublicClient } from 'viem';
+import { MAX_LOG_RANGE_BLOCKS } from '../chain/rpc-budget.js';
 import type { createReceiveStore } from './receive-store.js';
 
 type Store = ReturnType<typeof createReceiveStore>;
@@ -19,8 +20,11 @@ export const RECEIVE_SEARCH_LOOKBACK_BLOCKS = 600n;
  * pending rather than failing.
  */
 export const RECEIVE_SEARCH_MAX_BLOCKS = 50_000n;
-/** Blocks per getLogs page to start with; halved on a provider error down to the minimum. */
-const LOG_PAGE_BLOCKS = 10_000n;
+/**
+ * Blocks per getLogs page to start with: the endpoint's range cap, so no page is refused for its
+ * size. Halved on a provider error down to the minimum.
+ */
+const LOG_PAGE_BLOCKS = MAX_LOG_RANGE_BLOCKS;
 const LOG_PAGE_MIN_BLOCKS = 500n;
 
 export type ReceiveReconcileOutcome =

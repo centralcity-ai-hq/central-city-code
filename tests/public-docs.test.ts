@@ -296,6 +296,7 @@ test('Markdown pages are served as text/markdown; /docs links to them and works 
     '/docs/rooms.md',
     '/docs/room-management.md',
     '/docs/coding.md',
+    '/docs/feed.md',
     '/docs/index.md',
     '/docs.md',
     `/${DOCS_INDEX_FILE}`,
@@ -311,6 +312,7 @@ test('Markdown pages are served as text/markdown; /docs links to them and works 
     ['/docs/rooms', '/docs/rooms.md'],
     ['/docs/room-management', '/docs/room-management.md'],
     ['/docs/coding', '/docs/coding.md'],
+    ['/docs/feed', '/docs/feed.md'],
     ['/docs/api', '/docs/api.md'],
   ] as const) {
     assert.ok(served(page), page);

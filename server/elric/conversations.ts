@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { Database } from '../database.js';
 import { createPrivateRoom, PRIVATE_ROOM_NAME } from '../rooms/private.js';
 import { RoomError } from '../rooms/service.js';
+import { dayOf } from './config.js';
 import { purgeElricConversation } from './erase.js';
 import type { TitleSource } from './titles.js';
 
@@ -15,7 +16,8 @@ import type { TitleSource } from './titles.js';
  *
  * - `GET /api/elric/conversations`: newest activity first, with titles.
  * - `POST /api/elric/conversations` `{ title? }`: a new conversation (at most
- *   CONVERSATIONS_MAX open per owner; no daily limit: the churn limit is only for revoke + re-add).
+ *   CONVERSATIONS_MAX open and CONVERSATIONS_PER_DAY new ones per owner and day, deleted ones
+ *   included; the revoke + re-add churn limit does not apply).
  * - `GET /api/elric/conversations/:id[?since=<seq>]`: one conversation's poll state.
  * - `PATCH /api/elric/conversations/:id` `{ title }`: rename.
  * - `DELETE /api/elric/conversations/:id`: deletes it for good, content included.
@@ -156,8 +158,11 @@ async function one(db: Q, ownerId: string, id: string): Promise<Row> {
 
 /**
  * The conversation caps (in the caller's transaction, under the Elric row lock): at most
- * CONVERSATIONS_MAX open, and CONVERSATIONS_PER_DAY new ones in 24 hours (deleted ones count, so
- * delete and re-create cannot grow storage without bound).
+ * CONVERSATIONS_MAX open, and CONVERSATIONS_PER_DAY new ones in 24 hours and per UTC day (deleted
+ * ones count, so delete and re-create cannot grow storage or churn without bound). A delete purges
+ * the room, so the rolling count over rooms forgets it; the per-day counter on the owner's usage
+ * row (migration 220) does not. Counts this creation when it passes: call it only right before
+ * creating the conversation, in the same transaction.
  */
 export async function assertConversationCaps(tx: Q, ownerId: string, time: number) {
   const row = (
@@ -179,15 +184,34 @@ export async function assertConversationCaps(tx: Q, ownerId: string, time: numbe
       'too_many_conversations',
       `You have ${CONVERSATIONS_MAX} conversations. Delete one to start a new one.`,
     );
-  if (Number(row?.recent ?? 0) >= CONVERSATIONS_PER_DAY)
-    throw Object.assign(
+  const tooMany = (retryAfterMs: number) =>
+    Object.assign(
       refuse(
         429,
         'too_many_new_conversations',
         'Too many new conversations today. Try again later.',
       ),
-      { retryAfterMs: Math.max(1_000, Number(row!.oldest) + DAY_MS - time) },
+      { retryAfterMs: Math.max(1_000, retryAfterMs) },
     );
+  if (Number(row?.recent ?? 0) >= CONVERSATIONS_PER_DAY)
+    throw tooMany(Number(row!.oldest) + DAY_MS - time);
+  const day = dayOf(time);
+  await tx.query('INSERT INTO elric_usage(owner_id,day) VALUES($1,$2) ON CONFLICT DO NOTHING', [
+    ownerId,
+    day,
+  ]);
+  const used = (
+    await tx.query<{ conversations: string | number }>(
+      'SELECT conversations FROM elric_usage WHERE owner_id=$1 AND day=$2 FOR UPDATE',
+      [ownerId, day],
+    )
+  ).rows[0];
+  if (Number(used?.conversations ?? 0) >= CONVERSATIONS_PER_DAY)
+    throw tooMany(Date.parse(`${day}T00:00:00Z`) + DAY_MS - time);
+  await tx.query(
+    'UPDATE elric_usage SET conversations=conversations+1 WHERE owner_id=$1 AND day=$2',
+    [ownerId, day],
+  );
 }
 
 export async function createConversation(

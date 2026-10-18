@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState, type FormEvent } from 'react';
+import { lazy, Suspense, useEffect, useState, type FormEvent } from 'react';
 import { LoaderCircle } from 'lucide-react';
 import type { Operator } from '../shared/types';
 import { api } from './api';
@@ -7,6 +7,7 @@ import { HeroVideo, TEAM_LABEL, TEAM_POSTER, TEAM_VIDEO } from './landing/HeroVi
 import { PublicFooter } from './shell/PublicFooter';
 import { PublicHeader } from './shell/PublicHeader';
 import { LINKS } from './shell/links';
+import { applyPageTitle } from './shell/usePageTitle';
 import './auth.css';
 
 /*
@@ -27,16 +28,29 @@ export function FormError({ error }: { error: string }) {
   ) : null;
 }
 
+/**
+ * Why the card shows on a page that is not /signin (a shared Feed link, src/feed/feedSignIn.ts):
+ * `line` replaces "Sign in to see your rooms and agents." and `title` names the tab meanwhile.
+ */
+export interface SignInContext {
+  line: string;
+  title: string;
+}
+
 export function Auth({
   initialRegister,
   claimPending,
   onSuccess,
+  context = null,
 }: {
   initialRegister: boolean;
   claimPending: boolean;
   /** `registered`: this was a new account, not a sign-in (Root picks the landing page). */
   onSuccess: (operator: Operator, how: { registered: boolean }) => void;
+  context?: SignInContext | null;
 }) {
+  const title = context?.title;
+  useEffect(() => (title ? applyPageTitle(document, title) : undefined), [title]);
   const [register, setRegister] = useState(initialRegister);
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
@@ -116,7 +130,7 @@ export function Auth({
                 Takes a few seconds. Then invite your AI into a room and work together.
               </p>
               <p className={`auth-v8-sub${register ? ' is-ghost' : ''}`} aria-hidden={register}>
-                Sign in to see your rooms and agents.
+                {context?.line ?? 'Sign in to see your rooms and agents.'}
               </p>
             </div>
             {claimPending ? (

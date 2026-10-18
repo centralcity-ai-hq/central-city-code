@@ -32,6 +32,7 @@ const list = (overrides: Record<string, unknown> = {}) => ({
     onBase: 1284,
     new24h: 37,
     finalizingNow: 1,
+    ratedAgents: 412,
     readAtBlock: 52431207,
     readAt: now,
     servedAt: now,
@@ -49,11 +50,15 @@ async function mockList(page: Page, body: (url: URL) => unknown, status = 200) {
   await page.route('**/api/public/stats', (route) =>
     route.fulfill({ json: { ai_agents_total: 805272 } }),
   );
+  // A server without the directory: the registry page as before (e2e/directory.spec.ts has it).
+  await page.route('**/api/public/directory*', (route) =>
+    route.fulfill({ status: 404, json: { code: 'not_found' } }),
+  );
   // Base's endpoint doesn't answer this browser: tests never read the real chain.
   await page.route('https://mainnet.base.org/**', (route) => route.abort());
 }
 
-test('On Base: the switch, the four numbers, Basescan and the newest-first list', async ({
+test('On Base: the switch, the five numbers, Basescan and the newest-first list', async ({
   page,
 }) => {
   await mockList(page, () => list());
@@ -70,11 +75,27 @@ test('On Base: the switch, the four numbers, Basescan and the newest-first list'
   );
   await expect(page.getByText('Owners are read from Base')).toBeVisible();
   const stats = page.locator('.ll-stats');
-  for (const text of ['1,284', '37', '1', '52,431,207']) await expect(stats).toContainText(text);
-  await expect(page.getByRole('link', { name: /See the registry on Basescan/ })).toHaveAttribute(
+  for (const text of ['1,284', '37', '1', '412', '52,431,207'])
+    await expect(stats).toContainText(text);
+  // Rated agents: title, number and one short line, beside Finalizing now.
+  const cards = stats.locator(':scope > div');
+  await expect(cards).toHaveCount(5);
+  await expect(cards.nth(3).locator('dt')).toHaveText('Rated agents');
+  await expect(cards.nth(3).locator('dd').first()).toHaveText('412');
+  await expect(cards.nth(3).locator('.ob-stat-sub')).toHaveText('final on Base');
+  // One row on a wide screen.
+  const tops = await cards.evaluateAll((all) =>
+    all.map((card) => card.getBoundingClientRect().top),
+  );
+  expect(new Set(tops).size).toBe(1);
+  const basescan = page.getByRole('link', { name: /See the registry on Basescan/ });
+  await expect(basescan).toHaveAttribute(
     'href',
     'https://basescan.org/token/0x8004A169FB4a3325136EB29fA0ceB6D2e539a432',
   );
+  // Plain words: no arrow after the link.
+  await expect(basescan).toHaveText('See the registry on Basescan');
+  await expect(basescan.locator('svg')).toHaveCount(0);
   await expect(
     page.getByText("Central City registers each agent on Base from that agent's own account."),
   ).toBeVisible();
@@ -86,6 +107,33 @@ test('On Base: the switch, the four numbers, Basescan and the newest-first list'
   await expect(rows.nth(1)).toContainText('Pinako');
   await expect(rows.nth(1)).toContainText('0xD522…2F03');
   await expect(rows.nth(1)).toContainText('Final');
+});
+
+test('Rated agents rises with the live re-read; without a count it shows a dash', async ({
+  page,
+}) => {
+  await page.clock.install();
+  let rated: number | null | undefined = 412;
+  await mockList(page, () => {
+    const body = list();
+    if (rated === undefined) delete (body.totals as Record<string, unknown>).ratedAgents;
+    else body.totals.ratedAgents = rated as number;
+    return body;
+  });
+  await page.goto('/explorer/base');
+  const card = page.locator('.ll-stats > div').nth(3);
+  await expect(card.locator('dd').first()).toHaveText('412');
+  // The list is read again while the tab is visible: the number follows.
+  rated = 413;
+  await page.clock.runFor(31_000);
+  await expect(card.locator('dd').first()).toHaveText('413');
+  // Not counted (null), or an older server without the number: a dash, never 0 or NaN.
+  rated = null;
+  await page.clock.runFor(31_000);
+  await expect(card.locator('dd').first()).toHaveText('—');
+  rated = undefined;
+  await page.clock.runFor(31_000);
+  await expect(card.locator('dd').first()).toHaveText('—');
 });
 
 test('Verify opens under the row and claims nothing when Base is not reached', async ({ page }) => {
@@ -271,6 +319,35 @@ for (const theme of ['light', 'dark'] as const)
     await mockList(page, () => list());
     await page.goto('/explorer/base');
     await expect(page.locator('.ob-item')).toHaveCount(2);
+    // Five numbers, two per row; the block's card fills the last row. All inside the screen.
+    const cards = page.locator('.ll-stats > div');
+    await expect(cards.nth(3)).toContainText('Rated agents');
+    const boxes = await cards.evaluateAll((all) =>
+      all.map((card) => {
+        const box = card.getBoundingClientRect();
+        return { top: Math.round(box.top), left: box.left, right: box.right };
+      }),
+    );
+    expect(boxes.map((box) => box.top)).toEqual([
+      boxes[0].top,
+      boxes[0].top,
+      boxes[2].top,
+      boxes[2].top,
+      boxes[4].top,
+    ]);
+    expect(boxes[2].top).toBeGreaterThan(boxes[0].top);
+    expect(boxes[4].top).toBeGreaterThan(boxes[2].top);
+    expect(boxes[4].left).toBe(boxes[0].left);
+    expect(boxes[4].right).toBe(boxes[1].right);
+    for (const box of boxes) expect(box.right).toBeLessThanOrEqual(390);
+    // Each card's short line stays on one line, so the cards of a row keep one height.
+    const subs = await page.locator('.ll-stats .ob-stat-sub').evaluateAll((all) =>
+      all.map((sub) => {
+        const style = getComputedStyle(sub);
+        return { height: sub.getBoundingClientRect().height, line: parseFloat(style.lineHeight) };
+      }),
+    );
+    for (const sub of subs) expect(sub.height).toBeLessThan(sub.line * 1.5);
     await page.getByRole('button', { name: 'Verify Base ID 99268' }).click();
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
@@ -322,3 +399,34 @@ test('an open Verify checks again when a re-read changes the row; no old result 
     ]);
   await expect(page.getByRole('region', { name: 'Verify Base ID 99268' })).toBeVisible();
 });
+
+for (const total of [0, 1284])
+  test(`Explorer Base count uses stats without waiting for the directory (${total})`, async ({
+    page,
+  }) => {
+    await mockList(page, () => list());
+    let directoryReads = 0;
+    let statsReads = 0;
+    await page.route('**/api/public/base/agents*', async (route) => {
+      directoryReads++;
+      await route.abort();
+    });
+    await page.route('**/api/public/stats', (route) => {
+      statsReads++;
+      return route.fulfill({
+        json: {
+          ai_agents_total: 805272,
+          updated_at: new Date().toISOString(),
+          base_agents: { total, as_of: new Date().toISOString() },
+        },
+      });
+    });
+    await page.goto('/explorer');
+    const views = page.getByRole('navigation', { name: 'Explorer views' });
+    await expect(
+      views.getByRole('link', { name: `On Base · ${total.toLocaleString('en-US')}`, exact: true }),
+    ).toBeVisible();
+    expect(directoryReads).toBe(0);
+    // One for checkpoint verification, one shared by the two switch hooks.
+    expect(statsReads).toBe(2);
+  });

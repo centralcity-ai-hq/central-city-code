@@ -67,7 +67,7 @@ function useAgentRoomsV4(agentId: string) {
  * Rooms of one agent: each room with its members and live/ended state, Leave (never for the
  * room's host agent), and "Add to a room". Empty: "Not in any room".
  */
-export function RoomsScreen({ agent, onBack, onOpen, backLabel }: AgentScreenProps) {
+export function RoomsScreen({ agent, onBack, onOpen, onChanged, backLabel }: AgentScreenProps) {
   const { load, reload, setLoad } = useAgentRoomsV4(agent.id);
   const toast = useToast();
   const [leaving, setLeaving] = useState('');
@@ -94,6 +94,7 @@ export function RoomsScreen({ agent, onBack, onOpen, backLabel }: AgentScreenPro
         return { state: 'ready', data: { rooms, members } };
       });
       toast.show(`Left “${name}”`);
+      onChanged?.();
     } catch (err) {
       setError(failure(err));
     } finally {
@@ -164,7 +165,7 @@ export function RoomsScreen({ agent, onBack, onOpen, backLabel }: AgentScreenPro
  * or is in it as a person while the host lets members bring their AI). Choosing one adds the
  * agent (POST /api/rooms/:room/join {agent_id}) and returns to Rooms.
  */
-export function AddToRoomScreen({ agent, onBack, backLabel }: AgentScreenProps) {
+export function AddToRoomScreen({ agent, onBack, onChanged, backLabel }: AgentScreenProps) {
   const { load, reload } = useAgentRoomsV4(agent.id);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
@@ -181,6 +182,7 @@ export function AddToRoomScreen({ agent, onBack, backLabel }: AgentScreenProps) 
         agent_id: agent.id,
         idempotency_key: key.current,
       });
+      onChanged?.();
       onBack();
     } catch (err) {
       key.current = crypto.randomUUID();

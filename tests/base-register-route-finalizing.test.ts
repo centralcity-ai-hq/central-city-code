@@ -1,3 +1,4 @@
+import { bundlerRejection, SponsorError } from '../server/base/chain/rpc-bundler.js';
 import { transientChainError } from '../server/base/chain/transient.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -6,6 +7,8 @@ import Fastify from 'fastify';
 import { transientDatabaseError, type Database, type Transaction } from '../server/database.js';
 import {
   BASE_IDENTITY_PROVISIONAL_SQL,
+  BASE_IDENTITY_HANDOVER_BACKOFF_SQL,
+  BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL,
   BASE_MIGRATION_SQL,
   BASE_PAYMENTS_MIGRATION_SQL,
   BASE_WALLET_VAULT_SQL,
@@ -54,7 +57,11 @@ interface Fault {
   times: number;
 }
 
-async function setup(t: { after: (fn: () => Promise<unknown>) => void }, wallets = true) {
+async function setup(
+  t: { after: (fn: () => Promise<unknown>) => void },
+  wallets = true,
+  options: { throttle?: boolean } = {},
+) {
   const pg = await PGlite.create('memory://');
   t.after(() => pg.close());
   await pg.exec(`CREATE TABLE operators (id text PRIMARY KEY, kind text NOT NULL);
@@ -67,6 +74,8 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }, wallets
   await pg.exec(BASE_PAYMENTS_MIGRATION_SQL);
   await pg.exec(baseShortIdsMigration.sql);
   await pg.exec(BASE_IDENTITY_PROVISIONAL_SQL);
+  await pg.exec(BASE_IDENTITY_HANDOVER_BACKOFF_SQL);
+  await pg.exec(BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL);
   await pg.exec(BASE_WALLET_VAULT_SQL);
   await pg.query(
     `INSERT INTO base_owner_vaults (operator_id, owner_address, encrypted_owner_key, kdf_params,
@@ -114,6 +123,9 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }, wallets
   const app = Fastify();
   t.after(() => app.close());
   registerBaseRegistrationRoutes(app, {
+    // Every call here is one advance (no clock passes between them); the chain-check pacing is
+    // covered in base-rpc-calls-per-agent.test.ts.
+    throttleChainChecks: options.throttle === true,
     db,
     env: wallets ? ENV : { CITY_BASE_MAINNET: '1' },
     currentOperator: async (request) => {
@@ -427,6 +439,153 @@ test('Base\'s endpoint saying "not now" (429, timeout, 5xx) answers the stored s
   await assertConfirmsNext(s);
 });
 
+test('a JSON-RPC rate limit inside an HTTP 200 (-32002) is never a 500, and the cron retries it', async (t) => {
+  const s = await setup(t);
+  // As rpc-bundler reports the paymaster answering 200 {"error":{"code":-32002}} while preparing
+  // the register operation: nothing was signed or stored for it.
+  s.chain.registerError = new SponsorError(
+    bundlerRejection('pm_getPaymasterStubData', { code: -32002, message: 'resource unavailable' }),
+  );
+  const busy = await s.register();
+  // The route's answer for Base saying "not now": where the registration stands (open, not a 500).
+  assert.equal(busy.statusCode, 200, busy.body);
+  assert.equal(busy.json().identity.state, 'pending');
+  assert.equal(busy.json().identity.stage, 'registering');
+  assert.ok(s.events.some((e) => e.event === 'identity.register_transient'));
+  assert.equal(s.chain.signs.get(R0), undefined, 'nothing signed for the busy attempt');
+  const { rows } = await s.pg.query<{ op_id: string | null; register_op_id: string | null }>(
+    'SELECT op_id, register_op_id FROM base_identities WHERE agent_id = $1',
+    [AGENT],
+  );
+  assert.deepEqual(rows[0], { op_id: R0, register_op_id: R0 }, 'the attempt is recorded');
+  // The finalize cron picks the open attempt up once its backoff ended, and asks again with the
+  // same key.
+  await s.age();
+  await s.pg.query('UPDATE base_identities SET register_retry_at = 0 WHERE agent_id = $1', [AGENT]);
+  assert.deepEqual((await s.cron()).json(), { advanced: 1, confirmed: 0, errors: 0 });
+  assert.deepEqual(s.chain.calls.register, [R0, R0]);
+  assert.equal(s.chain.signs.get(R0), 1);
+  assert.equal((await s.row()).state, 'submitted');
+  // With no registration stored yet the same failure is the 503 busy answer.
+  const t2 = await setup(t);
+  t2.fault(
+    /^SELECT \* FROM base_wallets/,
+    new SponsorError(bundlerRejection('pm_getPaymasterData', { code: -32005, message: 'x' })),
+  );
+  const unstored = await t2.register();
+  assert.equal(unstored.statusCode, 503, unstored.body);
+  assert.equal(unstored.headers['retry-after'], String(TRANSIENT_RETRY_AFTER_S));
+  assert.equal(unstored.json().code, 'busy');
+  // A real JSON-RPC error is still a 500, and records nothing.
+  const t3 = await setup(t);
+  t3.chain.registerError = bundlerRejection('eth_estimateUserOperationGas', {
+    code: -32500,
+    message: 'AA21 didnt pay prefund',
+  });
+  assert.equal((await t3.register()).statusCode, 500);
+});
+
+test('a late busy answer never moves a registration another call stored back to pending', async (t) => {
+  const s = await setup(t);
+  const rowOf = async () =>
+    (
+      await s.pg.query<{
+        state: string;
+        op_id: string | null;
+        register_op_id: string | null;
+        tx_hash: string | null;
+        updated_at: string;
+        evidence_rev: string;
+        register_refusals: number;
+        register_retry_at: string | null;
+      }>(
+        `SELECT state, op_id, register_op_id, tx_hash, updated_at::text AS updated_at,
+           evidence_rev::text AS evidence_rev, register_refusals,
+           register_retry_at::text AS register_retry_at
+         FROM base_identities WHERE agent_id = $1`,
+        [AGENT],
+      )
+    ).rows[0];
+  // A reads the row (pending, no attempt) and asks Base to register. Before Base answers A, call B
+  // registers and stores it (submitted, with its transaction); then Base answers A "429".
+  let afterB: Awaited<ReturnType<typeof rowOf>> | undefined;
+  s.chain.beforeRegister = async () => {
+    const b = await s.register();
+    assert.equal(b.statusCode, 200, b.body);
+    await s.pg.query(`UPDATE base_identities SET tx_hash = '0xabc' WHERE agent_id = $1`, [AGENT]);
+    afterB = await rowOf();
+    assert.equal(afterB.state, 'submitted');
+    s.chain.registerError = Object.assign(new Error('Too Many Requests'), { status: 429 });
+  };
+  const a = await s.register();
+  assert.equal(a.statusCode, 200, a.body);
+  assert.deepEqual(s.chain.calls.register, [R0, R0]);
+  assert.equal(s.chain.signs.get(R0), 1, 'one operation for the one attempt');
+  // A's late refusal wrote nothing: still submitted, same attempt, same transaction, same write
+  // time (the stuck timer does not restart), no refusal counted.
+  assert.deepEqual(await rowOf(), afterB);
+  assert.equal(afterB!.op_id, R0);
+  assert.equal(afterB!.tx_hash, '0xabc');
+  assert.equal(afterB!.register_refusals, 0);
+});
+
+test('busy refusals back off, the cron skips the row meanwhile, and Try again is offered after 3', async (t) => {
+  const s = await setup(t);
+  const busy = () => {
+    s.chain.registerError = new SponsorError(
+      bundlerRejection('pm_getPaymasterStubData', { code: -32603, message: 'rate limit exceeded' }),
+    );
+  };
+  const refusals = async () =>
+    (
+      await s.pg.query<{ register_refusals: number; register_retry_at: string | null }>(
+        `SELECT register_refusals, register_retry_at::text AS register_retry_at
+         FROM base_identities WHERE agent_id = $1`,
+        [AGENT],
+      )
+    ).rows[0];
+  /** The backoff ends now: as if its wait had passed. */
+  const waitOut = () =>
+    s.pg.query('UPDATE base_identities SET register_retry_at = 0 WHERE agent_id = $1', [AGENT]);
+  busy();
+  const first = await s.register();
+  assert.equal(first.statusCode, 200, first.body);
+  assert.equal(first.json().identity.state, 'pending');
+  assert.equal(first.json().identity.canRetry, false, 'not offered after one refusal');
+  assert.equal((await refusals()).register_refusals, 1);
+  assert.ok(Number((await refusals()).register_retry_at) > Date.now(), 'backing off');
+  // While it backs off, neither the owner's poll nor the cron asks Base again.
+  await s.register();
+  await s.age();
+  assert.deepEqual((await s.cron()).json(), { advanced: 0, confirmed: 0, errors: 0 });
+  assert.deepEqual(s.chain.calls.register, [R0]);
+  // Two more refusals after their waits: the owner is offered Try again; still pending, one key.
+  for (let i = 2; i <= 3; i++) {
+    await waitOut();
+    busy();
+    const next = await s.register();
+    assert.equal(next.statusCode, 200, next.body);
+    assert.equal((await refusals()).register_refusals, i);
+  }
+  const offered = await s.register();
+  assert.equal(offered.json().identity.state, 'pending');
+  assert.equal(offered.json().identity.canRetry, true, 'Try again after 3 refusals');
+  assert.deepEqual(s.chain.calls.register, [R0, R0, R0]);
+  assert.equal(s.chain.signs.get(R0), undefined, 'nothing signed while refused');
+  // Try again asks at once, with the same attempt key, and an answer ends the backoff.
+  const retried = await s.app.inject({
+    method: 'POST',
+    url: `/api/base/agents/${AGENT}/register`,
+    headers: { 'x-test-person': 'p-1' },
+    payload: { expectedWallet: WALLET, retry: true },
+  });
+  assert.equal(retried.statusCode, 200, retried.body);
+  assert.equal(retried.json().identity.state, 'submitted');
+  assert.equal(s.chain.signs.get(R0), 1, 'one registration');
+  assert.equal(s.chain.calls.register.at(-1), R0);
+  assert.deepEqual(await refusals(), { register_refusals: 0, register_retry_at: null });
+});
+
 test('transient Base errors are told apart from real ones', () => {
   assert.equal(transientChainError(Object.assign(new Error('x'), { status: 429 })), true);
   assert.equal(transientChainError(Object.assign(new Error('x'), { status: 503 })), true);
@@ -494,6 +653,27 @@ test('transient database errors are told apart from real ones', () => {
     assert.equal(transientDatabaseError(error), false, String(error));
 });
 
+test('the finalize cron skips a row while its refused hand-over backs off, and takes it after', async (t) => {
+  const s = await setup(t);
+  await registeredAwaitingFinality(s);
+  await s.age();
+  // Backing off long past this run: its place in the batch goes to rows that can move.
+  await s.pg.query('UPDATE base_identities SET handover_refusals = 3, handover_retry_at = $1', [
+    Number.MAX_SAFE_INTEGER,
+  ]);
+  const calls = JSON.stringify(s.chain.calls);
+  assert.deepEqual((await s.cron()).json(), { advanced: 0, confirmed: 0, errors: 0 });
+  assert.equal(JSON.stringify(s.chain.calls), calls, 'no Base read for a row backing off');
+  const swept = await s.pg.query<{ swept_at: string | null }>(
+    'SELECT swept_at::text AS swept_at FROM base_identities',
+  );
+  assert.equal(swept.rows[0].swept_at, null, 'not claimed');
+  // The backoff ended: the next run moves it on.
+  await s.pg.query('UPDATE base_identities SET handover_retry_at = 1');
+  assert.deepEqual((await s.cron()).json(), { advanced: 1, confirmed: 1, errors: 0 });
+  assert.equal((await s.row()).state, 'confirmed');
+});
+
 test('the finalize cron leaves a row a poll just moved to that poll, and takes it on a later run', async (t) => {
   const s = await setup(t);
   await registeredAwaitingFinality(s);
@@ -510,4 +690,18 @@ test('the finalize cron leaves a row a poll just moved to that poll, and takes i
   await s.age();
   assert.deepEqual((await s.cron()).json(), { advanced: 1, confirmed: 1, errors: 0 });
   assert.equal((await s.row()).state, 'confirmed');
+});
+
+test('a frozen or closed wallet is refused also while the chain checks are throttled', async (t) => {
+  for (const state of ['frozen', 'closed']) {
+    const s = await setup(t, true, { throttle: true });
+    assert.equal((await s.register()).statusCode, 200);
+    // The chain was asked just now: the next call would answer the stored state.
+    await s.pg.query('UPDATE base_identities SET swept_at = $1::bigint', [Date.now()]);
+    assert.equal((await s.register()).statusCode, 200, 'throttled, stored state');
+    await s.pg.query('UPDATE base_wallets SET state = $1', [state]);
+    const refused = await s.register();
+    assert.equal(refused.statusCode, 409, `${state}: ${refused.body}`);
+    assert.equal(refused.json().code, 'wallet_frozen');
+  }
 });

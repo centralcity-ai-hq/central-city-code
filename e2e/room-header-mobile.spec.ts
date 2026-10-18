@@ -122,7 +122,7 @@ for (const width of [360, 390]) {
     await expect(menu.getByRole('menuitem', { name: 'Room settings' })).toBeVisible();
     await expect(menu.getByRole('menuitem', { name: 'Connect AI' })).toBeVisible();
     await expect(menu.getByRole('menuitem', { name: /^Members/ })).toHaveCount(0);
-    await expect(menu.getByRole('menuitem', { name: 'Invite' })).toHaveCount(0);
+    await expect(menu.getByRole('menuitem', { name: 'Invite', exact: true })).toHaveCount(0);
     await expect(menu.getByRole('menuitem', { name: 'Search messages' })).toHaveCount(0);
   });
 }

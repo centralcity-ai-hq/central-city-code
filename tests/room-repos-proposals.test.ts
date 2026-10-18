@@ -759,3 +759,70 @@ test('the base must be the default branch head or an earlier commit on it', asyn
   const onHead = await propose(f);
   assert.ok(onHead.proposal.id);
 });
+
+test('the same idempotency_key racing in two rooms is a conflict, never a replay of the other room', async (t) => {
+  const f = await fixture(t);
+  // A second room by the same host, the same member, bound to the same repository.
+  const second = await ok(f.app, f.a.key, 'city_create_room', {
+    agent_id: f.host,
+    name: 'Second synthetic proposal room',
+    topic: 'Proposal race topic',
+    idempotency_key: randomUUID(),
+  });
+  const joined = await call(f.app, f.b.key, 'city_join_room', {
+    link: second.link.link,
+    agent_id: f.member,
+    idempotency_key: randomUUID(),
+  });
+  assert.equal(joined.statusCode, 200, joined.body);
+  const otherRoom = second.room.id as string;
+  await f.service.bind(consoleP(f.a.id), {
+    room_id: otherRoom,
+    agent_id: f.host,
+    repo: 'example-org/sandbox',
+    acknowledge_member_read: true,
+    confirm_repo: 'example-org/sandbox',
+  });
+  // While the first room's request validates against GitHub (no lock held), the same key
+  // commits a proposal in the other room.
+  const idem = randomUUID();
+  let race: (() => Promise<unknown>) | null = () =>
+    f.service.propose(principal(f.b.id), {
+      room_id: otherRoom,
+      base: head,
+      diff: CHANGE,
+      summary: 'Bump the answer',
+      idempotency_key: idem,
+    });
+  const racing = createRoomRepos({
+    db: f.app.city.db,
+    clock: () => Date.now(),
+    limit: async () => {},
+    github: createGitHubApp({ appId: APP_ID, privateKey: key.pem }, async (request) => {
+      const run = race;
+      race = null;
+      if (run) await run();
+      return f.gh.transport(request);
+    }),
+    installationOwners: new Map([[INSTALLATION, f.a.id]]),
+  });
+  await rejects(
+    racing.propose(principal(f.b.id), {
+      room_id: f.roomId,
+      base: head,
+      diff: CHANGE,
+      summary: 'Bump the answer',
+      idempotency_key: idem,
+    }),
+    409,
+    'idempotency_conflict',
+  );
+  assert.equal(race, null, 'the race ran');
+  const rows = (
+    await f.app.city.db.query<{ room_id: string }>('SELECT room_id FROM room_proposals')
+  ).rows;
+  assert.deepEqual(
+    rows.map((row) => row.room_id),
+    [otherRoom],
+  );
+});

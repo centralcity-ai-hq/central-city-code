@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { CITY_PAY_SERVICE_HINT } from '../../../shared/feed-pay.js';
 import {
   cityPayInput,
   cityPayStatusInput,
@@ -64,6 +65,23 @@ export const agentPayDescriptions: Record<
       'Read one payment city_pay made from this workspace, brought up to date from Base. It never signs and never builds a new payment, but while bringing it up to date it may resend the payment’s same already-signed operation to Base. Returns the same fields as city_pay. Only state final means the recipient was paid. A payment of another workspace is not found.',
   },
 };
+
+/**
+ * The descriptions for one caller: while Feed pay is on for its workspace, city_pay also says that
+ * a service listed in the Feed is paid with city_service_call (shared/feed-pay.ts).
+ */
+export function agentPayDescriptionsFor(
+  payOn: boolean,
+): Record<AgentPayToolName, { title: string; description: string }> {
+  if (!payOn) return agentPayDescriptions;
+  return {
+    ...agentPayDescriptions,
+    city_pay: {
+      ...agentPayDescriptions.city_pay,
+      description: `${agentPayDescriptions.city_pay.description} ${CITY_PAY_SERVICE_HINT}`,
+    },
+  };
+}
 
 export interface AgentPayAnnotations {
   readOnlyHint: boolean;

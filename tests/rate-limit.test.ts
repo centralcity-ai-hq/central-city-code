@@ -649,6 +649,13 @@ test('capacity limits default to the reviewed bounds and accept validated overri
     inviteRequestsPerSitePerHour: 50_000,
     inviteRequestsPerNetworkPerHour: 100_000,
     inviteRequestsPerRegionPerHour: 200_000,
+    // city_service_call (docs/FEED_PAY.md section 11): new calls as before (20 a minute per grant or
+    // key and per workspace), same-key re-reads on their own budget, calls in flight per workspace.
+    feedPayCallsPerGrantPerMinute: 20,
+    feedPayCallsPerWorkspacePerMinute: 20,
+    feedPayReadsPerGrantPerMinute: 120,
+    feedPayReadsPerWorkspacePerMinute: 120,
+    feedPayCallsInFlightPerWorkspace: 10,
   });
   const raised = loadLimits(
     {

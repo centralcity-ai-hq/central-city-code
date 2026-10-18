@@ -201,9 +201,10 @@
 .ap4-block {
   width: 100%;
 }
+/* Dark text on the lighter dark-mode red: white on #f87171 is only about 2.8:1. */
 .ap4-danger-btn {
   background: var(--ap4-bad);
-  color: #fff;
+  color: var(--ap4-ink-text, #fff);
 }
 .ap4-menuwrap {
   position: relative;

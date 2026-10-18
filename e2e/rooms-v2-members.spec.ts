@@ -328,3 +328,135 @@ test('screenshots at 1440 and 390, light and dark', async ({ browser }) => {
     }
   }
 });
+
+test('Invite agent: the host types a passport number, sees the agent, and sends', async ({
+  browser,
+}) => {
+  test.setTimeout(150_000);
+  const { host, room } = await seededRoom(browser);
+  const page = await host.context.newPage();
+  const now = Date.now();
+  await page.route('**/api/public/base/agents*', (route) => {
+    const q = new URL(route.request().url()).searchParams.get('q') ?? '';
+    const rows =
+      q === 'k3P9xQ'
+        ? [
+            {
+              baseId: '1532',
+              name: 'Linet',
+              owner: '0x' + '1'.repeat(40),
+              short: 'k3P9xQ',
+              status: 'final',
+            },
+          ]
+        : [];
+    return route.fulfill({
+      json: {
+        rows,
+        totals: {
+          onBase: 1,
+          new24h: 0,
+          finalizingNow: 0,
+          readAtBlock: 1,
+          readAt: now,
+          servedAt: now,
+        },
+        registry: '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432',
+        nextBefore: null,
+      },
+    });
+  });
+  const sent: Array<Record<string, unknown>> = [];
+  await page.route(`**/api/rooms/${room.id}/invitations`, (route) => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: { invitations: [] } });
+    sent.push(route.request().postDataJSON() as Record<string, unknown>);
+    // The first answer is lost on the way (a 502): the retry must be the same request.
+    if (sent.length === 1) return route.fulfill({ status: 502, json: { error: 'Bad gateway' } });
+    return route.fulfill({ status: 201, json: { id: 'inv-1', state: 'open' } });
+  });
+  await page.goto(`/rooms/${room.id}`);
+  await expect(page.getByRole('heading', { level: 1, name: 'Members room' })).toBeVisible();
+  await page.getByRole('button', { name: 'Invite agent' }).click();
+  const sheet = page.getByRole('dialog', { name: 'Invite an agent' });
+  const field = sheet.getByRole('textbox', { name: 'Passport number' });
+  await expect(field).toBeFocused();
+  // Not a passport number: says what one looks like; a Base ID is not one.
+  await field.fill('1532');
+  await expect(sheet.getByText('A passport number is CC- and 6 letters and digits')).toBeVisible();
+  // An unknown one, then the agent's: its name shows before anything is sent.
+  await field.fill('CC-zzzzzz');
+  await expect(sheet.getByText('No Central City agent has this passport number.')).toBeVisible();
+  await field.fill('centralcity.ai/a/k3P9xQ');
+  await expect(sheet.getByText('Linet')).toBeVisible();
+  await sheet
+    .getByRole('textbox', { name: 'Note (optional)' })
+    .fill('  Please check our sources.  ');
+  await sheet.getByRole('button', { name: 'Send invite' }).click();
+  await expect(sheet.getByRole('alert')).toBeVisible();
+  // Send again: the same key, so the server replays the first one instead of a second invite.
+  await sheet.getByRole('button', { name: 'Send invite' }).click();
+  await expect(page.getByRole('dialog', { name: 'Invitation sent' })).toContainText(
+    'Linet’s owner gets it in their inbox and decides.',
+  );
+  expect(sent).toHaveLength(2);
+  expect(sent[1]!.idempotencyKey).toEqual(sent[0]!.idempotencyKey);
+  sent.shift();
+  expect(sent[0]).toMatchObject({ passport: 'k3P9xQ', note: 'Please check our sources.' });
+  expect(sent[0]).not.toHaveProperty('baseId');
+  expect(typeof sent[0]!.fromAgentId).toBe('string');
+  // Invite another: a second agent is a new request with its own key.
+  await page.getByRole('button', { name: 'Invite another' }).click();
+  await sheet.getByRole('textbox', { name: 'Passport number' }).fill('k3P9xQ');
+  await expect(sheet.getByText('Linet')).toBeVisible();
+  await sheet.getByRole('button', { name: 'Send invite' }).click();
+  await expect(page.getByRole('dialog', { name: 'Invitation sent' })).toBeVisible();
+  expect(sent).toHaveLength(2);
+  expect(sent[1]!.idempotencyKey).not.toEqual(sent[0]!.idempotencyKey);
+  await page.getByRole('button', { name: 'Done' }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+});
+
+test('v2 members: the host sees its invited agents, only joined or not, and can withdraw', async ({
+  browser,
+}) => {
+  test.setTimeout(150_000);
+  const { host, room } = await seededRoom(browser);
+  const page = await host.context.newPage();
+  const at = Date.UTC(2026, 9, 12, 9, 0);
+  const sentView = (id: string, name: string, state: string) => ({
+    id,
+    roomId: room.id,
+    to: { baseId: null, short: 'k3P9xQ', name },
+    from: { agentId: 'a1', name: 'Host agent' },
+    note: '',
+    state,
+    createdAt: at,
+    expiresAt: at + 7 * 86_400_000,
+    answeredAt: state === 'open' ? null : at,
+  });
+  const withdrawn: string[] = [];
+  await page.route(`**/api/rooms/${room.id}/invitations`, (route) =>
+    route.fulfill({
+      json: {
+        invitations: [
+          sentView('i1', 'Linet', 'open'),
+          sentView('i2', 'Briolo', 'joined'),
+          sentView('i3', 'Tuba', 'not_joined'),
+        ],
+      },
+    }),
+  );
+  await page.route(`**/api/rooms/${room.id}/invitations/*/withdraw`, (route) => {
+    withdrawn.push(route.request().url());
+    return route.fulfill({ json: sentView('i1', 'Linet', 'withdrawn') });
+  });
+  const panel = await openMembers(page, room.id);
+  const list = panel.getByRole('list', { name: 'Invited agents' });
+  await expect(list.locator('li')).toHaveCount(3);
+  await expect(list.locator('li').nth(0)).toContainText('Waiting · by Host agent');
+  await expect(list.locator('li').nth(1)).toContainText('Joined');
+  await expect(list.locator('li').nth(2)).toContainText("Didn't join");
+  await panel.getByRole('button', { name: 'Withdraw the invitation to Linet' }).click();
+  await expect(list.locator('li').nth(0)).toContainText('Withdrawn');
+  expect(withdrawn).toHaveLength(1);
+});

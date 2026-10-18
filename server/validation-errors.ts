@@ -8,7 +8,8 @@ import type { z } from 'zod';
  * Security: received values are never echoed. Field paths do appear, and a path can contain the
  * caller's own keys (unknown fields, record keys); each segment is reduced to [A-Za-z0-9_-]
  * (a dot inside a key becomes `?`, so it cannot pose as nesting) and the path is capped. The
- * rest is the schema's own constraints (limits, allowed options, formats).
+ * rest is the schema's own constraints (limits, allowed options, formats, and the custom messages
+ * it marks as fixed text with FIXED_MESSAGE).
  */
 
 export interface ValidationIssue {
@@ -27,8 +28,20 @@ export interface ValidationFailure {
 export const VALIDATION_ERROR_CODE = 'invalid_request';
 export const MAX_ISSUES = 10;
 export const MAX_PATH_LENGTH = 100;
+export const MAX_FIXED_MESSAGE_LENGTH = 160;
 const MAX_OPTIONS = 5;
 const MAX_OPTION_LENGTH = 40;
+
+/**
+ * Marks a custom issue whose message is the schema's own fixed text, never built from the received
+ * value, so it is shown in place of "is not valid". Pass it as the issue's params
+ * (`refine(check, { message, params: FIXED_MESSAGE })` or `addIssue({ ..., params: FIXED_MESSAGE
+ * })`) and write the message as a short constraint phrase like the others ("must be ..."). An
+ * unmarked custom message stays hidden: zod lets one carry the input.
+ */
+export const FIXED_MESSAGE: Readonly<Record<string, unknown>> = Object.freeze({
+  fixedMessage: true,
+});
 
 type Issue = z.core.$ZodIssue;
 
@@ -53,8 +66,20 @@ function option(value: unknown): string {
       : typeof value === 'bigint'
         ? String(value)
         : (JSON.stringify(value) ?? String(value));
+  return printable(text, MAX_OPTION_LENGTH);
+}
+
+/** Printable ASCII only, capped (a cut ends in `~`). */
+function printable(text: string, max: number): string {
   const clean = text.replace(/[^\x20-\x7e]/g, '?');
-  return clean.length > MAX_OPTION_LENGTH ? `${clean.slice(0, MAX_OPTION_LENGTH - 1)}~` : clean;
+  return clean.length > max ? `${clean.slice(0, max - 1)}~` : clean;
+}
+
+/** A custom issue's message when its schema marked it as fixed text (FIXED_MESSAGE), else null. */
+function fixedMessage(issue: z.core.$ZodIssueCustom): string | null {
+  if (issue.params?.fixedMessage !== true) return null;
+  const text = printable(issue.message.trim(), MAX_FIXED_MESSAGE_LENGTH);
+  return text || null;
 }
 
 const TYPE_NAMES: Record<string, string> = {
@@ -168,6 +193,8 @@ function describe(issue: Issue): string {
       return 'has an invalid key';
     case 'invalid_element':
       return 'has an invalid item';
+    case 'custom':
+      return fixedMessage(issue) ?? 'is not valid';
     default:
       return 'is not valid';
   }

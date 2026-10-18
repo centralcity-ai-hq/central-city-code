@@ -1,4 +1,4 @@
-import { api } from '../api';
+import { api, selectedWorkspaceId } from '../api';
 
 /*
  * Room tasks over the console REST routes (docs/ROOM_TASKS.md). The routes exist only when
@@ -63,18 +63,59 @@ export type PeerVerdict = 'approve' | 'changes_requested';
 
 const base = (roomId: string) => `/api/rooms/${encodeURIComponent(roomId)}/tasks`;
 
+/** At most this many pages of 100 are read, so a huge room cannot loop the panel forever. */
+export const TASK_LIST_MAX_PAGES = 50;
+
+/** How often an open Tasks panel re-reads a room whose tasks fit on one page. */
+export const TASK_REFRESH_MS = 10_000;
+/** The longest wait between two re-reads of an open Tasks panel. */
+export const TASK_REFRESH_MAX_MS = 300_000;
+
 /**
- * Tasks in the room with the room's stage list (empty when it uses none), or null when this
- * server has no room tasks (404).
+ * The wait before the next re-read of a room whose last read took this many page requests. Each
+ * re-read reads every page, so the wait grows with the page count: an open panel sends about one
+ * request per 10 s (at most 10 a minute) however many tasks the room holds, instead of up to 50
+ * requests every 10 s.
+ */
+export function taskRefreshDelay(pages: number): number {
+  return Math.min(TASK_REFRESH_MAX_MS, TASK_REFRESH_MS * Math.max(1, Math.floor(pages)));
+}
+
+/**
+ * Every task in the room (read page by page) with the room's stage list (empty when it uses
+ * none) and the number of pages read, or null when this server has no room tasks (404).
  */
 export async function listTasks(
   roomId: string,
-): Promise<{ tasks: RoomTask[]; stages: string[] } | null> {
-  const response = await fetch(`${base(roomId)}?limit=100`, { credentials: 'same-origin' });
-  if (response.status === 404) return null;
-  if (!response.ok) throw new Error("Tasks couldn't be loaded. Try again.");
-  const value = (await response.json()) as { tasks: RoomTask[]; stages?: string[] };
-  return { tasks: value.tasks, stages: value.stages ?? [] };
+): Promise<{ tasks: RoomTask[]; stages: string[]; pages: number } | null> {
+  const tasks: RoomTask[] = [];
+  let stages: string[] = [];
+  let after: number | null = null;
+  let pages = 0;
+  for (let page = 0; page < TASK_LIST_MAX_PAGES; page++) {
+    pages++;
+    const cursor = after === null ? '' : `&after_number=${after}`;
+    // The workspace the person acts in, as api() sends it: without it the server reads the
+    // person's own account, which is not a member of a co-owned AI workspace's room.
+    const workspace = selectedWorkspaceId();
+    const response = await fetch(`${base(roomId)}?limit=100${cursor}`, {
+      credentials: 'same-origin',
+      headers: workspace ? { 'X-City-Workspace': workspace } : {},
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error("Tasks couldn't be loaded. Try again.");
+    const value = (await response.json()) as {
+      tasks: RoomTask[];
+      stages?: string[];
+      next_after?: number | null;
+      has_more?: boolean;
+    };
+    tasks.push(...value.tasks);
+    stages = value.stages ?? [];
+    if (value.has_more !== true || typeof value.next_after !== 'number') break;
+    after = value.next_after;
+  }
+  return { tasks, stages, pages };
 }
 
 /** Move a task to one of the room's stages (null clears it): the host or the claim holder. */

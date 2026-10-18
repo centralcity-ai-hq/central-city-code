@@ -17,8 +17,41 @@ import {
   PUBLIC_STATS_EDGE_CACHE_CONTROL,
   PUBLIC_STATS_RATE,
   PUBLIC_STATS_TTL_MS,
+  registerPublicStatsRoutes,
+  type PublicStatsService,
 } from '../server/stats/public-stats.js';
-import { COUNTED_AGENT_IDS_SQL, publicStatsMigration } from '../server/stats/schema.js';
+import {
+  COUNTED_AGENT_IDS_SQL,
+  COUNTED_AGENT_IDS_SYNC_SQL,
+  publicStatsMigration,
+} from '../server/stats/schema.js';
+import {
+  createPaidCallsReader,
+  PAID_CALLS_CACHE_MS,
+  PAID_CALLS_LAST_GOOD_MS,
+  PAID_CALLS_READ_BUDGET_MS,
+  PAID_CALLS_READ_SQL,
+  paidCallsField,
+  type PaidCallsReader,
+  type PaidCallsSnapshot,
+} from '../server/stats/paid-calls.js';
+import {
+  PAID_CALLS_CHAIN_ID,
+  PAID_CALLS_FLAG,
+  PAID_CALLS_RECENT_MAX,
+  PAID_CALLS_RECENT_WINDOW_MS,
+} from '../shared/paid-calls.js';
+import {
+  BASE_AGENTS_COUNT_SQL,
+  BASE_AGENTS_FAILURE_BACKOFF_MS,
+  BASE_AGENTS_LAST_GOOD_MS,
+  baseAgentsForResponse,
+  countBaseAgents,
+  createBaseAgentsReader,
+} from '../server/stats/base-agents.js';
+import { createOnBaseStore } from '../server/base/explorer/store.js';
+import { add, NOW, SEPOLIA_REGISTRY, setup } from './on-base-fixture.js';
+import Fastify from 'fastify';
 import { ownerApi, type App } from './oauth-helpers.js';
 
 const jsonHeaders = { 'content-type': 'application/json', 'x-city-request': '1' };
@@ -37,6 +70,8 @@ async function table(t: { after: (fn: () => Promise<unknown>) => void }) {
   t.after(() => db.close());
   await db.exec('CREATE TABLE workspaces (operator_id text PRIMARY KEY, data jsonb NOT NULL)');
   await db.exec(COUNTED_AGENT_IDS_SQL);
+  // The trigger function as migration 111 replaced it.
+  await db.exec(COUNTED_AGENT_IDS_SYNC_SQL);
   const put = (operatorId: string, agents: unknown[] | undefined) =>
     db.query('INSERT INTO workspaces(operator_id,data) VALUES($1,$2::jsonb)', [
       operatorId,
@@ -398,7 +433,13 @@ test('GET /api/public/stats: unauthenticated, cacheable, only the number, and co
   assert.match(PUBLIC_STATS_EDGE_CACHE_CONTROL, /max-age=15, stale-while-revalidate=86400/);
   assert.equal(empty.headers['set-cookie'], undefined);
   assert.match(String(empty.headers['content-type']), /^application\/json/);
-  assert.deepEqual(Object.keys(empty.json()).sort(), ['ai_agents_total', 'updated_at']);
+  // The agent count, and the Base agents number (none registered on Base yet).
+  assert.deepEqual(Object.keys(empty.json()).sort(), [
+    'ai_agents_total',
+    'base_agents',
+    'updated_at',
+  ]);
+  assert.deepEqual(empty.json().base_agents, { total: 0, as_of: new Date(now).toISOString() });
   assert.equal(empty.json().ai_agents_total, 0);
   assert.equal(empty.json().updated_at, new Date(now).toISOString());
 
@@ -527,4 +568,506 @@ test('a query string on /api/public/stats is redirected at the handler, never re
   assert.equal(written.headers!.Location, '/api/public/stats');
   assert.match(written.headers!['Cache-Control']!, /s-maxage=/);
   assert.equal(written.ended, true);
+});
+
+// ---------------------------------------------------------------------------------------------
+// paid_calls: the paid service calls on Base mainnet (migration 125, server/stats/paid-calls.ts)
+
+const AT = Date.parse('2026-10-15T14:02:11.402Z');
+
+/** The route alone, with a fixed agent count and the given paid calls reader. */
+async function statsRoute(
+  t: { after: (fn: () => unknown) => void },
+  deps: {
+    paidCalls?: PaidCallsReader;
+    env?: Record<string, string | undefined>;
+    stats?: PublicStatsService;
+    clock?: () => number;
+    paidCallsBudgetMs?: number;
+  } = {},
+) {
+  const app = Fastify();
+  t.after(() => app.close());
+  registerPublicStatsRoutes(app, {
+    stats: deps.stats ?? {
+      get: async () => ({ ai_agents_total: 42, updated_at: new Date(AT).toISOString() }),
+    },
+    limit: async () => {},
+    paidCalls: deps.paidCalls,
+    env: deps.env ?? {},
+    clock: deps.clock ?? (() => AT),
+    paidCallsBudgetMs: deps.paidCallsBudgetMs,
+  });
+  const get = async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/public/stats' });
+    assert.equal(res.statusCode, 200, res.body);
+    return res;
+  };
+  return { get };
+}
+
+const snapshot = (total: number, recent: number[] = []): PaidCallsSnapshot => ({
+  total,
+  recent,
+  dbNowMs: AT,
+  readAt: AT,
+});
+
+test('paid_calls: the field rides on the stats response, with the cache headers unchanged', async (t) => {
+  const reader: PaidCallsReader = { read: async () => snapshot(1284, [AT - 1200, AT - 9800]) };
+  const { get } = await statsRoute(t, { paidCalls: reader });
+  const res = await get();
+  assert.deepEqual(res.json(), {
+    ai_agents_total: 42,
+    updated_at: new Date(AT).toISOString(),
+    paid_calls: {
+      total: 1284,
+      as_of: '2026-10-15T14:02:11.402Z',
+      recent_ms: [1200, 9800],
+      recent_complete: true,
+    },
+  });
+  assert.equal(res.headers['cache-control'], PUBLIC_STATS_CACHE_CONTROL);
+  assert.equal(res.headers['vercel-cdn-cache-control'], PUBLIC_STATS_EDGE_CACHE_CONTROL);
+  assert.equal(res.headers['set-cookie'], undefined);
+  // Never anything about who paid, which service, or how much.
+  assert.deepEqual(Object.keys(res.json().paid_calls).sort(), [
+    'as_of',
+    'recent_complete',
+    'recent_ms',
+    'total',
+  ]);
+});
+
+test('paid_calls is left out while switched off, before the row exists, or when its read fails; the agent count is still served', async (t) => {
+  const on: PaidCallsReader = { read: async () => snapshot(3) };
+  const cases: Array<[string, PaidCallsReader | undefined, Record<string, string | undefined>]> = [
+    ['flag 0', on, { [PAID_CALLS_FLAG]: '0' }],
+    ['no reader', undefined, {}],
+    ['no row yet', { read: async () => null }, {}],
+    [
+      'read fails',
+      {
+        read: async () => {
+          throw Object.assign(new Error('relation does not exist'), { code: '42P01' });
+        },
+      },
+      {},
+    ],
+  ];
+  for (const [label, paidCalls, env] of cases) {
+    const { get } = await statsRoute(t, { paidCalls, env });
+    assert.deepEqual(
+      (await get()).json(),
+      { ai_agents_total: 42, updated_at: new Date(AT).toISOString() },
+      label,
+    );
+  }
+  // Only exactly '0' turns it off: unset, '1' or anything else leaves it on.
+  assert.equal(PAID_CALLS_FLAG, 'CITY_PAID_CALLS_TICKER');
+  for (const value of [undefined, '1', 'false', 'off', '']) {
+    const { get } = await statsRoute(t, { paidCalls: on, env: { [PAID_CALLS_FLAG]: value } });
+    assert.equal((await get()).json().paid_calls?.total, 3, String(value));
+  }
+});
+
+test('paid_calls is read only after the agent count has been read, never alongside it', async (t) => {
+  const order: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const { get } = await statsRoute(t, {
+    stats: {
+      get: async () => {
+        order.push('agents:start');
+        await gate;
+        order.push('agents:end');
+        return { ai_agents_total: 42, updated_at: new Date(AT).toISOString() };
+      },
+    },
+    paidCalls: {
+      read: async () => {
+        order.push('paid:start');
+        return snapshot(1);
+      },
+    },
+  });
+  const pending = get();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(order, ['agents:start']);
+  release();
+  assert.equal((await pending).json().paid_calls.total, 1);
+  assert.deepEqual(order, ['agents:start', 'agents:end', 'paid:start']);
+});
+
+test('paid_calls never holds up the agent count: a slow read waits at most 250 ms, then the last good row or nothing', async (t) => {
+  assert.equal(PAID_CALLS_READ_BUDGET_MS, 250);
+  assert.equal(PAID_CALLS_LAST_GOOD_MS, 120_000);
+  let now = AT;
+  let last: PaidCallsSnapshot | null = null;
+  const slow: PaidCallsReader = {
+    read: () => new Promise((resolve) => setTimeout(() => resolve(snapshot(9)), 2_000).unref()),
+    lastGood: () => last,
+  };
+  const { get } = await statsRoute(t, { paidCalls: slow, clock: () => now });
+  // No good row yet: the agent count answers within the budget, without the field.
+  let started = Date.now();
+  let res = await get();
+  let took = Date.now() - started;
+  assert.ok(took < 1_000, `answered in ${took} ms`);
+  assert.deepEqual(res.json(), { ai_agents_total: 42, updated_at: new Date(AT).toISOString() });
+  // With a good row from 10 s ago: that row, as of its own read (never newer than it is).
+  last = { total: 1284, recent: [AT - 11_000], dbNowMs: AT - 10_000, readAt: AT - 10_000 };
+  started = Date.now();
+  res = await get();
+  took = Date.now() - started;
+  assert.ok(took < 1_000, `answered in ${took} ms`);
+  assert.deepEqual(res.json().paid_calls, {
+    total: 1284,
+    as_of: new Date(AT - 10_000).toISOString(),
+    recent_ms: [1_000],
+    recent_complete: true,
+  });
+  // A good row older than two minutes is not served.
+  now = AT - 10_000 + PAID_CALLS_LAST_GOOD_MS + 1;
+  assert.equal((await get()).json().paid_calls, undefined);
+  // A read inside the budget is served as it is.
+  const quick: PaidCallsReader = {
+    read: () => new Promise((resolve) => setTimeout(() => resolve(snapshot(7)), 20)),
+    lastGood: () => null,
+  };
+  const fast = await statsRoute(t, { paidCalls: quick });
+  assert.equal((await fast.get()).json().paid_calls.total, 7);
+});
+
+test('paid_calls: a failed read serves the last good row instead of hiding the count', async (t) => {
+  let fail = false;
+  let now = AT;
+  const reader = createPaidCallsReader({
+    db: {
+      query: async () => {
+        if (fail) throw Object.assign(new Error('down'), { code: '57P01' });
+        return {
+          rows: [{ total: '1284', recent: [], now_ms: String(now) }],
+        } as never;
+      },
+    },
+    clock: () => now,
+  });
+  const { get } = await statsRoute(t, { paidCalls: reader, clock: () => now });
+  assert.equal((await get()).json().paid_calls.total, 1284);
+  const readAt = now;
+  now += PAID_CALLS_CACHE_MS;
+  fail = true;
+  // The database blips: the count stays, as of the last good read.
+  const kept = (await get()).json().paid_calls;
+  assert.equal(kept.total, 1284);
+  assert.equal(kept.as_of, new Date(readAt).toISOString());
+  assert.equal(reader.lastGood?.()?.total, 1284);
+  // Still down two minutes later: the field is left out.
+  now = readAt + PAID_CALLS_LAST_GOOD_MS + 1;
+  assert.equal((await get()).json().paid_calls, undefined);
+  // Back up: a fresh read.
+  fail = false;
+  now += PAID_CALLS_CACHE_MS;
+  assert.equal((await get()).json().paid_calls.as_of, new Date(now).toISOString());
+});
+
+test('paid_calls: recent_ms keeps the 120 s window, newest first, never below 0; recent_complete', () => {
+  assert.equal(PAID_CALLS_RECENT_WINDOW_MS, 120_000);
+  assert.equal(PAID_CALLS_RECENT_MAX, 64);
+  // Newest first, in the window only; a block stamped ahead of the database clock reads 0.
+  const field = paidCallsField(
+    snapshot(10, [AT + 300, AT - 1_000, AT - 119_999, AT - 120_001, AT - 500_000]),
+    AT,
+  );
+  assert.deepEqual(field, {
+    total: 10,
+    as_of: new Date(AT).toISOString(),
+    recent_ms: [0, 1_000, 119_999],
+    recent_complete: true,
+  });
+  // The time the row spent in this server's memory is part of every age, and of as_of.
+  const later = paidCallsField(snapshot(10, [AT - 1_000]), AT + 4_000);
+  assert.equal(later.as_of, new Date(AT + 4_000).toISOString());
+  assert.deepEqual(later.recent_ms, [5_000]);
+  // All 64 kept times inside the window: more may exist than are listed.
+  const busy = Array.from({ length: 64 }, (_, i) => AT - i * 1_000);
+  assert.deepEqual(paidCallsField(snapshot(500, busy), AT).recent_complete, false);
+  assert.equal(paidCallsField(snapshot(500, busy), AT).recent_ms.length, 64);
+  // 64 kept, the oldest outside the window: the list is complete.
+  const spread = [...busy.slice(0, 63), AT - 200_000];
+  assert.deepEqual(paidCallsField(snapshot(500, spread), AT).recent_complete, true);
+  // Fewer than 64 kept: complete. Never more listed than the total (after a repair downward).
+  assert.equal(paidCallsField(snapshot(2, busy.slice(0, 5)), AT).recent_complete, true);
+  assert.equal(paidCallsField(snapshot(2, busy.slice(0, 5)), AT).recent_ms.length, 2);
+});
+
+test('the paid calls reader: one primary-key read of chain 8453, kept 5 s, one shared read, failures not repeated', async (t) => {
+  assert.equal(PAID_CALLS_CHAIN_ID, 8453);
+  assert.equal(PAID_CALLS_CACHE_MS, 5_000);
+  const db = await PGlite.create();
+  t.after(() => db.close());
+  await db.exec(`CREATE TABLE paid_call_count (chain_id integer PRIMARY KEY, total bigint NOT NULL,
+    recent bigint[] NOT NULL DEFAULT '{}', updated_at bigint NOT NULL)`);
+  let now = AT;
+  const reads: unknown[][] = [];
+  let fail = false;
+  const reader = createPaidCallsReader({
+    db: {
+      query: async (sql, params) => {
+        assert.equal(sql, PAID_CALLS_READ_SQL);
+        reads.push(params ?? []);
+        if (fail) throw new Error('down');
+        return db.query(sql, params) as never;
+      },
+    },
+    clock: () => now,
+  });
+  // Before the row exists: nothing to show.
+  assert.equal(await reader.read(), null);
+  assert.deepEqual(reads, [[8453]]);
+  await db.query(
+    "INSERT INTO paid_call_count VALUES (8453, 1284, '{1700000000000,1690000000000}', 1), (84532, 9, '{}', 1)",
+  );
+  // Within 5 s the remembered answer is served.
+  now += PAID_CALLS_CACHE_MS - 1;
+  assert.equal(await reader.read(), null);
+  assert.equal(reads.length, 1);
+  now += 1;
+  const [a, b] = await Promise.all([reader.read(), reader.read()]);
+  assert.equal(reads.length, 2, 'concurrent callers share one read');
+  assert.deepEqual(a, b);
+  assert.equal(a?.total, 1284);
+  assert.deepEqual(a?.recent, [1_700_000_000_000, 1_690_000_000_000]);
+  assert.ok(Math.abs(a!.dbNowMs - Date.now()) < 60_000, 'the database clock');
+  assert.equal(a?.readAt, now);
+  // A failed read is remembered for the same 5 s: the field is left out, without a read per request.
+  now += PAID_CALLS_CACHE_MS;
+  fail = true;
+  await assert.rejects(reader.read(), /down/);
+  await assert.rejects(reader.read());
+  assert.equal(reads.length, 3);
+  now += PAID_CALLS_CACHE_MS;
+  fail = false;
+  assert.equal((await reader.read())?.total, 1284);
+  assert.equal(reads.length, 4);
+});
+
+test('GET /api/public/stats in the app: paid_calls appears once Base mainnet has paid calls, never Sepolia, and CITY_PAID_CALLS_TICKER=0 hides it', async (t) => {
+  const saved = process.env[PAID_CALLS_FLAG];
+  t.after(() => {
+    if (saved === undefined) delete process.env[PAID_CALLS_FLAG];
+    else process.env[PAID_CALLS_FLAG] = saved;
+  });
+  delete process.env[PAID_CALLS_FLAG];
+  let now = Date.parse('2026-10-15T12:00:00.000Z');
+  const app = await createApp({ dataDir: ':memory:', startWorkers: false, now: () => now });
+  t.after(() => app.close());
+  // No counter row yet: the agent count keys and the Base agents number, no paid_calls.
+  assert.deepEqual(Object.keys((await stats(app)).json()).sort(), [
+    'ai_agents_total',
+    'base_agents',
+    'updated_at',
+  ]);
+  // A Sepolia count never shows.
+  await app.city.db.query("INSERT INTO paid_call_count VALUES (84532, 5, '{}', 1)");
+  now += PAID_CALLS_CACHE_MS;
+  assert.equal((await stats(app)).json().paid_calls, undefined);
+  await app.city.db.query("INSERT INTO paid_call_count VALUES (8453, 1284, '{}', 1)");
+  now += PAID_CALLS_CACHE_MS;
+  const shown = await stats(app);
+  assert.equal(shown.json().paid_calls.total, 1284);
+  assert.deepEqual(shown.json().paid_calls.recent_ms, []);
+  assert.equal(shown.json().paid_calls.recent_complete, true);
+  assert.equal(shown.headers['cache-control'], PUBLIC_STATS_CACHE_CONTROL);
+  // The emergency off, read per request.
+  process.env[PAID_CALLS_FLAG] = '0';
+  assert.equal((await stats(app)).json().paid_calls, undefined);
+  assert.equal(typeof (await stats(app)).json().ai_agents_total, 'number');
+  delete process.env[PAID_CALLS_FLAG];
+  assert.equal((await stats(app)).json().paid_calls.total, 1284);
+});
+
+// ---------------------------------------------------------------------------------------------
+// base_agents: the Agent Explorer's "On Base now" total (server/stats/base-agents.ts)
+
+test('base_agents counts exactly what the Agent Explorer counts as On Base now', async (t) => {
+  const db = await setup(t);
+  await add(db, { n: 1, kind: 'final', id: 120 });
+  await add(db, { n: 2, kind: 'finalizing', id: 130 });
+  await add(db, { n: 3, kind: 'final', id: 110, revoked: true });
+  await add(db, { n: 4, kind: 'final', id: 100, visibility: 'private' });
+  // Never counted: not yet safe, registering, failed, another registry, URI or network.
+  await add(db, { n: 5, kind: 'included', id: 140 });
+  await add(db, { n: 6, kind: 'pending' });
+  await add(db, { n: 7, kind: 'failed' });
+  await add(db, { n: 8, kind: 'final', id: 150, registry: SEPOLIA_REGISTRY });
+  await add(db, { n: 9, kind: 'final', id: 160, uri: 'https://example.com/a/S00009' });
+  await add(db, { n: 10, kind: 'final', id: 170, chainId: 84532 });
+  await add(db, { n: 13, kind: 'final', id: 200, seenAt: null });
+  const explorer = await createOnBaseStore(db, { chainId: 8453 }).totals(NOW);
+  assert.equal(explorer.onBase, 4);
+  assert.equal(await countBaseAgents(db), explorer.onBase);
+  // It never reads workspace documents.
+  assert.doesNotMatch(BASE_AGENTS_COUNT_SQL, /workspaces|->'agents'/);
+});
+
+/** The shared row with a counted, failing-on-demand Base agents count. */
+async function baseShared(t: { after: (fn: () => Promise<unknown>) => void }) {
+  const db = await PGlite.create();
+  t.after(() => db.close());
+  await db.exec(publicStatsMigration.sql);
+  const state = { counts: 0, value: 31_452, fail: false, delayMs: 5 };
+  const count = async () => {
+    state.counts++;
+    await new Promise((resolve) => setTimeout(resolve, state.delayMs));
+    if (state.fail) throw new Error('database unavailable');
+    return state.value;
+  };
+  const store = sqlPublicStatsStore(db as never);
+  return { db, store, state, count };
+}
+
+test('base_agents: about one count per TTL across instances; only the lease holder counts', async (t) => {
+  const s = await baseShared(t);
+  let now = 5_000_000;
+  const instances = Array.from({ length: 5 }, () =>
+    createBaseAgentsReader({ db: s.db as never, store: s.store, clock: () => now, count: s.count }),
+  );
+  const first = await Promise.all(instances.map((x) => x.read()));
+  // Only the lease winner counts, even before any value exists; the others answer none for now.
+  assert.equal(s.state.counts, 1);
+  assert.equal(first.filter((v) => v?.value === 31_452).length, 1);
+  assert.equal(first.filter((v) => v === null).length, 4);
+  now += PUBLIC_STATS_RETRY_MS;
+  const warm = await Promise.all(instances.map((x) => x.read()));
+  assert.ok(warm.every((v) => v?.value === 31_452 && v.refreshedAt === 5_000_000));
+  for (let round = 1; round <= 3; round++) {
+    s.state.value += round;
+    now += PUBLIC_STATS_TTL_MS;
+    const before: number = s.state.counts;
+    await Promise.all(instances.map((x) => x.read()));
+    now += PUBLIC_STATS_RETRY_MS;
+    const values = await Promise.all(instances.map((x) => x.read()));
+    assert.equal(s.state.counts - before, 1, `round ${round}`);
+    assert.ok(
+      values.every((v) => v?.value === s.state.value),
+      `round ${round}`,
+    );
+  }
+});
+
+test('base_agents: a failed count serves the last value and nobody counts again for a minute', async (t) => {
+  const s = await baseShared(t);
+  let now = 6_000_000;
+  const a = createBaseAgentsReader({
+    db: s.db as never,
+    store: s.store,
+    clock: () => now,
+    count: s.count,
+  });
+  const b = createBaseAgentsReader({
+    db: s.db as never,
+    store: s.store,
+    clock: () => now,
+    count: s.count,
+  });
+  assert.equal((await a.read())?.value, 31_452);
+  s.state.fail = true;
+  now += PUBLIC_STATS_TTL_MS;
+  assert.equal((await a.read())?.value, 31_452);
+  assert.equal(s.state.counts, 2);
+  // The holder keeps the shared lease through the back-off: the other instance does not count.
+  now += PUBLIC_STATS_LEASE_MS + 1_000;
+  assert.equal((await b.read())?.value, 31_452);
+  assert.equal((await a.read())?.value, 31_452);
+  assert.equal(s.state.counts, 2);
+  assert.ok(BASE_AGENTS_FAILURE_BACKOFF_MS >= 60_000);
+  // Without any value, the failure surfaces (the route then leaves the field out).
+  const cold = createBaseAgentsReader({
+    db: s.db as never,
+    store: { ...s.store, read: async () => Promise.reject(new Error('down')) },
+    clock: () => now,
+  });
+  await assert.rejects(cold.read(), /down/);
+  await assert.rejects(cold.read(), /down/);
+});
+
+test('base_agents: a slow recount on a fresh instance still answers the stored number, and the count runs past the response', async (t) => {
+  const s = await baseShared(t);
+  let now = 7_000_000;
+  const clock = () => now;
+  const first = createBaseAgentsReader({
+    db: s.db as never,
+    store: s.store,
+    clock,
+    count: s.count,
+  });
+  assert.equal((await first.read())?.value, 31_452);
+  // Much later (the stored row is stale), a fresh instance claims the recount, which is slow.
+  now += 30 * 60_000;
+  s.state.value = 39_037;
+  s.state.delayMs = 400;
+  const fresh = createBaseAgentsReader({
+    db: s.db as never,
+    store: s.store,
+    clock,
+    count: s.count,
+  });
+  const kept: Promise<unknown>[] = [];
+  const key = Symbol.for('@vercel/request-context');
+  const g = globalThis as unknown as Record<symbol, unknown>;
+  g[key] = { get: () => ({ waitUntil: (p: Promise<unknown>) => kept.push(p) }) };
+  t.after(() => delete g[key]);
+  const field = await baseAgentsForResponse(fresh, clock, 50);
+  // The response did not wait: it answers the stored number (30 minutes old), never nothing.
+  assert.deepEqual(field, { total: 31_452, as_of: new Date(7_000_000).toISOString() });
+  // The count was handed to waitUntil and finishes; the next response has the new number.
+  assert.equal(kept.length, 1);
+  await Promise.all(kept);
+  assert.equal((await baseAgentsForResponse(fresh, clock, 50))?.total, 39_037);
+  assert.equal(BASE_AGENTS_LAST_GOOD_MS, 60 * 60_000);
+});
+
+test('base_agents rides on the stats response; left out when unavailable; never holds it up', async (t) => {
+  const stat = { value: 31_452, refreshedAt: AT - 2_000 };
+  let read: () => Promise<{ value: number; refreshedAt: number } | null> = async () => stat;
+  let last: { value: number; refreshedAt: number } | null = null;
+  const reader = { read: () => read(), lastGood: () => last };
+  const app = Fastify();
+  t.after(() => app.close());
+  registerPublicStatsRoutes(app, {
+    stats: { get: async () => ({ ai_agents_total: 42, updated_at: new Date(AT).toISOString() }) },
+    limit: async () => {},
+    env: {},
+    clock: () => AT,
+    baseAgents: reader,
+    baseAgentsBudgetMs: 50,
+  });
+  const get = async () => (await app.inject({ method: 'GET', url: '/api/public/stats' })).json();
+  assert.deepEqual((await get()).base_agents, {
+    total: 31_452,
+    as_of: new Date(AT - 2_000).toISOString(),
+  });
+  assert.deepEqual(Object.keys(await get()).sort(), [
+    'ai_agents_total',
+    'base_agents',
+    'updated_at',
+  ]);
+  // Not counted yet anywhere: left out; the agent count is still served.
+  read = async () => null;
+  const none = await get();
+  assert.equal(none.base_agents, undefined);
+  assert.equal(none.ai_agents_total, 42);
+  // A failed or slow read: the last value while it is recent, else nothing.
+  read = async () => Promise.reject(new Error('down'));
+  assert.equal((await get()).base_agents, undefined);
+  last = stat;
+  assert.equal((await get()).base_agents.total, 31_452);
+  read = () => new Promise(() => undefined);
+  const started = performance.now();
+  assert.equal((await get()).base_agents.total, 31_452);
+  assert.ok(performance.now() - started < 1_000);
+  last = { value: 1, refreshedAt: AT - BASE_AGENTS_LAST_GOOD_MS - 1 };
+  assert.equal((await get()).base_agents, undefined);
 });

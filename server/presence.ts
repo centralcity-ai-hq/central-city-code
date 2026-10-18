@@ -148,15 +148,15 @@ export async function overlayPresence(
   workspace: Workspace,
 ): Promise<void> {
   if (!workspace.agents.some((agent) => agent.mode === 'external')) return;
-  applyPresence(
-    workspace,
-    (
-      await tx.query<PresenceRow>(
-        'SELECT agent_id,last_seen_at,sequence FROM agent_presence WHERE operator_id=$1',
-        [operatorId],
-      )
-    ).rows,
-  );
+  // One JSON value instead of one result row per agent: the same rows (the unlocked snapshot read
+  // takes them this way too), far cheaper to transfer and decode in a workspace of thousands.
+  const rows = (
+    await tx.query<{ presence: Pick<PresenceRow, 'agent_id' | 'last_seen_at' | 'sequence'>[] }>(
+      `SELECT ${PRESENCE_JSON_SQL} AS presence`,
+      [operatorId],
+    )
+  ).rows[0]?.presence;
+  applyPresence(workspace, rows ?? []);
 }
 
 /** The presence rows of a workspace as one JSON array (`$1` is the operator id). */

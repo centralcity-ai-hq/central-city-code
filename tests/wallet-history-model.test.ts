@@ -185,3 +185,12 @@ test('read again every 3 s while one moves, slower once all are safe, never when
   // Something this browser signed isn't shown yet: read on.
   assert.equal(pollDelay(new Map(), done, true, true), SAFE_POLL_MS);
 });
+
+test('a USDC amount is shown exactly as signed, never rounded to two decimals', () => {
+  const exact = (raw: string) =>
+    textOf({ view: view('w-1', 'submitted', { amount: { raw, decimals: 6, display: '' } }) });
+  assert.equal(exact('12345678'), '12.345678 USDC to 0x3C44…93BC');
+  assert.equal(exact('12005000'), '12.005 USDC to 0x3C44…93BC');
+  assert.equal(exact('12000000'), '12.00 USDC to 0x3C44…93BC');
+  assert.equal(exact('10000'), '0.01 USDC to 0x3C44…93BC');
+});

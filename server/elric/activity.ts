@@ -3,22 +3,27 @@ import type { Transaction as Tx } from '../database.js';
 /**
  * The owner's open pending actions (docs/ELRIC.md "Pending actions"), for the console's approval
  * list and the in-room approval card: only `pending` rows that have not expired, newest first.
- * The stored arguments never leave the server; the owner sees a safe summary (a task title,
- * cleaned and capped), the tool name and the hash it must name to approve. The room comes with
+ * Only what the owner approves leaves the server: the task title (`summary`) and its description
+ * (`detail`), both cleaned and capped, the tool name and the hash it must name to approve; no
+ * other stored argument. The room comes with
  * its name only while the owner can still see it, like the turn log.
  */
 export interface PendingView {
   id: string;
   tool: string;
   summary: string | null;
+  /** The task description the action would create, cleaned (line breaks kept); null when none. */
+  detail: string | null;
   args_hash: string;
   room: { id: string; name: string } | null;
   created_at: string;
   expires_at: string;
 }
 
-/** Longest summary shown for a pending action. */
-export const PENDING_SUMMARY_CHARS = 120;
+/** Longest summary shown for a pending action (the longest task title Elric may propose). */
+export const PENDING_SUMMARY_CHARS = 200;
+/** Longest detail shown for a pending action (the longest task body Elric may propose). */
+export const PENDING_DETAIL_CHARS = 4_000;
 /** Most open pending actions listed at once. */
 export const PENDING_LIST_LIMIT = 50;
 
@@ -36,6 +41,32 @@ export function pendingSummary(tool: string, args: unknown): string | null {
   const chars = Array.from(clean);
   return chars.length > PENDING_SUMMARY_CHARS
     ? `${chars.slice(0, PENDING_SUMMARY_CHARS - 1).join('')}…`
+    : clean;
+}
+
+/**
+ * A task body, so the owner sees everything the task would say before approving: control, bidi
+ * and zero-width characters removed (line breaks kept, at most one blank line), capped.
+ */
+export function pendingDetail(tool: string, args: unknown): string | null {
+  if (tool !== 'room_task_create' || !args || typeof args !== 'object') return null;
+  const body = (args as { body?: unknown }).body;
+  if (typeof body !== 'string') return null;
+  const clean = body
+    .normalize('NFKC')
+    .replace(/\r\n?/g, '\n')
+    .replace(
+      /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g,
+      ' ',
+    )
+    .replace(/[^\S\n]+/g, ' ')
+    .replace(/ *\n */g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (!clean) return null;
+  const chars = Array.from(clean);
+  return chars.length > PENDING_DETAIL_CHARS
+    ? `${chars.slice(0, PENDING_DETAIL_CHARS - 1).join('')}…`
     : clean;
 }
 
@@ -73,6 +104,7 @@ export async function listPendingActions(
       id: row.id,
       tool: row.tool,
       summary: pendingSummary(row.tool, row.args),
+      detail: pendingDetail(row.tool, row.args),
       args_hash: row.args_hash,
       room: row.room_name === null ? null : { id: row.room_id, name: row.room_name },
       created_at: new Date(Number(row.created_at)).toISOString(),

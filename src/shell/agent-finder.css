@@ -1,0 +1,245 @@
+/*
+ * The header's finder (docs/design/directory.html): a Spotlight-style panel over a blurred page.
+ * Global tokens (tokens.css), so it reads the same on every public page, light and dark.
+ */
+
+.af-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  justify-content: center;
+  padding: max(12vh, calc(env(safe-area-inset-top, 0px) + 72px)) 16px 16px;
+}
+.af-scrim {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--bg-page) 62%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  animation: af-fade 0.16s ease-out;
+}
+.af-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(640px, 100%);
+  max-height: min(560px, 100%);
+  align-self: flex-start;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--bg-surface-elevated);
+  box-shadow: var(--shadow-xl, var(--shadow-floating));
+  animation: af-rise 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes af-fade {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes af-rise {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.985);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .af-scrim,
+  .af-panel {
+    animation: none;
+  }
+}
+
+.af-input {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 60px;
+  padding: 0 14px 0 20px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+}
+.af-input input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: 400 17px var(--font-sans);
+  outline: none;
+}
+.af-input input::placeholder {
+  color: var(--text-muted);
+  opacity: 0.8;
+}
+.af-esc {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font: 500 13px var(--font-sans);
+  cursor: pointer;
+}
+.af-esc-key {
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: 500 11px var(--font-mono);
+}
+.af-esc-word {
+  display: none;
+}
+
+.af-caption {
+  margin: 0;
+  padding: 12px 20px 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+.af-list {
+  margin: 0;
+  padding: 8px;
+  overflow-y: auto;
+  list-style: none;
+}
+.af-row {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  color: inherit;
+  text-decoration: none;
+}
+.af-list [aria-selected='true'] .af-row {
+  background: var(--bg-surface-hover);
+}
+.af-av {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 11px;
+  color: #fff;
+  font-size: 15px;
+  font-style: normal;
+  font-weight: 700;
+}
+.af-text {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+.af-text b,
+.af-text span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.af-text b {
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 600;
+}
+.af-text span {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.af-standing {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.af-standing > span + span::before {
+  content: '·';
+  margin-right: 7px;
+}
+.af-stars {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.af-stars svg {
+  color: #f2a516;
+  fill: currentColor;
+}
+.af-stars b {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.af-note {
+  margin: 0;
+  padding: 22px 20px;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.af-foot {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 20px;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.af-hint kbd {
+  margin-right: 3px;
+  font: 500 11px var(--font-mono);
+}
+.af-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  color: var(--text-primary);
+  font-weight: 500;
+  text-decoration: none;
+}
+.af-all:hover {
+  text-decoration: underline;
+}
+
+@media (max-width: 640px), (hover: none) {
+  .af-hint {
+    display: none;
+  }
+}
+@media (max-width: 640px) {
+  .af-layer {
+    padding: calc(env(safe-area-inset-top, 0px) + 10px) 10px 10px;
+  }
+  .af-panel {
+    border-radius: 18px;
+  }
+  .af-input {
+    height: 56px;
+    padding-left: 16px;
+  }
+  .af-esc-key {
+    display: none;
+  }
+  .af-esc-word {
+    display: inline;
+    color: var(--accent);
+    font-size: 15px;
+  }
+  .af-standing > span + span {
+    display: none;
+  }
+}

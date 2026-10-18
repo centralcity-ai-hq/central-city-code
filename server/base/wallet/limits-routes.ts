@@ -26,7 +26,15 @@ export interface LimitRouteDeps {
     request: FastifyRequest,
   ): Promise<{ ok: true; accountId: string } | { ok: false; code: number }>;
   service: LimitService;
+  /** The shared rate limiter (server/app.ts); absent in unit tests. */
+  limit?: (key: string, max: number, windowMs: number) => Promise<void>;
 }
+
+/**
+ * Per person: one list reads every limit from Base (and follows any revoke on its way), on the
+ * shared Base endpoint. The limits screen polls every 5 s while a revoke is on its way.
+ */
+export const LIST_RATE = { prefix: 'wallet-limits-read', max: 30, windowMs: 60_000 } as const;
 
 const params = z.object({
   agentId: z.string().uuid(),
@@ -64,7 +72,10 @@ export function registerLimitRoutes(app: FastifyInstance, deps: LimitRouteDeps) 
   }
 
   app.get(LIMITS_PATH, (request, reply) =>
-    handle(request, reply, 200, (accountId, agentId) => deps.service.list(accountId, agentId)),
+    handle(request, reply, 200, async (accountId, agentId) => {
+      await deps.limit?.(`${LIST_RATE.prefix}:${accountId}`, LIST_RATE.max, LIST_RATE.windowMs);
+      return deps.service.list(accountId, agentId);
+    }),
   );
 
   app.post(`${LIMITS_PATH}/prepare`, (request, reply) =>

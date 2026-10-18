@@ -361,7 +361,7 @@ test('a lowered CITY_LIMIT_ROOM_MEMBERS_MAX bounds joins to rooms created under 
   const full = await join('Lowered two');
   assert.equal(full.statusCode, 409, full.body);
   assert.equal(full.json().code, 'room_full');
-  assert.match(full.json().message ?? full.json().error ?? full.body, /3 members/);
+  assert.equal(full.json().message ?? full.json().error ?? full.body, 'The room is full.');
   // The guest invite path is bounded the same way (its uniform refusal).
   const invite = await post(
     '/api/links',
@@ -564,7 +564,7 @@ test('a join beyond 100 members is refused, even in a room stored with a larger 
   const stillFull = await join();
   assert.equal(stillFull.statusCode, 409, stillFull.body);
   assert.equal(stillFull.json().code, 'room_full');
-  assert.match(stillFull.json().error, /100 members/);
+  assert.equal(stillFull.json().error, 'The room is full.', 'no member count in the refusal');
   // The guest invite path too (its uniform refusal).
   await f.app.city.db.query('UPDATE rooms SET member_cap=100 WHERE id=$1', [roomId]);
   const invite = await f.post(
@@ -587,6 +587,52 @@ test('a join beyond 100 members is refused, even in a room stored with a larger 
         })
       : start;
   assert.notEqual(redeemed.statusCode, 200, redeemed.body);
+});
+
+test('only the host reads a cap above 100; members and refused joiners never see the number', async (t) => {
+  const f = await capApp(t, 200);
+  const master = await f.account('Raised host');
+  const guest = await f.account('Room member');
+  const late = await f.account('Refused joiner');
+  await asStressOperators([master.operatorId], async () => {
+    const big = await f.createRoom(master, { member_cap: 10_000 });
+    assert.equal(big.statusCode, 201, big.body);
+    assert.equal(big.json().room.member_cap, 10_000, 'the host reads its own cap');
+    const roomId = big.json().room.id as string;
+    const link = big.json().link.link as string;
+    const joined = await f.post(
+      `/api/rooms/${roomId}/join`,
+      { link, agent_id: guest.agentId, idempotency_key: randomUUID() },
+      { cookie: guest.cookie },
+    );
+    assert.equal(joined.statusCode, 200, joined.body);
+    assert.ok(joined.json().room.member_cap <= 100, 'a member reads at most the standard cap');
+    const listed = await f.app.inject({
+      method: 'GET',
+      url: '/api/rooms',
+      headers: { ...headers, cookie: guest.cookie },
+    });
+    const seen = (listed.json().rooms as Array<{ id: string; member_cap: number }>).find(
+      (room) => room.id === roomId,
+    );
+    assert.ok(seen && seen.member_cap <= 100, 'the room list holds the same bound');
+    // Three members (host agent, host person, member): full at three, and the refusal names no
+    // number.
+    const lowered = await f.post(
+      `/api/rooms/${roomId}/settings`,
+      { member_cap: 3 },
+      { cookie: master.cookie },
+    );
+    assert.equal(lowered.statusCode, 200, lowered.body);
+    const full = await f.post(
+      `/api/rooms/${roomId}/join`,
+      { link, agent_id: late.agentId, idempotency_key: randomUUID() },
+      { cookie: late.cookie },
+    );
+    assert.equal(full.statusCode, 409, full.body);
+    assert.equal(full.json().code, 'room_full');
+    assert.doesNotMatch(full.json().error, /\d/);
+  });
 });
 
 test('migration 36 lowers open rooms above 100 to GREATEST(100, active members); nobody is evicted', async (t) => {

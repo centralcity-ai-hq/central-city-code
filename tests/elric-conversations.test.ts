@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import {
   CONVERSATIONS_MAX,
+  CONVERSATIONS_PER_DAY,
   NEW_CONVERSATION_TITLE,
   titleFrom,
 } from '../server/elric/conversations.js';
@@ -194,6 +195,8 @@ test('new conversations are not held to the revoke + re-add churn limit; the cap
     `UPDATE rooms SET created_at=created_at-86400001 WHERE elric_private AND host_owner_id=$1`,
     [a.operatorId],
   );
+  // As if those were made on an earlier day: the per-day counter starts over.
+  await f.db.query('UPDATE elric_usage SET conversations=0 WHERE owner_id=$1', [a.operatorId]);
   for (let i = open; i < CONVERSATIONS_MAX; i++) await create(f, a.cookie);
   const over = await create(f, a.cookie);
   assert.equal(over.statusCode, 409, over.body);
@@ -208,6 +211,23 @@ test('new conversations are not held to the revoke + re-add churn limit; the cap
   ).rows[0]!;
   await f.call(a.cookie, 'DELETE', `/api/elric/conversations/${one.id}`);
   assert.equal((await create(f, a.cookie)).statusCode, 201);
+});
+
+test('create then delete churn hits the daily cap: deleted conversations still count', async (t) => {
+  const f = await elricFixture(t);
+  const a = await owner(f, 'Churn owner');
+  // Every conversation is deleted right away, so the open cap never applies.
+  for (let i = 0; i < CONVERSATIONS_PER_DAY; i++) {
+    const made = await create(f, a.cookie);
+    assert.equal(made.statusCode, 201, `#${i} ${made.body}`);
+    const gone = await f.call(a.cookie, 'DELETE', `/api/elric/conversations/${made.json().id}`);
+    assert.equal(gone.statusCode, 200, gone.body);
+  }
+  const over = await create(f, a.cookie);
+  assert.equal(over.statusCode, 429, over.body);
+  assert.equal(over.json().code, 'too_many_new_conversations');
+  // The first chat is a new conversation too.
+  assert.equal((await f.call(a.cookie, 'GET', '/api/elric/chat')).statusCode, 429);
 });
 
 test('revoke closes every conversation (read-only); erasing the account removes them all', async (t) => {

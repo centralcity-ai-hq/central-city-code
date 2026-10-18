@@ -15,6 +15,10 @@ export type AgentScreenProps = {
   onOpen: (screen: string) => void;
   /** The back link's label (the previous screen); each screen has the mockup's default. */
   backLabel?: string;
+  /** Opens a room's page (an invitation the agent just accepted). */
+  onOpenRoom?: (roomId: string) => void;
+  /** The agent joined or left a room, or answered an invitation (the pane re-reads its rows). */
+  onChanged?: () => void;
 };
 
 const Svg = ({ children, size }: { children: ReactNode; size?: number }) => (
@@ -198,8 +202,13 @@ export function useLoad<T>(
   return { load, reload, setLoad };
 }
 
-/** The conversation list as these screens read it: the newest 100 threads (the server's cap). */
-export const CONVERSATIONS_PATH = '/api/messages/conversations?limit=100';
+/**
+ * The conversation list as these screens read it: the agent's newest 100 threads (the server's
+ * cap). Filtered on the server, so other agents' newer threads never push this agent's out.
+ */
+export function conversationsPath(agentId: string): string {
+  return `/api/messages/conversations?agent_id=${encodeURIComponent(agentId)}&limit=100`;
+}
 
 /** Threads opened by "New message" before their first message (the list does not have them). */
 const openedThreads = new Map<string, DirectThread>();

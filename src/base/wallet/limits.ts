@@ -2,10 +2,10 @@
  * Spending limits in the browser (Operation Base Wallet W3; server: server/base/wallet/limits.ts).
  * The owner signs ONE spend permission per token for the agent's spender; that permission is what
  * Base enforces. The server prepares it; this module checks it against what the owner typed (this
- * wallet, USDC, the allowance the cap means under the server's model, the period, the next Berlin
- * midnight, no end) and recomputes its hash, so the owner signs exactly the limit on screen. A
- * revoke is the wallet's own SpendPermissionManager.revoke of exactly the limit shown, with the
- * network fee covered.
+ * wallet, USDC, the allowance the cap means under the server's model, the period, a start at 00:00
+ * Berlin today so it works at once, no end) and recomputes its hash, so the owner signs exactly the
+ * limit on screen. A revoke is the wallet's own SpendPermissionManager.revoke of exactly the limit
+ * shown, with the network fee covered.
  *
  * The spender is the agent's own key, held by the server; the browser can't tell it from another
  * address, and the allowance bounds whoever holds it.
@@ -29,6 +29,7 @@ import {
   DEFAULT_ONCHAIN_CAP_MODEL,
   LIMIT_PERIOD_SECONDS,
   LIMIT_PERMISSION_END,
+  berlinDayStart,
   nextBerlinMidnight,
   onchainAllowance,
   permissionFromJson,
@@ -233,7 +234,10 @@ export function capFromText(text: string): string | null {
   return raw > 0n ? raw.toString(10) : null;
 }
 
-/** How far ahead of the next Berlin midnight a limit prepared just before it may start. */
+/**
+ * Around midnight the server's clock may already be on the next Berlin day, or still on the
+ * previous one: a start one day off is taken this close to midnight only.
+ */
 export const MIDNIGHT_SKEW_MS = 5 * 60_000;
 
 export interface CheckedLimit {
@@ -298,15 +302,17 @@ export function checkLimit(input: {
     throw new LimitCheckError('Base would allow a different amount than your limit.');
   if (permission.period !== LIMIT_PERIOD_SECONDS[period])
     throw new LimitCheckError('The limit counts a different period.');
-  // The next 00:00 in Berlin; prepared seconds before midnight, the server may see the one after.
-  const next = nextBerlinMidnight(now);
-  const after = nextBerlinMidnight(next * 1000);
-  if (permission.start * 1000 <= now) throw new LimitCheckError('The limit starts in the past.');
+  // 00:00 today in Berlin, so the limit works at once. Just before midnight the server may already
+  // be on the next day; just after it, still on the previous one.
+  const today = berlinDayStart(now);
+  const tomorrow = nextBerlinMidnight(now);
+  const yesterday = berlinDayStart(today * 1000 - 1);
   if (
-    permission.start !== next &&
-    !(permission.start === after && next * 1000 - now <= MIDNIGHT_SKEW_MS)
+    permission.start !== today &&
+    !(permission.start === tomorrow && tomorrow * 1000 - now <= MIDNIGHT_SKEW_MS) &&
+    !(permission.start === yesterday && now - today * 1000 <= MIDNIGHT_SKEW_MS)
   )
-    throw new LimitCheckError('The limit doesn’t start at the next midnight in Berlin.');
+    throw new LimitCheckError('The limit doesn’t start today at 00:00 Berlin time.');
   if (permission.end !== LIMIT_PERMISSION_END)
     throw new LimitCheckError('The limit has an end of its own.');
   if (permission.extraData !== '0x') throw new LimitCheckError('The limit carries extra data.');

@@ -61,6 +61,7 @@ import {
 } from './elric';
 import { AddMyAiSheet } from './AddMyAiSheet';
 import { InviteSheet } from './InviteSheet';
+import { InviteAgentSheet } from './InviteAgentSheet';
 import {
   readSuggestionsHidden,
   suggestionsHiddenKey,
@@ -113,6 +114,8 @@ import {
 } from './RoomHeaderV2';
 import { compactCount, headerCounts, metaLine } from './headerCountsV2';
 import { ELRIC_ROOM_HINT } from '../../shared/elric-copy';
+import { pageVisible, shouldMarkRead } from './readMark';
+import { mutePosting, mutedNotice } from './muteView';
 
 /** v2: how often the open Members panel refreshes its list (as the overview's counts). */
 const MEMBERS_POLL_MS = 30_000;
@@ -885,6 +888,7 @@ export function RoomView({
   // The shell's "Invite your AI" lands here with history.state.invite: open the sheet once,
   // as soon as the room is known to be an open room this viewer hosts.
   const [invite, setInvite] = useState(false);
+  const [inviteAgent, setInviteAgent] = useState(false);
   const [connect, setConnect] = useState(false);
   const [addAi, setAddAi] = useState(false);
   // "Add my AI": a person member adds one of their own AIs (no invite link needed).
@@ -1308,9 +1312,18 @@ export function RoomView({
     if (delivered.size) setPending((list) => list.filter((entry) => !delivered.has(entry.key)));
   }, [thread.messages]);
   const newest = thread.messages.at(-1)?.seq ?? 0;
+  // Read only while the newest message can be seen (readMark.ts): the tab is showing and the
+  // list follows the bottom. Coming back to the tab or scrolling down marks it then.
+  const [visible, setVisible] = useState(pageVisible);
+  const [atBottom, setAtBottom] = useState(true);
   useEffect(() => {
-    if (newest) onRead(initial.id, newest);
-  }, [initial.id, newest, onRead]);
+    const update = () => setVisible(pageVisible());
+    document.addEventListener('visibilitychange', update);
+    return () => document.removeEventListener('visibilitychange', update);
+  }, []);
+  useEffect(() => {
+    if (shouldMarkRead({ newest, visible, atBottom })) onRead(initial.id, newest);
+  }, [initial.id, newest, visible, atBottom, onRead]);
 
   async function deliver(item: PendingMessage) {
     const mentionsElric = /@elric\b/i.test(item.text);
@@ -1471,7 +1484,9 @@ export function RoomView({
     if (room.role === 'host' && !room.closed) setInvite(true);
   }, [room.name, room.role, room.closed]);
 
-  const canPost = thread.ready && !room.closed && !room.readOnly && !thread.denied;
+  // The host's mute (muteView.ts): no composer, or only your person member for an AI-only mute.
+  const mute = mutePosting(room, own);
+  const canPost = thread.ready && !room.closed && !room.readOnly && !thread.denied && !mute.blocked;
 
   const sectionRef = useRef<HTMLElement>(null);
   // "Who should join?" (src/rooms/WhoJoins.tsx): the host's, while nobody else is in the room,
@@ -1560,6 +1575,17 @@ export function RoomView({
             label: 'Show Who should join?',
             icon: <UserPlus size={16} aria-hidden="true" />,
             onSelect: () => setWhoJoinsHidden(false),
+          },
+        ]
+      : []),
+    // Phones: "Invite an agent" lives here (the header has no room for a second Invite).
+    ...(compactBar && host && !room.closed && !privateAgent
+      ? [
+          {
+            key: 'invite-agent',
+            label: 'Invite an agent',
+            icon: <UserPlus size={16} aria-hidden="true" />,
+            onSelect: () => setInviteAgent(true),
           },
         ]
       : []),
@@ -1739,6 +1765,15 @@ export function RoomView({
             <Search size={17} aria-hidden="true" />
           </button>
           {compactBar ? null : <MoreMenu items={moreItems} warm={warmRoomSheets} />}
+          {host && !room.closed && !privateAgent && !compactBar ? (
+            <button
+              type="button"
+              className="rm3-chip rm-invite-agent-head"
+              onClick={() => setInviteAgent(true)}
+            >
+              Invite agent
+            </button>
+          ) : null}
           {host && !room.closed && !privateAgent ? (
             <button
               type="button"
@@ -1867,6 +1902,7 @@ export function RoomView({
                   ) : undefined
                 }
                 noteFor={mentionNote}
+                onPinnedChange={setAtBottom}
                 directFor={(id) => {
                   const member = members.find((item) => item.id === id);
                   return member ? <DirectLink room={room} member={member} compact /> : null;
@@ -1954,12 +1990,20 @@ export function RoomView({
             <p className="rm-readonly">This room is closed. Its history stays readable.</p>
           ) : room.readOnly ? (
             <p className="rm-readonly">You can read this room but not post.</p>
+          ) : mute.blocked ? (
+            <p className="rm-readonly" data-testid="room-muted">
+              {mutedNotice(room.muteReason)}
+            </p>
           ) : canPost ? (
             <Composer
               roomName={room.name}
               members={members}
               // In the private chat you write as yourself only: the agent answers for itself.
-              own={privateAgent ? own.filter((member) => member.id !== privateAgent) : own}
+              own={
+                privateAgent
+                  ? mute.posters.filter((member) => member.id !== privateAgent)
+                  : mute.posters
+              }
               draft={draft}
               onDraft={onDraft}
               onSend={send}
@@ -2109,6 +2153,15 @@ export function RoomView({
             }}
           />
         </Suspense>
+      ) : null}
+      {inviteAgent ? (
+        <InviteAgentSheet
+          room={room}
+          onClose={() => {
+            setInviteAgent(false);
+            void loadMembers();
+          }}
+        />
       ) : null}
       {invite ? (
         <InviteSheet

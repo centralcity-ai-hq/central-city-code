@@ -61,7 +61,13 @@ owner's already-admitted deterministic demonstrations under the workspace row lo
 credentials, resource ownership and applicable scopes/grants are checked first. One read
 starts queued work; a later read completes it. Concurrent reads serialize without duplicate
 completion. Admission refreshes hosted presence after permission checks, without executing
-pending jobs. External presence still requires signed heartbeats. Pause, cancel, revoke and
+pending jobs. Hosted presence is synthetic: these reads renew the heartbeat of all of a
+workspace's hosted agents together, and only when one of them is new or its heartbeat is
+10 minutes old, so presence alone rewrites the workspace document at most once per 10 minutes.
+A hosted agent counts as reachable for 30 minutes after its last renewal. While it is reachable,
+reads report its `lastSeenAt` as the start of the current 30-second window (computed on read,
+never stored), not the stored renewal time. External presence still requires signed
+heartbeats (reachable for 90 seconds after the last one). Pause, cancel, revoke and
 other write routes do not run an execution tick before applying their control action.
 In hosted server mode, a quiet client does not consume demo retries: only external-provider
 jobs undergo lease expiry/recovery. Permission removal still cancels active work first.

@@ -33,6 +33,7 @@ import {
   BASE_MIGRATION_SQL,
   BASE_PAYMENTS_MIGRATION_SQL,
   BASE_SHARED_ADDITIONS_SQL,
+  BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL,
   BASE_WALLET_PAYMENTS_SQL,
   BASE_WALLET_VAULT_SQL,
   BASE_WALLET_WITHDRAWALS_SQL,
@@ -80,6 +81,7 @@ import {
 import {
   SPONSOR_DATA_BYTES,
   SPONSOR_PAYMASTERS,
+  SPONSOR_SEND_MARGIN_MS,
   sponsoredWithoutCharge,
 } from '../shared/base/paymasters.js';
 import {
@@ -251,6 +253,8 @@ function fakeBase() {
     sends: [] as Array<{ hash: Hex; op: UserOperation<'0.6'> }>,
     rejected: [] as string[],
     paymasterCalls: 0,
+    /** Block times in seconds by number (none: the node gives no timestamp, so nothing is concluded from time). */
+    blockTime: null as null | ((n: bigint) => bigint),
   };
   const lane = (sender: string, laneKey: bigint) => `${sender.toLowerCase()}:${laneKey}`;
   const seqAt = (sender: string, laneKey: bigint, block?: bigint) => {
@@ -336,7 +340,11 @@ function fakeBase() {
     getBlock: async (args: { blockNumber?: bigint; blockTag?: string } = {}) => {
       down();
       if (args.blockNumber !== undefined)
-        return { number: args.blockNumber, hash: blockHash(args.blockNumber) };
+        return {
+          number: args.blockNumber,
+          hash: blockHash(args.blockNumber),
+          ...(state.blockTime ? { timestamp: state.blockTime(args.blockNumber) } : {}),
+        };
       // Base reads finality from these tags (Base Sepolia counts confirmations instead).
       if (args.blockTag === 'finalized') {
         const settled = state.head - SETTLE_DEPTH;
@@ -566,6 +574,7 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }, options
     BASE_MIGRATION_SQL,
     BASE_PAYMENTS_MIGRATION_SQL,
     BASE_SHARED_ADDITIONS_SQL,
+    BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL,
     BASE_WALLET_VAULT_SQL,
     BASE_WALLET_WITHDRAWALS_SQL,
     // Spending-limit revokes (90): a live one that deploys the wallet holds the deployment.
@@ -982,6 +991,75 @@ test('a USDC withdrawal: prepared unsigned, signed over the raw hash, sent, incl
   );
   const text = JSON.stringify(events);
   assert.ok(!text.includes(signature.slice(2, 40)), 'no signature in the audit trail');
+});
+
+test('a signed withdrawal whose operation was stored but never claimed for its first send is sent by the next read', async (t) => {
+  const f = await setup(t);
+  const body = await signedWithdrawal(f, 1);
+  // A stop between the chain module's store and its queued → submitted claim: stored, never sent.
+  f.chain.state.pool.clear();
+  f.chain.state.sends.length = 0;
+  await f.pg.query(`UPDATE base_chain_ops SET status = 'queued' WHERE user_op_hash = $1`, [
+    body.userOpHash,
+  ]);
+
+  // The next read (the owner's, or the sweep's) sends exactly the stored operation, once.
+  assert.equal((await read(f, body.withdrawalId)).json().state, 'submitted');
+  assert.equal(f.chain.state.sends.length, 1);
+  assert.equal(f.chain.state.sends[0].hash, body.userOpHash);
+  assert.equal((await read(f, body.withdrawalId)).json().state, 'submitted');
+  assert.equal(f.chain.state.sends.length, 1, 'claimed once: a second read does not send again');
+
+  f.chain.include(body.userOpHash);
+  f.chain.mine(3);
+  assert.equal((await read(f, body.withdrawalId)).json().state, 'final');
+  assert.deepEqual(await reservations(f), [
+    { holder_kind: 'withdrawal', state: 'consumed', amount: '1500000' },
+  ]);
+});
+
+test('a signed operation that can never land fails as not sent once Base settles past its sponsorship', async (t) => {
+  const f = await setup(t);
+  const body = await created(f, 1);
+  assert.notEqual(userOperationFromRpc(body.userOperation).initCode, '0x');
+  // Another operation (an agent payment's approve) deployed the wallet meanwhile: this one's
+  // initCode can never pass validation again, so every send is refused.
+  f.chain.state.code.add(f.wallets[AGENT].toLowerCase());
+  const signed = await post(f, `${body.withdrawalId}/signature`, {
+    signature: await rawSign(f.owner, body.userOpHash),
+  });
+  assert.equal(signed.statusCode, 202, signed.body);
+  assert.deepEqual(f.chain.state.rejected, ['AA10 sender already constructed']);
+  const validUntil = BigInt(f.chain.state.sponsorValidUntil());
+
+  // Base has not settled a block past validUntil yet: it may still be on its way, nothing concluded.
+  f.chain.state.blockTime = () => validUntil;
+  f.chain.mine(5);
+  assert.equal((await read(f, body.withdrawalId)).json().state, 'submitted');
+  // Without a block time nothing is concluded from time either.
+  f.chain.state.blockTime = null;
+  assert.equal((await read(f, body.withdrawalId)).json().state, 'submitted');
+
+  // A settled block past validUntil with the nonce still unused: it never landed and never can.
+  f.chain.state.blockTime = () => validUntil + 1n;
+  const failed = (await read(f, body.withdrawalId)).json();
+  assert.equal(failed.state, 'failed');
+  assert.equal(failed.errorCode, 'not_sent');
+  assert.deepEqual(await reservations(f), [
+    { holder_kind: 'withdrawal', state: 'released', amount: '1500000' },
+  ]);
+});
+
+test('a sponsored operation that landed is never retired by its lapsed sponsorship', async (t) => {
+  const f = await setup(t);
+  const body = await signedWithdrawal(f, 1);
+  f.chain.include(body.userOpHash);
+  f.chain.state.blockTime = () => BigInt(f.chain.state.sponsorValidUntil()) + 1_000n;
+  f.chain.mine(3);
+  assert.equal((await read(f, body.withdrawalId)).json().state, 'final');
+  assert.deepEqual(await reservations(f), [
+    { holder_kind: 'withdrawal', state: 'consumed', amount: '1500000' },
+  ]);
 });
 
 test('the next withdrawal of a deployed wallet has no initCode and the next owner nonce', async (t) => {
@@ -2471,7 +2549,7 @@ test('lanes: an unsigned operation past its sponsorship frees its open slot and 
   assert.equal(await heldExposure(f), held, 'only the new one is held');
 });
 
-test('lanes: the sign-time check passes until validUntil and fails exactly from it', async (t) => {
+test('lanes: the sign-time check passes until the send margin before validUntil and fails from it', async (t) => {
   const f = await lanesSetup(t);
   f.chain.state.sponsorValidUntil = () => Math.floor((f.clock.now + 60_000) / 1000);
   const body = await created(f, 1, { amount: '1000000' });
@@ -2482,7 +2560,14 @@ test('lanes: the sign-time check passes until validUntil and fails exactly from 
   assert.equal(f.port.sponsorshipValid!(data, body.expiresAt), true);
   f.clock.now = body.expiresAt;
   assert.equal(f.port.sponsorshipValid!(data, body.expiresAt), false);
-  f.clock.now = body.expiresAt - 1;
+  // A bundler refuses an operation whose sponsorship ends within seconds: never taken that close.
+  f.clock.now = body.expiresAt - SPONSOR_SEND_MARGIN_MS;
+  const late = await post(f, `${body.withdrawalId}/signature`, {
+    signature: await rawSign(f.owner, body.userOpHash),
+  });
+  assert.equal(late.statusCode, 409, late.body);
+  assert.equal(late.json().code, 'sponsorship_expired');
+  f.clock.now = body.expiresAt - SPONSOR_SEND_MARGIN_MS - 1;
   await signIt(f, body);
 });
 
@@ -2491,6 +2576,25 @@ test('lanes off: expires_at stays the fixed 10 minutes, whatever the paymaster s
   f.chain.state.sponsorValidUntil = () => Math.floor((f.clock.now + 60_000) / 1000);
   const body = await created(f, 1, { amount: '1000000' });
   assert.equal(body.expiresAt, f.clock.now + WITHDRAWAL_SIGNATURE_TTL_MS);
+});
+
+test('lanes off: a signature after the sponsorship ended is refused and nothing is stored or sent', async (t) => {
+  const f = await setup(t);
+  f.chain.state.sponsorValidUntil = () => Math.floor((f.clock.now + 60_000) / 1000);
+  const body = await created(f, 1, { amount: '1000000' });
+  // Still inside the 10-minute signing deadline, but past the paymaster's validUntil.
+  f.clock.now += 61_000;
+  const refused = await post(f, `${body.withdrawalId}/signature`, {
+    signature: await rawSign(f.owner, body.userOpHash),
+  });
+  assert.equal(refused.statusCode, 409, refused.body);
+  assert.equal(refused.json().code, 'sponsorship_expired');
+  const stored = await f.pg.query<{ state: string; signed: boolean }>(
+    'SELECT state, owner_signature IS NOT NULL AS signed FROM base_wallet_withdrawals',
+  );
+  assert.deepEqual(stored.rows, [{ state: 'awaiting_signature', signed: false }]);
+  assert.equal(f.chain.state.sends.length, 0);
+  assert.equal((await f.pg.query('SELECT 1 FROM base_chain_ops')).rows.length, 0);
 });
 
 test('lanes: sponsorship expiring after the initial check is refused before signature acceptance', async (t) => {
@@ -3940,4 +4044,24 @@ test('lanes: GET ?open=1 answers a stored safe proof without asking Base, and pr
   assert.equal(count.proofs, 2);
   assert.equal(await safeAt(f, b.withdrawalId), null);
   assert.notEqual(await safeAt(f, a.withdrawalId), null);
+});
+
+test('a withdrawal read is rate limited per person before Base is read', async (t) => {
+  const calls: string[] = [];
+  let refuse = false;
+  const f = await setup(t, {
+    limit: async (key, max, windowMs) => {
+      calls.push(`${key}|${max}|${windowMs}`);
+      if (refuse) throw Object.assign(new Error('Too many requests.'), { statusCode: 429 });
+    },
+  });
+  const body = await created(f, 1);
+  calls.length = 0;
+  const ok = await read(f, body.withdrawalId);
+  assert.equal(ok.statusCode, 200, ok.body);
+  assert.deepEqual(calls, ['wallet-read:person-1|120|60000']);
+  refuse = true;
+  const limited = await read(f, body.withdrawalId);
+  assert.equal(limited.statusCode, 429);
+  assert.equal(limited.json().withdrawalId, undefined);
 });

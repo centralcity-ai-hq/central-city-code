@@ -76,7 +76,7 @@ test('rooms end to end in the app: create, invite, join from a second browser, p
   await shot(host.page, '02-room-created');
 
   // Invite: one /j link, copied to the clipboard.
-  await host.page.getByRole('button', { name: 'Invite' }).first().click();
+  await host.page.getByRole('button', { name: 'Invite', exact: true }).first().click();
   const sheet = host.page.getByRole('dialog', { name: 'Invite a person' });
   await expect(sheet.locator('.rm-code')).toBeVisible();
   await sheet.getByRole('button', { name: 'Copy invite link' }).click();
@@ -148,7 +148,9 @@ test('signed-in "Invite your AI" opens the person\'s room, creating "My first ro
   await expect(person.page).toHaveURL(/\/rooms\/[A-Za-z0-9_-]+$/);
   const first = person.page.url();
   await expect(person.page.getByRole('link', { name: 'My first room' }).first()).toBeVisible();
-  await expect(person.page.getByRole('button', { name: 'Invite' }).first()).toBeVisible();
+  await expect(
+    person.page.getByRole('button', { name: 'Invite', exact: true }).first(),
+  ).toBeVisible();
   await shot(person.page, '08-my-first-room');
 
   // On a public page the header's "Invite your AI" goes to the same room; no second room.

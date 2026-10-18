@@ -102,3 +102,49 @@ CREATE INDEX IF NOT EXISTS operators_owner ON operators(id) WHERE kind = 'owner'
 };
 
 registerMigration(fastCountsMigration);
+
+/**
+ * The trigger function of `counted_agent_ids` without a plan-dependent join. Migration 59's
+ * version deleted the rows missing from `counted_agent_ids_of(NEW.data)` with a NOT EXISTS over
+ * that function; once PostgreSQL caches a generic plan for it (after a few executions on one
+ * connection) that can become a nested loop that re-reads the whole document for every row:
+ * quadratic, seconds per create in a workspace of thousands of agents, all under the workspace
+ * row lock. Same rows as before: the new document's ids (by the same `counted_agent_ids_of`) and
+ * the owner's current rows are each collected once into a jsonb object; rows whose id is not in
+ * the document are deleted and ids without a row inserted (one key lookup each), so each write
+ * still leaves exactly the document's ids for its owner, repairing any drift as before.
+ */
+export const COUNTED_AGENT_IDS_SYNC_SQL = `
+CREATE OR REPLACE FUNCTION counted_agent_ids_sync() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  ids jsonb;
+  kept jsonb;
+BEGIN
+  IF TG_OP = 'DELETE' OR (TG_OP = 'UPDATE' AND OLD.operator_id IS DISTINCT FROM NEW.operator_id) THEN
+    DELETE FROM counted_agent_ids WHERE operator_id = OLD.operator_id;
+  END IF;
+  IF TG_OP = 'DELETE' THEN
+    RETURN OLD;
+  END IF;
+  SELECT COALESCE(jsonb_object_agg(n.agent_id, true), '{}'::jsonb) INTO ids
+    FROM counted_agent_ids_of(NEW.data) n;
+  SELECT COALESCE(jsonb_object_agg(c.agent_id, true), '{}'::jsonb) INTO kept
+    FROM counted_agent_ids c WHERE c.operator_id = NEW.operator_id;
+  DELETE FROM counted_agent_ids c WHERE c.operator_id = NEW.operator_id AND NOT (ids ? c.agent_id);
+  INSERT INTO counted_agent_ids(operator_id, agent_id)
+    SELECT NEW.operator_id, k.agent_id FROM jsonb_object_keys(ids) AS k(agent_id)
+     WHERE NOT (kept ? k.agent_id)
+    ON CONFLICT DO NOTHING;
+  RETURN NEW;
+END;
+$$;
+`;
+
+/** Migration 111 `counted_agent_ids_sync_linear`: the function above. */
+export const countedAgentIdsSyncLinearMigration: Migration = {
+  version: 111,
+  name: 'counted_agent_ids_sync_linear',
+  sql: COUNTED_AGENT_IDS_SYNC_SQL,
+};
+
+registerMigration(countedAgentIdsSyncLinearMigration);

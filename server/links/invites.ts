@@ -876,7 +876,8 @@ export function createRoomInvites(d: Dependencies) {
       // Not exact under concurrency: the same checks run again, exactly, under their locks below.
       if (!stressHost) await refuseSourceFull(tx, address, time);
       await refuseBlockedSource(tx, link.room_id, address, time);
-      // A stress host is bounded by its own ceiling, checked after admission (stress_test_capacity).
+      // A stress host is bounded by its own ceiling, checked after admission (the same
+      // neutral invite_host_capacity answer as every other host).
       if (
         !isStressTestHost(link.owner_id) &&
         (await hostedGuests(tx, link.owner_id, time)) >= d.caps.inviteGuestsPerHost
@@ -946,13 +947,7 @@ export function createRoomInvites(d: Dependencies) {
       }
       await lockHostGuests(tx, link.owner_id);
       if ((await hostedGuests(tx, link.owner_id, time)) >= guestCeiling(link.owner_id))
-        throw isStressTestHost(link.owner_id)
-          ? new RoomError(
-              429,
-              'stress_test_capacity',
-              'The load-test guest ceiling of this host is reached.',
-            )
-          : hostFull();
+        throw hostFull();
       await tx.query(
         'INSERT INTO room_invite_credentials(token_hash,operator_id,agent_id,room_id,host_owner_id,created_at,expires_at,source_hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',
         [

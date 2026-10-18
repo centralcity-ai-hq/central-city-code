@@ -11,6 +11,7 @@
  *   - wallets off: the owner address the request names, as before.
  * Agents registered earlier keep the wallet their owner address controls.
  */
+import type { FeedPayChainPort } from '../chain/feed-pay-chain.js';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { getAddress } from 'viem';
 import { z } from 'zod';
@@ -26,7 +27,9 @@ import {
 } from '../wallet/service.js';
 import { createVaultService } from '../wallet/vault.js';
 import {
+  chainCheckIntervalMs,
   createIdentityService,
+  errorCode,
   IDENTITY_COLUMNS,
   identityViewOf,
   IdentityServiceError,
@@ -48,6 +51,20 @@ export interface ChainRuntime {
    * network only, and only with the wallet operations' fee budget (as ownerOperations).
    */
   agentPayments?: (authorize: NonNullable<PaymentChainDeps['authorize']>) => PaymentChainPort;
+  /**
+   * Feed pay's chain side (chain/feed-pay-chain.ts): float top-ups, sweeps, cancels and the x402
+   * authorizations of agents' spender accounts; wallet network only, with the same fee budget and
+   * pinned sponsor as agent payments.
+   */
+  feedPay?: () => FeedPayChainPort;
+  /** The network's public read client, for read-only contract calls (payment screening). */
+  readClient?: import('viem').PublicClient;
+  /**
+   * The read client of Feed pay's payment screening: Feed pay's own endpoint when
+   * CITY_FEED_PAY_CDP_RPC_URL is set, else `readClient`. Throws (ChainRuntimeError, the setting
+   * name only) when that setting is not an https URL.
+   */
+  feedPayReadClient?: () => import('viem').PublicClient;
 }
 
 export interface RegisterRouteDeps {
@@ -68,6 +85,11 @@ export interface RegisterRouteDeps {
   now?: () => number;
   /** One JSON line per event (default: console.info). */
   log?: (event: IdentityEvent) => void;
+  /**
+   * Polls of one registration ask the chain at most once per chainCheckIntervalMs (default on).
+   * Off only for tests that drive every advance through the route themselves.
+   */
+  throttleChainChecks?: boolean;
 }
 
 export const IDENTITY_FINALIZE_PATH = '/api/cron/base-identity-finalize';
@@ -211,7 +233,7 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
          FROM workspaces w
          CROSS JOIN LATERAL jsonb_array_elements(w.data->'agents') a
          JOIN agent_manifests m ON m.agent_id = a->>'id' AND m.revision = (a->>'revision')::int
-         WHERE w.operator_id = $1 AND a->>'id' = $2`,
+         WHERE w.operator_id = $1 AND a->>'id' = $2 AND a->>'revokedAt' IS NULL`,
         [workspaceId, agentId],
       );
       return rows[0]?.visibility ?? null;
@@ -273,13 +295,7 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
     error: unknown,
     asked: { wallet: Address | null; owner: Address | null },
   ) {
-    const code = (error as { code?: unknown } | null)?.code;
-    logEvent({
-      event: 'identity.register_transient',
-      agentId,
-      chainId,
-      code: typeof code === 'string' ? code : 'error',
-    });
+    logEvent({ event: 'identity.register_transient', agentId, chainId, code: errorCode(error) });
     const unavailable = () =>
       reply
         .code(503)
@@ -302,6 +318,34 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
       },
       identity: identityViewOf(row, (deps.now ?? Date.now)()),
     };
+  }
+
+  /**
+   * Whether this call may ask the chain for an open registration now, claimed when it may: the
+   * row's last chain advance (`swept_at`, shared with the finalize cron's claim) is at least
+   * chainCheckIntervalMs old, and this call moves it forward with a compare-and-set, so of
+   * concurrent polls one advances and the others answer the stored state. A row not started yet
+   * (no attempt), a closed one or none at all: always (advance creates or only reads it).
+   */
+  async function chainCheckDue(agentId: string, chainId: number): Promise<boolean> {
+    const now = (deps.now ?? Date.now)();
+    const { rows } = await deps.db.query<IdentityRow & { swept_at: string | null }>(
+      `SELECT ${IDENTITY_COLUMNS}, swept_at::text AS swept_at FROM base_identities
+       WHERE agent_id = $1 AND chain_id = $2`,
+      [agentId, chainId],
+    );
+    const row = rows[0];
+    if (!row || row.op_id === null || (row.state !== 'pending' && row.state !== 'submitted'))
+      return true;
+    const last = row.swept_at === null ? null : Number(row.swept_at);
+    if (last !== null && now - last < chainCheckIntervalMs(row, now)) return false;
+    const claimed = await deps.db.query(
+      `UPDATE base_identities SET swept_at = $3::bigint
+       WHERE agent_id = $1 AND chain_id = $2 AND swept_at IS NOT DISTINCT FROM $4::bigint
+       RETURNING 1`,
+      [agentId, chainId, now, row.swept_at],
+    );
+    return claimed.rows.length > 0;
   }
 
   app.post('/api/base/agents/:agentId/register', async (request, reply) => {
@@ -410,6 +454,36 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
           error: 'This is not the wallet your wallet key makes. Nothing was registered.',
           code: 'wallet_mismatch',
         });
+      // A frozen or closed wallet is refused on every call, as the advance below refuses it, also
+      // when the throttle answers the stored state instead.
+      if (wallet.state === 'frozen' || wallet.state === 'closed')
+        throw new IdentityServiceError('wallet_frozen', 'The wallet is frozen or closed.');
+      // "Try again" counts only while the stored registration offers it (canRetry); any other
+      // retry is a normal poll, so the throttle, the backoffs and the settling gate still apply.
+      if (input.retry === true) {
+        const stored = (await storedRegistrations(owned.agentId, input.chainId))[0];
+        input.retry =
+          stored !== undefined && identityViewOf(stored, (deps.now ?? Date.now)()).canRetry;
+      }
+      // A registration whose chain was asked a moment ago (by another poll of this owner, another
+      // tab or script, or the finalize cron) answers its stored state; only "Try again" always
+      // advances. See chainCheckIntervalMs.
+      if (
+        deps.throttleChainChecks !== false &&
+        input.retry !== true &&
+        !(await chainCheckDue(owned.agentId, input.chainId))
+      ) {
+        const stored = (await storedRegistrations(owned.agentId, input.chainId))[0];
+        if (stored)
+          return {
+            wallet: {
+              address: wallet.address,
+              ownerAddress: wallet.ownerAddress,
+              state: wallet.state,
+            },
+            identity: identityViewOf(stored, (deps.now ?? Date.now)()),
+          };
+      }
       const identity = await identities.advance(owned.agentId, input.chainId, {
         retry: input.retry === true,
       });
@@ -464,7 +538,10 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
   /*
    * Finalize cron (every minute): moves open registrations on until both operations are final,
    * also when nobody has the panel open. Only rows the owner started (op_id set) are touched; no
-   * retry is ever made here. Rows a poll moved within FINALIZE_FRESH_MS are left for a later run. Fails closed: without the bearer secret the route answers 404.
+   * retry is ever made here. Rows a poll moved within FINALIZE_FRESH_MS are left for a later run,
+   * and so are rows whose refused hand-over or register attempt is still backing off, and rows
+   * whose chain a poll asked within FINALIZE_RECLAIM_MS (the poll's claim of swept_at,
+   * chainCheckDue). Fails closed: without the bearer secret the route answers 404.
    */
   const cronSecret = deps.cronSecret;
   if (cronSecret !== undefined)
@@ -480,6 +557,8 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
            WHERE state IN ('pending','submitted') AND op_id IS NOT NULL
              AND (swept_at IS NULL OR swept_at <= $2::bigint)
              AND updated_at <= $3::bigint
+             AND (handover_retry_at IS NULL OR handover_retry_at <= $1::bigint)
+             AND (register_retry_at IS NULL OR register_retry_at <= $1::bigint)
            ORDER BY swept_at NULLS FIRST, updated_at LIMIT ${FINALIZE_BATCH}
            FOR UPDATE SKIP LOCKED)
          RETURNING agent_id, chain_id`,

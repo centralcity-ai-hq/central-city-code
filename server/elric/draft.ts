@@ -90,7 +90,8 @@ export interface PublicDraft {
 
 /**
  * The live drafts of a room, for an operator with an active member in it (else null: 404).
- * Only drafts answering a message the operator's member may see.
+ * Only drafts answering a message the operator's member may see. As the room's access rule, a
+ * member counts only when it is a person or a live (not revoked) agent of the operator.
  */
 export async function roomDrafts(
   db: Q,
@@ -101,7 +102,11 @@ export async function roomDrafts(
   const member = (
     await db.query<{ from_seq: string | number }>(
       `SELECT min(m.visible_from_seq) AS from_seq FROM room_members m JOIN rooms r ON r.id=m.room_id
-        WHERE m.room_id=$1 AND m.owner_id=$2 AND m.removed_at IS NULL AND r.deleted_at IS NULL`,
+        WHERE m.room_id=$1 AND m.owner_id=$2 AND m.removed_at IS NULL AND r.deleted_at IS NULL
+          AND (m.kind='person' OR EXISTS (
+            SELECT 1 FROM workspaces w CROSS JOIN LATERAL jsonb_array_elements(w.data->'agents') a
+             WHERE w.operator_id=m.owner_id AND a->>'id'=m.agent_id
+               AND COALESCE(a->>'revokedAt', '') = ''))`,
       [roomId, operatorId],
     )
   ).rows[0];

@@ -296,11 +296,14 @@ test('on Vercel only an explicit production deployment applies migrations', asyn
       else process.env[key] = value;
   });
   process.env.VERCEL = '1';
-  for (const env of [undefined, 'preview', 'development']) {
+  for (const env of [undefined, 'development']) {
     if (env === undefined) delete process.env.VERCEL_ENV;
     else process.env.VERCEL_ENV = env;
     await assert.rejects(runMigrations(await fresh(t)), /only applied by production deployments/);
   }
+  // A preview without its own database branch never starts at all (fails closed).
+  process.env.VERCEL_ENV = 'preview';
+  await assert.rejects(runMigrations(await fresh(t)), /own database branch/);
   process.env.VERCEL_ENV = 'production';
   assert.ok((await runMigrations(await fresh(t))).applied.length > 0);
   // Isolated previews (per-preview database branch) may migrate their own branch; the flag is

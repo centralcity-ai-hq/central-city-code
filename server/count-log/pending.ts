@@ -201,6 +201,43 @@ SELECT count_log_backfill_pending();
 `,
 };
 
+/**
+ * Migration 110: the pending recorder finds the agents a write added in one pass. Before it, the
+ * trigger tested every agent of the new document against the whole old agents array
+ * (`OLD.data->'agents' @> [{"id": …}]`): quadratic in the workspace's agents, so with 7,000 agents
+ * every write that changed `agents` (each create, rename, pause or presence change) spent seconds
+ * in this trigger while holding the workspace row lock.
+ *
+ * Same result: an agent is recorded exactly when the old agents array had no object element whose
+ * `id` is the same string (all that containment test could match), in document order, through
+ * the same count_log_record_agent. The old string ids are collected once into a jsonb object and
+ * each new agent is a key lookup (binary search), so the cost cannot depend on a query plan.
+ */
+export const countLogPendingLinearMigration: Migration = {
+  version: 110,
+  name: 'count_log_pending_linear',
+  sql: `
+CREATE OR REPLACE FUNCTION count_log_record_pending() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  agent jsonb;
+  old_ids jsonb := '{}'::jsonb;
+BEGIN
+  IF TG_OP = 'UPDATE' AND jsonb_typeof(OLD.data->'agents') = 'array' THEN
+    SELECT COALESCE(jsonb_object_agg(o.value->>'id', true), '{}'::jsonb) INTO old_ids
+      FROM jsonb_array_elements(OLD.data->'agents') AS o(value)
+     WHERE jsonb_typeof(o.value->'id') = 'string';
+  END IF;
+  FOR agent IN SELECT value FROM jsonb_array_elements(COALESCE(NEW.data->'agents', '[]'::jsonb)) LOOP
+    -- Only agents this write added.
+    CONTINUE WHEN agent->>'id' IS NOT NULL AND old_ids ? (agent->>'id');
+    PERFORM count_log_record_agent(agent, NEW.operator_id);
+  END LOOP;
+  RETURN NEW;
+END;
+$$;
+`,
+};
+
 type Q = Pick<Database, 'query'>;
 
 /**

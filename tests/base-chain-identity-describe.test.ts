@@ -363,13 +363,17 @@ test('describe: an op that has not landed has no block hash and reads nothing fo
     assert.equal(op.blockNumber, null);
     assert.deepEqual(calls, [], 'no RPC call');
   }
-  // Stored, not broadcast yet: no receipt or block read for the view.
+  // Sent, not landed yet (and not due for a rebroadcast): no receipt or block read for the view.
+  // (A queued one, stored but never authorized, is resumed instead: base-identity-queued-resume.)
   {
     const { client, calls } = scriptedChain();
-    const { store } = memoryOps([stored({ status: 'queued', txHash: null, blockNumber: null })]);
-    const { bundler } = scriptedBundler();
+    const { store } = memoryOps([
+      stored({ status: 'submitted', txHash: null, blockNumber: null, updatedAt: Date.now() }),
+    ]);
+    const { bundler, sent } = scriptedBundler();
     const op = await registerAgain(client, store, bundler);
-    assert.deepEqual(evidence(op), { status: 'queued', blockHash: null, reverted: false });
+    assert.deepEqual(evidence(op), { status: 'submitted', blockHash: null, reverted: false });
+    assert.deepEqual(sent, [], 'nothing sent');
     assert.ok(
       !calls.some((c) => c.startsWith('getTransactionReceipt') || c === `getBlock:${BLOCK}`),
       `no receipt or block read: ${calls.join(', ')}`,

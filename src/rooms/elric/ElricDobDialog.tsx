@@ -25,12 +25,16 @@ export function ElricDobDialog({
   const fieldRef = useRef<HTMLInputElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
+  // The latest onClose, so the focus effect runs once: the room passes a new onClose on every
+  // render, and re-running the effect would send focus to the page behind the dialog.
+  const close = useRef(onClose);
+  close.current = onClose;
 
   useEffect(() => {
     previousFocusRef.current = document.activeElement as HTMLElement | null;
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === 'Escape') {
-        onClose();
+        close.current();
         return;
       }
       if (e.key === 'Tab' && formRef.current) {
@@ -54,7 +58,7 @@ export function ElricDobDialog({
       window.removeEventListener('keydown', onKeyDown);
       previousFocusRef.current?.focus();
     };
-  }, [onClose]);
+  }, []);
 
   function handleSubmit(e: FormEvent) {
     e.preventDefault();

@@ -19,6 +19,10 @@ import {
 import { getUserOperationHash, type UserOperation } from 'viem/account-abstraction';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { createApp } from '../server/app.js';
+import {
+  AGENT_PAY_STATUS_PER_MINUTE,
+  AGENT_PAY_STATUS_WORKSPACE_PER_MINUTE,
+} from '../server/assistant-access.js';
 import type { Database } from '../server/database.js';
 import {
   agentWalletRecipe,
@@ -1036,6 +1040,34 @@ test('1: only an agent of the calling workspace, with its wallet there and its o
   assert.equal(codeOf(frozen), 'wallet_not_usable');
 });
 
+test('1b: a consent for Central City agents only (Feed pay off when given) still pays an agent', async (t) => {
+  // Feed pay is off when the owner confirms: the consent covers Central City agents only.
+  const f = await setup(t, { env: { ...FLAGS, CITY_FEED_PAY: '0' } });
+  const walletA = await f.addWallet({
+    agentId: f.agentA,
+    workspace: f.payer.id,
+    account: f.payer.id,
+    owner: OWNER_A.address,
+    spender: SPENDER,
+  });
+  const permission = await f.limit(`wallet-${f.agentA}`, walletA);
+  const given = await f.consent(f.agentA, permission.hash);
+  assert.equal(given.statusCode, 200, given.body);
+  assert.equal(given.json().consent.recipients, 'central-city-agents');
+  assert.equal((await f.pay()).statusCode, 200);
+  // Feed pay comes on: the consent is not widened, and agent payments go on as before.
+  delete process.env.CITY_FEED_PAY;
+  const view = await f.app.inject({
+    url: `/api/base/agents/${f.agentA}/wallet/agent-pay`,
+    headers: { cookie: f.payer.cookie },
+  });
+  assert.equal(view.json().scope.recipients, 'central-city-agents');
+  assert.equal(view.json().reconfirmAddsFeedServices, true);
+  const paid = await f.pay();
+  assert.equal(paid.statusCode, 200, paid.body);
+  assert.equal((await payments(f)).length, 2);
+});
+
 test('2: the grant or key is checked again before reserving, before signing and before broadcast', async (t) => {
   const f = await setup(t);
   await f.ready();
@@ -1364,6 +1396,37 @@ test('6: answers never call the spender the agent wallet; status shows only this
     assert.equal(missing.statusCode, 404, missing.body);
     assert.equal(codeOf(missing), 'payment_not_found');
   }
+});
+
+test('6: status reads have their own budget per grant or key, and one per workspace', async (t) => {
+  const f = await setup(t);
+  // Each status read of a payment in flight reads the bundler and Base: bounded before any read.
+  for (let i = 0; i < AGENT_PAY_STATUS_PER_MINUTE; i += 1) {
+    const read = await f.status(randomUUID());
+    assert.equal(read.statusCode, 404, read.body);
+  }
+  const over = await f.status(randomUUID());
+  assert.equal(over.statusCode, 429, over.body);
+  // Another grant of the same workspace has its own budget, until the workspace's runs out.
+  const spare = AGENT_PAY_STATUS_WORKSPACE_PER_MINUTE - AGENT_PAY_STATUS_PER_MINUTE;
+  const others = await Promise.all(
+    Array.from({ length: Math.ceil(spare / AGENT_PAY_STATUS_PER_MINUTE) + 1 }, () =>
+      f.grant(['workspace:read', 'pay']),
+    ),
+  );
+  let answered = 0;
+  let limited = 0;
+  for (const other of others)
+    for (let i = 0; i < AGENT_PAY_STATUS_PER_MINUTE; i += 1) {
+      const read = await f.status(randomUUID(), other.token);
+      if (read.statusCode === 429) limited += 1;
+      else {
+        assert.equal(read.statusCode, 404, read.body);
+        answered += 1;
+      }
+    }
+  assert.equal(answered, spare);
+  assert.ok(limited > 0);
 });
 
 test('7: an unknown broadcast outcome reconciles; the same key never makes a second transfer', async (t) => {

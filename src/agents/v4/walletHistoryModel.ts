@@ -1,4 +1,5 @@
 import { formatUnits } from 'viem';
+import { usdcText } from '../../base/wallet/limits';
 import {
   sentStatus,
   type LaneRecord,
@@ -37,7 +38,8 @@ const DECIMALS: Record<WithdrawalToken, number> = { USDC: 6, ETH: 18 };
 const shortHex = (value: string) => `${value.slice(0, 6)}…${value.slice(-4)}`;
 const shownAmount = (raw: bigint, token: WithdrawalToken) => {
   const text = formatUnits(raw, DECIMALS[token]);
-  return token === 'USDC' ? Number(text).toFixed(2) : text;
+  // Exact: every digit that is signed is shown (at least two decimals).
+  return token === 'USDC' ? usdcText(raw) : text;
 };
 
 export const sameHash = (a: { userOpHash: string }, b: { userOpHash: string }) =>

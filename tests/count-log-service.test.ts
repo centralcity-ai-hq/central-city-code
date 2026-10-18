@@ -635,3 +635,51 @@ test('the verify page lists an owner’s agents without touching the workspace',
   assert.deepEqual(after, before, 'no workspace write');
   assert.equal((await app.inject({ url: '/api/count-log/my-agents' })).statusCode, 401);
 });
+
+test('the public withdrawn list refuses other query keys and is paged by leaf index', async (t) => {
+  const { app, log, clock, nextDay } = await fixture(t);
+  const person = await owner(app, 'Count Wendy');
+  for (const name of ['W0', 'W1', 'W2']) await agent(app, person.cookie, name);
+  nextDay();
+  await log.checkpoint();
+  // All three agents leave: three withdrawn leaves (idx 0, 1, 2).
+  await app.city.db.query(
+    `UPDATE workspaces SET data = jsonb_set(data, '{agents}', '[]'::jsonb) WHERE operator_id=$1`,
+    [person.id],
+  );
+  nextDay();
+  await log.checkpoint();
+  const api = Fastify();
+  t.after(() => api.close());
+  registerCountLogRoutes(api, {
+    log,
+    now: clock,
+    owner: async () => {
+      throw Object.assign(new Error('no'), { statusCode: 401 });
+    },
+  });
+  // A cache-busting key is refused before any read, like /checkpoints.
+  for (const url of [
+    '/api/public/count-log/withdrawn?r=123',
+    '/api/public/count-log/withdrawn?from=-1',
+    '/api/public/count-log/withdrawn?from=x',
+  ])
+    assert.ok((await api.inject({ url })).statusCode >= 400, url);
+  const all = await api.inject({ url: '/api/public/count-log/withdrawn' });
+  assert.equal(all.statusCode, 200, all.body);
+  assert.deepEqual(
+    all.json().withdrawn.map((w: { idx: number }) => w.idx),
+    [0, 1, 2],
+  );
+  assert.equal(all.json().next, null);
+  const range = await api.inject({ url: '/api/public/count-log/withdrawn?from=1&to=2' });
+  assert.deepEqual(
+    range.json().withdrawn.map((w: { idx: number }) => w.idx),
+    [1],
+  );
+  // The service reads one bounded page at a time.
+  assert.deepEqual(
+    (await log.withdrawn(0, undefined, 2)).map((w) => w.idx),
+    [0, 1],
+  );
+});

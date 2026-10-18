@@ -14,6 +14,7 @@ import type { Agent, Snapshot } from '../shared/types';
 import type { SpendPermission } from '../shared/base/types';
 import { BASE_NETWORKS } from '../shared/base/chains';
 import {
+  berlinDayStart,
   calendarPeriod,
   LIMIT_PERIOD_SECONDS,
   LIMIT_PERMISSION_END,
@@ -296,7 +297,8 @@ async function limitsServer(page: Page) {
         token: USDC,
         allowance: state.tamper ? cap : onchainAllowance(cap, state.model),
         period: LIMIT_PERIOD_SECONDS[body.period],
-        start: nextBerlinMidnight(Date.now()),
+        // 00:00 Berlin today, as the server prepares it: the limit works at once.
+        start: berlinDayStart(Date.now()),
         end: LIMIT_PERMISSION_END,
         salt: BigInt(`0x${randomBytes(32).toString('hex')}`),
         extraData: '0x',
@@ -499,7 +501,7 @@ test('set a limit: checked in the browser, signed by the owner key over the wall
   await expect(wallet.locator('[data-k="row-limit"]')).toContainText('None');
   await wallet.locator('[data-k="row-limit"]').click();
   const panel = wallet;
-  await expect(panel.getByText('Let Research scout pay on its own')).toBeVisible();
+  await expect(panel.getByText('Set the most Research scout may spend')).toBeVisible();
 
   // Three decimals are caught before anything is prepared.
   await toReview(panel, '20.001');
@@ -513,6 +515,9 @@ test('set a limit: checked in the browser, signed by the owner key over the wall
     'Base enforces 10.00 USDC per Base day, so even around midnight Research scout stays within 20.00.',
   );
   await expect(panel).toContainText('Base days start at 00:00 Berlin time (');
+  await expect(panel.locator('[data-k="works-now"]')).toHaveText(
+    'Research scout can use it as soon as you sign.',
+  );
   await expect(panel).toContainText('Central City’s counter resets at midnight (Berlin time).');
   if (WALLET_CHAIN_ID !== 8453) await expect(panel).toContainText('test network, no real money');
   await expect(panel.locator('[data-k="checked"]')).toHaveText(
@@ -529,13 +534,17 @@ test('set a limit: checked in the browser, signed by the owner key over the wall
   const card = panel.locator('[data-k="limit-card"]');
   await expect(card).toContainText('20.00 USDC a day', { timeout: 20_000 });
   await expect(card.locator('.w4-state')).toHaveText('Signed · waiting for its first use on Base.');
-  // Before its first Base day: when Base starts counting, never zeros invented for it.
-  await expect(panel.locator('[data-k="base-period"]')).toContainText('Base starts counting');
+  // It works at once: Base's first day is today, with its whole allowance left.
+  const base = panel.locator('[data-k="base-period"]');
+  await expect(base).toContainText('This Base day');
+  await expect(base).toContainText('0.00 spent · 10.00 left');
+  await expect(base).not.toContainText('Base starts counting');
   await expect(panel.locator('[data-k="calendar"]')).toContainText(
     'Used today: 0.00 of 20.00 · resets at midnight (Berlin time)',
   );
   // One signature, by the owner key, over the wallet's wrapper of exactly the prepared permission.
   expect(server.signatures).toEqual([{ kind: 'limit', valid: true }]);
+  expect(server.prepared!.start).toBe(berlinDayStart(Date.now()));
   await expect(panel.getByLabel('Wallet password')).toHaveValue('');
 });
 
@@ -687,6 +696,21 @@ test('a limit in force: the calendar count with its bar, Base’s period, the st
   await shot(page, 'card-1440-light');
 });
 
+test('a limit signed before 14 Oct 2026 starts at the next midnight: the card says when', async ({
+  page,
+}) => {
+  const server = await limitsServer(page);
+  server.seed({ state: 'signed' });
+  server.limit!.permission = { ...server.limit!.permission, start: nextBerlinMidnight(Date.now()) };
+  server.onchainSpentRaw = '0';
+  server.calendarSpentRaw = '0';
+  const panel = await openLimits(page);
+  // Before its first Base day: when Base starts counting, never zeros invented for it.
+  const base = panel.locator('[data-k="base-period"]');
+  await expect(base).toContainText('Base starts counting');
+  await expect(base).not.toContainText('spent ·');
+});
+
 test('Base can’t be read: it says so and shows no numbers for Base', async ({ page }) => {
   const server = await limitsServer(page);
   server.seed();
@@ -729,11 +753,15 @@ test('revoke: blocked at once, checked, signed with the owner key, then Revoking
   await expect(panel.getByLabel('Wallet password')).toHaveCount(0);
 });
 
-test('a server without limits: the wallet’s row stays as it was', async ({ page }) => {
+test('a server without limits: the wallet shows no Spending limit row, never Coming soon', async ({
+  page,
+}) => {
   const server = await limitsServer(page);
   server.off = true;
   const wallet = await openWallet(page);
-  await expect(wallet.getByText('Coming soon', { exact: true })).toBeVisible();
+  await expect(wallet.getByRole('button', { name: 'Add funds' })).toBeVisible();
+  await expect(wallet.getByText('Spending limit', { exact: true })).toHaveCount(0);
+  await expect(wallet.getByText('Coming soon', { exact: true })).toHaveCount(0);
   await expect(wallet.locator('[data-k="row-limit"]')).toHaveCount(0);
 });
 

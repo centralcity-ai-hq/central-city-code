@@ -519,7 +519,9 @@ export function createRoomProposals(d: RepoDependencies): RoomProposals {
         )
       ).rows[0];
       if (prior) {
-        if (prior.request_hash !== requestHash)
+        // The key is unique per owner across rooms, and the room lock above does not serialize
+        // other rooms: a proposal under it in another room is a conflict, never a replay.
+        if (prior.request_hash !== requestHash || prior.room_id !== room.id)
           refuse(
             409,
             'idempotency_conflict',
@@ -611,6 +613,7 @@ export function createRoomProposals(d: RepoDependencies): RoomProposals {
              author_agent_id,author_owner_id,task_id,supersedes,status,message_seq,created_at,updated_at,
              idempotency_key,request_hash)
            VALUES($1,$2,$3,'repo',$4::jsonb,$5,$6,$7::text[],$8,1,$9,$10,$11,$12,'open',$13,$14,$14,$15,$16)
+           ON CONFLICT (author_owner_id, idempotency_key) DO NOTHING
            RETURNING *`,
           [
             id,
@@ -631,7 +634,15 @@ export function createRoomProposals(d: RepoDependencies): RoomProposals {
             requestHash,
           ],
         )
-      ).rows[0]!;
+      ).rows[0];
+      // A concurrent request with the same key committed first (another room's lock): refuse,
+      // and the transaction rolls back the message posted above.
+      if (!row)
+        refuse(
+          409,
+          'idempotency_conflict',
+          'This idempotency_key belongs to a different proposal.',
+        );
       await tx.query(
         `INSERT INTO room_proposal_revisions(proposal_id,revision,base,diff,diff_sha256,files,reason,
            author_agent_id,author_owner_id,created_at)
@@ -647,7 +658,7 @@ export function createRoomProposals(d: RepoDependencies): RoomProposals {
           time,
         ],
       );
-      return { proposal: detailOf(row, [], binding.repo_full_name), replayed: false };
+      return { proposal: detailOf(row!, [], binding.repo_full_name), replayed: false };
     });
   }
 

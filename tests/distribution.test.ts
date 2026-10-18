@@ -17,6 +17,10 @@ import { APP_SHELL, isClientRoute } from '../shared/routes.js';
 import { SHARE_CARDS } from '../shared/share-cards.js';
 import { ROOM_TASK_TOOLS } from '../server/rooms/tasks-tools.js';
 import { ROOM_REPO_TOOLS } from '../server/rooms/repos/tools.js';
+import { FEED_TOOLS } from '../server/feed/tools.js';
+import { FEED_REQUEST_TOOLS } from '../server/feed/request-tools.js';
+import { FEED_PAY_TOOLS } from '../server/feed/pay/tool.js';
+import { FEED_OFFER_TOOLS } from '../server/feed/offers/tools.js';
 import { renderPublicDocs } from '../scripts/public-docs/build.js';
 import { fixture, fullFlow, mcpCall, rpcResult, type App } from './oauth-helpers.js';
 
@@ -40,13 +44,25 @@ const OAUTH_TOOLS = Object.keys(remoteInputSchemas);
 const OPEN_TOOLS: string[] = [...ANONYMOUS_TOOLS];
 /** Invitation tools on /mcp/open, live where CITY_INVITE_FLOW=1 (production). */
 const INVITE_TOOLS = Object.keys(openInviteInputSchemas);
-/** Room task tools on /mcp, live where CITY_ROOM_TASKS=1 (production). */
+/**
+ * The Feed's tools on /mcp, in the order tools/list lists them: the service search and the request
+ * search (live unless CITY_FEED=0) and city_service_call (live unless CITY_FEED or CITY_FEED_PAY is
+ * '0'; docs/protocol/LIVE.md), then the services:sell tools (live unless CITY_FEED=0).
+ */
+const FEED_LIVE_TOOLS: string[] = [
+  ...FEED_TOOLS,
+  ...FEED_REQUEST_TOOLS,
+  ...FEED_PAY_TOOLS,
+  ...FEED_OFFER_TOOLS,
+];
+/** Room task tools on /mcp, live where CITY_ROOM_TASKS=1 (production); the Feed's tools. */
 const LIVE_TOOLS = new Set([
   ...OAUTH_TOOLS,
   ...ROOM_TASK_TOOLS,
   ...ROOM_REPO_TOOLS,
   ...OPEN_TOOLS,
   ...INVITE_TOOLS,
+  ...FEED_LIVE_TOOLS,
 ]);
 /** Streamable HTTP exists from this revision on; the 2026 revision is served statelessly. */
 const FIRST_STREAMABLE_HTTP_VERSION = '2025-03-26';
@@ -316,7 +332,7 @@ test('server.json validates against the vendored MCP Registry schema and registr
   });
   assert.deepEqual(provided.remotes[OAUTH_URL], {
     authentication: 'oauth2',
-    tools: [...OAUTH_TOOLS, ...ROOM_TASK_TOOLS],
+    tools: [...OAUTH_TOOLS, ...ROOM_TASK_TOOLS, ...FEED_LIVE_TOOLS],
   });
   assert.equal(provided.serverCard, `${ORIGIN}/mcp/server-card`);
   assert.equal(provided.llms, `${ORIGIN}/llms.txt`);
@@ -388,13 +404,20 @@ test('the MCP server card validates, mirrors server.json and describes both endp
 });
 
 test('the server card matches the tools, scopes and protocol versions the server serves', async (t) => {
-  // Production runs with invites and room tasks on, so the card lists those tools too.
+  // Production runs with invites and room tasks on, so the card lists those tools too. The Feed's
+  // tools are live by default: the comparison runs with the production default (CITY_FEED and
+  // CITY_FEED_PAY unset), so the card lists city_service_search, city_request_search and
+  // city_service_call.
   const saved = {
     CITY_INVITE_FLOW: process.env.CITY_INVITE_FLOW,
     CITY_ROOM_TASKS: process.env.CITY_ROOM_TASKS,
+    CITY_FEED: process.env.CITY_FEED,
+    CITY_FEED_PAY: process.env.CITY_FEED_PAY,
   };
   process.env.CITY_INVITE_FLOW = '1';
   process.env.CITY_ROOM_TASKS = '1';
+  delete process.env.CITY_FEED;
+  delete process.env.CITY_FEED_PAY;
   t.after(() => {
     for (const [key, value] of Object.entries(saved))
       if (value === undefined) delete process.env[key];
@@ -533,9 +556,10 @@ test('llms.txt follows the llmstxt.org structure and covers every tool', () => {
   // llms.txt names every live tool (about 60 across a dozen families) in one short file. 15 KB is
   // about 3.8k tokens: still a small part of any client's context, next to about 130 KB for a
   // full tools/list. Raised from 12 KB (29 Sep 2026) so the next tool family fits without
-  // cutting rules, and from 14 KB (7 Oct 2026) for the Microsoft Copilot and Mistral Le Chat
-  // docs pages; keep adding detail to llms-full.txt and the /docs/*.md pages instead.
-  assert.ok(Buffer.byteLength(text) < 15_000, 'llms.txt stays small (under 15 KB)');
+  // cutting rules, from 14 KB (7 Oct 2026) for the Microsoft Copilot and Mistral Le Chat docs
+  // pages, and from 15 KB (13 Oct 2026) for the Feed's tool and docs page; keep adding detail to
+  // llms-full.txt and the /docs/*.md pages instead.
+  assert.ok(Buffer.byteLength(text) < 16_000, 'llms.txt stays small (under 16 KB)');
 
   const full = read('public/llms-full.txt');
   assert.equal(full.split('\n')[0], '# Central City');

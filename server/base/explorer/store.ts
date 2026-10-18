@@ -39,7 +39,7 @@ import {
 type Queryable = Pick<Database, 'query'>;
 
 /** The newest-first order key: ERC-8004 ids count up, so a higher id registered later. */
-const BASE_ID = 'COALESCE(i.erc8004_agent_id, i.provisional_agent_id)';
+export const BASE_ID = 'COALESCE(i.erc8004_agent_id, i.provisional_agent_id)';
 
 /**
  * The transaction that minted the id, or NULL when it is not known for certain. Never another
@@ -63,7 +63,7 @@ const MINT_TX = `COALESCE(i.mint_tx_hash,
           = 'identity:register:' || i.chain_id || ':' || i.agent_id || ':')))`;
 
 /** The rows the explorer may list (see the header). $1 chain id, $2 registry, $3 URI origin. */
-const LISTED = `i.chain_id = $1 AND lower(i.registry_address) = lower($2)
+export const LISTED = `i.chain_id = $1 AND lower(i.registry_address) = lower($2)
   AND i.agent_card_uri = $3 || '/a/' || s.short_id
   AND i.mint_seen_at IS NOT NULL
   AND (
@@ -78,7 +78,7 @@ const LISTED = `i.chain_id = $1 AND lower(i.registry_address) = lower($2)
       AND i.handover_finality IN ('safe','final'))
   )`;
 
-const FROM = `FROM base_identities i
+export const FROM = `FROM base_identities i
   JOIN base_wallets w ON w.agent_id = i.agent_id AND w.chain_id = i.chain_id
   JOIN base_short_ids s ON s.agent_id = i.agent_id`;
 
@@ -90,21 +90,36 @@ const COLUMNS = `i.agent_id, ${BASE_ID}::text AS base_id, (i.state = 'confirmed'
   i.mint_seen_at::text AS seen_at, i.updated_at::text AS updated_at`;
 
 /**
- * The current public display name: the agent in its workspace document, not revoked, at its
- * current manifest revision, with visibility 'public' (the card route's rule,
- * server/autonomy/index.ts). Anything else has no name here. Joined onto a subquery aliased `l`
- * that has an `agent_id` column (pay/store.ts too).
+ * The agent's current public manifest revision: the agent in its workspace document, not revoked,
+ * at its current manifest revision, with visibility 'public' (the card route's rule,
+ * server/autonomy/index.ts). The FROM ... LIMIT 1 of a LATERAL joined onto a subquery aliased `l`
+ * that has an `agent_id` column.
  */
-export const PUBLIC_NAME = `LEFT JOIN LATERAL (
-  SELECT NULLIF(btrim(m.manifest->'metadata'->>'displayName'), '') AS name
-  FROM workspaces ws
+const PUBLIC_REVISION = `FROM workspaces ws
   CROSS JOIN LATERAL jsonb_array_elements(ws.data->'agents') a
   JOIN agent_manifests m ON m.agent_id = a->>'id' AND m.revision = (a->>'revision')::int
   WHERE ws.operator_id = (SELECT operator_id FROM agent_manifests WHERE agent_id = l.agent_id LIMIT 1)
     AND a->>'id' = l.agent_id AND a->>'revokedAt' IS NULL
     AND m.manifest->'spec'->>'visibility' = 'public'
-  LIMIT 1
+  LIMIT 1`;
+
+/**
+ * The current public display name (PUBLIC_REVISION's rule); anything else has no name here.
+ * Joined onto a subquery aliased `l` that has an `agent_id` column (pay/store.ts too).
+ */
+export const PUBLIC_NAME = `LEFT JOIN LATERAL (
+  SELECT NULLIF(btrim(m.manifest->'metadata'->>'displayName'), '') AS name
+  ${PUBLIC_REVISION}
 ) p ON true`;
+
+/**
+ * The whole current public manifest as `pm.manifest` (PUBLIC_REVISION's rule), NULL while the
+ * agent is private, revoked or unknown. The directory's cards (server/directory/store.ts).
+ */
+export const PUBLIC_MANIFEST = `LEFT JOIN LATERAL (
+  SELECT m.manifest
+  ${PUBLIC_REVISION}
+) pm ON true`;
 
 interface Row {
   agent_id: string;
@@ -121,6 +136,20 @@ interface Row {
   updated_at: string;
   name: string | null;
 }
+
+/**
+ * Rated agents (the explorer's "Rated agents" number): how many distinct Base IDs on chain $1 have
+ * at least one rating sent through Central City whose own operation is a 'rate' on that chain,
+ * FINAL on Base and not reverted (the finality listScores counts by). Every rated agent and every
+ * rater, nothing else filtered.
+ *
+ * Cost: one index-only count of base_rated_agents (migration 121), which the database keeps as
+ * ratings turn final: one narrow row per rated agent, never a walk of the ratings or of
+ * base_chain_ops, and no workspace document. The routes run it through one shared public_stats
+ * row, about once per RATED_TTL_MS globally (routes.ts), never per request.
+ */
+export const RATED_AGENTS_SQL = `SELECT count(*)::text AS rated
+  FROM base_rated_agents WHERE chain_id = $1`;
 
 const blockOf = (value: string | null) => (value === null ? null : Number(value));
 
@@ -167,7 +196,8 @@ export interface ParsedQuery {
 }
 
 export function parseQuery(text: string): ParsedQuery {
-  const q = text.trim();
+  // Control characters become spaces: Postgres refuses a NUL in the name pattern (a 500).
+  const q = text.replace(/\p{Cc}/gu, ' ').trim();
   return {
     baseId: /^#?(0|[1-9][0-9]{0,77})$/.exec(q)?.[1] ?? null,
     // A short id, alone or as a passport number (CC-<short id>); short ids are case-sensitive.
@@ -438,7 +468,156 @@ export function createOnBaseStore(db: Queryable, options: OnBaseStoreOptions) {
     };
   }
 
-  return { list, passport, listedByAddress, raterWallets, listScores, totals, registry };
+  /** RATED_AGENTS_SQL on this chain: the number of rated agents. */
+  async function ratedAgents(): Promise<number> {
+    const { rows } = await db.query<{ rated: string }>(RATED_AGENTS_SQL, [options.chainId]);
+    return Number(rows[0]?.rated ?? 0);
+  }
+
+  /**
+   * What a listed agent has been paid (Operation Directory D4): its passport's totals, by short id.
+   * Counted from Central City's own payment records, never from Base directly: a payment counts
+   * once it is FINAL (final_at is set in the transaction that records its withdrawal final), in
+   * USDC, sent to this agent's own wallet as a Central City payment from another agent's wallet.
+   * Public numbers never depend on who owns the payer: an owner filter would let anyone compare
+   * these counts with Base transfers and learn which agents share an owner. Every such payment is
+   * a real, final USDC transfer with its fee, visible on Base, and a wallet can never pay itself
+   * (the schema's recipient <> sender check, repeated here). Totals only: no payers, no notes.
+   * null when the short id is not a listed agent (the explorer's rule).
+   */
+  async function earnings(
+    short: string,
+  ): Promise<{ paidTimes: number; totalRaw: bigint; lastPaidAt: number | null } | null> {
+    const { rows } = await db.query<{
+      agent_id: string;
+      paid: string;
+      total: string | null;
+      last_at: string | null;
+    }>(
+      `SELECT l.agent_id, e.paid::text AS paid, e.total::text AS total, e.last_at::text AS last_at
+       FROM (SELECT i.agent_id, w.wallet_id, w.address ${FROM}
+             WHERE ${LISTED} AND s.short_id = $4
+             ORDER BY (i.state = 'confirmed') DESC, i.agent_id LIMIT 1) l
+       CROSS JOIN LATERAL (
+         SELECT count(*) AS paid, sum(x.amount_raw) AS total, max(pm.final_at) AS last_at
+         FROM base_wallet_payments pm
+         JOIN base_wallet_withdrawals x
+           ON x.withdrawal_id = pm.withdrawal_id AND x.token = 'USDC'
+             AND x.wallet_id = pm.sender_wallet_id AND lower(x.destination) = lower(l.address)
+         WHERE pm.recipient_agent_id = l.agent_id AND pm.recipient_wallet_id = l.wallet_id
+           AND pm.chain_id = $1 AND pm.final_at IS NOT NULL
+           AND pm.sender_wallet_id <> l.wallet_id) e`,
+      [options.chainId, registry, origin, short],
+    );
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      paidTimes: Number(row.paid),
+      totalRaw: BigInt(row.total ?? '0'),
+      lastPaidAt: row.last_at === null ? null : Number(row.last_at),
+    };
+  }
+
+  /**
+   * What a listed agent paid for services (the passport's "Paid for services"), by short id, under
+   * the listing rule of earnings above: null exactly when earnings is null. Totals of its paid
+   * service calls (Feed pay, server/feed/pay), in ONE aggregate over the agent's own wallet:
+   *
+   *   - a call counts once its payment is confirmed on Base: payment_state 'settled' with its
+   *     transaction (tx_hash), whether or not the service then answered (paid_no_result counts);
+   *   - only calls paid from this agent's own wallet on this chain: the call's wallet_id, the link
+   *     the engine stores when it reserves a call for an agent (its spender is that wallet's own);
+   *   - the total is what the calls paid: the price. For a fee-on-top call (pay_kind 'x402') that is
+   *     amount_raw; for a fee-included call ('included', a service sold by a Central City agent)
+   *     amount_raw is the seller's 90% and the price is amount_raw + fee_raw;
+   *   - its Central City fee counts only once the fee's own transaction is final: fee on top,
+   *     fee_state 'charged' (set only from a final operation that did not revert) with its
+   *     transaction; fee included, the fee moves in the payment's own transaction, where
+   *     fee_state is 'charged' at inclusion, so it counts once that payment is final
+   *     (pay_final_at). An included fee is part of the total as well.
+   *
+   * The settled calls of one wallet come from the partial index feed_pay_calls_paid (migration
+   * 120). Totals only: never inputs, results, errors, call ids, hosts, transactions or who started
+   * a call.
+   */
+  async function servicePayments(short: string): Promise<{
+    paidCalls: number;
+    totalRaw: bigint;
+    feeRaw: bigint;
+    lastPaidAt: number | null;
+  } | null> {
+    const { rows } = await db.query<{
+      agent_id: string;
+      paid: string;
+      total: string | null;
+      fee: string | null;
+      last_at: string | null;
+    }>(
+      `SELECT l.agent_id, x.paid::text AS paid, x.total::text AS total, x.fee::text AS fee,
+              x.last_at::text AS last_at
+       FROM (SELECT i.agent_id, w.wallet_id ${FROM}
+             WHERE ${LISTED} AND s.short_id = $4
+             ORDER BY (i.state = 'confirmed') DESC, i.agent_id LIMIT 1) l
+       CROSS JOIN LATERAL (
+         SELECT count(*) AS paid,
+                sum(c.amount_raw + CASE WHEN c.pay_kind = 'included' THEN c.fee_raw ELSE 0 END)
+                  AS total,
+                sum(c.fee_raw) FILTER (WHERE c.fee_state = 'charged' AND c.fee_tx_hash IS NOT NULL
+                  AND (c.pay_kind <> 'included' OR c.pay_final_at IS NOT NULL)) AS fee,
+                max(c.settled_at) AS last_at
+         FROM feed_pay_calls c
+         WHERE c.wallet_id = l.wallet_id AND c.payment_state = 'settled' AND c.tx_hash IS NOT NULL
+           AND c.agent_id = l.agent_id AND c.chain_id = $1) x`,
+      [options.chainId, registry, origin, short],
+    );
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      paidCalls: Number(row.paid),
+      totalRaw: BigInt(row.total ?? '0'),
+      feeRaw: BigInt(row.fee ?? '0'),
+      lastPaidAt: row.last_at === null ? null : Number(row.last_at),
+    };
+  }
+
+  /**
+   * The passport's paidTimes (earnings above, same rule) for many agents in ONE query: agent id ->
+   * final Central City USDC payments to its own wallet from other agents' wallets, whoever owns
+   * them. Agents never paid are not in the map.
+   */
+  async function paidCounts(agentIds: readonly string[]): Promise<Map<string, number>> {
+    const counts = new Map<string, number>();
+    if (agentIds.length === 0) return counts;
+    const { rows } = await db.query<{ agent_id: string; paid: string }>(
+      `SELECT pm.recipient_agent_id AS agent_id, count(*)::text AS paid
+       FROM base_wallet_payments pm
+       JOIN base_wallets rw
+         ON rw.wallet_id = pm.recipient_wallet_id AND rw.agent_id = pm.recipient_agent_id
+       JOIN base_wallet_withdrawals x
+         ON x.withdrawal_id = pm.withdrawal_id AND x.token = 'USDC'
+           AND x.wallet_id = pm.sender_wallet_id AND lower(x.destination) = lower(rw.address)
+       WHERE pm.recipient_agent_id = ANY($2::text[]) AND pm.chain_id = $1
+         AND pm.final_at IS NOT NULL AND pm.sender_wallet_id <> rw.wallet_id
+       GROUP BY pm.recipient_agent_id`,
+      [options.chainId, [...new Set(agentIds)]],
+    );
+    for (const row of rows) counts.set(row.agent_id, Number(row.paid));
+    return counts;
+  }
+
+  return {
+    list,
+    passport,
+    paidCounts,
+    listedByAddress,
+    raterWallets,
+    listScores,
+    totals,
+    ratedAgents,
+    earnings,
+    servicePayments,
+    registry,
+  };
 }
 
 export type OnBaseStore = ReturnType<typeof createOnBaseStore>;

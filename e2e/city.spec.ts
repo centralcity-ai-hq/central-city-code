@@ -254,8 +254,8 @@ test('external runtime authenticates, requests a permitted peer task, retrieves 
     .toBe('online');
   await openAdvanced(page, 'Agent permissions');
   await page.getByRole('button', { name: 'New connection', exact: true }).first().click();
-  await page.getByLabel('From · asks for the work').selectOption(external.id);
-  await page.getByLabel('To · does the work').selectOption(relay.id);
+  await page.getByLabel('Sends work', { exact: true }).selectOption(external.id);
+  await page.getByLabel('Does the work', { exact: true }).selectOption(relay.id);
   await page.getByRole('button', { name: 'Connect', exact: true }).click();
   await expect(page.getByRole('dialog')).not.toBeVisible();
   const created = await runtimeRequest<{ job: Job }>(runtime, 'POST', '/api/runtime/requests', {

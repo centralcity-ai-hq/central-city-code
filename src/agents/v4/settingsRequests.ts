@@ -9,6 +9,7 @@ import type {
   ResponderSettingsView,
 } from '../../responder/contract';
 import { withoutKey, type PermissionRow } from './settingsActionsModel';
+import { snapshotPath } from '../agentPages';
 import {
   SETTINGS_READ_DEADLINE_MS,
   StaleRunError,
@@ -25,9 +26,12 @@ import {
 
 /* ---------- Reads ---------- */
 
-/** The owner's snapshot (GET /api/snapshot): agents with their key hint, lineage and connections. */
+/**
+ * The owner's snapshot (GET /api/snapshot): agents with their key hint, lineage and connections.
+ * A paged workspace (src/agents/agentPages.ts) is asked to include the run's agent.
+ */
 export const readSnapshot = (run: SettingsRun) =>
-  run.api<Snapshot>('/api/snapshot', undefined, 'GET');
+  run.api<Snapshot>(snapshotPath(run.workspace, [run.agentId]), undefined, 'GET');
 
 /** Rotate key and Connect an agent read the snapshot only. */
 export const SNAPSHOT_READS = { snapshot: readSnapshot } as const;

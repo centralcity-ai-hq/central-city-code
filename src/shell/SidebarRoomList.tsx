@@ -4,6 +4,7 @@ import { api } from '../api';
 import { navigate } from './navigation';
 import { markInAppChange } from './pageNavigation';
 import { closeSidebar, ROOMS_SHEET_STATE, type RoomsSheet } from './sidebarRooms';
+import { timeoutSignal } from './timeoutSignal';
 import { recordRoomActivity, roomActivityAt, sortRoomsByActivity } from './roomActivity';
 
 /** The fields the sidebar needs from a room (src/rooms/api.ts Room). */
@@ -183,7 +184,7 @@ export function ShellRoomList({ workspaceId }: { workspaceId: string }) {
         '/api/rooms',
         undefined,
         'GET',
-        AbortSignal.any([controller.signal, AbortSignal.timeout(12_000)]),
+        timeoutSignal(controller.signal, 12_000),
       )
         .then((value) => {
           if (!active) return;

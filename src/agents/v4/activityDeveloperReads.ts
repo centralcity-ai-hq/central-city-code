@@ -1,5 +1,6 @@
 import type { AgentActivityPage, Snapshot } from '../../../shared/types';
 import { apiInWorkspace } from '../../api';
+import { snapshotPath } from '../agentPages';
 import {
   activityNames,
   activityPath,
@@ -276,7 +277,9 @@ export class ActivityNameReads extends ScreenReads<ActivityNamesSnapshot> {
     // generation is checked again at that point (a switch or close in between drops both).
     const current = this.generationCheck();
     const [snapshot, rooms] = await Promise.all([
-      this.read<Snapshot>('snapshot', () => '/api/snapshot'),
+      this.read<Snapshot>('snapshot', (agentId) =>
+        snapshotPath(this.scope?.workspace ?? null, [agentId]),
+      ),
       this.read<{ rooms?: { id: string; name: string }[] }>('rooms', () => '/api/rooms'),
     ]);
     // A switch, a close or a newer read: that one sets the names.
@@ -331,7 +334,9 @@ export class DeveloperReads extends ScreenReads<DeveloperSnapshot> {
 
   private async load() {
     this.set({ loading: true, error: null });
-    const outcome = await this.read<Snapshot>('snapshot', () => '/api/snapshot');
+    const outcome = await this.read<Snapshot>('snapshot', (agentId) =>
+      snapshotPath(this.scope?.workspace ?? null, [agentId]),
+    );
     if (!outcome) return;
     if (!outcome.ok) {
       this.set({ loading: false, error: outcome.error, view: null, missing: false });

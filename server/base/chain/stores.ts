@@ -29,13 +29,15 @@ interface OpRow {
   fee_wei: string | null;
   error_code: string | null;
   submitted_block: string | null;
+  searched_block: string | null;
   updated_at: string;
 }
 
 const OP_COLUMNS = `idempotency_key, intent_hash, chain_id, kind, status, signed_operation,
   signer_address, nonce::text AS nonce, user_op_hash, tx_hash, block_number::text AS block_number,
   gas_used::text AS gas_used, fee_wei::text AS fee_wei, error_code,
-  submitted_block::text AS submitted_block, updated_at::text AS updated_at`;
+  submitted_block::text AS submitted_block, searched_block::text AS searched_block,
+  updated_at::text AS updated_at`;
 
 function opView(row: OpRow): StoredOperation {
   // A tombstone (submission abandoned before anything was stored) carries no operation.
@@ -60,6 +62,7 @@ function opView(row: OpRow): StoredOperation {
       feeWei: null,
       maxCostWei: '0',
       submittedBlock: null,
+      searchedBlock: null,
       errorCode: row.error_code,
     };
   if (!row.signed_operation || !row.signer_address || !row.user_op_hash || row.nonce === null)
@@ -85,6 +88,7 @@ function opView(row: OpRow): StoredOperation {
     maxCostWei: maxCostWei(op).toString(10),
     // Rows stored before migration 82 have none: absence is then never concluded for them.
     submittedBlock: row.submitted_block,
+    searchedBlock: row.searched_block,
     errorCode: row.error_code,
     updatedAt: Number(row.updated_at),
   };
@@ -199,6 +203,18 @@ export function pgChainOperationStore(
         params,
       );
       return rows[0] ? opView(rows[0]) : null;
+    },
+
+    async recordSearched(key, block) {
+      // The search cursor only: never updated_at (the rebroadcast window and the send claims
+      // count from it), never the status or the receipt. An advance never moves it back; a
+      // finished search clears it (null), so the next one starts at the submission block.
+      await db.query(
+        `UPDATE base_chain_ops SET searched_block = CASE WHEN $2::bigint IS NULL THEN NULL
+           ELSE GREATEST(COALESCE(searched_block, $2::bigint), $2::bigint) END
+         WHERE idempotency_key = $1`,
+        [key, block],
+      );
     },
 
     async claimSend(key, status, seenUpdatedAt, at) {

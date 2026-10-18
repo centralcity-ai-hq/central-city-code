@@ -931,3 +931,46 @@
     transition: none;
   }
 }
+
+/* The header's search button: the theme toggle's quiet sibling. */
+.cc-header-find {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+@media (hover: hover) {
+  .cc-header-find:hover {
+    background: var(--bg-surface-hover);
+    color: var(--text-primary);
+  }
+}
+.cc-header-find:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+@media (max-width: 767px) {
+  .cc-header-find {
+    width: var(--target, 44px);
+    height: var(--target, 44px);
+  }
+}
+/* The narrowest phones (360 px): a slimmer box, so the bar never scrolls sideways; the tap
+   height stays. */
+@media (max-width: 400px) {
+  .cc-header-find {
+    width: 34px;
+    margin-inline: -2px;
+  }
+}

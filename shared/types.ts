@@ -94,10 +94,45 @@ export interface WorkflowDetail {
   briefJob: Job;
   checkJob: Job | null;
 }
+/**
+ * Present only on the snapshot of a workspace with more agents than AGENT_PAGES.threshold
+ * (shared/agent-pages.ts). Then `agents` starts with one page (`count` agents, newest first) and
+ * goes on with other agents the snapshot refers to (jobs, workflows, events, connections and
+ * include=), which are there for their names only and are not part of the list.
+ */
+export interface AgentsPageInfo {
+  /** Every agent of the workspace, removed ones included. */
+  total: number;
+  /** Agents that are not removed. */
+  live: number;
+  /** Live agents that are not paused and are online or working. */
+  online: number;
+  /** The page size used. */
+  limit: number;
+  /** How many of `agents`, from the start, are the page. */
+  count: number;
+  /** Pass as ?cursor= to GET /api/agents for the next (older) page; null on the last page. */
+  nextCursor: string | null;
+}
+
+/** One page of the owner's agents (GET /api/agents), newest first. */
+export interface AgentListPage {
+  agents: Agent[];
+  /** Every agent of the workspace, removed ones included. */
+  total: number;
+  /** Agents that match q=, ids= or under= (all of them when none is given). */
+  matched: number;
+  limit: number;
+  /** Pass as ?cursor= with the same q=, ids= or under= for the next page; null on the last page. */
+  nextCursor: string | null;
+}
+
 export interface Snapshot {
   operator: Operator;
   paused: boolean;
   agents: Agent[];
+  /** Paged workspaces only (more than AGENT_PAGES.threshold agents); absent otherwise. */
+  agentsPage?: AgentsPageInfo;
   connections: Connection[];
   jobs: Job[];
   workflows: Workflow[];

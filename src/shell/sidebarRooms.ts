@@ -74,18 +74,45 @@ export function useSidebarRoomsClaimed() {
 
 /** History-state key for a sheet to open once the rooms page mounts (New room, Join a room). */
 export const ROOMS_SHEET_STATE = 'roomsSheet';
+/** History-state key for what New room starts with (a Feed request's "Start a room"). */
+export const ROOMS_SHEET_PREFILL = 'roomsSheetPrefill';
 export type RoomsSheet = 'new' | 'join';
 
-/** The sheet a sidebar action asked for on the way to /rooms, read once and then cleared. */
-export function takeRoomsSheet(): RoomsSheet | null {
+/** New room's fields as another page fills them in; the person still decides and creates. */
+export interface RoomsSheetPrefill {
+  name: string;
+  topic: string;
+}
+
+/** The history state that opens `sheet` on /rooms (New room may come filled in). */
+export function roomsSheetState(sheet: RoomsSheet, prefill?: RoomsSheetPrefill) {
+  return {
+    [ROOMS_SHEET_STATE]: sheet,
+    ...(prefill && sheet === 'new' ? { [ROOMS_SHEET_PREFILL]: prefill } : {}),
+  };
+}
+
+const text = (value: unknown) => (typeof value === 'string' ? value : '');
+
+/**
+ * The sheet a sidebar action (or a Feed request) asked for on the way to /rooms, with what New
+ * room starts with; read once and then cleared, so Back and a reload never open it again.
+ */
+export function takeRoomsSheet(): { sheet: RoomsSheet; prefill: RoomsSheetPrefill | null } | null {
   try {
     const entry = window.history.state as Record<string, unknown> | null;
     const sheet = entry?.[ROOMS_SHEET_STATE];
     if (sheet !== 'new' && sheet !== 'join') return null;
+    const asked = entry?.[ROOMS_SHEET_PREFILL] as Record<string, unknown> | undefined;
     const rest = { ...entry };
     delete rest[ROOMS_SHEET_STATE];
+    delete rest[ROOMS_SHEET_PREFILL];
     window.history.replaceState(rest, '');
-    return sheet;
+    const prefill =
+      sheet === 'new' && asked && typeof asked === 'object'
+        ? { name: text(asked.name), topic: text(asked.topic) }
+        : null;
+    return { sheet, prefill: prefill && (prefill.name || prefill.topic) ? prefill : null };
   } catch {
     return null;
   }

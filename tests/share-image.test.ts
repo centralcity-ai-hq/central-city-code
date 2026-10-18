@@ -124,6 +124,13 @@ test('the built output carries each route’s head (after pnpm build)', (t) => {
   );
   for (const card of SHARE_CARDS) {
     const built = readFileSync(join(dist, card.shell), 'utf8');
+    // A card behind a switch that was off for this build (shareCardLive: the Feed with
+    // CITY_FEED=0) is written as the plain shell itself; on, it carries its full head.
+    if (built === index) {
+      assert.notEqual(card.flag, null, `${card.path}: only a switched card is the plain shell`);
+      assert.notEqual(unescape(titleOf(built)), card.title, `${card.path} <title>`);
+      continue;
+    }
     assertHead(built, card);
     // Same app: every hashed script and style of index.html. A prerendered copy may also link its
     // page stylesheet, so its first paint does not shift.

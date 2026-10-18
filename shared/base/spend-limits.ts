@@ -3,8 +3,11 @@
  *
  * The owner signs ONE spend permission per token for the agent's spender (SpendPermissionManager,
  * EIP-712). That permission is the only security bound: a stolen agent key can never move more
- * than its allowance per on-chain period. On-chain periods are FIXED lengths, starting at the next
- * 00:00 Europe/Berlin: a day is 86,400 s, a week 604,800 s, a month 2,678,400 s (31 days).
+ * than its allowance per on-chain period. On-chain periods are FIXED lengths, starting at 00:00
+ * Europe/Berlin of the day the owner signs (`berlinDayStart`), so the first period is the current
+ * one and a new limit works at once: a day is 86,400 s, a week 604,800 s, a month 2,678,400 s
+ * (31 days). SpendPermissionManager takes a start in the past: approveWithSignature does not check
+ * the start, and spend / getCurrentPeriod only need block.timestamp >= start.
  *
  * Two on-chain models, chosen by one server setting (`OnchainCapModel`):
  *   'half'  the allowance per Base period is floor(cap / 2), so even the burst around a reset (one
@@ -308,6 +311,15 @@ export function berlinMidnight(year: number, month: number, day: number): number
 export function nextBerlinMidnight(nowMs: number): number {
   const today = berlinDate(nowMs);
   return berlinMidnight(today.year, today.month, today.day + 1);
+}
+
+/**
+ * The last 00:00 Berlin at or before an instant (ms): the start of its Berlin day, as unix seconds.
+ * A new limit starts here, so its first on-chain period is the current one.
+ */
+export function berlinDayStart(nowMs: number): number {
+  const today = berlinDate(nowMs);
+  return berlinMidnight(today.year, today.month, today.day);
 }
 
 /** The Berlin calendar day, week (from Monday) or month (from the 1st) containing an instant. */

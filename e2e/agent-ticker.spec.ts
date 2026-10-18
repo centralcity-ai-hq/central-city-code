@@ -124,7 +124,12 @@ test('the landing shows the live count of AI agents from the real endpoint', asy
   expect(stats.ok()).toBeTruthy();
   expect(stats.headers()['cache-control']).toContain('s-maxage=15');
   const body = await stats.json();
-  expect(Object.keys(body).sort()).toEqual(['ai_agents_total', 'updated_at']);
+  // The agent count, and the optional Base agents number (server/stats/base-agents.ts).
+  expect(
+    Object.keys(body)
+      .filter((key) => key !== 'base_agents')
+      .sort(),
+  ).toEqual(['ai_agents_total', 'updated_at']);
   expect(body.ai_agents_total).toBeGreaterThanOrEqual(1);
 
   await page.goto('/');
@@ -464,7 +469,7 @@ test("without JavaScript the build's count is visible, with its sentence and Ver
   await context.close();
 });
 
-test("with the build's count in the HTML, the app starts from it: no count from 0, no shift, then on to the live number", async ({
+test("with the build's count in the HTML, the app counts in from 0 like the other counts: never shows the number first, no shift, then on to the live number", async ({
   page,
 }) => {
   const frames = await recordTicker(page);
@@ -481,8 +486,10 @@ test("with the build's count in the HTML, the app starts from it: no count from 
   });
   await page.goto('/');
   const ticker = page.locator(TICKER);
-  // The app has mounted over the static copy and still shows the build's number.
+  // The app has mounted over the static copy; the boot-time marker that hid the prerendered digits
+  // is gone, and the count from 0 ends on the build's number.
   await expect(page.locator('#root')).not.toHaveAttribute('aria-busy', 'true');
+  await expect(page.locator('html')).not.toHaveAttribute('data-count-in', '1');
   await expect(ticker).toHaveAttribute('data-source', 'build');
   await expect(ticker.locator('.cc-agent-ticker-n')).toHaveText('29,000');
   const before = await howY(page);
@@ -490,12 +497,15 @@ test("with the build's count in the HTML, the app starts from it: no count from 
   await expect(ticker).toHaveAttribute('data-source', 'live');
   await expect(ticker.locator('.cc-agent-ticker-n')).toHaveText('30,500');
   expect(await howY(page)).toBe(before);
-  // Never a 0 and never down: from the build's number it only rises to the live one.
+  // Counted in from 0 (the static copy's 29,000 is in the DOM but hidden until the app mounts), then
+  // only ever up, ending on the live one.
   const values = digits(await frames());
-  expect(values.length).toBeGreaterThan(0);
-  expect(Math.min(...values)).toBeGreaterThanOrEqual(29_000);
-  expect(values).toEqual([...values].sort((a, b) => a - b));
-  expect(values.at(-1)).toBe(30_500);
+  const from = values.findIndex((v) => v < 29_000 / 2);
+  expect(from).toBeGreaterThanOrEqual(0);
+  const counted = values.slice(from);
+  expect(counted.length).toBeGreaterThan(3);
+  expect(counted).toEqual([...counted].sort((a, b) => a - b));
+  expect(counted.at(-1)).toBe(30_500);
 });
 
 test("with reduced motion the build's number stays until the live one replaces it", async ({

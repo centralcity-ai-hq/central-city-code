@@ -5,24 +5,14 @@ import type { Database, Transaction as Tx } from '../database.js';
 import type { CityLimits } from '../limits.js';
 import type { Operator } from '../../shared/types.js';
 import { listTemplatesToolInput } from '../../shared/assistant-tools.js';
-import type { ResolvedAgentManifest } from '../../shared/manifest.js';
 import { clientAddressKey, clientAddressPrefixes } from '../rate-limit.js';
-import {
-  emptyWorkspace,
-  event,
-  iso,
-  publicAgent,
-  stopJob,
-  type StoredAgent,
-  type Workspace,
-} from '../model.js';
+import { emptyWorkspace, event, iso, publicAgent, stopJob, type Workspace } from '../model.js';
 import { descendants, issueRuntimeCredential } from '../agent-lifecycle.js';
-import { compileAgentCard, signAgentCard } from '../manifest/agent-card.js';
+import { signAgentCard } from '../manifest/agent-card.js';
+import { cardAgent, compileCardFor } from '../manifest/card-agent.js';
 import { builtinTemplates } from '../manifest/templates.js';
 import type { PlatformSigner } from './signing.js';
 import { revokeResponderCredentials } from '../responder/revoke.js';
-import { basePassport } from '../base/identity/passport.js';
-import { passportExtension } from '../../shared/base/passport.js';
 import {
   AutonomyError,
   CLAIM_TOKEN,
@@ -879,11 +869,19 @@ export async function registerAutonomy(
   // ---------------------------------------------------------------------------------------------
   // Honest metrics: owned and unclaimed agents are counted separately, never summed.
   // N7: cached per instance for 60 seconds; the query aggregates every workspace.
+  // Concurrent misses share one in-flight computation instead of each scanning every workspace.
   let metricsCache: { at: number; value: unknown } | null = null;
+  let metricsInflight: Promise<unknown> | null = null;
   app.get('/api/metrics/agents', async (request) => {
     await d.owner(request);
     const now = d.clock();
     if (metricsCache && now - metricsCache.at < 60_000) return metricsCache.value;
+    metricsInflight ??= computeMetrics(now).finally(() => {
+      metricsInflight = null;
+    });
+    return metricsInflight;
+  });
+  async function computeMetrics(now: number): Promise<unknown> {
     const rows = (
       await d.db.query<{
         kind: string;
@@ -928,7 +926,7 @@ export async function registerAutonomy(
     };
     metricsCache = { at: now, value };
     return value;
-  });
+  }
 
   // ---------------------------------------------------------------------------------------------
   // Agent Cards (A2A 1.0) and the platform JWKS.
@@ -954,40 +952,18 @@ export async function registerAutonomy(
     const parsed = z.object({ agentId: z.string().uuid() }).safeParse(request.params);
     if (!parsed.success) return notFound();
     const agentId = parsed.data.agentId;
-    const found = (
-      await d.db.query<{ agent: StoredAgent; operator_id: string; kind: string }>(
-        `SELECT a AS agent, w.operator_id, o.kind FROM workspaces w
-          JOIN operators o ON o.id=w.operator_id
-          CROSS JOIN LATERAL jsonb_array_elements(w.data->'agents') a
-          WHERE w.operator_id=(SELECT operator_id FROM agent_manifests WHERE agent_id=$1 LIMIT 1)
-          AND a->>'id'=$1`,
-        [agentId],
-      )
-    ).rows[0];
-    if (!found || found.agent.revokedAt || !found.agent.revision) return notFound();
-    const manifest = (
-      await d.db.query<{ manifest: ResolvedAgentManifest }>(
-        'SELECT manifest FROM agent_manifests WHERE agent_id=$1 AND revision=$2',
-        [agentId, found.agent.revision],
-      )
-    ).rows[0]?.manifest;
-    if (!manifest) return notFound();
+    const found = await cardAgent(d.db, agentId);
+    if (!found) return notFound();
     // N5: only public-visibility cards are public. Private and org cards are owner-only; an
     // unclaimed agent has no owner yet, so its private card is not served until it is claimed.
-    const publicCard = manifest.spec.visibility === 'public';
+    const publicCard = found.manifest.spec.visibility === 'public';
     if (!publicCard) {
       const viewer = found.kind === 'owner' ? await d.optionalOperator(request) : null;
       // Owner-only cards answer 404 (not 403) so their existence is not disclosed.
-      if (viewer?.id !== found.operator_id) return notFound();
+      if (viewer?.id !== found.operatorId) return notFound();
     }
     const origin = d.originOf(request);
-    const passport = await basePassport(d.db, agentId);
-    const card = compileAgentCard(manifest, {
-      agentId,
-      baseUrl: origin,
-      provider: { organization: 'Central City', url: origin },
-      ...(passport ? { extensions: [passportExtension(passport)] } : {}),
-    });
+    const card = await compileCardFor(d.db, agentId, found.manifest, origin);
     const key = d.signer.key;
     return sendCard(
       reply,

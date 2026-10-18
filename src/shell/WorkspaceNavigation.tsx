@@ -20,6 +20,7 @@ import {
   Play,
   Plug,
   RefreshCw,
+  Rss,
   Search,
   Settings,
   ShieldCheck,
@@ -32,21 +33,26 @@ import { Lockup } from '../brand';
 import { navigate } from './navigation';
 import { markInAppChange } from './pageNavigation';
 import { prefetchElric, prefetchElricIdle } from '../elric/prefetch';
+import { useFeedOn } from '../feed/feedStatus';
 import { waitingLabel } from '../elric/elricV3';
 import { type WorkspaceView } from './workspaceDestinations';
 import { nextThemePreference, useTheme, type ThemePreference } from './theme';
 import { ShellRoomList } from './SidebarRoomList';
 import { avatarStyle } from './avatarColor';
 import { setSidebarClose, setSidebarRoomsSlot, useSidebarRoomsClaimed } from './sidebarRooms';
+import { messagesBadgeLabel } from './badgeLabels';
+import { timeoutSignal } from './timeoutSignal';
+import { pageVisible } from '../rooms/readMark';
 import '../rooms/rooms-v2.css';
 import './workspace-navigation.css';
 
 /** "1 pending connection request", "2 pending connection requests". */
 export const pendingRequestsLabel = (count: number) =>
   `${count} pending connection ${count === 1 ? 'request' : 'requests'}`;
-/** "1 unread message", "2 unread messages" (the console's Messages count). */
-export const unreadMessagesLabel = (count: number) =>
-  `${count} unread ${count === 1 ? 'message' : 'messages'}`;
+/** "1 room invitation", "2 room invitations" (open invitations to your agents). */
+export const roomInvitationsLabel = (count: number) =>
+  `${count} room ${count === 1 ? 'invitation' : 'invitations'}`;
+export { messagesBadgeLabel, unreadMessagesLabel } from './badgeLabels';
 
 const THEME_NAME: Record<ThemePreference, string> = {
   system: 'System',
@@ -66,15 +72,21 @@ function readAdvanced(workspaceId: string) {
 
 const ICON = { size: 18, strokeWidth: 1.9, 'aria-hidden': true } as const;
 
+/** The Feed's code, fetched on the way to a click on its entry. */
+const warmFeed = () => void import('../feed/Feed').catch(() => undefined);
+
 /**
  * The workspace sidebar (docs/design/WORKSPACE_V3.md §3): brand, Rooms with the room list,
- * Messages, Elric, My agents, Connect AI, the ADVANCED group, and the account card with its menu.
+ * Messages, Elric, My agents, the Feed (only while GET /api/public/feed answers 200), Connect AI,
+ * the ADVANCED group, and the account card with its menu.
  * Global navigation only. Room membership and console permissions remain server-owned.
  */
 export function WorkspaceNavigation({
   workspaceId,
   view,
   unreadMessages = 0,
+  requestResponses = 0,
+  roomInvitations = 0,
   onView,
   showElric,
   onClose,
@@ -94,6 +106,10 @@ export function WorkspaceNavigation({
   view: WorkspaceView | null;
   /** Unread messages across the workspace's inboxes, shown on Messages as in the classic nav. */
   unreadMessages?: number;
+  /** Open responses to your Feed requests: counted on Messages' badge too, and said so. */
+  requestResponses?: number;
+  /** Open room invitations to your agents (the inbox summary): on My agents' badge. */
+  roomInvitations?: number;
   onView: (view: WorkspaceView) => void;
   showElric: boolean;
   onClose: () => void;
@@ -139,6 +155,9 @@ export function WorkspaceNavigation({
   const roomsClaimed = useSidebarRoomsClaimed();
   const path = window.location.pathname.replace(/\/+$/, '') || '/';
   const onRooms = path.startsWith('/rooms') || path.startsWith('/r/');
+  const onFeed = path === '/feed' || path.startsWith('/feed/');
+  // The Feed's entry: only once the Feed answers that it is on (unless CITY_FEED is '0').
+  const feedOn = useFeedOn();
   useEffect(() => setAdvanced(readAdvanced(workspaceId)), [workspaceId]);
   useEffect(() => {
     // The removed room shortcuts kept their state here; drop the leftover key.
@@ -157,7 +176,7 @@ export function WorkspaceNavigation({
     const controller = new AbortController();
     let active = true;
     async function load() {
-      const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(12_000)]);
+      const signal = timeoutSignal(controller.signal, 12_000);
       await Promise.allSettled([
         api<{ incoming: { status: string }[] }>(
           '/api/v2/connections/requests',
@@ -190,11 +209,19 @@ export function WorkspaceNavigation({
       ]);
     }
     void load();
-    const timer = window.setInterval(() => void load(), 30_000);
+    // Badges refresh only while the tab is showing; coming back reads them at once.
+    const timer = window.setInterval(() => {
+      if (pageVisible()) void load();
+    }, 30_000);
+    const shown = () => {
+      if (pageVisible()) void load();
+    };
+    document.addEventListener('visibilitychange', shown);
     return () => {
       active = false;
       controller.abort();
       window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', shown);
     };
   }, [workspaceId, attempt, view, path, showElric]);
   useEffect(() => {
@@ -394,14 +421,17 @@ export function WorkspaceNavigation({
           },
           {
             badge:
-              unreadMessages > 0 ? (
+              unreadMessages + requestResponses > 0 ? (
                 <span className="nav-count" aria-hidden="true">
-                  {unreadMessages}
+                  {unreadMessages + requestResponses}
                 </span>
               ) : null,
             badgeHint:
-              unreadMessages > 0
-                ? { id: messagesHintId, text: unreadMessagesLabel(unreadMessages) }
+              unreadMessages + requestResponses > 0
+                ? {
+                    id: messagesHintId,
+                    text: messagesBadgeLabel(unreadMessages, requestResponses),
+                  }
                 : undefined,
           },
         )}
@@ -423,16 +453,27 @@ export function WorkspaceNavigation({
           : null}
         {item('My agents', <Layers3 {...ICON} />, view === 'agents', () => onView('agents'), {
           badge:
-            requests !== null && requests > 0 ? (
+            (requests ?? 0) + roomInvitations > 0 ? (
               <span className="nav-count wv2-pending" aria-hidden="true">
-                {requests}
+                {(requests ?? 0) + roomInvitations}
               </span>
             ) : null,
           badgeHint:
-            requests !== null && requests > 0
-              ? { id: agentsHintId, text: pendingRequestsLabel(requests) }
+            (requests ?? 0) + roomInvitations > 0
+              ? {
+                  id: agentsHintId,
+                  text: [
+                    requests ? pendingRequestsLabel(requests) : '',
+                    roomInvitations ? roomInvitationsLabel(roomInvitations) : '',
+                  ]
+                    .filter(Boolean)
+                    .join(', '),
+                }
               : undefined,
         })}
+        {feedOn
+          ? item('Feed', <Rss {...ICON} />, onFeed, () => go('/feed'), { warm: warmFeed })
+          : null}
         {item('Connect AI', <Plug {...ICON} />, view === 'connect', () => onView('connect'), {
           className: 'nav-connect',
         })}

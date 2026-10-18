@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ExternalLink, LoaderCircle, Pause, Play, ShieldOff } from 'lucide-react';
 import { api } from '../api';
 import { formatDate, Modal } from '../components';
@@ -39,11 +39,12 @@ type Turn = {
   created_at: string;
 };
 type Page = { turns: Turn[]; next_cursor: string | null };
-/** An open pending action (GET /api/elric/pending): a safe summary, never the stored arguments. */
+/** An open pending action (GET /api/elric/pending): the cleaned task title and description. */
 export type PendingItem = {
   id: string;
   tool: string;
   summary: string | null;
+  detail?: string | null;
   args_hash: string;
   room: { id: string; name: string } | null;
   created_at: string;
@@ -74,6 +75,40 @@ const STATUS: Record<NonNullable<ElricStatusView['status']>, string> = {
   revoked: 'Revoked',
 };
 const label = (value: string) => value.replace(/_/g, ' ');
+const LOAD_FAILED = 'Elric’s activity could not be loaded.';
+
+/** The status chip: unknown (not "Not added") while the status could not be loaded. */
+export function statusChipLabel(state: ElricStatusView['status'], loadFailed: boolean) {
+  if (state) return STATUS[state];
+  return loadFailed ? 'Status unknown' : 'Not added';
+}
+
+/** A failed load of the page: one line and "Try again", which loads everything again. */
+export function ElricActivityLoadFailed({ onRetry }: { onRetry: () => void }) {
+  return (
+    <p className="form-error" role="alert">
+      {LOAD_FAILED}{' '}
+      <button type="button" className="button secondary" onClick={onRetry}>
+        Try again
+      </button>
+    </p>
+  );
+}
+
+/**
+ * Loads one page of turns and hands it to `apply` only if no newer load started meanwhile
+ * (`generation` is bumped by every new filter or retry), so a slow answer for an old filter
+ * never replaces the list or the cursor of the new one.
+ */
+export async function loadIfCurrent<T>(
+  generation: { current: number },
+  fetchPage: () => Promise<T>,
+  apply: (page: T) => void,
+) {
+  const asked = generation.current;
+  const page = await fetchPage();
+  if (asked === generation.current) apply(page);
+}
 
 export function ElricActivity() {
   const [status, setStatus] = useState<ElricStatusView | null>(null);
@@ -87,6 +122,9 @@ export function ElricActivity() {
   const [confirm, setConfirm] = useState(false);
   const [error, setError] = useState('');
   const [pending, setPending] = useState<PendingItem[]>([]);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const generation = useRef(0);
 
   const loadStatus = useCallback(async () => {
     setStatus(await api<ElricStatusView>('/api/elric'));
@@ -100,29 +138,44 @@ export function ElricActivity() {
       if (after) query.set('cursor', after);
       if (room) query.set('room_id', room);
       if (result) query.set('result', result);
-      const page = await api<Page>(`/api/elric/turns?${query}`);
-      setTurns((current) => (after ? [...current, ...page.turns] : page.turns));
-      setCursor(page.next_cursor);
-      setRooms((current) => {
-        const next = new Map(current);
-        for (const turn of page.turns) if (turn.room) next.set(turn.room.id, turn.room.name);
-        return next;
-      });
+      await loadIfCurrent(
+        generation,
+        () => api<Page>(`/api/elric/turns?${query}`),
+        (page) => {
+          setTurns((current) => (after ? [...current, ...page.turns] : page.turns));
+          setCursor(page.next_cursor);
+          setRooms((current) => {
+            const next = new Map(current);
+            for (const turn of page.turns) if (turn.room) next.set(turn.room.id, turn.room.name);
+            return next;
+          });
+        },
+      );
     },
     [room, result],
   );
   useEffect(() => {
     let active = true;
+    // A new filter or a retry: answers of earlier loads no longer land.
+    generation.current += 1;
     setLoading(true);
     // The approval list is extra: if it cannot load, the activity still shows.
     Promise.all([loadStatus(), loadTurns(null), loadPending().catch(() => setPending([]))])
-      .then(() => active && setError(''))
-      .catch(() => active && setError('Elric’s activity could not be loaded. Try again.'))
+      .then(() => {
+        if (!active) return;
+        setError('');
+        setLoadFailed(false);
+      })
+      .catch(() => {
+        if (!active) return;
+        setError('');
+        setLoadFailed(true);
+      })
       .finally(() => active && setLoading(false));
     return () => {
       active = false;
     };
-  }, [loadStatus, loadTurns, loadPending]);
+  }, [loadStatus, loadTurns, loadPending, attempt]);
 
   async function control(action: 'pause' | 'resume' | 'revoke') {
     setBusy(true);
@@ -174,7 +227,7 @@ export function ElricActivity() {
         <div className="elric-state">
           <h2>Elric</h2>
           <span className={`elric-chip ${state ?? 'none'}`} data-testid="elric-status">
-            {state ? STATUS[state] : 'Not added'}
+            {statusChipLabel(state, loadFailed)}
           </span>
         </div>
         {state === 'active' || state === 'paused' ? (
@@ -257,6 +310,11 @@ export function ElricActivity() {
                   <time dateTime={item.expires_at}>Until {formatDate(item.expires_at)}</time>
                 </div>
                 {item.summary ? <p className="elric-summary">{item.summary}</p> : null}
+                {item.detail ? (
+                  <p className="elric-summary elric-detail" data-testid="elric-pending-detail">
+                    {item.detail}
+                  </p>
+                ) : null}
                 <div className="elric-controls elric-decide">
                   <button
                     type="button"
@@ -281,6 +339,7 @@ export function ElricActivity() {
         </section>
       ) : null}
 
+      {loadFailed ? <ElricActivityLoadFailed onRetry={() => setAttempt((n) => n + 1)} /> : null}
       {error ? (
         <p className="form-error" role="alert">
           {error}

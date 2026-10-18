@@ -109,6 +109,9 @@ export function storedKeyHash(windowMs: number, key: string): string {
  * under server/ is classified explicitly.
  */
 export const FAIL_CLOSED_PREFIXES: readonly string[] = [
+  // The Agent Explorer's Service calls searches, one bucket for every client together
+  // (server/base/explorer/calls.ts): searches scan the payment table, so they share one budget.
+  'explorer-calls-search',
   // Newsletter subscribe attempts and the signed link POSTs (server/email/index.ts).
   'newsletter',
   'newsletter-link',
@@ -158,6 +161,9 @@ export const FAIL_CLOSED_PREFIXES: readonly string[] = [
   'room-bulk-mute',
   // Owner actions that reach other owners or the network.
   'xconn-req',
+  // Room invitations to other owners' agents, and their answers (rooms/invitations.ts).
+  'room-invite-send',
+  'room-invite-answer',
   'wake-webhook',
   // Room repos: binding calls GitHub with the App JWT (docs/ROOM_REPOS.md).
   'room-repo-bind',
@@ -181,12 +187,50 @@ export const FAIL_CLOSED_PREFIXES: readonly string[] = [
   // Base Pay P2c: an agent paying on its own, per grant or key. It moves the owner's money without
   // the owner present, so it is never unbounded during an outage.
   'agent-pay',
+  // city_pay_status, per grant or key and per workspace: it pays nothing, but a payment in flight
+  // is read from the bundler and Base (and may be resent), so it fails closed like city_pay.
+  'agent-pay-status',
   // Reply budgets (S2b): they protect the owner's money, so they fail closed too.
   'responder-room',
   'responder-agent-room',
   'responder-pair',
   'responder-pair-day',
   'responder-unclaimed-day',
+  // Feed requests (server/feed/requests.ts): anyone may post, report and close with a manage
+  // token, signed in or not, so every write budget is abuse-sensitive.
+  'feed-post',
+  'feed-post-day',
+  'feed-post-site',
+  'feed-post-network',
+  'feed-post-region',
+  'feed-post-global',
+  'feed-post-owner',
+  'feed-post-owner-day',
+  'feed-post-owner-global',
+  'feed-post-signed',
+  'feed-post-signed-day',
+  'feed-post-signed-site',
+  'feed-post-signed-network',
+  'feed-post-signed-region',
+  'feed-report',
+  'feed-report-site',
+  'feed-report-network',
+  'feed-report-region',
+  'feed-report-global',
+  'feed-manage',
+  // Feed Respond (server/feed/respond.ts): a response reaches another owner's inbox.
+  'feed-respond',
+  // Feed pay (server/feed/pay): a quote reaches an outside service; a call (Feed or MCP) moves the
+  // agent's money. Never unbounded during an outage.
+  'feed-pay-quote',
+  'feed-pay-call',
+  'feed-pay-agents',
+  'feed-pay-mcp',
+  // The services:sell tools (server/feed/offers/tools.ts): writes to public listings.
+  'feed-offers-mcp',
+  // A same-key re-read of a call (MCP): it pays nothing, but it can resume the call's work, so it
+  // fails closed like the rest of Feed pay (the call itself goes on; the AI reads it again later).
+  'feed-pay-mcp-read',
 ];
 export const DEGRADED_PREFIXES: readonly string[] = [
   'ip',
@@ -248,6 +292,12 @@ export const DEGRADED_PREFIXES: readonly string[] = [
   'pay-lookup',
   'pay-incoming',
   'pay-create',
+  // Base Wallet reads per signed-in person: one withdrawal (may bring it up to date from Base)
+  // and the spending limits (read from Base each time).
+  'wallet-read',
+  'wallet-limits-read',
+  // city_request_search reads of the public request list, per workspace (read-only).
+  'feed-read-owner',
 ];
 /** Degraded buckets allow limit / this per instance while the shared limiter is unavailable. */
 export const DEGRADED_LIMIT_DIVISOR = 4;
@@ -342,9 +392,117 @@ export function throttledOutageLog(
   };
 }
 
+/** The last part of every window in which LocalShed leaves each decision to the shared limiter. */
+export const SHED_SKEW_MARGIN_MS = 1_000;
+
+/** Start of the clock-aligned fixed window holding `time`; the shared row and LocalShed use it. */
+export function windowStartOf(time: number, windowMs: number): number {
+  return Math.floor(time / windowMs) * windowMs;
+}
+
+/**
+ * Per-instance pre-check in front of the shared limiter. All hits of one key update one row, so a
+ * flood from one client queues on that row's lock while holding clients of the small application
+ * pool. This check refuses the excess of such a flood before it reaches the database.
+ *
+ * It counts, per key, window length, limit and clock-aligned window (windowStartOf, as the shared
+ * row), only the hits this instance saw the shared limiter count in that same window: a hit whose
+ * query failed, or that the row counted in another window, is left out. The shared row counts
+ * every hit of the key and window length (refused ones too) and never decreases within a window,
+ * so it is at least this local count. Once the local count plus the new hit exceeds the limit, the
+ * shared count after that hit would too: the shared limiter would refuse it, and it is refused
+ * here without a query, with the Retry-After the shared limiter gives (the end of the window).
+ * Otherwise the shared limiter decides exactly as before. Counting too few is always safe: it only
+ * sends more hits to the shared limiter. A hit refused here never reaches the row, so the row stops
+ * growing during a refused flood: count() still reads at least the limit, but another limit on the
+ * same key and window length sees only the hits that reached the row.
+ *
+ * Another instance whose clock runs slightly ahead can start the next shared window (or clean the
+ * row up) a little early, so in the last `skewMarginMs` of each window every hit goes to the
+ * shared limiter. A count applies only to the exact window it was counted in, so a clock that
+ * moves back never carries it into another window. Memory is bounded: at `maxKeys`, a short sweep
+ * drops ended windows and then the least recently used entries are evicted; forgetting a count
+ * only sends its hits to the shared limiter again. There are no timers.
+ */
+export class LocalShed {
+  private readonly entries = new Map<string, { end: number; count: number }>();
+  constructor(
+    readonly maxKeys = 10_000,
+    readonly skewMarginMs = SHED_SKEW_MARGIN_MS,
+  ) {
+    if (!Number.isSafeInteger(maxKeys) || maxKeys < 1) throw new Error('maxKeys must be positive.');
+    if (!Number.isFinite(skewMarginMs) || skewMarginMs < 0)
+      throw new Error('skewMarginMs must not be negative.');
+  }
+  get size(): number {
+    return this.entries.size;
+  }
+  /** Retry-After in ms when the hit can be refused without the shared limiter, otherwise null. */
+  refuse(key: string, limit: number, windowMs: number, time: number): number | null {
+    if (!(windowMs > 0) || !Number.isFinite(windowMs)) return null;
+    const id = `${windowMs}\n${limit}\n${key}`;
+    const entry = this.entries.get(id);
+    if (!entry) return null;
+    const end = windowStartOf(time, windowMs) + windowMs;
+    if (entry.end !== end) {
+      if (entry.end <= time) this.entries.delete(id);
+      return null;
+    }
+    // The comparison the shared limiter makes on its count after this hit (count > limit).
+    if (!(entry.count + 1 > limit) || time >= end - this.skewMarginMs) return null;
+    // Re-insert to mark as most recently used: a key under a flood is never the one evicted.
+    this.entries.delete(id);
+    this.entries.set(id, entry);
+    return Math.max(1, end - time);
+  }
+  /**
+   * Records one hit the shared limiter counted: computed at `time` for the window starting at
+   * `windowStart`, and counted in the row whose window ends at `countedEnd` (its expires_at). A
+   * later row window means another instance already started the next window: the hit is left out.
+   */
+  counted(
+    key: string,
+    limit: number,
+    windowMs: number,
+    windowStart: number,
+    countedEnd: number,
+    time: number,
+  ): void {
+    if (!(windowMs > 0) || !Number.isFinite(windowMs)) return;
+    const end = windowStart + windowMs;
+    if (countedEnd !== end) return;
+    const id = `${windowMs}\n${limit}\n${key}`;
+    let entry = this.entries.get(id);
+    // A late answer for a window this instance has left (or a clock that moved back).
+    if (entry && entry.end > end) return;
+    if (entry) this.entries.delete(id);
+    if (entry && entry.end < end) entry = undefined;
+    if (!entry) {
+      this.makeRoom(time);
+      entry = { end, count: 0 };
+    }
+    entry.count++;
+    this.entries.set(id, entry);
+  }
+  private makeRoom(time: number): void {
+    if (this.entries.size < this.maxKeys) return;
+    let scanned = 0;
+    for (const [id, entry] of this.entries) {
+      if (entry.end <= time) this.entries.delete(id);
+      if (++scanned >= 64) break;
+    }
+    while (this.entries.size >= this.maxKeys) {
+      const oldest = this.entries.keys().next();
+      if (oldest.done) break;
+      this.entries.delete(oldest.value);
+    }
+  }
+}
+
 /**
  * Fixed windows aligned to the clock and stored in PostgreSQL, so every hosted instance shares
- * one counter per key. One upsert per hit; keys go through storedKeyHash.
+ * one counter per key. One upsert per hit; keys go through storedKeyHash. A hit that LocalShed
+ * proves the shared limiter would refuse is refused without the upsert (`shedHits` counts them).
  * Expired rows are removed opportunistically in bounded batches. If the database is unavailable,
  * fail-closed buckets deny with FAIL_CLOSED_RETRY_MS and degraded buckets use the per-instance
  * memory limiter at a reduced limit (see outageMode). `outages` counts both, per mode.
@@ -361,10 +519,14 @@ export class PostgresRateLimiter implements RateLimiter {
       cause: LimiterOutageCause,
     ) => void = throttledOutageLog(now),
     private readonly strict = strictClassificationDefault(),
+    /** The per-instance pre-check; null sends every hit to the database. */
+    private readonly shed: LocalShed | null = new LocalShed(),
   ) {}
   readonly outages = { 'fail-closed': 0, degraded: 0 };
   /** Outage decisions caused by a pool acquisition timeout (a subset of `outages`). */
   poolTimeouts = 0;
+  /** Hits refused by the per-instance pre-check without a database query. */
+  shedHits = 0;
   private outage(key: string, error: unknown): LimiterOutageMode {
     const mode = outageMode(key);
     const cause = outageCause(error);
@@ -376,7 +538,12 @@ export class PostgresRateLimiter implements RateLimiter {
   async hit(key: string, limit: number, windowMs: number): Promise<RateLimitResult> {
     if (this.strict) assertClassified(key);
     const time = this.now();
-    const windowStart = Math.floor(time / windowMs) * windowMs;
+    const shedRetryAfterMs = this.shed?.refuse(key, limit, windowMs, time) ?? null;
+    if (shedRetryAfterMs !== null) {
+      this.shedHits++;
+      return { allowed: false, retryAfterMs: shedRetryAfterMs };
+    }
+    const windowStart = windowStartOf(time, windowMs);
     const keyHash = storedKeyHash(windowMs, key);
     let row: { count: number | string; expires_at: number | string } | undefined;
     try {
@@ -401,6 +568,7 @@ export class PostgresRateLimiter implements RateLimiter {
         windowMs,
       );
     }
+    if (row) this.shed?.counted(key, limit, windowMs, windowStart, Number(row.expires_at), time);
     if (++this.hits % this.cleanupEvery === 0) await this.cleanup(time);
     const count = Number(row?.count ?? 1);
     return count > limit
@@ -410,7 +578,7 @@ export class PostgresRateLimiter implements RateLimiter {
   async count(key: string, windowMs: number): Promise<number> {
     if (this.strict) assertClassified(key);
     const time = this.now();
-    const windowStart = Math.floor(time / windowMs) * windowMs;
+    const windowStart = windowStartOf(time, windowMs);
     const keyHash = storedKeyHash(windowMs, key);
     try {
       const row = (

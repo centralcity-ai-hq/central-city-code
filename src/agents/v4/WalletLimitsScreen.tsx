@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type FormEvent,
+  type RefObject,
+} from 'react';
 import { ApiError } from '../../api';
 import { readWallet } from '../../base/wallet/api';
 import {
@@ -24,6 +32,7 @@ import {
   readSpenderPin,
 } from '../../base/wallet/limits';
 import { VaultCryptoError } from '../../base/vault';
+import { AgentPayConsent } from './AgentPayConsent';
 import type { AgentScreenProps } from './screens';
 import { SettingsEmpty, SettingsError, SettingsFrame, SettingsLoading } from './settingsShared';
 import './wallet-screen.css';
@@ -33,8 +42,10 @@ import './wallet-screen.css';
  * server prepares the spend permission; this browser checks it is exactly that limit for this
  * wallet (src/base/wallet/limits.ts) and only then asks for the wallet password to sign it. Base
  * enforces the signed permission and nothing else; Central City's calendar counter is shown as a
- * count, never as protection. A revoke blocks the agent's spends at once in Central City and is
- * "revoked" only once Base shows it so.
+ * count, never as protection. A limit starts at 00:00 Berlin today, so it works at once. A revoke
+ * blocks the agent's spends at once in Central City and is "revoked" only once Base shows it so.
+ * Under an active limit, "Paying on its own" (AgentPayConsent) is the owner's separate permission
+ * for the agent to pay within it without asking each time.
  */
 
 const POLL_MS = 5_000;
@@ -106,7 +117,7 @@ function enforced(
     : `Base enforces ${per}; around a reset ${name} could spend up to ${usdcText(allowance)} just before and ${usdcText(allowance)} just after.`;
 }
 
-/** When Base's periods start: fixed lengths from the first 00:00 Berlin. */
+/** When Base's periods start: fixed lengths from 00:00 Berlin on the day it is signed. */
 function baseStarts(period: LimitPeriod, start: number) {
   if (period === 'day') return `Base days start at 00:00 Berlin time (${day(start)}).`;
   if (period === 'week')
@@ -200,11 +211,14 @@ function LimitCard({
   view,
   name,
   onRetry,
+  stateRef,
 }: {
   limit: LimitView;
   view: LimitsView;
   name: string;
   onRetry: () => void;
+  /** The state line, where focus goes when the section under the card goes away. */
+  stateRef: RefObject<HTMLParagraphElement | null>;
 }) {
   const cap = BigInt(limit.capRaw);
   const spent = BigInt(limit.calendar.spentRaw);
@@ -212,8 +226,9 @@ function LimitCard({
   return (
     <>
       <div className="w4-limit" data-k="limit-card" data-state={limit.state}>
+        {/* A ceiling, not a permission: paying on its own is the owner's separate OK below. */}
         <p className="w4-eyebrow">
-          {name} can pay up to
+          The most {name} may spend
           <span className={`w4-net${view.testnet ? '' : ' live'}`}>
             {view.testnet ? 'Test network · no real money' : 'Base'}
           </span>
@@ -224,7 +239,14 @@ function LimitCard({
         <p className="w4-hint">
           {enforced(limit.onchainModel, limit.allowanceRaw, cap, limit.period, name)}
         </p>
-        <p className="w4-state" data-state={limit.state} role="status">
+        <p
+          ref={stateRef}
+          className="w4-state"
+          data-state={limit.state}
+          data-k="limit-state"
+          role="status"
+          tabIndex={-1}
+        >
           {stateLine(limit, name)}
         </p>
       </div>
@@ -260,6 +282,7 @@ export function WalletLimitsScreen({ agent, onBack, backLabel }: AgentScreenProp
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const revokeHeading = useId();
   // As on the withdraw screen: the typed password goes when the page is hidden or left, after
   // 5 minutes without input, or when the screen closes; a signature made meanwhile isn't sent.
   const session = useRef(0);
@@ -330,6 +353,22 @@ export function WalletLimitsScreen({ agent, onBack, backLabel }: AgentScreenProp
       // Not answered: the next read tries again.
     }
   }, [agent.id]);
+
+  // "Paying on its own" found the limit changed and the limits were read again for it. If that
+  // section went away meanwhile (the limit is no longer active) with focus in it, focus goes to
+  // what is there now: the card's state line, or the lead when there is no limit at all.
+  const limitState = useRef<HTMLParagraphElement>(null);
+  const lead = useRef<HTMLParagraphElement>(null);
+  const [limitsReread, setLimitsReread] = useState(0);
+  useEffect(() => {
+    if (!limitsReread) return;
+    const active = document.activeElement;
+    if (active && active !== document.body) return;
+    (limitState.current ?? lead.current)?.focus();
+  }, [limitsReread]);
+  const rereadForConsent = useCallback(() => {
+    void refresh().then(() => setLimitsReread((count) => count + 1));
+  }, [refresh]);
 
   /** The agent's wallet address, the one the limit must be for. */
   async function walletOf(): Promise<{ address: string; owner: string; spender: string | null }> {
@@ -525,6 +564,10 @@ export function WalletLimitsScreen({ agent, onBack, backLabel }: AgentScreenProp
             )}
           </div>
           <ul className="w4-facts">
+            {/* It starts at 00:00 Berlin today; only just before midnight can it be the next day's. */}
+            {phase.checked.start * 1000 <= Date.now() ? (
+              <li data-k="works-now">{agent.name} can use it as soon as you sign.</li>
+            ) : null}
             <li>{baseStarts(phase.checked.period, phase.checked.start)}</li>
             <li>Central City’s counter resets {RESETS[phase.checked.period]}.</li>
             <li>
@@ -584,9 +627,33 @@ export function WalletLimitsScreen({ agent, onBack, backLabel }: AgentScreenProp
         </form>
       ) : phase.k === 'ready' && view && limit ? (
         <div className="w4-steps">
-          <LimitCard limit={limit} view={view} name={agent.name} onRetry={() => void refresh()} />
+          <LimitCard
+            limit={limit}
+            view={view}
+            name={agent.name}
+            onRetry={() => void refresh()}
+            stateRef={limitState}
+          />
+          {/* Paying on its own: only for an active limit (a revoke already blocks every spend). */}
+          {limit.state === 'signed' || limit.state === 'approved' ? (
+            <AgentPayConsent
+              agentId={agent.id}
+              name={agent.name}
+              limit={limit}
+              onLimitChanged={rereadForConsent}
+            />
+          ) : null}
           {canRevoke(limit) ? (
-            <form className="w4-steps" onSubmit={(event) => void revoke(event)}>
+            /* Its own heading: revoking the whole limit is not withdrawing "Paying on its own". */
+            <form
+              className="w4-steps"
+              aria-labelledby={revokeHeading}
+              data-k="limit-revoke"
+              onSubmit={(event) => void revoke(event)}
+            >
+              <h4 id={revokeHeading} className="w4-section">
+                Revoke the limit
+              </h4>
               <p className="w4-hint">
                 {limit.state === 'revoke_pending'
                   ? 'The revoke isn’t on Base yet. Sign it with your wallet password.'
@@ -609,9 +676,11 @@ export function WalletLimitsScreen({ agent, onBack, backLabel }: AgentScreenProp
         </div>
       ) : phase.k === 'ready' && view ? (
         <form className="w4-steps" onSubmit={(event) => void prepare(event)}>
-          <p className="w4-lead">
-            Let {agent.name} pay on its own, up to a limit you sign. Base holds it to that limit,
-            and you can revoke it any time.
+          {/* A limit alone doesn't let the agent pay on its own: that is a separate OK. */}
+          <p ref={lead} className="w4-lead" tabIndex={-1} data-k="limit-lead">
+            Set the most {agent.name} may spend, in a limit you sign. Base holds it to that limit,
+            and you can revoke it any time. Paying on its own needs your separate OK once the limit
+            is set.
           </p>
           {last?.state === 'revoked' ? (
             <p className="w4-hint">Your last limit, {limitText(last)}, is revoked on Base.</p>

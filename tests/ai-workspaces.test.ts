@@ -101,8 +101,8 @@ test('an AI creates its own workspace on /mcp/open and works on /mcp with its ke
   assert.equal(created.claim_url, `${base}/#claim=${created.claim_token}`);
   assert.equal(created.mcp_url, `${base}/mcp`);
   assert.equal(created.secrets_already_issued, false);
-  // Created without a human: every scope except rooms:host, rooms:apply, results:publish and pay
-  // (a co-owner can grant them later).
+  // Created without a human: every scope except rooms:host, rooms:apply, results:publish, pay
+  // services:pay and services:sell (a co-owner can grant them later).
   assert.deepEqual(
     created.key.scopes,
     ASSISTANT_SCOPES.filter(
@@ -110,7 +110,9 @@ test('an AI creates its own workspace on /mcp/open and works on /mcp with its ke
         scope !== 'rooms:host' &&
         scope !== 'rooms:apply' &&
         scope !== 'results:publish' &&
-        scope !== 'pay',
+        scope !== 'pay' &&
+        scope !== 'services:pay' &&
+        scope !== 'services:sell',
     ),
   );
   assert.match(created.slug, /^parity-lab-[0-9a-f]{10}$/);

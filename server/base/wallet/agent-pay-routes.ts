@@ -4,6 +4,7 @@
  *
  *   GET    /api/base/agents/:agentId/wallet/agent-pay   200 the current limit's terms + the consent
  *   PUT    /api/base/agents/:agentId/wallet/agent-pay   200 consent for {permissionHash} (the limit seen)
+ *          and {recipients?} (who the screen showed it covers; left out: Central City agents only)
  *   DELETE /api/base/agents/:agentId/wallet/agent-pay   200 consent withdrawn (idempotent)
  *
  * The signed-in person must be the wallet's owner (its vault account), whatever workspace is

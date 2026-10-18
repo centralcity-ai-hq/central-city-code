@@ -5,6 +5,8 @@ import Fastify from 'fastify';
 import type { Database } from '../server/database.js';
 import {
   BASE_IDENTITY_PROVISIONAL_SQL,
+  BASE_IDENTITY_HANDOVER_BACKOFF_SQL,
+  BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL,
   BASE_MIGRATION_SQL,
   BASE_PAYMENTS_MIGRATION_SQL,
   baseShortIdsMigration,
@@ -47,6 +49,8 @@ async function setup(
   // Rows written by the legacy, final-only flow before migration 85.
   await beforeMigration85?.(pg);
   await pg.exec(BASE_IDENTITY_PROVISIONAL_SQL);
+  await pg.exec(BASE_IDENTITY_HANDOVER_BACKOFF_SQL);
+  await pg.exec(BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL);
   const db: Database = {
     query: (sql, params) => pg.query(sql, params) as never,
     exec: (sql) => pg.exec(sql),
@@ -67,6 +71,9 @@ async function setup(
   const app = Fastify();
   t.after(() => app.close());
   registerBaseRegistrationRoutes(app, {
+    // Every call here is one advance (no clock passes between them); the chain-check pacing is
+    // covered in base-rpc-calls-per-agent.test.ts.
+    throttleChainChecks: false,
     db,
     env: ENV,
     currentOperator: async (request) => {

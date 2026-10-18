@@ -14,12 +14,14 @@ import type { Database } from '../server/database.js';
 import { createApp } from '../server/app.js';
 import {
   NO_OWNER,
+  ON_BASE_LIST_LIVE,
+  ON_BASE_LIST_LIVE_EDGE,
   ON_BASE_LIVE,
   ON_BASE_LIVE_EDGE,
   ON_BASE_NOT_FOUND,
   registerOnBaseRoutes,
 } from '../server/base/explorer/routes.js';
-import { parseQuery } from '../server/base/explorer/store.js';
+import { RATED_AGENTS_SQL, parseQuery } from '../server/base/explorer/store.js';
 import {
   MULTICALL3,
   baseChainReader,
@@ -157,6 +159,7 @@ test('the list shows only registrations Central City sent and saw on Base, newes
     onBase: 5,
     new24h: 4,
     finalizingNow: 1,
+    ratedAgents: 0,
     // No Base reader: Central City's records, as old as the oldest of them.
     readAtBlock: 1005 + 1,
     readAt: NOW - 5 * MIN,
@@ -173,10 +176,13 @@ test('the list shows only registrations Central City sent and saw on Base, newes
   assert.equal(text.includes('v1:key'), false);
   assert.equal(text.includes('"ws"'), false);
 
-  // At most 15 s old anywhere; browsers always revalidate.
-  assert.equal(response.headers['cache-control'], ON_BASE_LIVE);
-  assert.equal(response.headers['vercel-cdn-cache-control'], ON_BASE_LIVE_EDGE);
-  assert.match(ON_BASE_LIVE, /(^|, )max-age=0(,|$)/);
+  // The list: an HTTP copy at most 60 s old in shared caches (fresh 10 s, then served while it
+  // refreshes); browsers always revalidate. A passport keeps the 15 s bound.
+  assert.equal(response.headers['cache-control'], ON_BASE_LIST_LIVE);
+  assert.equal(response.headers['vercel-cdn-cache-control'], ON_BASE_LIST_LIVE_EDGE);
+  assert.match(ON_BASE_LIST_LIVE, /(^|, )max-age=0(,|$)/);
+  assert.ok(staleBound(ON_BASE_LIST_LIVE, 's-maxage') <= 60);
+  assert.ok(staleBound(ON_BASE_LIST_LIVE_EDGE, 'max-age') <= 60);
   assert.ok(staleBound(ON_BASE_LIVE, 's-maxage') <= 15);
   assert.ok(staleBound(ON_BASE_LIVE_EDGE, 'max-age') <= 15);
 });
@@ -271,6 +277,7 @@ test('search finds Base IDs, short ids, agent wallets, transactions and current 
 
   assert.deepEqual(parseQuery('cc-Ab12Cd').shortId, 'Ab12Cd');
   assert.equal(parseQuery('0x12').name, null);
+  assert.equal(parseQuery('a\u0000b').name, '%a b%', 'a NUL never reaches the LIKE parameter');
 });
 
 test('a passport carries the chain facts and Central City records of one listed agent', async (t) => {
@@ -367,6 +374,7 @@ test('owner is ownerOf as the server read it at readAtBlock, never the person', 
     onBase: 3,
     new24h: 3,
     finalizingNow: 0,
+    ratedAgents: 0,
     readAtBlock: 52_431_207,
     readAt: NOW,
     servedAt: NOW,
@@ -428,6 +436,7 @@ test('without any Base answer, owners and readAt are the records, as old as they
     onBase: 0,
     new24h: 0,
     finalizingNow: 0,
+    ratedAgents: 0,
     readAtBlock: null,
     readAt: null,
     servedAt: NOW,
@@ -527,6 +536,25 @@ test('the Base reader reads the head and ownerOf at one block, only on the expec
     baseChainReader(base.url, 8453, REGISTRY).owners(['120'], 16n),
     /expected network/,
   );
+});
+
+test('the reader falls back to a second endpoint when the first does not answer', async (t) => {
+  const base = await mockBase(t);
+  // Nothing listens on the first endpoint: every read there fails at once.
+  const reader = baseChainReader(['http://127.0.0.1:9', base.url], 8453, REGISTRY);
+  assert.deepEqual(await reader.head(), { block: 16n });
+  assert.deepEqual(
+    await reader.owners(['120', '999'], 16n),
+    new Map([
+      ['120', getAddress(agentWallet(1))],
+      ['999', null],
+    ]),
+  );
+  // A failure on every endpoint still rejects; a single URL behaves as before.
+  await assert.rejects(
+    baseChainReader(['http://127.0.0.1:9', 'http://127.0.0.1:10'], 8453, REGISTRY).head(),
+  );
+  assert.deepEqual(await baseChainReader(base.url, 8453, REGISTRY).head(), { block: 16n });
 });
 
 test('a failed ownerOf read is never "no owner": the reader rejects, the list keeps its old read', async (t) => {
@@ -674,10 +702,12 @@ test("a row's score is the latest FINAL rating of each Central City rater, from 
   await addRating(db, { id: 'x1', rater: 3, baseId: 121, rated: 2, stars: 4, block: 2006 });
 
   let ratingReads = 0;
+  let ratedCounts = 0;
   const counting: Database = {
     ...db,
     query: ((sql: string, params?: unknown[]) => {
-      if (sql.includes('base_wallet_withdrawals')) ratingReads++;
+      if (sql === RATED_AGENTS_SQL) ratedCounts++;
+      else if (sql.includes('base_wallet_withdrawals')) ratingReads++;
       return db.query(sql, params as never);
     }) as Database['query'],
   };
@@ -693,6 +723,9 @@ test("a row's score is the latest FINAL rating of each Central City rater, from 
   // One query for the whole page of 7 rows, never one per row.
   assert.equal(body.rows.length, 7);
   assert.equal(ratingReads, 1);
+  // Rated agents: 120 and 121 have a final rating (on this network); counted once, not per row.
+  assert.equal(body.totals.ratedAgents, 2);
+  assert.equal(ratedCounts, 1);
 
   // A search page is scored the same way.
   const found = (

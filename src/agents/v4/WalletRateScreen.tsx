@@ -197,7 +197,7 @@ function RateStatus({
         if (stop) return;
         setView(next);
         if (DONE.includes(next.state)) {
-          clearAnchor(agentId, { withdrawalId, userOpHash: next.userOpHash });
+          clearAnchor(agentId, { withdrawalId, userOpHash: next.userOpHash }, 'rating');
           return;
         }
       } catch {
@@ -488,11 +488,15 @@ export function WalletRateScreen({ agent, onBack, backLabel }: AgentScreenProps)
         () => {
           // Again right before the signature leaves: the unlock may have taken a while.
           checkRatingWindow(request);
-          saveAnchor(agent.id, {
-            withdrawalId: request.withdrawalId,
-            userOperation: request.userOperation,
-            userOpHash: hash,
-          });
+          saveAnchor(
+            agent.id,
+            {
+              withdrawalId: request.withdrawalId,
+              userOperation: request.userOperation,
+              userOpHash: hash,
+            },
+            'rating',
+          );
           // Sent from here on: Back waits for the answer (and this rating carries on regardless).
           setSending(true);
         },
@@ -520,7 +524,7 @@ export function WalletRateScreen({ agent, onBack, backLabel }: AgentScreenProps)
       const dropped = checked ? ratingDropped(err) : null;
       if (dropped && checked) {
         key.current = null;
-        clearAnchor(agent.id, checked);
+        clearAnchor(agent.id, checked, 'rating');
         await discardUnsigned(agent.id, checked.withdrawalId);
         if (!current()) return;
         setError(

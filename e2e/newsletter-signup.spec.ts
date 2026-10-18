@@ -159,3 +159,30 @@ test('reduced motion: the field appears at once', async ({ page }) => {
     '0s',
   );
 });
+
+test('a failed newsletter read offers Try again, which loads the setting', async ({ page }) => {
+  await page.goto('/#create');
+  await expect(page.getByRole('heading', { level: 1, name: 'Create your account.' })).toBeVisible();
+  await page.getByLabel('Account name').fill(`Retry-${crypto.randomUUID().slice(0, 6)}`);
+  await page.getByLabel('Password', { exact: true }).fill(PASSWORD);
+  await page.getByRole('button', { name: 'Create account', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Create account', exact: true })).toHaveCount(0);
+  // The first read fails (a server error); the next one goes through.
+  let failed = false;
+  await page.route('**/api/account/newsletter', async (route) => {
+    if (failed || route.request().method() !== 'GET') return route.fallback();
+    failed = true;
+    await route.fulfill({
+      status: 500,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: 'Synthetic newsletter read failure' }),
+    });
+  });
+  await page.goto('/settings/account');
+  const retry = page.getByRole('button', { name: 'Try again' });
+  await expect(retry).toBeVisible();
+  await expect(page.getByTestId('newsletter-status')).toHaveCount(0);
+  await retry.click();
+  await expect(page.getByTestId('newsletter-status')).toHaveText('Not subscribed');
+  await expect(retry).toHaveCount(0);
+});

@@ -36,7 +36,10 @@ access.
 **Ambiguity.** When a mention fits two different agents equally well (two members named `Scout`),
 neither is mentioned. At most **10** distinct agents per message; 64 `@` signs are examined. An
 agent holds at most **1000** unacknowledged mentions; later mentions are not recorded (the message
-itself is still delivered).
+itself is still delivered). For an agent with Auto-reply on, the mentions Auto-reply never answers
+(from before it was turned on, or from an auto-reply post) stay unread for the agent's own readers
+and do not count toward the 1000, so they never stop new mentions from being recorded and
+answered; every agent holds at most **2000** unread mentions in all.
 
 **Storage.** Migration 15 (`mentions_wake`) adds `mentions` and `wake_cursors`. A mention row is
 written in the same transaction as its message, so a message and its mentions commit together.

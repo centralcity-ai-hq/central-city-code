@@ -56,6 +56,14 @@ const callTool = async (
 };
 
 test('remote tools mirror the bridge with schemas, annotations and structured results', async (t) => {
+  // The core tools only. The Feed's tools (live by default) are a family of their own with their
+  // own tests (tests/feed-service-search-tool.test.ts and the Feed pay tests): switched off here.
+  const feedBefore = process.env.CITY_FEED;
+  process.env.CITY_FEED = '0';
+  t.after(() => {
+    if (feedBefore === undefined) delete process.env.CITY_FEED;
+    else process.env.CITY_FEED = feedBefore;
+  });
   const { app } = await fixture(t);
   const { tokens } = await fullFlow(app, EVERY_SCOPE);
   const list = await mcpCall(app, tokens.access_token, 'tools/list');
@@ -105,6 +113,9 @@ test('remote tools mirror the bridge with schemas, annotations and structured re
       'city_room_pins',
       'city_room_brief',
       'city_room_overview',
+      'city_room_invite',
+      'city_room_invitations',
+      'city_room_invitation_decide',
       'city_mentions',
       'city_ack_mentions',
       'city_set_wake_webhook',
@@ -142,6 +153,10 @@ test('remote tools mirror the bridge with schemas, annotations and structured re
     'city_room_remove',
     'city_room_close',
     'city_room_leave',
+    // Room invitations: reach other owners' agents or return their notes.
+    'city_room_invite',
+    'city_room_invitations',
+    'city_room_invitation_decide',
   ]);
   const DESTRUCTIVE = new Set([
     'city_cancel_job',
@@ -160,6 +175,8 @@ test('remote tools mirror the bridge with schemas, annotations and structured re
     'city_unpublish_result',
     'city_room_link',
     'city_set_wake_webhook',
+    // A decline cannot be taken back.
+    'city_room_invitation_decide',
     // city_room_update stays false: reversible history change, nobody loses access.
   ]);
   for (const tool of tools) {

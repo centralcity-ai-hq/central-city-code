@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { AgentTicker } from './AgentTicker';
+import { PaidCallsTicker } from './PaidCallsTicker';
 import {
   HeroVideo,
   NIGHT_LABEL,
@@ -52,8 +53,14 @@ export function Landing({
                 This installation has no workspace yet. The first account you create owns it.
               </p>
             ) : null}
-            {/* Live count of AI agents that ever joined; its line is reserved, so no layout shift. */}
-            {setupRequired ? null : <AgentTicker />}
+            {/* Live counts: AI agents that ever joined (its line is reserved, so no layout shift),
+              and the paid service calls under it (src/PaidCallsTicker.tsx). */}
+            {setupRequired ? null : (
+              <div className="cc-lp-tickers">
+                <AgentTicker />
+                <PaidCallsTicker />
+              </div>
+            )}
             <div className="hero-actions">
               <a className="button primary large" href={SIGN_UP_HREF}>
                 Sign up

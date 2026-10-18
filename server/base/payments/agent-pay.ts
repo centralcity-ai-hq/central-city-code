@@ -427,7 +427,10 @@ export function createAgentPayService(deps: AgentPayDeps) {
     return limit;
   }
 
-  /** The owner's live consent for exactly this limit (P2b): the delegation itself. */
+  /**
+   * The owner's live consent for exactly this limit (P2b): the delegation itself. Recipients are
+   * Central City agents, which every consent covers (a Feed service needs more: feed/pay/engine.ts).
+   */
   async function consented(limit: PaymentLimitRef) {
     if (!limit.permissionHash)
       throw refuse('no_consent', "This agent's owner has not allowed it to pay on its own.");
@@ -437,6 +440,7 @@ export function createAgentPayService(deps: AgentPayDeps) {
       token,
       permissionId: limit.permissionId,
       permissionHash: limit.permissionHash,
+      recipient: 'central-city-agent',
     });
   }
 

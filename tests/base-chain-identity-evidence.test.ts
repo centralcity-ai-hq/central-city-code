@@ -438,9 +438,18 @@ test('finality elsewhere: shallow is included, unlanded has none, the settled de
     spender: SENDER,
     uri: URI,
   } as const;
+  // `${key}:q` was sent and has not landed (another operation hash; not due for a rebroadcast).
   const { store } = memoryOps([
     row,
-    registration({ ...row, idempotencyKey: `${key}:q`, status: 'queued' }),
+    registration({
+      ...row,
+      idempotencyKey: `${key}:q`,
+      userOpHash: OTHER_OP,
+      status: 'submitted',
+      txHash: null,
+      blockNumber: null,
+      updatedAt: Date.now(),
+    }),
   ]);
   const { bundler } = scriptedBundler(landed());
   // Head one block past it: not yet three confirmations deep.
@@ -450,13 +459,13 @@ test('finality elsewhere: shallow is included, unlanded has none, the settled de
     { status: op.status, blockNumber: op.blockNumber, finality: op.finality },
     { status: 'included', blockNumber: '1000', finality: 'included' },
   );
-  const queued = await portOn(shallow.client, store, bundler, sepolia).register({
+  const unlanded = await portOn(shallow.client, store, bundler, sepolia).register({
     ...input,
     operationKey: `${key}:q`,
   });
   assert.deepEqual(
-    { status: queued.status, blockNumber: queued.blockNumber, finality: queued.finality },
-    { status: 'queued', blockNumber: null, finality: null },
+    { status: unlanded.status, blockNumber: unlanded.blockNumber, finality: unlanded.finality },
+    { status: 'submitted', blockNumber: null, finality: null },
   );
   // Deep enough: final, as before (the settled depth is unchanged).
   const deep = scriptedChain({ head: BLOCK + 3n });

@@ -96,6 +96,9 @@ export function TaskStagesSection({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
+  // A failed load leaves the list unknown: it shows the error and Try again (attempt), never an
+  // empty list the host could not save.
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let live = true;
@@ -112,7 +115,7 @@ export function TaskStagesSection({
     return () => {
       live = false;
     };
-  }, [roomId]);
+  }, [roomId, attempt]);
   useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(''), 2500);
@@ -150,7 +153,21 @@ export function TaskStagesSection({
         Optional steps a task moves through, such as Building, Testing, Shipped. They show on each
         task next to its status. Leave the list empty to not use stages.
       </p>
-      {saved === null && !error ? (
+      {saved === null && error ? (
+        <div className="rm-inline-error" role="alert">
+          <span>{error}</span>
+          <button
+            type="button"
+            className="rm-quiet"
+            onClick={() => {
+              setError('');
+              setAttempt((value) => value + 1);
+            }}
+          >
+            Try again
+          </button>
+        </div>
+      ) : saved === null ? (
         <p className="rm-meta" role="status">
           Loading stages…
         </p>

@@ -12,7 +12,7 @@ import { Avatar } from '../../rooms/Avatar';
 import { AvatarColorsContext, useAvatarColors } from '../../shell/avatarColor';
 import { agentConversations, newMessageRoom, shortAgo } from './messagesRoomsModel';
 import {
-  CONVERSATIONS_PATH,
+  conversationsPath,
   ErrorLine,
   IconMsg,
   LoadingRow,
@@ -22,6 +22,7 @@ import {
   useLoad,
   type AgentScreenProps,
 } from './messagesRoomsShared';
+import { InvitationRequests } from './InvitationsScreen';
 
 /**
  * The agent's unread total for the pane's Messages row (GET /api/messages/summary, owner-wide
@@ -37,12 +38,19 @@ type MessagesData = { conversations: ConversationSummary[]; recipients: DirectRe
  * Messages of one agent: its threads (who, last text, time, unread) → a thread. Empty: "No
  * messages yet", with "New message" only when the person shares a room with the agent.
  */
-export function MessagesScreen({ agent, onBack, onOpen, backLabel }: AgentScreenProps) {
+export function MessagesScreen({
+  agent,
+  onBack,
+  onOpen,
+  onOpenRoom,
+  onChanged,
+  backLabel,
+}: AgentScreenProps) {
   const { load, reload } = useLoad<MessagesData>(
     agent.id,
     async (signal) => {
       const { conversations } = await api<{ conversations: ConversationSummary[] }>(
-        CONVERSATIONS_PATH,
+        conversationsPath(agent.id),
         undefined,
         'GET',
         signal,
@@ -88,6 +96,8 @@ export function MessagesScreen({ agent, onBack, onOpen, backLabel }: AgentScreen
 
   return (
     <ScreenFrame backLabel={backLabel ?? agent.name} onBack={onBack} title="Messages">
+      {/* A room's invitation to this agent: the owner accepts or declines here. */}
+      <InvitationRequests agent={agent} onOpenRoom={onOpenRoom} onChanged={onChanged} />
       {load.state === 'loading' ? (
         <LoadingRow />
       ) : load.state === 'error' ? (

@@ -9,6 +9,7 @@ import {
   BASE_MIGRATION_SQL,
   BASE_PAYMENTS_MIGRATION_SQL,
   BASE_SHARED_ADDITIONS_SQL,
+  BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL,
 } from '../server/base/schema.js';
 import { createKeystore, parseKeks } from '../server/base/chain/keystore.js';
 import {
@@ -28,6 +29,7 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }) {
   await pg.exec(BASE_MIGRATION_SQL);
   await pg.exec(BASE_PAYMENTS_MIGRATION_SQL);
   await pg.exec(BASE_SHARED_ADDITIONS_SQL);
+  await pg.exec(BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL);
   const db: Database = {
     query: (sql, params) => pg.query(sql, params) as never,
     exec: (sql) => pg.exec(sql),
@@ -167,6 +169,27 @@ test('chain operations: the submission block is stored and read back', async (t)
   assert.equal((await store.get('op:b'))?.submittedBlock, '123456');
   // Unknown stays unknown: absence is then never concluded.
   assert.equal((await store.insert(row('op:c'))).submittedBlock, null);
+});
+
+test('chain operations: the search cursor only moves forward, null clears it, nothing else changes', async (t) => {
+  const { db } = await setup(t);
+  const store = pgChainOperationStore(db, () => 5_000);
+  const inserted = await store.insert({ ...row('op:s'), submittedBlock: '100' });
+  assert.equal(inserted.searchedBlock, null);
+  await store.recordSearched!('op:s', '3099');
+  assert.equal((await store.get('op:s'))?.searchedBlock, '3099');
+  // A slower refresh that searched less never moves it back.
+  await store.recordSearched!('op:s', '1099');
+  assert.equal((await store.get('op:s'))?.searchedBlock, '3099');
+  await store.recordSearched!('op:s', '6099');
+  const advanced = await store.get('op:s');
+  assert.equal(advanced?.searchedBlock, '6099');
+  // The status, the receipt and the write time are never touched.
+  assert.equal(advanced?.status, inserted.status);
+  assert.equal(advanced?.updatedAt, inserted.updatedAt);
+  assert.equal(advanced?.blockNumber, null);
+  await store.recordSearched!('op:s', null);
+  assert.equal((await store.get('op:s'))?.searchedBlock, null);
 });
 
 test('x402 authorizations: stored once per intent, lowercase, returned unchanged', async (t) => {

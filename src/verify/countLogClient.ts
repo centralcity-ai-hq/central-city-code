@@ -39,6 +39,29 @@ export async function json<T>(path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
+/** The server's page cap for /api/public/count-log/leaves (LEAVES_PAGE_MAX). */
+export const LEAVES_PAGE = 10_000;
+
+/**
+ * Leaves `from` up to (not including) `to`, in order, fetched in pages the server answers in
+ * full: one request past the cap would come back short and leave a gap the list never fills.
+ */
+export async function leavesBetween<L>(
+  from: number,
+  to: number,
+  get: (path: string) => Promise<{ leaves: L[] }> = json,
+): Promise<L[]> {
+  const leaves: L[] = [];
+  for (let at = from; at < to;) {
+    const end = Math.min(to, at + LEAVES_PAGE);
+    const page = await get(`/api/public/count-log/leaves?from=${at}&to=${end}`);
+    if (!page.leaves.length) break;
+    leaves.push(...page.leaves);
+    at += page.leaves.length;
+  }
+  return leaves;
+}
+
 async function ed25519Available(): Promise<boolean> {
   try {
     await crypto.subtle.importKey(

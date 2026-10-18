@@ -100,6 +100,43 @@ test('host may invoke only when the owner turned it on', async (t) => {
   assert.equal(await f.usage(s.host.operatorId), undefined);
 });
 
+test('turning host_may_invoke off stops host invocations already queued', async (t) => {
+  const f = await elricFixture(t);
+  const s = await f.scene();
+  const hostPerson = await f.joinPerson(s.host, s.room, 'Hosty');
+  const on = await f.call(s.owner.cookie, 'PUT', '/api/elric/settings', { host_may_invoke: true });
+  assert.equal(on.statusCode, 200, on.body);
+  // Queued while allowed, then consent is withdrawn: cancelled, never run.
+  await f.say(s.host, s.room, '@Elric status please', hostPerson);
+  const off = await f.call(s.owner.cookie, 'PUT', '/api/elric/settings', {
+    host_may_invoke: false,
+  });
+  assert.equal(off.statusCode, 200, off.body);
+  await f.elric.drain();
+  assert.deepEqual(
+    (await f.turns(s.owner.operatorId)).map((turn) => [turn.outcome, turn.reason]),
+    [['cancelled', 'host_not_allowed']],
+  );
+  // The owner's own queued invocations are not touched by the setting.
+  await f.call(s.owner.cookie, 'PUT', '/api/elric/settings', { host_may_invoke: true });
+  await f.say(s.host, s.room, '@Elric status again', hostPerson);
+  await f.say(s.owner, s.room, '@Elric who is here?', s.person);
+  // The flag goes off without the setting path (a run already leased): run() refuses it too.
+  await f.db.query('UPDATE elric_agents SET host_may_invoke=false WHERE agent_id=$1', [s.elricId]);
+  await f.elric.drain();
+  const turns = await f.turns(s.owner.operatorId);
+  assert.deepEqual(
+    turns.slice(1).map((turn) => [turn.invoker_kind, turn.outcome]),
+    [
+      ['host', 'refused_access'],
+      ['owner', 'ok'],
+    ],
+  );
+  assert.equal(turns[1]!.reason, 'host_not_allowed');
+  assert.equal(f.adapterCalls(), 0);
+  assert.equal(await f.usage(s.owner.operatorId), undefined, 'no allowance used');
+});
+
 test('Tier 0 answers with no model and no cost; the reply is posted as Elric, once', async (t) => {
   const f = await elricFixture(t);
   const s = await f.scene();

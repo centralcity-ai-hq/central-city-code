@@ -40,6 +40,8 @@ export const BASE_TABLES = [
   'base_cron_cursors',
   // The sponsor's gas in flight (migration 97): operational, recognized, never exported.
   'base_sponsor_exposure',
+  // The rated agents (migration 121): derived from the ratings and their operations, never exported.
+  'base_rated_agents',
 ] as const;
 
 export const BASE_MIGRATION_SQL = `
@@ -873,7 +875,7 @@ export const baseWalletPaymentsMigration: Migration = {
  * Base Pay P2b: the owner's consent that one agent may pay on its own (wallet/agent-pay-consent.ts).
  * Bound to one chain, token, wallet and spending limit (permission id and hash); at most one live
  * consent per wallet and token. Withdrawn rows stay (revoked_at), so the history of who allowed
- * what is kept.
+ * what is kept. Who it lets the agent pay (`recipients`) is migration 118's.
  */
 export const BASE_AGENT_PAY_CONSENTS_SQL = `
 CREATE TABLE IF NOT EXISTS base_agent_pay_consents (
@@ -1130,6 +1132,140 @@ export const baseRatingsByRatedMigration: Migration = {
 };
 
 /**
+ * A refused hand-over backs off (migration 102; 100 and 101 are the directory and room invitations): how many times in a row the bound hand-over was
+ * refused before anything was stored (a node read refused under load, identity.handover_refused),
+ * and when it may be tried again. The finalize cron skips a row until then, so its batch goes to
+ * rows that can move; the owner's Try again tries it at once. Columns only: no data changes.
+ */
+export const BASE_IDENTITY_HANDOVER_BACKOFF_SQL = `
+ALTER TABLE base_identities
+  ADD COLUMN IF NOT EXISTS handover_refusals integer NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS handover_retry_at bigint;
+`;
+
+export const baseIdentityHandoverBackoffMigration: Migration = {
+  version: 102,
+  name: 'base_identity_handover_backoff',
+  sql: BASE_IDENTITY_HANDOVER_BACKOFF_SQL,
+};
+
+/**
+ * Migration 109 (105 to 108 belong to other changes). Columns only: no data changes.
+ * - `base_chain_ops.searched_block`: how far the current on-chain search for an operation's event
+ *   got without finding it, through settled blocks only (chain/submit.ts searchOnChain). The next
+ *   search resumes after it, so one refresh asks for a few getLogs pages at most, never the whole
+ *   span from the submission block. NULL: the next search starts at `submitted_block`.
+ * - `base_identities.register_refusals`, `register_retry_at`: register attempts Base refused in a row
+ *   before anything was stored (a rate limit or busy answer), and when the attempt may be tried
+ *   again, like the hand-over's (102). The finalize cron skips a row until then; after a few
+ *   refusals the owner is offered Try again, which asks at once with the same attempt key.
+ */
+export const BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL = `
+ALTER TABLE base_chain_ops ADD COLUMN IF NOT EXISTS searched_block bigint
+  CHECK (searched_block IS NULL OR searched_block >= 0);
+ALTER TABLE base_identities
+  ADD COLUMN IF NOT EXISTS register_refusals integer NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS register_retry_at bigint;
+`;
+
+export const baseSearchCursorRegisterBackoffMigration: Migration = {
+  version: 109,
+  name: 'base_search_cursor_register_backoff',
+  sql: BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL,
+};
+
+/**
+ * Migration 118 (116 and 117 belong to other open changes): who the owner's consent lets the agent
+ * pay, as the owner confirmed it (wallet/agent-pay-consent.ts). 'central-city-agents' (city_pay) or
+ * 'central-city-agents-and-feed-services' (also city_service_call). Every existing consent was
+ * given before this column, so it reads 'central-city-agents': the owner was never asked about
+ * services in the Feed, and confirms again to include them. Cheap DDL only: a constant default
+ * (no rewrite, no scan) and a check that is NOT VALID (enforced on every new or changed row; the
+ * existing rows hold the default, which passes it).
+ */
+export const BASE_AGENT_PAY_CONSENT_RECIPIENTS_SQL = `
+ALTER TABLE base_agent_pay_consents
+  ADD COLUMN IF NOT EXISTS recipients text NOT NULL DEFAULT 'central-city-agents';
+ALTER TABLE base_agent_pay_consents
+  ADD CONSTRAINT base_agent_pay_consents_recipients_check
+  CHECK (recipients IN ('central-city-agents', 'central-city-agents-and-feed-services')) NOT VALID;
+`;
+
+export const baseAgentPayConsentRecipientsMigration: Migration = {
+  version: 118,
+  name: 'base_agent_pay_consent_recipients',
+  sql: BASE_AGENT_PAY_CONSENT_RECIPIENTS_SQL,
+};
+
+/**
+ * Migration 120 (119 belongs to another open change): the rated agents, kept as they happen, so
+ * the Agent Explorer's "Rated agents" number (explorer/store.ts RATED_AGENTS_SQL) is a count of
+ * one narrow index, never a walk of every rating.
+ * - `base_rated_agents`: one row per network and Base ID with at least one rating sent through
+ *   Central City (base_wallet_withdrawals kind 'rate') whose own operation (base_chain_ops, its
+ *   chain_op_key) is a 'rate' on that network, FINAL on Base and not reverted: the finality the
+ *   list's scores count by (listScores). Every rated agent and every rater. Rows are only added
+ *   (a final operation stays final), and only by the two triggers below, in the same transaction
+ *   as the change that makes a rating count, on every write path and on older instances during a
+ *   deploy: an operation turning final (or stored final), or a rating linked to an operation that
+ *   is already final. Both insert ON CONFLICT DO NOTHING: no counter row, so no hot row and no
+ *   lock order between concurrent finalizations.
+ * - The ratings from before it are added once here, from the rating rows' own index (migration 99)
+ *   with one probe of the operation's unique key per rating: it grows with the ratings, never
+ *   with base_chain_ops.
+ */
+export const BASE_RATED_AGENTS_SQL = `
+CREATE TABLE IF NOT EXISTS base_rated_agents (
+  chain_id integer NOT NULL,
+  rated_base_id numeric(78,0) NOT NULL CHECK (rated_base_id >= 0),
+  PRIMARY KEY (chain_id, rated_base_id)
+);
+CREATE OR REPLACE FUNCTION base_rated_agents_from_op() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  INSERT INTO base_rated_agents (chain_id, rated_base_id)
+    SELECT w.chain_id, w.rated_base_id FROM base_wallet_withdrawals w
+    WHERE w.chain_op_key = NEW.idempotency_key AND w.kind = 'rate'
+      AND w.chain_id = NEW.chain_id AND w.rated_base_id IS NOT NULL
+  ON CONFLICT DO NOTHING;
+  RETURN NULL;
+END $$;
+DROP TRIGGER IF EXISTS base_rated_agents_from_op ON base_chain_ops;
+CREATE TRIGGER base_rated_agents_from_op AFTER INSERT OR UPDATE OF status, error_code, kind
+  ON base_chain_ops FOR EACH ROW
+  WHEN (NEW.kind = 'rate' AND NEW.status = 'final'
+    AND NEW.error_code IS DISTINCT FROM 'USEROP_REVERTED')
+  EXECUTE FUNCTION base_rated_agents_from_op();
+CREATE OR REPLACE FUNCTION base_rated_agents_from_rating() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  INSERT INTO base_rated_agents (chain_id, rated_base_id)
+    SELECT NEW.chain_id, NEW.rated_base_id FROM base_chain_ops o
+    WHERE o.idempotency_key = NEW.chain_op_key AND o.kind = 'rate'
+      AND o.chain_id = NEW.chain_id AND o.status = 'final'
+      AND o.error_code IS DISTINCT FROM 'USEROP_REVERTED'
+  ON CONFLICT DO NOTHING;
+  RETURN NULL;
+END $$;
+DROP TRIGGER IF EXISTS base_rated_agents_from_rating ON base_wallet_withdrawals;
+CREATE TRIGGER base_rated_agents_from_rating AFTER INSERT OR UPDATE OF chain_op_key, rated_base_id, kind
+  ON base_wallet_withdrawals FOR EACH ROW
+  WHEN (NEW.kind = 'rate' AND NEW.chain_op_key IS NOT NULL AND NEW.rated_base_id IS NOT NULL)
+  EXECUTE FUNCTION base_rated_agents_from_rating();
+INSERT INTO base_rated_agents (chain_id, rated_base_id)
+SELECT DISTINCT r.chain_id, r.rated_base_id FROM base_wallet_withdrawals r
+WHERE r.kind = 'rate' AND r.rated_base_id IS NOT NULL
+  AND (SELECT o.kind = 'rate' AND o.chain_id = r.chain_id AND o.status = 'final'
+         AND o.error_code IS DISTINCT FROM 'USEROP_REVERTED'
+       FROM base_chain_ops o WHERE o.idempotency_key = r.chain_op_key)
+ON CONFLICT DO NOTHING;
+`;
+
+export const baseRatedAgentsMigration: Migration = {
+  version: 121,
+  name: 'base_rated_agents',
+  sql: BASE_RATED_AGENTS_SQL,
+};
+
+/**
  * The sponsor's exposure in flight (migration 97; 96 is the incoming payments' safe_at, and the
  * two are independent): what the paymaster may still pay for owner operations that are not
  * finished, one row per sponsored operation or sponsored cancel (its most expensive gas,
@@ -1253,4 +1389,8 @@ export function registerBaseMigration(): void {
   registerMigration(baseSponsorExposureMigration); // 97 (96: incoming safe_at, independent)
   registerMigration(baseCronCursorsMigration); // 98 (96 and 97 belong to other open changes)
   registerMigration(baseRatingsByRatedMigration); // 99
+  registerMigration(baseIdentityHandoverBackoffMigration); // 102
+  registerMigration(baseSearchCursorRegisterBackoffMigration); // 109 (105 to 108: other changes)
+  registerMigration(baseAgentPayConsentRecipientsMigration); // 118 (116, 117: other open changes)
+  registerMigration(baseRatedAgentsMigration); // 121 (119, 120: other open changes)
 }

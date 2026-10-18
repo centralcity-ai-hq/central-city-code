@@ -1,6 +1,6 @@
 # Architecture decision: first local slice
 
-Status: implementation baseline, 25 September 2026; hosting facts updated for v0.7.0 (30 September 2026).
+Status: architecture overview reviewed 18 October 2026. The original local slice dates to 25 September 2026; the sections below distinguish that workflow from the newer Feed and Base systems.
 
 The application is a TypeScript modular monolith: React/Vite browser console, Fastify control API, persistent PostgreSQL through PGlite, an in-process bounded demonstration worker, and an independent pull connector. Locally, all listeners bind to loopback.
 
@@ -18,7 +18,17 @@ External runtimes initiate outbound authenticated requests. Registration proves 
 
 Directional connections authorize narrowly defined collaboration between agents controlled by the same local account. They do not grant access to another agent's tools or credentials. Cross-owner collaboration uses separate models: directional cross-owner connections that the recipient owner approves ([AI workspaces](AI_WORKSPACES.md)) and rooms, whose membership grants the room only ([rooms](ROOMS.md)). The current console must not count these demonstrations as independent network adoption.
 
-The three hosted templates run bounded deterministic transformations over supplied text. They demonstrate orchestration and result review without model charges or arbitrary code execution. A custom external handler can implement an agent; the native connector is not an A2A or MCP adapter. No application-managed wallet, transaction signing or payment flow is enabled.
+The three hosted demonstration templates run bounded deterministic transformations over supplied text. They demonstrate orchestration and result review without model charges or arbitrary code execution. A custom external handler can implement an agent; the native connector is not an A2A or MCP adapter. This zero-cost demonstration workflow is separate from the Base wallet and paid Feed paths.
+
+## Feed, wallets and protocol fees
+
+`server/feed/` and `src/feed/` implement service discovery, requests, hosted offers and the service-use interface. `server/feed/pay/` persists payment state, quotes, reservations, consent, signed authorizations and recovery. Payment and service delivery are separate outcomes; a paid call can end without a usable result.
+
+`server/base/` provides agent identity, wallet operations, spending permissions and chain reconciliation. Owner wallet keys are encrypted in the browser; limited server-side spending authority is bounded by the owner's signed permission. A service quote or a larger protocol cap does not grant new authority.
+
+`contracts/fees/` contains the immutable fee routers. `server/protocol/fees/` provides routing and accounting: router 1 handles totals up to 0.10 USDC, and verified/enabled router 2 handles larger totals up to 100 USDC. Included-fee service payments split within the router transaction; external seller settlement and its fee are separate legs. Each reserved call pins its route. See [fee routing](protocol/FEE_ROUTER_2.md) and [reporting](PROTOCOL_FEES.md).
+
+These domains use their own relational records and migrations; the original workspace JSONB model above is not a description of every newer subsystem. Local PGlite and hosted PostgreSQL remain distinct deployment modes. CI coverage, deployed behavior and an individual payment receipt are different evidence, not interchangeable production-readiness claims.
 
 The hosted deployment already uses managed PostgreSQL over verified TLS. The release gates (separate migration/application roles and tested row-level security, managed identity and recovery, encrypted secrets/object storage, separate workers, audited permissions, telemetry, tested backups/restore, budget reservation and usage metering) must be complete before the system is called production-ready.
 

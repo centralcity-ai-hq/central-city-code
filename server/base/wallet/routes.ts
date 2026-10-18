@@ -76,6 +76,7 @@ import type { ChainRuntime } from '../identity/routes.js';
 import { baseBalanceReader, type BalanceReader } from '../chain/balances.js';
 import { basePermissionReader, type PermissionReader } from '../chain/permission-reader.js';
 import { payChainReader, type PayChainReader } from '../pay/chain.js';
+import { baseReadUrls } from '../chain/read-transport.js';
 import { createAgentPayHistory, registerAgentPayHistoryRoutes } from '../pay/agent-history.js';
 import { registerPayRoutes } from '../pay/routes.js';
 import { createPayService, payAnyAddressEnabled } from '../pay/service.js';
@@ -134,18 +135,21 @@ export interface WalletRouteDeps {
  * The wallet network's readers (balances; W3's spend permissions; Pay's ownerOf) from the
  * environment: its endpoint (the network's bundlerEnv) and, on Base, its gate (CITY_BASE_MAINNET=1).
  * Without either there are none, so a read answers 503 (a limit view is stale) and nothing is
- * invented. Building them reads nothing.
+ * invented. Building them reads nothing. Every one of them falls back to the second read endpoint
+ * (CITY_BASE_READ_FALLBACK_RPC_URL, else the public RPC when hosted; chain/read-transport.ts) when
+ * the configured one cannot answer a read right now.
  */
 export function walletReaders(
   env: Record<string, string | undefined>,
+  options: { hosted?: boolean } = {},
 ): Pick<WalletRouteDeps, 'balances' | 'permissions' | 'payChain'> {
   const network = baseNetwork(WALLET_CHAIN_ID, env);
-  const url = network ? env[network.bundlerEnv]?.trim() : undefined;
-  if (!network || !url) return {};
+  const urls = network ? baseReadUrls(env[network.bundlerEnv], env, network.chainId, options) : [];
+  if (!network || urls.length === 0) return {};
   return {
-    balances: baseBalanceReader(url, network),
-    permissions: basePermissionReader(url, network),
-    payChain: payChainReader(url, network),
+    balances: baseBalanceReader(urls, network),
+    permissions: basePermissionReader(urls, network),
+    payChain: payChainReader(urls, network),
   };
 }
 
@@ -589,13 +593,19 @@ export function registerBaseWalletRoutes(app: FastifyInstance, deps: WalletRoute
       operations: deps.limitOperations,
       now,
     }),
+    limit: deps.limit,
   });
 
   // P2b: the owner's consent that this agent may pay on its own (nothing pays with it yet).
   registerAgentPayRoutes(app, {
     enabled,
     person: personOf,
-    service: createAgentPayConsentService({ db: deps.db, chainId: WALLET_CHAIN_ID, now }),
+    service: createAgentPayConsentService({
+      db: deps.db,
+      chainId: WALLET_CHAIN_ID,
+      now,
+      env: deps.env,
+    }),
   });
 
   // P2d: the payments the agent made on its own, read only (the wallet's owner account alone).

@@ -3,8 +3,9 @@
  * wallet, one per token (USDC only), signed in the browser by the owner key.
  *
  *   prepare  the spend permission for the owner's cap and period: account = the agent wallet,
- *            spender = the agent's spender account, the fixed on-chain period starting at the next
- *            00:00 Berlin, no end, a random salt; plus the typed data the owner signs
+ *            spender = the agent's spender account, the fixed on-chain period starting at 00:00
+ *            Berlin of the current day (so the first period is today's and the limit works at
+ *            once), no end, a random salt; plus the typed data the owner signs
  *   store    the signed permission, rebuilt and compared field by field, the owner recovered from
  *            the signature, wrapped for the wallet (ERC-6492 while it has no code); 'signed'
  *   list     every limit with Base's view at ONE block (period, spent, left, approved, revoked)
@@ -43,8 +44,8 @@ import {
   LIMIT_PERMISSION_END,
   LIMIT_SIGNATURE_TTL_MS,
   LIMIT_TIME_ZONE,
+  berlinDayStart,
   calendarPeriod,
-  nextBerlinMidnight,
   onchainAllowance,
   permissionFromJson,
   permissionToJson,
@@ -53,6 +54,7 @@ import {
   type LimitPeriod,
   type OnchainCapModel,
 } from '../../../shared/base/spend-limits.js';
+import { sponsorshipEnding } from '../../../shared/base/paymasters.js';
 import { calendarSpent } from '../chain/calendar-limit.js';
 import { DERIVATION_VERSION, type DerivationRecipe } from '../chain/derive.js';
 import {
@@ -459,6 +461,12 @@ export function createLimitService(deps: LimitServiceDeps) {
     }
   }
 
+  /** The stored revoke operation's paymasterAndData, when it has one. */
+  function revokeSponsorData(row: LimitRow): string | undefined {
+    const data = row.revoke_operation?.paymasterAndData;
+    return typeof data === 'string' ? data : undefined;
+  }
+
   /** What is sent for a signed revoke: the stored operation with the owner's stored signature. */
   function submission(wallet: WalletRow, row: LimitRow, signature: Hex) {
     const userOpHash = row.revoke_user_op_hash as Hex;
@@ -532,7 +540,10 @@ export function createLimitService(deps: LimitServiceDeps) {
   /**
    * The chain operation of a signed revoke, brought up to date. Signed and linked here but never
    * stored by the chain module (a stop in between, or Base unreachable when it was signed): sent
-   * now, exactly as signed. Null when the chain cannot be reached; the next read tries again.
+   * now, exactly as signed. Stored there but never claimed for its first send (a stop or a
+   * database error between that store and the claim): resumed the same way, since refresh never
+   * sends a queued operation; submit's compare-and-set claim lets exactly one worker send it.
+   * Null when the chain cannot be reached; the next read tries again.
    */
   async function follow(
     wallet: WalletRow,
@@ -541,9 +552,9 @@ export function createLimitService(deps: LimitServiceDeps) {
   ): Promise<StoredOperation | null> {
     if (!row.revoke_op_key) return null;
     let op = await refreshOp(row.revoke_op_key);
-    if (!op) {
+    if (!op || op.status === 'queued') {
       const signature = await signatureOf(row);
-      if (!signature) return null;
+      if (!signature) return op;
       try {
         op = await (await operations()).submit(submission(wallet, row, signature));
       } catch (error) {
@@ -552,7 +563,7 @@ export function createLimitService(deps: LimitServiceDeps) {
           (error.code === 'OUTDATED' || error.code === 'WALLET_MISMATCH')
         )
           await clearLink(row);
-        return null;
+        return op;
       }
     }
     await markSubmitted(wallet, accountId, row, op);
@@ -661,11 +672,13 @@ export function createLimitService(deps: LimitServiceDeps) {
       requireBackup(wallet);
       const cap = capFrom(parsed.data.capRaw);
       await requireNoActiveLimit(wallet, accountId);
+      // The start of today in Berlin: the first on-chain period is the current one, so the limit
+      // can be used as soon as it is stored. Later periods keep their fixed lengths.
       const permission = build(
         wallet,
         cap,
         parsed.data.period,
-        nextBerlinMidnight(now()),
+        berlinDayStart(now()),
         BigInt(`0x${randomBytes(32).toString('hex')}`),
       );
       checkPermission(permission);
@@ -704,11 +717,12 @@ export function createLimitService(deps: LimitServiceDeps) {
       const cap = capFrom(parsed.data.capRaw);
       const period = parsed.data.period;
 
-      // Rebuild what prepare would have built and compare every field: only the start (the next
-      // Berlin midnight when it was prepared, within the signing window) and the salt come from
-      // the request.
+      // Rebuild what prepare would have built and compare every field: only the start (the start
+      // of the Berlin day it was prepared on, within the signing window: prepared just before
+      // midnight and stored just after, it is the previous day's) and the salt come from the
+      // request.
       const at = now();
-      const starts = [nextBerlinMidnight(at), nextBerlinMidnight(at - LIMIT_SIGNATURE_TTL_MS)];
+      const starts = [berlinDayStart(at), berlinDayStart(at - LIMIT_SIGNATURE_TTL_MS)];
       const expected = build(wallet, cap, period, permission.start, permission.salt);
       const same =
         starts.includes(permission.start) &&
@@ -876,11 +890,13 @@ export function createLimitService(deps: LimitServiceDeps) {
           });
       }
       // (A linked one that failed on Base, its nonce used by another owner operation: a new attempt.)
+      // An unsigned one whose sponsorship is ending is not handed out again: a new one is prepared.
       if (
         !row.revoke_op_key &&
         row.revoke_operation &&
         row.revoke_expires_at !== null &&
-        Number(row.revoke_expires_at) > now()
+        Number(row.revoke_expires_at) > now() &&
+        !sponsorshipEnding(revokeSponsorData(row), now())
       )
         return signingRequest(wallet, row);
 
@@ -940,7 +956,10 @@ export function createLimitService(deps: LimitServiceDeps) {
       const signature = parsed.data.signature as Hex;
       const owner = getAddress(wallet.owner_address);
       const userOpHash = row.revoke_user_op_hash as Hex;
-      if (row.revoke_op_key !== key && Number(row.revoke_expires_at) <= now())
+      if (
+        row.revoke_op_key !== key &&
+        (Number(row.revoke_expires_at) <= now() || sponsorshipEnding(revokeSponsorData(row), now()))
+      )
         throw new LimitError(
           410,
           'expired',

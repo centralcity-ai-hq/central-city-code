@@ -471,3 +471,219 @@ test('sent and failed queue rows (address and body) are deleted after 30 days', 
   await drain(f.app);
   assert.equal((await f.app.city.db.query('SELECT 1 FROM email_outbox')).rows.length, 0);
 });
+
+test('confirmation emails per recipient are capped across accounts and paths; ticked sign-ups use the address budget', async (t) => {
+  const f = await fixture(t);
+  let ip = 10;
+  const signUpFor = (name: string, email: string, remoteAddress = `198.51.100.${ip++}`) =>
+    f.app.inject({
+      method: 'POST',
+      url: '/api/auth/register',
+      headers: jsonHeaders,
+      remoteAddress,
+      payload: JSON.stringify({
+        password: 'synthetic-password-0001',
+        name,
+        newsletter: true,
+        email,
+      }),
+    });
+  // Three confirmations to one address from three sources and accounts (case does not matter).
+  for (const [i, email] of [
+    'target@example.com',
+    'Target@Example.com',
+    'TARGET@example.com',
+  ].entries())
+    assert.equal((await signUpFor(`Recipient ${i}`, email)).statusCode, 201);
+  // The fourth gets no confirmation, but the account is still created: a spent recipient budget
+  // skips the opt-in (no consent, no email) and never blocks the sign-up.
+  const skipped = await signUpFor('Recipient 3', 'target@example.com');
+  assert.equal(skipped.statusCode, 201, skipped.body);
+  const skippedId = skipped.json().operator.id as string;
+  assert.equal(
+    (
+      await f.app.city.db.query('SELECT 1 FROM newsletter_consents WHERE operator_id=$1', [
+        skippedId,
+      ])
+    ).rows.length,
+    0,
+  );
+  assert.equal(
+    (await f.app.city.db.query('SELECT 1 FROM email_outbox WHERE operator_id=$1', [skippedId])).rows
+      .length,
+    0,
+  );
+  assert.equal((await newsletter(f.app, cookieOf(skipped))).status, 'none');
+  // Settings on another account cannot reach it either.
+  const other = await signUpFor('Recipient other', 'other@example.com');
+  const settings = await f.app.inject({
+    method: 'POST',
+    url: '/api/account/newsletter',
+    headers: { ...jsonHeaders, cookie: cookieOf(other) },
+    payload: JSON.stringify({ subscribe: true, email: 'target@example.com' }),
+  });
+  assert.equal(settings.statusCode, 429, settings.body);
+  await drain(f.app);
+  assert.equal(f.sent.filter((mail) => mail.body.to[0] === 'target@example.com').length, 3);
+  // A day later the address can be signed up again.
+  f.clock.now += 24 * 3_600_000 + 1;
+  assert.equal((await signUpFor('Recipient 4', 'target@example.com')).statusCode, 201);
+
+  // One source: ticked sign-ups are charged to the newsletter address budget (20 an hour), even
+  // with a fresh register window.
+  const source = '203.0.113.7';
+  for (let i = 0; i < 20; i++) {
+    if (i && i % 10 === 0) f.clock.now += 15 * 60_000 + 1;
+    const res = await signUpFor(`Source ${i}`, `reader${i}@example.com`, source);
+    assert.equal(res.statusCode, 201, res.body);
+  }
+  f.clock.now += 15 * 60_000 + 1;
+  // A spent address budget skips the opt-in (no consent, no email) and never refuses the account.
+  const over = await signUpFor('Source 20', 'reader20@example.com', source);
+  assert.equal(over.statusCode, 201, over.body);
+  const overId = over.json().operator.id as string;
+  assert.equal(
+    (await f.app.city.db.query('SELECT 1 FROM newsletter_consents WHERE operator_id=$1', [overId]))
+      .rows.length,
+    0,
+  );
+  assert.equal(
+    (await f.app.city.db.query('SELECT 1 FROM email_outbox WHERE operator_id=$1', [overId])).rows
+      .length,
+    0,
+  );
+  // Settings from the same source is still refused with a 429.
+  const fromSettings = await f.app.inject({
+    method: 'POST',
+    url: '/api/account/newsletter',
+    headers: { ...jsonHeaders, cookie: cookieOf(over) },
+    remoteAddress: source,
+    payload: JSON.stringify({ subscribe: true, email: 'reader20@example.com' }),
+  });
+  assert.equal(fromSettings.statusCode, 429, fromSettings.body);
+  // Without the tick the same source still registers.
+  const plain = await f.app.inject({
+    method: 'POST',
+    url: '/api/auth/register',
+    headers: jsonHeaders,
+    remoteAddress: source,
+    payload: JSON.stringify({ password: 'synthetic-password-0001', name: 'Source plain' }),
+  });
+  assert.equal(plain.statusCode, 201, plain.body);
+});
+
+test('refused sign-ups and onboardings spend no newsletter budget', async (t) => {
+  const f = await fixture(t);
+  const pendingFor = async (operatorId: string) =>
+    (
+      await f.app.city.db.query<{ email: string }>(
+        'SELECT email FROM newsletter_consents WHERE operator_id=$1 AND confirmed_at IS NULL',
+        [operatorId],
+      )
+    ).rows[0]?.email;
+  // Password sign-up: three ticked attempts on a taken name are refused before any budget is used.
+  assert.equal((await register(f.app, { name: 'Taken Name' })).statusCode, 201);
+  const source = '203.0.113.40';
+  const attempt = (name: string) =>
+    f.app.inject({
+      method: 'POST',
+      url: '/api/auth/register',
+      headers: jsonHeaders,
+      remoteAddress: source,
+      payload: JSON.stringify({
+        password: 'synthetic-password-0001',
+        name,
+        newsletter: true,
+        email: 'retry@example.com',
+      }),
+    });
+  for (let i = 0; i < 3; i++) assert.equal((await attempt('Taken Name')).statusCode, 409);
+  const created = await attempt('Free Name');
+  assert.equal(created.statusCode, 201, created.body);
+  assert.equal(await pendingFor(created.json().operator.id), 'retry@example.com');
+  // Onboarding: three refused names, then a free one; the opt-in still goes out.
+  const cookie = await signUp(f, '100000000000000000988');
+  for (let i = 0; i < 3; i++)
+    assert.equal(
+      (await onboard(f.app, cookie, { name: 'Taken Name', newsletter: true })).statusCode,
+      409,
+    );
+  const done = await onboard(f.app, cookie, { name: 'Onboarded Reader', newsletter: true });
+  assert.equal(done.statusCode, 200, done.body);
+  assert.equal(
+    await pendingFor(done.json().operator.id),
+    'person.100000000000000000988@example.com',
+  );
+  await drain(f.app);
+  assert.equal(f.sent.filter((mail) => mail.body.to[0] === 'retry@example.com').length, 1);
+});
+
+test('a spent recipient budget skips the onboarding opt-in and never blocks onboarding', async (t) => {
+  const f = await fixture(t);
+  const cookie = await signUp(f, '100000000000000000977');
+  const victim = 'person.100000000000000000977@example.com';
+  // Another account spends the address's confirmation budget from its settings.
+  const other = await register(f.app, { name: 'Budget Spender' });
+  assert.equal(other.statusCode, 201, other.body);
+  const subscribe = () =>
+    f.app.inject({
+      method: 'POST',
+      url: '/api/account/newsletter',
+      headers: { ...jsonHeaders, cookie: cookieOf(other) },
+      payload: JSON.stringify({ subscribe: true, email: victim }),
+    });
+  for (let i = 0; i < 3; i++) assert.equal((await subscribe()).statusCode, 200);
+  assert.equal((await subscribe()).statusCode, 429);
+  // The ticked box no longer fails the onboarding: the name and terms are kept, the opt-in skipped.
+  const done = await onboard(f.app, cookie, { name: 'Budget Victim', newsletter: true });
+  assert.equal(done.statusCode, 200, done.body);
+  assert.equal(done.json().operator.name, 'Budget Victim');
+  assert.equal(done.json().onboarding.required, false);
+  assert.equal((await newsletter(f.app, cookie)).status, 'none');
+  assert.equal(
+    (
+      await f.app.city.db.query(
+        "SELECT 1 FROM email_outbox WHERE operator_id=$1 AND kind='newsletter_confirm'",
+        [done.json().operator.id],
+      )
+    ).rows.length,
+    0,
+  );
+});
+
+test('a newsletter opt-in error after the commit is skipped: sign-up and onboarding still reply', async (t) => {
+  const f = await fixture(t);
+  const googleAddress = 'person.100000000000000000966@example.com';
+  // A synthetic non-429 database error inside the opt-in, after the account has committed.
+  await f.app.city.db.query(
+    `ALTER TABLE newsletter_consents ADD CONSTRAINT synthetic_opt_in_failure
+       CHECK (email NOT IN ('broken@example.com', '${googleAddress}'))`,
+  );
+  const created = await register(f.app, {
+    name: 'Broken Letter',
+    newsletter: true,
+    email: 'broken@example.com',
+  });
+  assert.equal(created.statusCode, 201, created.body);
+  assert.equal(created.json().operator.name, 'Broken Letter');
+  assert.equal((await newsletter(f.app, cookieOf(created))).status, 'none');
+  // A retry is not needed: the session is live.
+  const session = await f.app.inject({
+    method: 'GET',
+    url: '/api/session',
+    headers: { cookie: cookieOf(created) },
+  });
+  assert.equal(session.json().operator?.id, created.json().operator.id);
+
+  const cookie = await signUp(f, '100000000000000000966');
+  const done = await onboard(f.app, cookie, { name: 'Broken Onboarding', newsletter: true });
+  assert.equal(done.statusCode, 200, done.body);
+  assert.equal(done.json().operator.name, 'Broken Onboarding');
+  assert.equal(done.json().onboarding.required, false);
+  assert.equal((await newsletter(f.app, cookie)).status, 'none');
+  assert.equal(
+    (await f.app.city.db.query("SELECT 1 FROM email_outbox WHERE kind='newsletter_confirm'")).rows
+      .length,
+    0,
+  );
+});

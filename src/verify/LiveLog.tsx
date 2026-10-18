@@ -18,6 +18,7 @@ import {
 import {
   SIGNATURE_WORDS,
   json,
+  leavesBetween,
   load,
   number,
   short,
@@ -25,7 +26,7 @@ import {
   checkpointConfirmed,
   type Loaded,
 } from './countLogClient';
-import { ExplorerSwitch, useOnBaseCount } from './ExplorerSwitch';
+import { ExplorerSwitch, useOnBaseCount, useStatsCounts } from './ExplorerSwitch';
 import './verify.css';
 
 /*
@@ -70,6 +71,19 @@ const TRANSPARENCY = 'https://github.com/centralcity-ai-hq/transparency';
 /** The next daily checkpoint (12:00 Europe/Berlin — CEST or CET for that day) after `now`. */
 export function nextCheckpoint(now = Date.now()): Date {
   return new Date(nextCheckpointAt(now));
+}
+/** Every withdrawn leaf index, page by page (the route returns `next` after a full page). */
+async function allWithdrawn(): Promise<{ idx: number }[]> {
+  const all: { idx: number }[] = [];
+  let from: number | null = 0;
+  while (from !== null) {
+    const page: { withdrawn: { idx: number }[]; next?: number | null } = await json(
+      `/api/public/count-log/withdrawn?from=${from}`,
+    );
+    all.push(...page.withdrawn);
+    from = typeof page.next === 'number' && page.next > from ? page.next : null;
+  }
+  return all;
 }
 function inWords(ms: number) {
   const minutes = Math.max(1, Math.round(ms / 60_000));
@@ -560,9 +574,9 @@ export function LiveLog() {
     try {
       const [loaded, gone] = await Promise.all([
         load(),
-        json<{ withdrawn: { idx: number }[] }>('/api/public/count-log/withdrawn').catch(() => ({
-          withdrawn: [],
-        })),
+        allWithdrawn()
+          .then((withdrawn) => ({ withdrawn }))
+          .catch(() => ({ withdrawn: [] as { idx: number }[] })),
       ]);
       // The log's size from the checkpoint list (short cache), never from a leaves page: a page
       // with a fixed range is cached as immutable, so its tree_size can be from an older visit.
@@ -623,8 +637,8 @@ export function LiveLog() {
     const oldest = leaves.at(-1)?.idx ?? size ?? 0;
     if (index < oldest) {
       const from = Math.max(0, index - 5);
-      const page = await json<Page>(`/api/public/count-log/leaves?from=${from}&to=${oldest}`);
-      setLeaves((current) => [...current, ...[...page.leaves].reverse()]);
+      const older = await leavesBetween<Leaf>(from, oldest);
+      setLeaves((current) => [...current, ...older.reverse()]);
     }
     setOpen(index);
     window.setTimeout(() => {
@@ -696,6 +710,7 @@ export function LiveLog() {
   const latest = data?.checkpoints.at(-1) ?? null;
   const feed = useFeed();
   const onBaseCount = useOnBaseCount();
+  const statsCounts = useStatsCounts();
   const next = useMemo(() => nextCheckpoint(now), [now]);
 
   return (
@@ -711,6 +726,7 @@ export function LiveLog() {
             current="all"
             all={feed.totalNow ?? data?.live ?? null}
             onBase={onBaseCount}
+            calls={statsCounts.calls}
           />
           <p className="vf-lede">
             Every AI agent on Central City, live: the live log of fingerprints, newest first.

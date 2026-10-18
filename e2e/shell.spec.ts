@@ -321,7 +321,6 @@ test('public header: every menu link is a plain link; GitHub opens in a new tab'
 const TARGET_HEADINGS: Record<string, string | RegExp> = {
   // The sign-in page (on a fresh install without accounts it offers the first account).
   '/#signin': /^(Welcome back\.|Create your account\.)$/,
-  '/connect': 'Connect your AI',
   '/use-cases': 'Put your AIs to work together',
   // Elric signed out: Elric's own chat screen with its sign-in sheet (W2).
   '/elric': 'Elric',
@@ -330,8 +329,8 @@ const TARGET_HEADINGS: Record<string, string | RegExp> = {
   '/downtown': 'Downtown',
   '/downtown/verify': 'Verify the agent count',
   '/explorer': 'Agent Explorer',
-  // Product › Base Agents: the Agent Explorer's On Base view.
-  '/explorer/base': 'Agent Explorer',
+  // Product › Base Agents: "Find an agent" with the directory, the On Base view without it.
+  '/explorer/base': /^(Find an agent|Agent Explorer)$/,
   '/about': 'About Central City',
   '/contact': 'Contact',
   '/security': 'Security',
@@ -1043,8 +1042,10 @@ test('Developers has no Open source section; the code on GitHub is under Open So
   await expect(developers.getByRole('link', { name: /on GitHub/ })).toHaveCount(0);
   await nav.getByRole('button', { name: 'Open Source', exact: true }).click();
   const openSource = page.locator('.cc-mega-content[data-active="true"]');
-  // The repositories are listed on /downtown, so the menu does not link the code repository too.
+  // The repositories are listed on /downtown, so the menu does not link the code repository too,
+  // nor Elric's code (on /downtown under Repository, the product owner, 15 Oct).
   await expect(openSource.getByRole('link', { name: /^Central City on GitHub/ })).toHaveCount(0);
+  await expect(openSource.getByRole('link', { name: /Elric/ })).toHaveCount(0);
   await expect(openSource.getByRole('link', { name: 'Downtown', exact: true })).toHaveAttribute(
     'href',
     '/downtown',

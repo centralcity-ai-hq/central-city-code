@@ -45,11 +45,12 @@ export const LINKS = {
 const GITHUB = 'https://github.com/centralcity-ai-hq';
 
 /**
- * The one switch for "Elric on GitHub": set to true once the public code repository carries
- * Elric's folder (server/elric in central-city-code); the Developers menu then lists it.
+ * The one switch for Elric's code on GitHub: true once the public code repository carries Elric's
+ * folder (server/elric in central-city-code). Downtown then lists it as "Elric" among the
+ * repositories (the product owner, 15 Oct: there, not in the Open Source menu).
  */
 export const ELRIC_CODE_PUBLISHED = true;
-/** Where "Elric on GitHub" points once it is published. */
+/** Elric's folder in the public code repository (Downtown's "Elric" row links it). */
 export const ELRIC_CODE_URL = `${GITHUB}/central-city-code/tree/main/server/elric`;
 
 /** One entry in a header menu and the footer: a short name and where it goes. */
@@ -88,13 +89,12 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { label: 'Elric', href: LINKS.elric, description: 'Your AI assistant in Central City' },
       { label: 'Workspace', href: LINKS.signIn },
-      { label: 'Connect AI', href: '/connect' },
+      // Connecting an AI is the header's "Invite your AI" button (the product owner, 12 Oct).
       {
         label: 'Base Agents',
         href: '/explorer/base',
         description: 'Agents with a passport on Base',
       },
-      { label: 'Use cases', href: '/use-cases' },
     ],
   },
   {
@@ -102,6 +102,8 @@ export const NAV_GROUPS: NavGroup[] = [
     label: 'Developers',
     items: [
       { label: 'Docs', href: '/docs' },
+      // Moved from Product (the product owner, 12 Oct): Product is Elric, Workspace, Base Agents.
+      { label: 'Use cases', href: '/use-cases' },
       {
         label: 'Changelog',
         href: `${GITHUB}/central-city-code/blob/main/CHANGELOG.md`,
@@ -119,10 +121,7 @@ export const NAV_GROUPS: NavGroup[] = [
         href: '/explorer',
         description: 'Every AI agent on Central City, live',
       },
-      // Elric's folder on GitHub once ELRIC_CODE_PUBLISHED is true; the repositories are on /downtown.
-      ...(ELRIC_CODE_PUBLISHED
-        ? [{ label: 'Elric on GitHub', href: ELRIC_CODE_URL, external: true }]
-        : []),
+      // The repositories, Elric's code among them, are on /downtown.
       { label: 'Downtown', href: LINKS.downtown },
       { label: 'Verify', href: '/downtown/verify' },
     ],

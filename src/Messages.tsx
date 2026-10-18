@@ -1,5 +1,6 @@
 import './messages-v2.css';
 import { navigate } from './shell/navigation';
+import { subscribePoll, type PollState } from './shell/sharedPoll';
 import {
   useCallback,
   useEffect,
@@ -40,9 +41,13 @@ import type {
   DirectThread,
   InboxSummary,
 } from '../server/messaging/contract';
-import { api, ApiError } from './api';
+import { api, ApiError, selectedWorkspaceId } from './api';
+import { pageVisible } from './rooms/readMark';
 import { AgentGlyph, ConfirmDialog, formatDate } from './components';
 import { describeError } from './ui/errors';
+import { RequestResponses, requestResponsesOf, type AgentSearch } from './RequestResponses';
+import { searchLiveAgents } from './agents/ownAgents';
+import { useResolvedAgents } from './agents/useResolvedAgents';
 import { AvatarColorsContext, useAvatarColors, useAvatarStyle } from './shell/avatarColor';
 import {
   formatUnread,
@@ -528,17 +533,80 @@ function ReadError({
   );
 }
 
-/** Unacknowledged counts per agent inbox, from the inbox cursors. */
+/**
+ * One shared poll per address for every component that shows the same thing (sharedPoll.ts),
+ * per workspace: the answer depends on the workspace the request goes out in.
+ */
+function useSharedPoll<T>(path: string | null) {
+  const workspace = selectedWorkspaceId() ?? '';
+  const key = path ? `${workspace}|${path}` : null;
+  const [, changed] = useState(0);
+  const handle = useRef<{ get: () => PollState<T>; refresh: () => Promise<void> } | null>(null);
+  useEffect(() => {
+    if (!key || !path) return;
+    const subscription = subscribePoll<T>(
+      key,
+      path,
+      {
+        read: readJson,
+        describe: (err, timedOut) => describe(timedOut ? { name: 'TimeoutError' } : err),
+        lost: lostAccess,
+        everyMs: POLL_MS,
+      },
+      () => changed((n) => n + 1),
+    );
+    handle.current = subscription;
+    changed((n) => n + 1);
+    return () => {
+      handle.current = null;
+      subscription.unsubscribe();
+    };
+  }, [key, path]);
+  const refresh = useCallback(() => handle.current?.refresh() ?? Promise.resolve(), []);
+  const state = key && handle.current ? handle.current.get() : null;
+  return {
+    data: (state?.data ?? null) as T | null,
+    error: state?.error ?? '',
+    loading: state?.loading ?? Boolean(path),
+    refresh,
+  };
+}
+
+/** Unacknowledged counts per agent inbox, from the inbox cursors (one shared poll). */
 export function useInboxSummary(enabled: boolean) {
-  const { data, refresh } = usePoll<{ inboxes: InboxSummary[] }>(
-    enabled ? '/api/messages/summary' : null,
-  );
+  const { data, refresh } = useSharedPoll<{
+    inboxes: InboxSummary[];
+    /** Open room invitations per agent (Operation Directory D2), when the server counts them. */
+    invitations?: Record<string, number>;
+    /** Open responses to the owner's Feed requests (Feed Respond); absent while the Feed is off. */
+    requestResponses?: number;
+  }>(enabled ? '/api/messages/summary' : null);
   const unread = new Map((data?.inboxes ?? []).map((item) => [item.agent_id, item.unread]));
   const capped = new Set(
     (data?.inboxes ?? []).filter((item) => item.unread_capped).map((item) => item.agent_id),
   );
   const total = [...unread.values()].reduce((sum, value) => sum + value, 0);
-  return { unread, capped, total, refresh };
+  const invitations = new Map(
+    Object.entries(data?.invitations ?? {}).filter(
+      (entry): entry is [string, number] => Number.isInteger(entry[1]) && entry[1] > 0,
+    ),
+  );
+  const invited = [...invitations.values()].reduce((sum, value) => sum + value, 0);
+  const requestResponses = requestResponsesOf(data);
+  // The Messages badge: unread conversations and responses to the owner's Feed requests.
+  const badge = total + requestResponses;
+  return {
+    unread,
+    capped,
+    total,
+    invitations,
+    invited,
+    requestResponses,
+    badge,
+    /** The last summary read (a new object with every read). */
+    summary: data,
+    refresh,
+  };
 }
 
 /** A send route: the sender is always one of your agents; the recipient may be another owner's. */
@@ -1803,6 +1871,32 @@ const FILTERS: Array<{ id: InboxFilter; label: string; empty: string }> = [
 ];
 
 /**
+ * Marks the open thread read (POST .../read for each of its contexts) only while it is on screen:
+ * the tab must be visible. The polls keep running in a background tab, so a message that arrives
+ * there stays unread until the person comes back to the tab, and is marked read then.
+ */
+export function useThreadReadMark(readContexts: string, shownCount: number, onRead: () => void) {
+  const [visible, setVisible] = useState(pageVisible);
+  useEffect(() => {
+    const update = () => setVisible(pageVisible());
+    document.addEventListener('visibilitychange', update);
+    return () => document.removeEventListener('visibilitychange', update);
+  }, []);
+  const read = useRef(onRead);
+  read.current = onRead;
+  useEffect(() => {
+    if (!readContexts || !shownCount || !visible) return;
+    Promise.all(
+      (JSON.parse(readContexts) as string[]).map((context) =>
+        api(`/api/messages/direct/${encodeURIComponent(context)}/read`, {}),
+      ),
+    )
+      .then(() => read.current())
+      .catch(() => undefined);
+  }, [readContexts, shownCount, visible]);
+}
+
+/**
  * The Messages page (WORKSPACE_V3 §5). One view at a time: the inbox (a floating "Messages" pill
  * with the live unread count and New conversation, the All / Unread / Agents tabs and one card
  * list of conversations), or a thread (Back, the other side's pill and its ⋯ menu, the bubbles
@@ -1827,6 +1921,32 @@ export function MessagesView({
   direct?: { room: string; to: string } | null;
 }) {
   const [threadOpen, setThreadOpen] = useState(Boolean(direct));
+  // Responses to the owner's Feed requests (the shared summary poll): Accept picks a live agent
+  // that is not paused (the server refuses a paused one: 409 agent_paused).
+  const requestSummary = useInboxSummary(true);
+  const ownAgents = useMemo(
+    () =>
+      snapshot.agents
+        .filter((agent) => !agent.revokedAt && agent.status !== 'revoked')
+        .map((agent) => ({
+          id: agent.id,
+          name: agent.name,
+          paused: Boolean(agent.pausedAt),
+        })),
+    [snapshot.agents],
+  );
+  // A paged workspace (src/agents/agentPages.ts) carries its newest agents: Accept also searches
+  // every agent of the workspace.
+  const acceptSearch: AgentSearch | null = snapshot.agentsPage
+    ? (q, signal) =>
+        searchLiveAgents(q, signal).then((found) =>
+          found.map((agent) => ({
+            id: agent.id,
+            name: agent.name,
+            paused: Boolean(agent.pausedAt),
+          })),
+        )
+    : null;
   const [filter, setFilter] = useState<InboxFilter>('all');
   const [details, setDetails] = useState(false);
   const listRef = useRef<HTMLElement>(null);
@@ -2002,6 +2122,17 @@ export function MessagesView({
     (opened && opened.context_id === active ? opened : null);
   const pendingDirect = !summary && directThread ? directThread : null;
   const thread = useThread(workspace, summary?.key ?? null, summary?.items ?? []);
+  // A paged snapshot carries only some agents: the ones the inbox, its unread counts and the
+  // open thread name and it does not carry are read by id (a full snapshot reads nothing).
+  const knownAgents = useResolvedAgents(snapshot, [
+    ...unread.keys(),
+    ...conversations.flatMap((chat) => chat.participants),
+    ...thread.messages.flatMap((message) => [message.from_agent_id, message.to_agent_id]),
+  ]);
+  const named = useMemo(
+    () => (knownAgents === snapshot.agents ? snapshot : { ...snapshot, agents: knownAgents }),
+    [snapshot, knownAgents],
+  );
   // Reading a thread marks it read for you, whichever of your members received it (the owner's
   // read mark), and a private room thread to your person also acknowledges the person's inbox
   // (a person has no inbox view), so it drains like an AI's does when it acknowledges. An AI's
@@ -2011,20 +2142,11 @@ export function MessagesView({
   const readContexts = !threadOpen
     ? ''
     : JSON.stringify(summary?.contexts ?? (directThread ? [directThread.context_id] : []));
-  useEffect(() => {
-    if (!readContexts || !shownCount) return;
-    Promise.all(
-      (JSON.parse(readContexts) as string[]).map((context) =>
-        api(`/api/messages/direct/${encodeURIComponent(context)}/read`, {}),
-      ),
-    )
-      // Re-read the list and the navigation count so every badge shows the server's count.
-      .then(() => {
-        void list.refresh();
-        onSummaryChanged();
-      })
-      .catch(() => undefined);
-  }, [readContexts, shownCount]);
+  useThreadReadMark(readContexts, shownCount, () => {
+    // Re-read the list and the navigation count so every badge shows the server's count.
+    void list.refresh();
+    onSummaryChanged();
+  });
   const newestContext = summary?.items[0]?.context_id;
   useEffect(() => {
     if (newestContext) writeLastChat(workspace, newestContext);
@@ -2032,7 +2154,7 @@ export function MessagesView({
   const participants = summary?.participants ?? [];
   const inThread = (route: Route) =>
     participants.includes(route.from.id) && participants.includes(route.to.id);
-  const threadRoutes = [...routesOf(snapshot, inThread), ...crossRoutes.filter(inThread)];
+  const threadRoutes = [...routesOf(named, inThread), ...crossRoutes.filter(inThread)];
   // Default to answering the last message: its recipient writes back to its sender.
   const last = thread.messages.at(-1);
   const replyRoutes = last
@@ -2041,9 +2163,9 @@ export function MessagesView({
         ...threadRoutes.filter((route) => route.from.id !== last.to_agent_id),
       ]
     : threadRoutes;
-  const withUnread = snapshot.agents.filter((agent) => (unread.get(agent.id) ?? 0) > 0);
+  const withUnread = knownAgents.filter((agent) => (unread.get(agent.id) ?? 0) > 0);
   const nameOf = (id: string) =>
-    snapshot.agents.find((agent) => agent.id === id)?.name ?? 'Unknown agent';
+    knownAgents.find((agent) => agent.id === id)?.name ?? 'Unknown agent';
   // Participants are stored by id; show them in a stable, readable (alphabetical) order.
   const title = (ids: string[]) =>
     ids
@@ -2256,6 +2378,15 @@ export function MessagesView({
           ) : null}
         </div>
         <div className="msg3-page">
+          <RequestResponses
+            count={requestSummary.requestResponses}
+            agents={ownAgents}
+            search={acceptSearch}
+            onChanged={() => {
+              void requestSummary.refresh();
+              onSummaryChanged();
+            }}
+          />
           {list.data && conversations.length ? (
             <div className="msg3-tabs" role="group" aria-label="Show" ref={tabsRef}>
               {FILTERS.map((item) => (
@@ -2501,7 +2632,7 @@ export function MessagesView({
               names={threadNames}
               key={`thread:${summary.key}`}
               messages={thread.messages}
-              snapshot={snapshot}
+              snapshot={named}
               hasOlder={thread.ready && thread.hasOlder}
               loadingOlder={thread.loadingOlder}
               onOlder={thread.loadOlder}

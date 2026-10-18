@@ -207,14 +207,14 @@
 }
 .w4-field input,
 .w4-field textarea {
-  height: 44px;
+  height: calc(38 * var(--ws-px));
   padding: 0 calc(14 * var(--ws-px));
   border: 1px solid var(--ap4-line);
   border-radius: calc(12 * var(--ws-px));
   outline: none;
   background: var(--ap4-surface);
   color: var(--ap4-text);
-  font: 400 15px / 1 var(--font-sans);
+  font: 400 calc(14 * var(--ws-type-px)) / 1 var(--font-sans);
 }
 /* The backup key: 16 groups of 4 wrap over a few lines. */
 .w4-field textarea {
@@ -278,9 +278,12 @@
 .w4-check.off {
   opacity: 0.4;
 }
+/* The form's one action: the app's pill size on desktop, not a full-width bar. */
 .ap4-btn.w4-wide {
-  width: 100%;
-  height: 44px;
+  align-self: flex-start;
+  min-width: calc(140 * var(--ws-px));
+  height: calc(38 * var(--ws-px));
+  padding: 0 calc(22 * var(--ws-px));
 }
 
 /* Withdraw (W2): the token switch, the steps on Base, the explorer link */
@@ -298,7 +301,7 @@
   flex-direction: column;
   align-items: flex-start;
   gap: 2px;
-  min-height: 44px;
+  min-height: calc(34 * var(--ws-px));
   padding: calc(6 * var(--ws-px)) calc(12 * var(--ws-px));
   border: 0;
   border-radius: calc(9 * var(--ws-px));
@@ -917,4 +920,469 @@
 .w4-expired b {
   display: block;
   margin-bottom: 2px;
+}
+
+/* Services (ServiceCalls, Feed pay): the per-call maximum's Change gets a full-size tap area. */
+[data-k='per-call-max'] .w4-copy {
+  position: relative;
+}
+[data-k='per-call-max'] .w4-copy::after {
+  position: absolute;
+  inset: calc(-8 * var(--ws-px)) calc(-4 * var(--ws-px));
+  content: '';
+}
+.w4-amt.w4-pend {
+  color: var(--ap4-muted);
+}
+[data-state='cancelled'] .w4-amt.w4-pend,
+[data-state='expired'] .w4-amt.w4-pend,
+[data-state='refused'] .w4-amt.w4-pend,
+[data-state='result_saved'][data-money='no'] .w4-amt.w4-pend {
+  text-decoration: line-through;
+}
+/* Paid, and the service sent no result: a problem, never shown like a call that worked. */
+[data-k='service-call'][data-state='paid_no_result'] .w4-act-who b,
+.w4-sheet-line[data-state='paid_no_result'] {
+  color: var(--ap4-bad);
+}
+
+/* Services (Operation DESIGN W1): two tiles side by side, then what is left of the limit. */
+.w4-tiles {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+.w4-tile {
+  display: flex;
+  flex-direction: column;
+  gap: calc(3 * var(--ws-px));
+  min-width: 0;
+  padding: calc(12 * var(--ws-px)) calc(14 * var(--ws-px));
+}
+.w4-tile + .w4-tile {
+  box-shadow: inset 1px 0 0 var(--ap4-line);
+}
+.w4-tile-k {
+  color: var(--ap4-muted);
+  font-size: calc(12 * var(--ws-type-px));
+  font-weight: 500;
+}
+.w4-tile-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(8 * var(--ws-px));
+  min-width: 0;
+}
+.w4-tile-v {
+  overflow-wrap: anywhere;
+  color: var(--ap4-text);
+  font-size: calc(19 * var(--ws-type-px));
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+.w4-tile-v small {
+  color: var(--ap4-muted);
+  font-size: calc(11.5 * var(--ws-type-px));
+  font-weight: 500;
+  letter-spacing: 0;
+}
+.w4-tile-note {
+  color: var(--ap4-muted);
+  font-size: calc(11.5 * var(--ws-type-px));
+}
+.w4-meter {
+  display: flex;
+  flex-direction: column;
+  gap: calc(6 * var(--ws-px));
+  padding: calc(10 * var(--ws-px)) calc(14 * var(--ws-px)) calc(12 * var(--ws-px));
+  box-shadow: inset 0 1px 0 var(--ap4-line);
+}
+.w4-meter-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: calc(2 * var(--ws-px)) calc(12 * var(--ws-px));
+  color: var(--ap4-text);
+  font-size: calc(12.5 * var(--ws-type-px));
+  font-variant-numeric: tabular-nums;
+}
+.w4-meter-row > span:first-child {
+  color: var(--ap4-muted);
+}
+.w4-meter-bar {
+  display: block;
+  height: calc(5 * var(--ws-px));
+}
+.w4-meter-bar i {
+  min-width: calc(5 * var(--ws-px));
+  background: var(--accent);
+}
+@media (max-width: 520px) {
+  .w4-tiles {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .w4-tile + .w4-tile {
+    box-shadow: inset 0 1px 0 var(--ap4-line);
+  }
+}
+
+/* Activity (Operation DESIGN W2): one line per entry, grouped by day; details in a sheet. */
+.w4-acthead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(6 * var(--ws-px)) calc(12 * var(--ws-px));
+  margin-bottom: calc(-6 * var(--ws-px));
+}
+.w4-filter {
+  display: inline-flex;
+  gap: calc(2 * var(--ws-px));
+  padding: calc(2 * var(--ws-px));
+  border-radius: 999px;
+  background: var(--ap4-sunken);
+  box-shadow: inset 0 0 0 1px var(--ap4-line);
+}
+.w4-filter button {
+  position: relative;
+  min-height: calc(24 * var(--ws-px));
+  padding: 0 calc(10 * var(--ws-px));
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--ap4-muted);
+  font: 500 calc(12.5 * var(--ws-type-px)) / 1 var(--font-sans);
+  cursor: pointer;
+}
+/* A full-size tap area on a small control. */
+.w4-filter button::after {
+  position: absolute;
+  inset: calc(-10 * var(--ws-px)) 0;
+  content: '';
+}
+.w4-filter button[aria-pressed='true'] {
+  background: var(--ap4-surface);
+  color: var(--ap4-text);
+  box-shadow: var(--ap4-shadow-s);
+}
+.w4-acts {
+  padding: calc(4 * var(--ws-px));
+}
+.w4-day + .w4-day {
+  margin-top: calc(4 * var(--ws-px));
+}
+.w4-day-k {
+  margin: 0;
+  padding: calc(8 * var(--ws-px)) calc(10 * var(--ws-px)) calc(3 * var(--ws-px));
+  color: var(--ap4-muted);
+  font-size: calc(11.5 * var(--ws-type-px));
+  font-weight: 600;
+}
+.w4-act {
+  display: grid;
+  grid-template-columns: calc(30 * var(--ws-px)) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: calc(10 * var(--ws-px));
+  width: 100%;
+  min-height: calc(44 * var(--ws-px));
+  padding: calc(6 * var(--ws-px)) calc(10 * var(--ws-px));
+  border: 0;
+  border-radius: calc(9 * var(--ws-px));
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms;
+}
+.w4-act:hover {
+  background: var(--ap4-hover);
+}
+.w4-mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: calc(30 * var(--ws-px));
+  height: calc(30 * var(--ws-px));
+  border-radius: calc(8 * var(--ws-px));
+  color: #ffffff;
+  font-size: calc(12.5 * var(--ws-type-px));
+  font-weight: 600;
+}
+.w4-mark-move {
+  background: var(--ap4-sunken);
+  color: var(--ap4-muted);
+  box-shadow: inset 0 0 0 1px var(--ap4-line);
+}
+.w4-act-who {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.35;
+}
+.w4-act-who b {
+  overflow: hidden;
+  font-size: calc(13.5 * var(--ws-type-px));
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.w4-act-who > span {
+  overflow: hidden;
+  color: var(--ap4-muted);
+  font-size: calc(12 * var(--ws-type-px));
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.w4-act .w4-amt {
+  text-align: right;
+}
+
+/* The entry's sheet: a side panel; a bottom sheet on phones. */
+.w4-sheet-layer {
+  position: fixed;
+  inset: 0;
+  /* Over everything, like the Feed's drawer (feed.css .fd-layer). */
+  z-index: 1001;
+}
+.w4-scrim {
+  position: absolute;
+  inset: 0;
+  background: var(--backdrop, rgba(0, 0, 0, 0.5));
+  animation: w4-fade 200ms ease-out;
+}
+.w4-sheet {
+  position: absolute;
+  top: calc(10 * var(--ws-px));
+  right: calc(10 * var(--ws-px));
+  bottom: calc(10 * var(--ws-px));
+  display: flex;
+  flex-direction: column;
+  gap: calc(12 * var(--ws-px));
+  width: min(calc(360 * var(--ws-px)), calc(100% - 20 * var(--ws-px)));
+  overflow-y: auto;
+  padding: calc(16 * var(--ws-px));
+  border-radius: calc(18 * var(--ws-px));
+  background: var(--ap4-surface);
+  box-shadow: var(--ap4-shadow-s), var(--ap4-shadow);
+  font-size: calc(13.5 * var(--ws-type-px));
+  overflow-wrap: anywhere;
+  animation: w4-in-side 250ms ease-out;
+}
+.w4-sheet:focus {
+  outline: none;
+}
+.w4-sheet-head {
+  display: flex;
+  align-items: center;
+  gap: calc(10 * var(--ws-px));
+}
+.w4-sheet-head .w4-act-who {
+  flex: 1;
+}
+.w4-sheet-head .w4-act-who b {
+  font-size: calc(14 * var(--ws-type-px));
+  font-weight: 600;
+}
+.w4-x {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: calc(30 * var(--ws-px));
+  height: calc(30 * var(--ws-px));
+  border: 0;
+  border-radius: 50%;
+  background: var(--ap4-surface);
+  color: var(--ap4-muted);
+  box-shadow: var(--ap4-shadow-s);
+  cursor: pointer;
+}
+.w4-x::after {
+  position: absolute;
+  inset: calc(-7 * var(--ws-px));
+  content: '';
+}
+.w4-x:hover {
+  background: var(--ap4-sunken);
+}
+.w4-sheet-amt {
+  display: flex;
+  align-items: baseline;
+  gap: calc(5 * var(--ws-px));
+  margin-top: calc(4 * var(--ws-px));
+}
+.w4-sheet-amt .w4-amt {
+  font-size: calc(28 * var(--ws-type-px));
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+.w4-sheet-amt small {
+  color: var(--ap4-muted);
+  font-size: calc(12.5 * var(--ws-type-px));
+  font-weight: 500;
+}
+.w4-sheet-line {
+  margin: calc(-8 * var(--ws-px)) 0 0;
+  color: var(--ap4-muted);
+  font-size: calc(13 * var(--ws-type-px));
+  font-variant-numeric: tabular-nums;
+}
+.w4-facts-card {
+  margin: 0;
+  border-radius: calc(12 * var(--ws-px));
+  box-shadow: inset 0 0 0 1px var(--ap4-line);
+}
+.w4-fact {
+  display: flex;
+  justify-content: space-between;
+  gap: calc(12 * var(--ws-px));
+  padding: calc(9 * var(--ws-px)) calc(12 * var(--ws-px));
+}
+.w4-fact + .w4-fact {
+  box-shadow: inset 0 1px 0 var(--ap4-line);
+}
+.w4-fact dt {
+  color: var(--ap4-muted);
+}
+.w4-fact dd {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: calc(6 * var(--ws-px));
+  margin: 0;
+  color: var(--ap4-text);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.w4-fact dd b {
+  font-weight: 600;
+}
+.w4-tag {
+  display: inline-block;
+  padding: calc(1 * var(--ws-px)) calc(8 * var(--ws-px));
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 1px var(--ap4-line);
+  color: var(--ap4-muted);
+  font-size: calc(11 * var(--ws-type-px));
+  font-weight: 600;
+  white-space: nowrap;
+}
+.w4-sheet-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(7 * var(--ws-px));
+  margin-top: auto;
+  padding-top: calc(4 * var(--ws-px));
+}
+.w4-sheet-actions .ap4-btn {
+  flex: 1 1 auto;
+  text-decoration: none;
+}
+.w4-sheet-actions .w4-hint {
+  flex: 1 1 100%;
+}
+@keyframes w4-fade {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes w4-in-side {
+  from {
+    transform: translateX(calc(100% + 24px));
+  }
+}
+@keyframes w4-in-up {
+  from {
+    transform: translateY(calc(100% + 24px));
+  }
+}
+@media (max-width: 520px) {
+  .w4-sheet {
+    top: auto;
+    right: calc(8 * var(--ws-px));
+    left: calc(8 * var(--ws-px));
+    bottom: calc(8 * var(--ws-px));
+    width: auto;
+    max-height: 86%;
+    animation-name: w4-in-up;
+  }
+  .w4-sheet-actions .ap4-btn {
+    height: 44px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .w4-scrim,
+  .w4-sheet {
+    animation: none;
+  }
+  .w4-act {
+    transition: none;
+  }
+}
+.w4-maxform {
+  margin-top: calc(4 * var(--ws-px));
+}
+.w4-maxform .ap4-actions {
+  flex-wrap: wrap;
+}
+
+/* Paying on its own (Base Pay P2b): the owner's permission, under the limit card. A long
+   unbroken agent name wraps there and on the card, the pane never widens. */
+.w4-agentpay,
+.w4-limit {
+  overflow-wrap: anywhere;
+}
+.w4-state[data-state='allowed']::before {
+  background: var(--ap4-ok);
+}
+.w4-agentpay .w4-facts {
+  margin-top: calc(-2 * var(--ws-px));
+}
+.w4-agentpay .w4-state:focus-visible,
+.w4-agentpay .w4-caution:focus-visible,
+.w4-agentpay .w4-error:focus-visible,
+.w4-limit .w4-state:focus-visible,
+.w4-lead:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid var(--ap4-ink);
+  outline-offset: 2px;
+}
+.w4-agentpay .w4-caution .v4s-quiet {
+  align-self: auto;
+}
+/* Withdraw's confirmation: the two buttons share the width, and wrap on a narrow pane. */
+.ap4-actions.w4-confirm {
+  flex-wrap: wrap;
+  border-radius: calc(12 * var(--ws-px));
+}
+.w4-confirm .ap4-btn {
+  flex: 1 1 calc(140 * var(--ws-px));
+  height: 44px;
+}
+
+/* Phones and touch screens keep 44 px targets and the full-width action. */
+@media (max-width: 640px), (pointer: coarse) {
+  .w4-field input,
+  .w4-field textarea {
+    height: 44px;
+    font-size: 15px;
+  }
+  .w4-field textarea {
+    height: auto;
+  }
+  .w4-seg button {
+    min-height: 44px;
+  }
+  .ap4-btn.w4-wide {
+    align-self: stretch;
+    width: 100%;
+    height: 44px;
+  }
 }

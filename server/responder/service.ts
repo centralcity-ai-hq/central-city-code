@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Database, Transaction as Tx } from '../database.js';
-import { event, PRESENCE_TTL, type Workspace } from '../model.js';
+import { event, presenceTtl, type Workspace } from '../model.js';
 import { encryptApiKey } from './crypto.js';
 import { setResponderTarget } from './targets.js';
 import type { ResponderKeyring } from './keys.js';
@@ -275,7 +275,7 @@ export function createResponder(d: ResponderDependencies): Responder {
           : agent.lastSeenAt
             ? Date.parse(agent.lastSeenAt)
             : null;
-      const runtime = lastSeen !== null && time - lastSeen < PRESENCE_TTL;
+      const runtime = lastSeen !== null && time - lastSeen < presenceTtl(agent);
       // Elric is hosted too, but not scripted (isDemo false): it answers through its own model.
       const scripted = agent.mode === 'hosted' && agent.isDemo === true;
       const answers = runtime && !scripted;

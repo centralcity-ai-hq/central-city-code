@@ -28,7 +28,11 @@ interface Link {
   note: string;
 }
 
-function content(origin: string, open: boolean) {
+/**
+ * `feed`: the Feed is on (server/feed/flag.ts, unless CITY_FEED is '0'). Only then does the
+ * signed-in guide name the Feed's search, the tool /mcp lists only then.
+ */
+function content(origin: string, open: boolean, feed: boolean) {
   const mcp = `${origin}/mcp`;
   const openUrl = `${origin}/mcp/open`;
   return {
@@ -71,12 +75,23 @@ function content(origin: string, open: boolean) {
         url: `${origin}/.well-known/ai-catalog.json`,
         note: 'Discovery catalog.',
       },
+      // The Feed's search is a signed-in tool (CITY_FEED=0 switches it off): only this endpoint's
+      // guide names it, and only while the Feed is on.
+      ...(open || !feed
+        ? []
+        : [
+            {
+              label: 'Feed',
+              url: `${origin}/docs/feed.md`,
+              note: 'city_service_search (scope workspace:read, read-only) searches the Feed for external x402 services on Base. They are not Central City agents, and Pay refuses them.',
+            },
+          ]),
     ] satisfies Link[],
   };
 }
 
-export function guideMarkdown(origin: string, open: boolean): string {
-  const c = content(origin, open);
+export function guideMarkdown(origin: string, open: boolean, feed: boolean): string {
+  const c = content(origin, open, feed);
   const item = (link: Link) => `- **${link.label}:** <${link.url}> ${link.note}`;
   return [
     `# ${c.title}`,
@@ -102,8 +117,8 @@ export function guideMarkdown(origin: string, open: boolean): string {
   ].join('\n');
 }
 
-export function guideHtml(origin: string, open: boolean): string {
-  const c = content(origin, open);
+export function guideHtml(origin: string, open: boolean, feed: boolean): string {
+  const c = content(origin, open, feed);
   const e = escapeHtml;
   const item = (link: Link) =>
     `<li><strong>${e(link.label)}:</strong> <a href="${e(link.url)}"><code>${e(link.url)}</code></a><br>${e(link.note)}</li>`;
@@ -142,12 +157,16 @@ ${c.discover.map(item).join('\n')}
 `;
 }
 
-/** Sends the guide: HTML when Accept includes text/html, Markdown otherwise. */
+/**
+ * Sends the guide: HTML when Accept includes text/html, Markdown otherwise. `feed` is whether the
+ * Feed is on (feedEnabled), read by the caller for this request.
+ */
 export function sendGuide(
   request: FastifyRequest,
   reply: FastifyReply,
   origin: string,
   open: boolean,
+  feed: boolean,
 ): FastifyReply {
   const html = String(request.headers.accept ?? '')
     .toLowerCase()
@@ -161,7 +180,7 @@ export function sendGuide(
   if (!html)
     return reply
       .header('content-type', 'text/markdown; charset=utf-8')
-      .send(guideMarkdown(origin, open));
+      .send(guideMarkdown(origin, open, feed));
   return reply
     .header('content-type', 'text/html; charset=utf-8')
     .header(
@@ -169,5 +188,5 @@ export function sendGuide(
       "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
     )
     .header('x-frame-options', 'DENY')
-    .send(guideHtml(origin, open));
+    .send(guideHtml(origin, open, feed));
 }

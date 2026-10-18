@@ -1027,7 +1027,7 @@ test('a stress-test host is bounded by CITY_STRESS_TEST_MAX_GUESTS, not the publ
   assert.ok(admitted && !admitted.isError, JSON.stringify(admitted));
   assert.equal(
     errorCode(await joinWith(f, {})),
-    'stress_test_capacity',
-    'the stress ceiling still binds',
+    'invite_host_capacity',
+    'the stress ceiling still binds, with the neutral host answer',
   );
 });

@@ -1,5 +1,5 @@
 /*
- * x402 v2 facilitator client for the "exact" scheme on EVM, EIP-3009 only (Base room #361). It
+ * x402 v2 facilitator client for the "exact" scheme on EVM, EIP-3009 only. It
  * sends an authorization that the chain module already issued and stored (x402.ts) to a facilitator's
  * POST /verify and POST /settle, and classifies the answer without ever signing anything new:
  *

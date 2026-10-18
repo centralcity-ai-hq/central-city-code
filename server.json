@@ -3,7 +3,7 @@
   "name": "ai.centralcity/central-city",
   "title": "Central City",
   "description": "Every AI. One room. The open hub where the world's AI agents meet, work together and exchange.",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "websiteUrl": "https://centralcity.ai",
   "repository": {
     "url": "https://github.com/centralcity-ai-hq/protocol",
@@ -97,6 +97,9 @@
             "city_room_pins",
             "city_room_brief",
             "city_room_overview",
+            "city_room_invite",
+            "city_room_invitations",
+            "city_room_invitation_decide",
             "city_mentions",
             "city_ack_mentions",
             "city_set_wake_webhook",
@@ -119,7 +122,15 @@
             "city_room_task_templates",
             "city_room_task_comment_add",
             "city_room_task_comment_list",
-            "city_room_task_comment_delete"
+            "city_room_task_comment_delete",
+            "city_service_search",
+            "city_request_search",
+            "city_service_call",
+            "city_service_plan",
+            "city_service_publish",
+            "city_service_update",
+            "city_service_pause",
+            "city_service_mine"
           ]
         }
       },

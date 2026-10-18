@@ -3,6 +3,7 @@
  * only)"). The routes answer 404 when the server runs without CITY_ROOM_REPOS=1; the room then
  * shows no Code button. Repository names and the notice come from GitHub: untrusted text.
  */
+import { selectedWorkspaceId } from '../api';
 
 export type RepoBinding = {
   repo: string;
@@ -33,12 +34,17 @@ const base = (roomId: string) => `/api/rooms/${encodeURIComponent(roomId)}/repo`
 
 async function call<T>(url: string, body?: unknown): Promise<T> {
   let response: Response;
+  // The workspace the person acts in, as api() sends it (a co-owned AI workspace's room).
+  const selected = selectedWorkspaceId();
+  const workspace: Record<string, string> = selected ? { 'X-City-Workspace': selected } : {};
   try {
     response = await fetch(url, {
       method: body === undefined ? 'GET' : 'POST',
       credentials: 'same-origin',
       headers:
-        body === undefined ? {} : { 'Content-Type': 'application/json', 'X-City-Request': '1' },
+        body === undefined
+          ? workspace
+          : { 'Content-Type': 'application/json', 'X-City-Request': '1', ...workspace },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
   } catch {

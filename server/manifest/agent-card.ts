@@ -70,7 +70,8 @@ export const NATIVE_SECURITY_SCHEME = 'centralCityNative';
 export const DEFAULT_INPUT_MODES = ['text/plain'];
 export const DEFAULT_OUTPUT_MODES = ['application/json'];
 
-const CAPABILITY_SKILLS: Record<string, { name: string; description: string }> = {
+/** The skills a card without its own skills lists per capability (the directory reads them too). */
+export const CAPABILITY_SKILLS: Record<string, { name: string; description: string }> = {
   research: {
     name: 'Research brief',
     description: 'Organizes supplied text into a short brief with its source URLs.',

@@ -8,7 +8,7 @@ const base = '/api/v2/connections';
 const recordedAt = '2026-10-03T12:00:00.000Z';
 const expiresAt = '2026-10-10T12:00:00.000Z';
 const requestError = 'The request could not be confirmed. Please try again.';
-const recordedNotice = 'Connection request recorded. Check its status in Connections and history.';
+const recordedNotice = 'Connection request recorded. Check its status under With other people.';
 const sender = makeAgent('test-sender-0001', 'First sender');
 const alternate = makeAgent('test-sender-0002', 'Second sender');
 
@@ -124,6 +124,10 @@ async function setup(page: Page, populated = false): Promise<ReadState> {
   return state;
 }
 
+/**
+ * Opens Agent permissions. Its cards: "With other people" (the lists, Refresh and read errors)
+ * and "Use an invite" (the request form, its error and its message); `main` is the whole page.
+ */
 async function openConnections(page: Page) {
   await page.goto('/#connect');
   await expect(page.locator('.app-shell')).toBeVisible();
@@ -132,9 +136,13 @@ async function openConnections(page: Page) {
   )
     .getByRole('button', { name: 'Agent permissions', exact: true })
     .click();
-  const panel = page.getByRole('region', { name: 'Connections with other people', exact: true });
-  await expect(panel).toBeVisible();
-  return panel;
+  const others = page.getByRole('region', { name: 'With other people', exact: true });
+  await expect(others).toBeVisible();
+  return {
+    others,
+    use: page.getByRole('region', { name: 'Use an invite', exact: true }),
+    main: page.getByRole('main'),
+  };
 }
 
 async function fillDraft(
@@ -150,26 +158,26 @@ async function fillDraft(
     .fill('  Synthetic connection note  ');
 }
 
-async function refresh(page: Page, panel: Locator) {
-  // Invites is read only by this panel, unlike the request count in preview navigation.
+async function refresh(page: Page, others: Locator) {
+  // Invites is read only by this page, unlike the request count in the workspace navigation.
   const loaded = page.waitForResponse(
     (response) =>
       new URL(response.url()).pathname === `${base}/invites` &&
       response.request().method() === 'GET',
   );
-  await panel.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await others.getByRole('button', { name: 'Refresh', exact: true }).click();
   await (await loaded).finished();
-  await expect(panel.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled();
+  await expect(others.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled();
 }
 
-async function expectLists(panel: Locator) {
-  await expect(panel.getByRole('list', { name: 'Requests from other people' })).toContainText(
+async function expectLists(page: Page) {
+  await expect(page.getByRole('list', { name: 'Requests from other people' })).toContainText(
     'Synthetic peer',
   );
-  await expect(panel.getByRole('list', { name: 'Connections with other people' })).toContainText(
+  await expect(page.getByRole('list', { name: 'Connections with other people' })).toContainText(
     alternate.name,
   );
-  await expect(panel.getByRole('list', { name: 'Your invites' })).toContainText('Not used yet');
+  await expect(page.getByRole('list', { name: 'Your invites' })).toContainText('Not used yet');
 }
 
 {
@@ -207,33 +215,33 @@ async function expectLists(panel: Locator) {
         await route.fulfill({ status: 201, json: { request: outgoing(), replayed: true } });
       }
     });
-    const panel = await openConnections(page);
-    await fillDraft(panel);
-    const submit = panel.getByRole('button', { name: 'Request connection', exact: true });
+    const { others, use, main } = await openConnections(page);
+    await fillDraft(use);
+    const submit = use.getByRole('button', { name: 'Request connection', exact: true });
     await submit.click();
     await requestEntered;
     try {
       await expect(submit).toBeDisabled();
       await expect(
-        panel.getByRole('combobox', { name: 'From your agent', exact: true }),
+        use.getByRole('combobox', { name: 'From your agent', exact: true }),
       ).toBeDisabled();
-      await expect(panel.getByLabel('Their invite', { exact: true })).toBeDisabled();
-      await expect(panel.getByLabel('Note for them (optional)', { exact: true })).toBeDisabled();
+      await expect(use.getByLabel('Their invite', { exact: true })).toBeDisabled();
+      await expect(use.getByLabel('Note for them (optional)', { exact: true })).toBeDisabled();
       expect(bodies).toHaveLength(1);
     } finally {
       release();
     }
-    await expect(panel.getByRole('alert')).toContainText(requestError);
-    await expect(panel.getByRole('combobox', { name: 'From your agent', exact: true })).toHaveValue(
+    await expect(use.getByRole('alert')).toContainText(requestError);
+    await expect(use.getByRole('combobox', { name: 'From your agent', exact: true })).toHaveValue(
       alternate.id,
     );
-    await expect(panel.getByLabel('Their invite', { exact: true })).toHaveValue(
+    await expect(use.getByLabel('Their invite', { exact: true })).toHaveValue(
       'https://example.test/connect#cci_test_invite_0001',
     );
-    await expect(panel.getByLabel('Note for them (optional)', { exact: true })).toHaveValue(
+    await expect(use.getByLabel('Note for them (optional)', { exact: true })).toHaveValue(
       '  Synthetic connection note  ',
     );
-    await expect(panel.getByRole('status').filter({ hasText: recordedNotice })).toHaveCount(0);
+    await expect(use.getByRole('status').filter({ hasText: recordedNotice })).toHaveCount(0);
     expect(bodies[0]).toMatchObject({
       from_agent_id: alternate.id,
       invite_token: 'cci_test_invite_0001',
@@ -241,26 +249,26 @@ async function expectLists(panel: Locator) {
     });
     expect(bodies[0].idempotency_key.length).toBeGreaterThan(0);
     // Pasting just the code and removing outer whitespace keeps the logical request unchanged.
-    await panel.getByLabel('Their invite', { exact: true }).fill('cci_test_invite_0001');
-    await panel
+    await use.getByLabel('Their invite', { exact: true }).fill('cci_test_invite_0001');
+    await use
       .getByLabel('Note for them (optional)', { exact: true })
       .fill('Synthetic connection note');
     recover = true;
     await submit.click();
-    await expect(panel.getByRole('status')).toContainText(recordedNotice);
-    await expect(panel.getByRole('alert')).toHaveCount(0);
-    await expect(panel.getByLabel('Their invite', { exact: true })).toHaveValue('');
-    await expect(panel.getByLabel('Note for them (optional)', { exact: true })).toHaveValue('');
-    await expect(panel.getByRole('combobox', { name: 'From your agent', exact: true })).toHaveValue(
+    await expect(use.getByRole('status')).toContainText(recordedNotice);
+    await expect(main.getByRole('alert')).toHaveCount(0);
+    await expect(use.getByLabel('Their invite', { exact: true })).toHaveValue('');
+    await expect(use.getByLabel('Note for them (optional)', { exact: true })).toHaveValue('');
+    await expect(use.getByRole('combobox', { name: 'From your agent', exact: true })).toHaveValue(
       alternate.id,
     );
     await expect(
-      panel.getByRole('list', { name: 'Connections with other people' }).getByRole('listitem'),
+      others.getByRole('list', { name: 'Connections with other people' }).getByRole('listitem'),
     ).toHaveCount(1);
     expect(bodies).toHaveLength(2);
     expect(bodies[1]).toEqual(bodies[0]);
-    await expect(panel.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled();
-    await fillDraft(panel);
+    await expect(others.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled();
+    await fillDraft(use);
     freshSubmission = true;
     const freshResponse = page.waitForResponse(
       (response) =>
@@ -269,7 +277,7 @@ async function expectLists(panel: Locator) {
     );
     await submit.click();
     await (await freshResponse).finished();
-    await expect(panel.getByRole('alert')).toContainText(
+    await expect(use.getByRole('alert')).toContainText(
       'The agents already have a pending connection request.',
     );
     expect(bodies).toHaveLength(3);
@@ -277,10 +285,10 @@ async function expectLists(panel: Locator) {
     const { idempotency_key: freshKey, ...freshFields } = bodies[2];
     expect(freshKey).not.toBe(retiredKey);
     expect(freshFields).toEqual(confirmedFields);
-    await expect(panel.getByLabel('Their invite', { exact: true })).toHaveValue(
+    await expect(use.getByLabel('Their invite', { exact: true })).toHaveValue(
       'https://example.test/connect#cci_test_invite_0001',
     );
-    await expect(panel.getByLabel('Note for them (optional)', { exact: true })).toHaveValue(
+    await expect(use.getByLabel('Note for them (optional)', { exact: true })).toHaveValue(
       '  Synthetic connection note  ',
     );
   });
@@ -297,9 +305,9 @@ for (const edited of ['sender', 'target', 'note'] as const) {
       bodies.push(route.request().postDataJSON() as RequestBody);
       await route.fulfill({ status: 503, json: { error: requestError } });
     });
-    const panel = await openConnections(page);
-    await fillDraft(panel, 'test-target-agent-0001');
-    const submit = panel.getByRole('button', { name: 'Request connection', exact: true });
+    const { use } = await openConnections(page);
+    await fillDraft(use, 'test-target-agent-0001');
+    const submit = use.getByRole('button', { name: 'Request connection', exact: true });
     async function failSubmission() {
       const settled = page.waitForResponse(
         (response) =>
@@ -308,18 +316,18 @@ for (const edited of ['sender', 'target', 'note'] as const) {
       );
       await submit.click();
       await (await settled).finished();
-      await expect(panel.getByRole('alert')).toContainText(requestError);
+      await expect(use.getByRole('alert')).toContainText(requestError);
       await expect(submit).toBeEnabled();
     }
     await failSubmission();
     if (edited === 'sender')
-      await panel
+      await use
         .getByRole('combobox', { name: 'From your agent', exact: true })
         .selectOption(sender.id);
     if (edited === 'target')
-      await panel.getByLabel('Their invite', { exact: true }).fill('cci_test_invite_0002');
+      await use.getByLabel('Their invite', { exact: true }).fill('cci_test_invite_0002');
     if (edited === 'note')
-      await panel
+      await use
         .getByLabel('Note for them (optional)', { exact: true })
         .fill('A different synthetic note');
     await failSubmission();
@@ -343,18 +351,23 @@ for (const failed of ['requests', 'invites'] as const) {
   }) => {
     const state = await setup(page, true);
     state.failure = failed;
-    const panel = await openConnections(page);
-    await expect(panel.getByRole('alert')).toContainText('Connections could not be loaded.');
-    await expect(panel.getByRole('alert')).toContainText('Use Refresh to try again.');
-    await expect(panel.getByRole('status').filter({ hasText: /Loading/ })).toHaveCount(0);
-    await expect(panel.getByText('No requests are waiting.', { exact: true })).toHaveCount(0);
-    await expect(panel.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled();
-    state.failure = null;
-    await refresh(page, panel);
-    await expectLists(panel);
-    await expect(panel.getByRole('alert')).toHaveCount(0);
+    const { others, use, main } = await openConnections(page);
+    await expect(others.getByRole('alert')).toContainText('Connections could not be loaded.');
+    await expect(others.getByRole('alert')).toContainText('Use Refresh to try again.');
+    await expect(main.getByRole('status').filter({ hasText: /Loading/ })).toHaveCount(0);
+    // Nothing is shown as if it were the lists: no requests card, no list, no forms.
     await expect(
-      panel.getByRole('button', { name: 'Request connection', exact: true }),
+      main.getByRole('region', { name: 'Waiting for your approval', exact: true }),
+    ).toHaveCount(0);
+    await expect(main.getByRole('list', { name: 'Connections with other people' })).toHaveCount(0);
+    await expect(use).toHaveCount(0);
+    await expect(others.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled();
+    state.failure = null;
+    await refresh(page, others);
+    await expectLists(page);
+    await expect(main.getByRole('alert')).toHaveCount(0);
+    await expect(
+      use.getByRole('button', { name: 'Request connection', exact: true }),
     ).toBeDisabled();
   });
 }
@@ -363,25 +376,25 @@ test('a later failed refresh preserves both request lists and invites until reco
   page,
 }) => {
   const state = await setup(page, true);
-  const panel = await openConnections(page);
-  await expectLists(panel);
+  const { others, main } = await openConnections(page);
+  await expectLists(page);
   state.failure = 'invites';
-  await refresh(page, panel);
-  await expect(panel.getByRole('alert')).toContainText(
+  await refresh(page, others);
+  await expect(others.getByRole('alert')).toContainText(
     'Connections could not be refreshed. Showing the previous list.',
   );
-  await expectLists(panel);
-  await expect(panel.getByRole('status').filter({ hasText: /Loading/ })).toHaveCount(0);
+  await expectLists(page);
+  await expect(main.getByRole('status').filter({ hasText: /Loading/ })).toHaveCount(0);
   state.failure = null;
   state.lists.incoming = [request({ from_agent_name: 'Recovered peer' })];
   state.invites = [{ ...invite(), status: 'used' }];
-  await refresh(page, panel);
-  await expect(panel.getByRole('alert')).toHaveCount(0);
-  const incoming = panel.getByRole('list', { name: 'Requests from other people' });
+  await refresh(page, others);
+  await expect(main.getByRole('alert')).toHaveCount(0);
+  const incoming = main.getByRole('list', { name: 'Requests from other people' });
   await expect(incoming).toContainText('Recovered peer');
   await expect(incoming).not.toContainText('Synthetic peer');
-  await expect(panel.getByRole('list', { name: 'Your invites' })).toContainText('Used');
-  await expect(panel.getByRole('list', { name: 'Connections with other people' })).toContainText(
+  await expect(main.getByRole('list', { name: 'Your invites' })).toContainText('Used');
+  await expect(others.getByRole('list', { name: 'Connections with other people' })).toContainText(
     alternate.name,
   );
 });
@@ -398,29 +411,27 @@ test('confirmed submission followed by a failed reload clears the draft and retr
     state.failure = 'requests';
     await route.fulfill({ status: 201, json: { request: outgoing(), replayed: false } });
   });
-  const panel = await openConnections(page);
-  await fillDraft(panel);
-  await panel.getByRole('button', { name: 'Request connection', exact: true }).click();
-  await expect(panel.getByRole('status')).toContainText(recordedNotice);
-  await expect(panel.getByRole('alert')).toContainText(
+  const { others, use, main } = await openConnections(page);
+  await fillDraft(use);
+  await use.getByRole('button', { name: 'Request connection', exact: true }).click();
+  await expect(use.getByRole('status')).toContainText(recordedNotice);
+  await expect(others.getByRole('alert')).toContainText(
     'Connections could not be refreshed. Showing the previous list.',
   );
-  await expect(panel.getByLabel('Their invite', { exact: true })).toHaveValue('');
-  await expect(panel.getByLabel('Note for them (optional)', { exact: true })).toHaveValue('');
-  await expect(
-    panel.getByRole('button', { name: 'Request connection', exact: true }),
-  ).toBeDisabled();
+  await expect(use.getByLabel('Their invite', { exact: true })).toHaveValue('');
+  await expect(use.getByLabel('Note for them (optional)', { exact: true })).toHaveValue('');
+  await expect(use.getByRole('button', { name: 'Request connection', exact: true })).toBeDisabled();
   expect(bodies).toHaveLength(1);
-  await refresh(page, panel);
-  await expect(panel.getByRole('alert')).toContainText('Connections could not be refreshed.');
-  await expect(panel.getByRole('status')).toContainText(recordedNotice);
+  await refresh(page, others);
+  await expect(others.getByRole('alert')).toContainText('Connections could not be refreshed.');
+  await expect(use.getByRole('status')).toContainText(recordedNotice);
   expect(bodies).toHaveLength(1);
   state.failure = null;
-  await refresh(page, panel);
-  await expect(panel.getByRole('alert')).toHaveCount(0);
+  await refresh(page, others);
+  await expect(main.getByRole('alert')).toHaveCount(0);
   await expect(
-    panel.getByRole('list', { name: 'Connections with other people' }).getByRole('listitem'),
+    others.getByRole('list', { name: 'Connections with other people' }).getByRole('listitem'),
   ).toHaveCount(1);
-  await expect(panel.getByRole('status')).toContainText(recordedNotice);
+  await expect(use.getByRole('status')).toContainText(recordedNotice);
   expect(bodies).toHaveLength(1);
 });

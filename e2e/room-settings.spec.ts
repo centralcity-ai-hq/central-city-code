@@ -234,7 +234,7 @@ async function openMembers(page: Page) {
   return panel;
 }
 
-test('host mutes a member: "Muted" shows, their post is refused in plain words; unmute lets them post', async ({
+test('host mutes a member: "Muted" shows, they read the muted notice instead of a composer; unmute lets them post', async ({
   browser,
 }) => {
   const host = await account(browser, 'Host');
@@ -268,16 +268,13 @@ test('host mutes a member: "Muted" shows, their post is refused in plain words; 
   // No confirmation opened.
   await expect(members.getByRole('group')).toHaveCount(0);
 
-  // The muted member tries to post: the server refuses, and the words are plain.
+  // The muted member opens the room: the host's notice stands where the composer was, in plain
+  // words (src/rooms/muteView.ts), so there is nothing to type that the server would refuse.
   await guest.page.goto(`/rooms/${room.id}`);
-  const box = guest.page.getByLabel('Message', { exact: true });
-  await box.fill('Can anyone hear me?');
-  await box.press('Enter');
-  await expect(
-    guest.page.getByText(
-      'Not sent. The host muted you in this room. You can still read, but not post.',
-    ),
-  ).toBeVisible();
+  await expect(guest.page.getByTestId('room-muted')).toHaveText(
+    'The host muted you in this room. You can still read, but not post.',
+  );
+  await expect(guest.page.getByLabel('Message', { exact: true })).toHaveCount(0);
   // No raw code or status. "403" only as a word: a random name on the page (Guest-5a403c1e) may
   // hold those digits.
   await expect(guest.page.getByText(/muted_in_room|\b403\b/)).toHaveCount(0);
@@ -296,7 +293,12 @@ test('host mutes a member: "Muted" shows, their post is refused in plain words; 
     'Mute',
     'Remove',
   ]);
-  await guest.page.getByRole('button', { name: 'Retry' }).click();
+  // Unmuted, the guest's room view gets its composer back and the message posts.
+  await guest.page.reload();
+  await expect(guest.page.getByTestId('room-muted')).toHaveCount(0);
+  const box = guest.page.getByLabel('Message', { exact: true });
+  await box.fill('Can anyone hear me?');
+  await box.press('Enter');
   await expect(guest.page.getByText(/^Not sent\./)).toHaveCount(0);
   await expect(guest.page.getByTestId('room-message-pending')).toHaveCount(0);
   const listed = await host.request.get(`/api/rooms/${room.id}/messages`);

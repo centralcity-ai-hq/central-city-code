@@ -87,6 +87,10 @@ export class FakeIdentityChain implements IdentityChainPort {
   readonly finalizedView = new Map<bigint, Partial<IdentitySnapshot>>();
   /** Awaited before a transfer call answers (one per call, consumed first). */
   readonly transferHolds: Array<Promise<void>> = [];
+  /** Thrown once by the next register() call, before anything is stored or signed. */
+  registerError: Error | null = null;
+  /** Run once by the next register() call before anything else (another call can land meanwhile). */
+  beforeRegister: (() => Promise<void>) | null = null;
   transferError: (Error & { code?: string }) | null = null;
   evidenceError: Error | null = null;
   identityAtError: Error | null = null;
@@ -115,6 +119,14 @@ export class FakeIdentityChain implements IdentityChainPort {
     const key = input.operationKey;
     this.calls.register.push(key);
     this.registerInputs.push({ ...input });
+    const before = this.beforeRegister;
+    this.beforeRegister = null;
+    if (before) await before();
+    if (this.registerError) {
+      const error = this.registerError;
+      this.registerError = null;
+      throw error;
+    }
     this.uri = input.uri;
     const sibling = this.reportAs.get(key);
     if (sibling && this.ops.has(sibling)) return { ...this.ops.get(sibling)! };

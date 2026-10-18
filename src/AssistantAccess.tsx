@@ -82,18 +82,26 @@ const permissions: { scope: AssistantScope; label: string; description: string }
  * The plain name of every permission, including those the form above doesn't offer: an app
  * connected over OAuth holds rooms:join by default, and an AI workspace key may hold any scope.
  */
-const PERMISSION_LABELS: Record<AssistantScope, string> = {
-  ...(Object.fromEntries(permissions.map((item) => [item.scope, item.label])) as Record<
-    AssistantScope,
-    string
-  >),
+const MORE_LABELS: Readonly<Record<string, string>> = {
   'rooms:join': 'Join rooms',
   'rooms:host': 'Host rooms',
   'rooms:apply': 'Open draft pull requests',
   'agents:wake': 'Wake your agents',
   'results:read': 'Ask for published results',
   'results:publish': 'Publish results',
+  // Two scopes, two kinds of payee: Central City agents (Base Pay), and Feed services outside
+  // Central City (Feed pay, docs/FEED_PAY.md). A grant for one never pays the other.
   pay: 'Pay other agents',
+  'services:pay': 'Pay Feed services',
+  // Listing services the agents sell in the Feed (fee included); it moves no money itself.
+  'services:sell': 'Sell services in the Feed',
+};
+const PERMISSION_LABELS: Record<AssistantScope, string> = {
+  ...(Object.fromEntries(permissions.map((item) => [item.scope, item.label])) as Record<
+    AssistantScope,
+    string
+  >),
+  ...MORE_LABELS,
 };
 
 /** The plain name of a permission ("workspace:read" → "See your workspace"). */

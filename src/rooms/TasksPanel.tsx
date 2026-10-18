@@ -19,11 +19,13 @@ import {
   moveTaskStage,
   sortTasks,
   submitPeerReview,
+  taskRefreshDelay,
   type PeerVerdict,
   type RoomTask,
   type TaskDecision,
   type TaskStatus,
 } from './tasks';
+import { requestKey } from './requestKey';
 import { describe } from './useRoomThread';
 import { AskReviewForm, PeerReviewForm, PeerReviewSummary } from './PeerReview';
 import { TASK_TEMPLATES, findTaskTemplate } from '../../shared/task-templates';
@@ -34,6 +36,7 @@ import { useRoomsV2 } from './roomsV2';
 import { canAskReview, countTasks, filterTasks, type TaskFilter } from './taskViewV2';
 import { TaskCard, TaskClaimer, TaskFilterRow, TaskProgress, TaskStageFlow } from './TasksV2';
 import { PanelHead } from './PanelV3';
+import { pageVisible } from './readMark';
 
 /*
  * The room's Tasks panel (docs/COPY_GLOSSARY.md wording): every task with its CURRENT state only.
@@ -51,7 +54,6 @@ const LABEL: Record<TaskStatus, string> = {
 };
 
 /** How often the open panel refreshes the list (tasks change when members claim or hand in). */
-const REFRESH_MS = 10_000;
 
 // A task's comment thread loads on first open, so the room's first load stays the same size.
 const TaskComments = lazy(() =>
@@ -360,11 +362,14 @@ export function useRoomTasks(roomId: string, active: boolean) {
   const [stages, setStages] = useState<string[]>([]);
   const [available, setAvailable] = useState<boolean | null>(null);
   const [error, setError] = useState('');
+  // Pages the last read took: a bigger room is re-read less often (taskRefreshDelay).
+  const pages = useRef(1);
   const refresh = useCallback(async () => {
     try {
       const list = await listTasks(roomId);
       setAvailable(list !== null);
       if (list) {
+        pages.current = list.pages;
         setTasks(list.tasks);
         setStages(list.stages);
       }
@@ -378,10 +383,20 @@ export function useRoomTasks(roomId: string, active: boolean) {
   }, [refresh]);
   useEffect(() => {
     if (!active) return;
+    let stopped = false;
+    let timer: number | undefined;
+    // The next re-read is planned only after this one ends, so two never overlap, and a hidden
+    // tab skips its turn.
+    const tick = async () => {
+      if (pageVisible()) await refresh();
+      if (!stopped) timer = window.setTimeout(() => void tick(), taskRefreshDelay(pages.current));
+    };
     // Opening the panel shows fresh tasks and stages (the host may have just edited them).
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), REFRESH_MS);
-    return () => window.clearInterval(timer);
+    void tick();
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
   }, [active, refresh]);
   return { tasks, stages, available, error, refresh, setTasks };
 }
@@ -469,7 +484,7 @@ export function TasksPanel({
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState('');
   const [actionError, setActionError] = useState('');
-  const key = useRef(crypto.randomUUID());
+  const key = useRef(requestKey());
   const nameOf = (agentId: string) =>
     members.find((member) => member.id === agentId)?.name ?? 'A member';
   // Comments act as one of the viewer's own members: the person when they joined as themselves,
@@ -497,19 +512,29 @@ export function TasksPanel({
     const template = findTaskTemplate(templateId);
     setBusy(true);
     setFormError('');
+    // With a template an empty body stays empty: the server fills the template's body only
+    // when no body is sent (API and MCP callers), and the console always sends one.
+    const request = {
+      roomId: room.id,
+      agentId: actingMember?.id,
+      title: title.trim(),
+      body: template ? body.trim() : body.trim() || undefined,
+      templateId: template?.id,
+    };
     try {
+      // The same key for a retry of the same form (it never adds the task twice); any edit to
+      // the form, or another acting member, takes a new key.
       const task = await createTask({
-        roomId: room.id,
-        agentId: actingMember?.id,
-        title: title.trim(),
-        // With a template an empty body stays empty: the server fills the template's body only
-        // when no body is sent (API and MCP callers), and the console always sends one.
-        body: template ? body.trim() : body.trim() || undefined,
-        templateId: template?.id,
-        key: key.current,
+        ...request,
+        key: key.current.for({
+          roomId: request.roomId,
+          agentId: request.agentId ?? null,
+          title: request.title,
+          body: request.body ?? null,
+          templateId: request.templateId ?? null,
+        }),
       });
-      // A new key only after success: a retry of the same form never adds the task twice.
-      key.current = crypto.randomUUID();
+      key.current.done();
       setTasks((list) => [task, ...(list ?? []).filter((item) => item.id !== task.id)]);
       resetForm();
     } catch (err) {

@@ -283,12 +283,37 @@ test('overview: kept counts equal a scan through joins, leaves, removals and tas
     complete: false,
     stopped: null,
   });
-  assert.deepEqual(await checkRoomCounts(f.app.city.db, { repair: true }), {
+  // The repair waits for the counts row (held by a writer's trigger until it commits, such as
+  // the lapse sweep, which takes no room lock) before it scans, so it cannot overwrite a delta.
+  const statements: string[] = [];
+  const db = f.app.city.db;
+  const recording = {
+    transaction: <T>(fn: (tx: Parameters<Parameters<typeof db.transaction>[0]>[0]) => Promise<T>) =>
+      db.transaction((tx) =>
+        fn(
+          new Proxy(tx, {
+            get(target, key, receiver) {
+              if (key !== 'query') return Reflect.get(target, key, receiver);
+              return (sql: string, params?: unknown[]) => {
+                statements.push(sql.replace(/\s+/g, ' ').trim());
+                return target.query(sql, params);
+              };
+            },
+          }),
+        ),
+      ),
+  };
+  assert.deepEqual(await checkRoomCounts(recording, { repair: true }), {
     rooms: 1,
     repaired: 1,
     complete: true,
     stopped: null,
   });
+  const at = (prefix: string) => statements.findIndex((sql) => sql.startsWith(prefix));
+  const roomLock = at('SELECT 1 FROM rooms WHERE id=$1 FOR UPDATE');
+  const countsLock = at('SELECT 1 FROM room_counts WHERE room_id=$1 FOR UPDATE');
+  const repair = at('INSERT INTO room_counts');
+  assert.ok(roomLock >= 0 && countsLock > roomLock && repair > countsLock, statements.join('\n'));
   assert.deepEqual(await checkRoomCounts(f.app.city.db), {
     rooms: 0,
     repaired: 0,

@@ -28,6 +28,8 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { Database } from '../server/database.js';
 import {
   BASE_IDENTITY_PROVISIONAL_SQL,
+  BASE_IDENTITY_HANDOVER_BACKOFF_SQL,
+  BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL,
   BASE_MIGRATION_SQL,
   BASE_PAYMENTS_MIGRATION_SQL,
   BASE_SHARED_ADDITIONS_SQL,
@@ -463,6 +465,8 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }, options
     baseShortIdsMigration.sql,
     BASE_SHARED_ADDITIONS_SQL,
     BASE_IDENTITY_PROVISIONAL_SQL,
+    BASE_IDENTITY_HANDOVER_BACKOFF_SQL,
+    BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL,
     BASE_WALLET_VAULT_SQL,
     BASE_WALLET_WITHDRAWALS_SQL,
     BASE_WALLET_PAYMENTS_SQL,

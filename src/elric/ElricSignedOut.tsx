@@ -6,6 +6,7 @@ import { ELRIC_AI_TAG, ELRIC_NAME } from '../../shared/elric-copy';
 import { usePageTitle } from '../shell/usePageTitle';
 import { PAGE_TITLES } from '../../shared/page-titles';
 import { MascotPeek } from './ElricMascot';
+import { onPageRestore } from '../pageRestore';
 import { clearPendingDraft, readPendingDraft, savePendingDraft } from './pendingDraft';
 import './dashboard.css';
 
@@ -69,6 +70,8 @@ export function ElricSignedOut({ onAuth }: { onAuth: (mode: AuthMode) => void })
   const [error, setError] = useState('');
   const input = useRef<HTMLTextAreaElement>(null);
   const button = useRef<HTMLButtonElement>(null);
+  // Back from Google can show this page again from the browser's cache, still busy.
+  useEffect(() => onPageRestore(window, () => setBusy(false)), []);
   useEffect(() => {
     let live = true;
     // Continue with Google only when the server has it on (like the sign-in page).

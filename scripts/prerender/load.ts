@@ -14,6 +14,8 @@ export async function loadPrerender(root: string): Promise<{
   render: RenderPublicPage;
   /** The agent count the landing renders with (scripts/prerender/agent-count.ts). */
   setAgentCount: (count: AgentCount | null) => void;
+  /** Whether the landing reserves the paid service calls line (never a number). */
+  setPaidCallsLine: (reserved: boolean) => void;
   close: () => Promise<void>;
 }> {
   const server = await createServer({
@@ -30,10 +32,12 @@ export async function loadPrerender(root: string): Promise<{
     const module = (await server.ssrLoadModule('/src/prerender.tsx')) as {
       renderPublicPage: RenderPublicPage;
       setPrerenderAgentCount: (count: AgentCount | null) => void;
+      setPrerenderPaidCallsLine: (reserved: boolean) => void;
     };
     return {
       render: module.renderPublicPage,
       setAgentCount: module.setPrerenderAgentCount,
+      setPaidCallsLine: module.setPrerenderPaidCallsLine,
       close: () => server.close(),
     };
   } catch (error) {

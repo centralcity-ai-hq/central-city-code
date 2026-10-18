@@ -12,6 +12,7 @@ import './settings/account-data.css';
 import { openWorkspaceView } from './shell/workspaceDestinations';
 import { useWorkspaceV2 } from './shell/workspaceV2';
 import { safeReturnPath } from '../shared/return-path';
+import { onPageRestore } from './pageRestore';
 import { NEWSLETTER_HINT, NEWSLETTER_LABEL } from '../shared/newsletter';
 import { NewsletterSettings } from './settings/Newsletter';
 import type { Operator } from '../shared/types';
@@ -40,6 +41,34 @@ export interface GoogleLinkState {
   /** An account just created with Google that has not chosen its account name yet. */
   handle_needed?: boolean;
   linked: { email: string; hd: string | null; linked_at: string } | null;
+  /**
+   * Set here (never by the server) when GET /api/auth/google failed (network, 429, 5xx): whether
+   * Google sign-in is on is unknown, which is not the same as "off".
+   */
+  error?: true;
+}
+
+/** The state after a failed check: unknown, not disabled. */
+export const GOOGLE_LINK_UNKNOWN: GoogleLinkState = { enabled: false, linked: null, error: true };
+
+/**
+ * Sign-in shows "Continue with Google" when the server says it is on, and also when the check
+ * failed: the /start POST reports the real refusal if it is off.
+ */
+export function showGoogleSignIn(state: GoogleLinkState | null) {
+  return state?.enabled === true || state?.error === true;
+}
+
+/** Settings' line when the check failed, with Try again (which runs the check again). */
+export function GoogleLinkCheckFailed({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div role="alert">
+      <p>Couldn't check Google sign-in.</p>
+      <button type="button" className="button secondary" onClick={onRetry}>
+        Try again
+      </button>
+    </div>
+  );
 }
 
 const OUTCOMES: Record<string, { text: string; error: boolean }> = {
@@ -110,22 +139,29 @@ export function useGoogleOutcome() {
 
 export function useGoogleLink() {
   const [state, setState] = useState<GoogleLinkState | null>(null);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let active = true;
     api<GoogleLinkState>('/api/auth/google', undefined, 'GET')
       .then((value) => active && setState(value))
-      .catch(() => active && setState({ enabled: false, linked: null }));
+      .catch(() => active && setState(GOOGLE_LINK_UNKNOWN));
     return () => {
       active = false;
     };
-  }, []);
-  return [state, setState] as const;
+  }, [attempt]);
+  const retry = () => {
+    setState(null);
+    setAttempt((value) => value + 1);
+  };
+  return [state, setState, retry] as const;
 }
 
 /** "Continue with Google": starts the flow on the server, then goes to Google. */
 export function GoogleButton({ intent }: { intent: 'signin' | 'link' }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  // Back from Google can show this page again from the browser's cache, still busy.
+  useEffect(() => onPageRestore(window, () => setBusy(false)), []);
   async function go() {
     setBusy(true);
     setError('');
@@ -164,7 +200,7 @@ export function GoogleSignInOption(_props: { register: boolean }) {
     <>
       {outcome?.error ? <FormError error={outcome.text} /> : null}
       {/* One button for both: an unknown Google account gets a new account. */}
-      {state?.enabled ? (
+      {showGoogleSignIn(state) ? (
         <div className="auth-v8-alt">
           <span className="auth-v8-or">or</span>
           <GoogleButton intent="signin" />
@@ -315,7 +351,7 @@ export function AccountPage() {
 
 function ClassicAccountPage() {
   const outcome = useGoogleOutcome();
-  const [state, setState] = useGoogleLink();
+  const [state, setState, retryGoogle] = useGoogleLink();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   async function unlink() {
@@ -348,6 +384,8 @@ function ClassicAccountPage() {
           ) : null}
           {!state ? (
             <LoaderCircle size={17} className="spin" aria-label="Loading" />
+          ) : state.error ? (
+            <GoogleLinkCheckFailed onRetry={retryGoogle} />
           ) : !state.enabled ? (
             <p className="auth-v8-sub">Sign in with Google isn't available on this server.</p>
           ) : state.handle_needed ? (
@@ -403,7 +441,7 @@ function ClassicAccountPage() {
  */
 function AccountSettingsV2() {
   const outcome = useGoogleOutcome();
-  const [state, setState] = useGoogleLink();
+  const [state, setState, retryGoogle] = useGoogleLink();
   const [session, setSession] = useState<Operator | null>(null);
   const [sessionError, setSessionError] = useState('');
   const [attempt, setAttempt] = useState(0);
@@ -512,6 +550,8 @@ function AccountSettingsV2() {
             ) : null}
             {!state ? (
               <SettingsLoading label="Loading your Google link…" rows={1} />
+            ) : state.error ? (
+              <GoogleLinkCheckFailed onRetry={retryGoogle} />
             ) : !state.enabled ? (
               <p className="account-data-muted">
                 Sign in with Google isn’t available on this server.

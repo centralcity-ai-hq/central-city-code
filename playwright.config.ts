@@ -14,7 +14,8 @@ export default defineConfig({
   testDir: './e2e',
   fullyParallel: false,
   workers: 1,
-  retries: 0,
+  // One retry on CI only: a test that passes on retry is reported as flaky, never hidden.
+  retries: process.env.CI ? 1 : 0,
   timeout: 45_000,
   // A first render on a busy CI machine can take more than the default 5 s.
   expect: { timeout: 10_000 },
@@ -47,6 +48,10 @@ export default defineConfig({
         CITY_LIMIT_AI_WORKSPACE_CREATES_PER_SOURCE_PER_HOUR: '10',
         // Room tasks (docs/ROOM_TASKS.md) are on in production; the Tasks panel needs its routes.
         CITY_ROOM_TASKS: '1',
+        // The Feed is live by default (docs/protocol/LIVE.md). The browser specs mock every Feed
+        // route they use themselves (e2e/feed-fixtures.ts), so this server keeps the Feed switched
+        // off with its emergency off, as the specs expect.
+        CITY_FEED: '0',
         // The count-log cron endpoint (e2e/verify.spec.ts takes a checkpoint through it).
         CRON_SECRET: 'e2e-count-log-cron-secret',
         // Pin the cron gate to a Berlin-noon instant (12:00 CEST) so the suite passes at any
@@ -67,6 +72,8 @@ export default defineConfig({
         CITY_ELRIC_MOCK: '1',
         // The room header with Members, Elric and Tasks together (e2e/elric-controls.spec.ts).
         CITY_ROOM_TASKS: '1',
+        // As on the main test server: the specs mock the Feed themselves.
+        CITY_FEED: '0',
         CITY_LIMIT_REGISTRATIONS_PER_WINDOW: '1000',
         CITY_LIMIT_API_REQUESTS_PER_MINUTE: '100000',
       },

@@ -7,8 +7,14 @@ import { fileURLToPath } from 'node:url';
 import { writePublicDocs } from './scripts/public-docs/build';
 import { publicDocGuides } from './scripts/public-docs/guides';
 import { loadPrerender } from './scripts/prerender/load';
-import { fetchBuildAgentCount } from './scripts/prerender/agent-count';
-import { homeHtml, SHARE_CARDS, shareCardHtml, withShareCard } from './shared/share-cards';
+import { fetchBuildHomeStats } from './scripts/prerender/agent-count';
+import {
+  homeHtml,
+  SHARE_CARDS,
+  shareCardHtml,
+  shareCardLive,
+  withShareCard,
+} from './shared/share-cards';
 import { APP_SHELL } from './shared/routes';
 import { sitemapXml, withStructuredData } from './shared/seo';
 import { pageLastmod } from './scripts/seo/lastmod';
@@ -95,6 +101,8 @@ function publicDocs(): Plugin {
  * crawlers, which do not run JavaScript, see each page's own title and link preview. The public
  * content pages (src/prerender.tsx) also get their rendered markup inside #root, so their text is
  * in the first HTML; a page that fails to render keeps the plain shell, with a warning.
+ * A card whose page is switched off for this deployment (shareCardLive: the Feed while CITY_FEED
+ * is 0, its emergency off) gets the plain shell instead, as its route is the app's 404.
  * vercel.json and server/index.ts serve the copy for the route. index.html ("/") gets the
  * signed-out landing; the plain shell every other client route uses is app.html.
  */
@@ -157,8 +165,9 @@ function shareCards(): Plugin {
       const html = String(index.source);
       const warn = (message: string) => this.warn(message);
       // The landing's agent count, read once for this build (never per request) and never failing
-      // it: without a count the landing is built as before (scripts/prerender/agent-count.ts).
-      const agentCount = fetchBuildAgentCount({ warn });
+      // it: without a count the landing is built as before (scripts/prerender/agent-count.ts). The
+      // same response says whether to reserve the paid service calls line (never a number).
+      const homeStats = fetchBuildHomeStats({ warn });
       let prerender: Awaited<ReturnType<typeof loadPrerender>> | null = null;
       try {
         prerender = await loadPrerender(fileURLToPath(new URL('.', import.meta.url)));
@@ -167,6 +176,10 @@ function shareCards(): Plugin {
       }
       try {
         for (const card of SHARE_CARDS) {
+          if (!shareCardLive(card, process.env)) {
+            this.emitFile({ type: 'asset', fileName: card.shell, source: html });
+            continue;
+          }
           let source = withShareCard(html, card);
           if (prerender) {
             const page = shareCardHtml(html, card, prerender.render, warn);
@@ -178,7 +191,9 @@ function shareCards(): Plugin {
         }
         this.emitFile({ type: 'asset', fileName: APP_SHELL.slice(1), source: html });
         if (prerender) {
-          prerender.setAgentCount(await agentCount);
+          const stats = await homeStats;
+          prerender.setAgentCount(stats.count);
+          prerender.setPaidCallsLine(stats.paidCalls);
           const home = homeHtml(html, prerender.render, warn);
           index.source = home.prerendered
             ? withStylesheets(home.html, chunkCss(bundle, prerenderedPageModule('/')!))

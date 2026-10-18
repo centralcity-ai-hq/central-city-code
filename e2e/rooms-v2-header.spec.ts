@@ -349,7 +349,7 @@ test('Needs you: hidden when nothing waits, and never shown to a member who is n
   await member.goto(`/rooms/${room.id}`);
   await expect(member.getByRole('heading', { level: 1, name: ROOM_NAME })).toBeVisible();
   await expect(member.getByTestId('room-pill')).toBeVisible();
-  await expect(member.getByRole('button', { name: 'Invite' })).toHaveCount(0);
+  await expect(member.getByRole('button', { name: 'Invite', exact: true })).toHaveCount(0);
   await expect(member.getByTestId('needs-you-chip')).toHaveCount(0);
   expect(asked).toBe(false);
 });
@@ -718,7 +718,7 @@ for (const theme of ['light', 'dark'] as const)
       await page.getByRole('button', { name: 'More room actions' }).click();
       await expect(page.getByRole('menuitem', { name: 'Connect AI' })).toBeVisible();
       await expect(page.getByRole('menuitem', { name: /^Members/ })).toHaveCount(0);
-      await expect(page.getByRole('menuitem', { name: 'Invite' })).toHaveCount(0);
+      await expect(page.getByRole('menuitem', { name: 'Invite', exact: true })).toHaveCount(0);
       await expect(header.getByRole('button', { name: 'Invite', exact: true })).toBeVisible();
       await page.keyboard.press('Escape');
 

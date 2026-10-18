@@ -32,12 +32,14 @@ test('/a/<id> keeps the registration file byte-identical for resolvers and varie
   const db = await setup(t);
   await add(db, { n: 1, kind: 'final', id: 4711 });
   const short = shortOf(1);
-  const card = (app: ReturnType<typeof Fastify>) =>
-    app.get('/a2a/:agentId/.well-known/agent-card.json', async () => ({
-      name: 'Harbor',
-      description: 'Research agent',
-      supportedInterfaces: [{ protocolVersion: '1.0' }],
-    }));
+  const card = async () => ({
+    name: 'Harbor',
+    description: 'Research agent',
+    supportedInterfaces: [{ protocolVersion: '1.0' }],
+  });
+  const updated = await db.query<{ updated_at: string }>(
+    "SELECT updated_at FROM base_identities WHERE state = 'confirmed' AND erc8004_agent_id = 4711",
+  );
   const file = JSON.stringify(
     buildRegistrationFile({
       name: 'Harbor',
@@ -50,6 +52,8 @@ test('/a/<id> keeps the registration file byte-identical for resolvers and varie
       image: 'https://centralcity.ai/brand/directory-icon-1024.png',
       cardUrl: `https://centralcity.ai/a2a/${agentId(1)}/.well-known/agent-card.json`,
       a2aVersion: '1.0',
+      webUrl: `https://centralcity.ai/a/${short}`,
+      updatedAtMs: Number(updated.rows[0]?.updated_at ?? 0),
       identities: [{ chainId: 8453, registry: REGISTRY, erc8004AgentId: '4711' }],
     }),
   );
@@ -58,8 +62,7 @@ test('/a/<id> keeps the registration file byte-identical for resolvers and varie
   // Without a page (today): every client, a browser included, gets the same bytes.
   const plain = Fastify();
   t.after(() => plain.close());
-  card(plain);
-  registerShortLinks(plain, { db, originOf: () => 'https://centralcity.ai' });
+  registerShortLinks(plain, { db, originOf: () => 'https://centralcity.ai', card });
   for (const headers of [...resolvers, { accept: 'text/html' }]) {
     const response = await plain.inject({ url: `/a/${short}`, headers });
     assert.equal(response.statusCode, 200);
@@ -75,9 +78,9 @@ test('/a/<id> keeps the registration file byte-identical for resolvers and varie
   // With the passport page: browsers get it, resolvers still get the same bytes.
   const paged = Fastify();
   t.after(() => paged.close());
-  card(paged);
   registerShortLinks(paged, {
     db,
+    card,
     originOf: () => 'https://centralcity.ai',
     page: (_request, reply) => reply.type('text/html').send('<!doctype html><title>page</title>'),
   });
@@ -104,8 +107,11 @@ test('/a/<x> reads x only as a short id, even when it is all digits', async (t) 
   await db.query("UPDATE base_short_ids SET short_id = '123456' WHERE agent_id = $1", [agentId(2)]);
   const app = Fastify();
   t.after(() => app.close());
-  app.get('/a2a/:agentId/.well-known/agent-card.json', async () => ({ name: 'Harbor' }));
-  registerShortLinks(app, { db, originOf: () => 'https://centralcity.ai' });
+  registerShortLinks(app, {
+    db,
+    card: async () => ({ name: 'Harbor' }),
+    originOf: () => 'https://centralcity.ai',
+  });
   const file = (await app.inject({ url: '/a/123456' })).json() as {
     registrations: Array<{ agentId: number }>;
   };
@@ -122,17 +128,20 @@ test("Verify's two-way binding: a JSON fetch of the URI Base holds gets the file
   const short = shortOf(1);
   const app = Fastify();
   t.after(() => app.close());
-  app.get('/a2a/:agentId/.well-known/agent-card.json', async () => ({ name: 'Harbor' }));
   registerShortLinks(app, {
     db,
+    card: async () => ({ name: 'Harbor' }),
     originOf: () => 'https://centralcity.ai',
     page: (_request, reply) => reply.type('text/html').send('<!doctype html><title>page</title>'),
   });
   // Today's bytes, before the page existed.
   const before = Fastify();
   t.after(() => before.close());
-  before.get('/a2a/:agentId/.well-known/agent-card.json', async () => ({ name: 'Harbor' }));
-  registerShortLinks(before, { db, originOf: () => 'https://centralcity.ai' });
+  registerShortLinks(before, {
+    db,
+    card: async () => ({ name: 'Harbor' }),
+    originOf: () => 'https://centralcity.ai',
+  });
   const today = (await before.inject({ url: `/a/${short}` })).body;
 
   // A browser fetch() sends */* unless told otherwise; Verify asks for application/json.

@@ -5,13 +5,17 @@
  * eth_chainId once, then eth_blockNumber and one eth_call per read. Any transport, HTTP, RPC or
  * decoding failure rejects the whole read: a failed read is never a balance of zero. The URL may
  * carry a key (the CDP endpoint), so it is never logged or returned.
+ *
+ * `url` may be a list (read-transport.ts): the configured endpoint first, then a second one that
+ * answers when the first cannot. The head number may come from either; the one aggregate3 call is
+ * pinned to that number on whichever node answers it (a node without that block fails, never
+ * reads another one), so every value still describes one block.
  */
 import {
   createPublicClient,
   decodeFunctionResult,
   encodeFunctionData,
   getAddress,
-  http,
   multicall3Abi,
   parseAbi,
   size,
@@ -23,6 +27,7 @@ import {
   type BaseNetwork,
 } from '../../../shared/base/chains.js';
 import type { ReservationDeps } from './reservations.js';
+import { baseReadTransport } from './read-transport.js';
 
 export interface WalletBalances {
   /** USDC in base units (6 decimals). */
@@ -49,12 +54,19 @@ const erc20Abi = parseAbi(['function balanceOf(address owner) view returns (uint
 const probeAbi = parseAbi(['function entryPoint() view returns (address)']);
 
 export function baseBalanceReader(
-  url: string,
+  url: string | readonly string[],
   network: BaseNetwork,
   timeoutMs = 3_000,
+  /** What these reads count as per minute (rpc-count.ts); 'read' by default. */
+  purpose?: string,
 ): BalanceReader {
   const client = createPublicClient({
-    transport: http(url, { timeout: timeoutMs, retryCount: 0 }),
+    transport: baseReadTransport(url, {
+      chainId: network.chainId,
+      timeoutMs,
+      headNumberMayFallBack: true,
+      ...(purpose ? { purpose } : {}),
+    }),
   });
   const usdc = network.tokens.USDC.address;
   let chainChecked = false;

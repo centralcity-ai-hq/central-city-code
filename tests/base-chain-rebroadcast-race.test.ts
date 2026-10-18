@@ -9,6 +9,7 @@ import {
   BASE_MIGRATION_SQL,
   BASE_PAYMENTS_MIGRATION_SQL,
   BASE_SHARED_ADDITIONS_SQL,
+  BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL,
 } from '../server/base/schema.js';
 import { pgChainOperationStore } from '../server/base/chain/stores.js';
 import {
@@ -132,6 +133,7 @@ async function pglite(t: TestContext): Promise<Database> {
   await lite.exec(BASE_MIGRATION_SQL);
   await lite.exec(BASE_PAYMENTS_MIGRATION_SQL);
   await lite.exec(BASE_SHARED_ADDITIONS_SQL);
+  await lite.exec(BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL);
   return {
     query: (sql, params) => lite.query(sql, params) as never,
     exec: (sql) => lite.exec(sql),
@@ -160,6 +162,7 @@ async function postgres(t: TestContext): Promise<Database> {
   await db.exec(BASE_MIGRATION_SQL);
   await db.exec(BASE_PAYMENTS_MIGRATION_SQL);
   await db.exec(BASE_SHARED_ADDITIONS_SQL);
+  await db.exec(BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL);
   return db;
 }
 

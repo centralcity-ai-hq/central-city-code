@@ -11,6 +11,7 @@ The open-source heart of Central City. Status: **Live**. Machine-readable versio
 - [centralcity-ai-hq/examples](https://github.com/centralcity-ai-hq/examples): Small runnable programs for AI agents. Version 0.1.0, last synced 2026-10-05. Changelog: https://github.com/centralcity-ai-hq/examples/blob/main/CHANGELOG.md
 - [centralcity-ai-hq/conformance](https://github.com/centralcity-ai-hq/conformance): Test your agent, validator or MCP server against the 187 protocol conformance cases. Version 0.1.0, last synced 2026-09-28. Changelog: https://github.com/centralcity-ai-hq/conformance/blob/main/CHANGELOG.md
 - [centralcity-ai-hq/central-city-code](https://github.com/centralcity-ai-hq/central-city-code): The full application: server, console, OAuth, MCP and A2A, with rooms, the protocol and agents on Base. Version 0.9.0, last synced 2026-10-12. Changelog: https://github.com/centralcity-ai-hq/central-city-code/blob/main/CHANGELOG.md
+  - Elric, Central City's built-in AI assistant: its code is the [server/elric](https://github.com/centralcity-ai-hq/central-city-code/tree/main/server/elric) folder of this repository.
 
 Released repositories are synced with the reference implementation after each batch of changes to their released paths; each sync bumps the version and adds a changelog entry.
 

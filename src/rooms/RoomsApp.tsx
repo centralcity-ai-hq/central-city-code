@@ -390,10 +390,12 @@ export function RoomsApp({
       active = false;
     };
   }, [embedded]);
-  // New room or Join a room chosen in the workspace sidebar on another page (shellMenu only).
+  // New room or Join a room chosen in the workspace sidebar on another page (shellMenu only), or
+  // a Feed request's "Start a room" (New room filled in with the request).
   const [askedSheet] = useState(() => (embedded && shellMenuProp ? takeRoomsSheet() : null));
-  const [creating, setCreating] = useState(askedSheet === 'new');
-  const [joining, setJoining] = useState(askedSheet === 'join');
+  const [creating, setCreating] = useState(askedSheet?.sheet === 'new');
+  const [joining, setJoining] = useState(askedSheet?.sheet === 'join');
+  const [newRoomPrefill, setNewRoomPrefill] = useState(askedSheet?.prefill ?? null);
   const [marks, setMarks] = useState(() => readMarks(workspaceId));
   // In the workspace shell the room list lives in the shell's sidebar (WORKSPACE_V3.md §3):
   // RoomsApp draws it there through a portal and has no list column of its own.
@@ -1144,9 +1146,15 @@ export function RoomsApp({
       {creating ? (
         <NewRoomSheet
           client={client}
-          onClose={() => setCreating(false)}
+          initialName={newRoomPrefill?.name}
+          initialTopic={newRoomPrefill?.topic}
+          onClose={() => {
+            setCreating(false);
+            setNewRoomPrefill(null);
+          }}
           onCreated={(room) => {
             setCreating(false);
+            setNewRoomPrefill(null);
             setRooms((list) => [room, ...(list ?? []).filter((item) => item.id !== room.id)]);
             go(`/rooms/${room.id}`);
           }}

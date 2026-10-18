@@ -55,3 +55,33 @@ export function usageShare(used: number, allowance: number) {
   const share = allowance > 0 ? Math.min(Math.max(used, 0) / allowance, 1) : 1;
   return { share, full: share >= 1 };
 }
+
+/**
+ * Whether a reply that arrives after an await still belongs to the chat on screen: seqs are per
+ * room, so messages of a chat the person has since left must never merge into the open one (nor
+ * move its poll cursor). A new chat with no room yet matches nothing.
+ */
+export function isOpenChat(openRoomId: string | null | undefined, roomId: string): boolean {
+  return Boolean(roomId) && openRoomId === roomId;
+}
+
+export interface SendAttempt {
+  scope: string;
+  body: string;
+  key: string;
+}
+
+/**
+ * The idempotency key of a send: the same text sent again to the same room keeps the key of the
+ * attempt that failed, so a post the server stored before its response was lost is not stored
+ * (and answered) twice. Other text, or another room, gets a new key.
+ */
+export function sendAttempt(
+  last: SendAttempt | null,
+  scope: string,
+  body: string,
+  newKey: () => string,
+): SendAttempt {
+  if (last && last.scope === scope && last.body === body) return last;
+  return { scope, body, key: newKey() };
+}

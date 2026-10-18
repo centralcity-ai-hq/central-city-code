@@ -14,11 +14,11 @@ import { fileURLToPath } from 'node:url';
  * the same.
  */
 const FROZEN: Record<string, string> = {
-  'src/trust/Privacy.tsx': '88e89289831dd5f556436b832fb3f103bd923428f4c05b6dc4ebeb0d1243b410',
+  'src/trust/Privacy.tsx': '4788808ff1b7adfb0ba129a8afa99664f801e85a334b74d0b3b31e93264cb8ca',
   'src/trust/Dpa.tsx': '9ba21e01b29b2549fa26ea615cee4cacee4ee0c196456a276b40d13a415a7534',
   'src/trust/Terms.tsx': '31fc5d567251c2f9014f917fe748e3b369e2bc701a9e9ba826f988de2b1e26a9',
   'src/trust/PrivacyChoices.tsx':
-    '2493c7a7a025e198ef980a0a9be6e871dd134fa362f013455ac42ef50596fa18',
+    'c2d57508ed1839ca5773ad300721b581a8012cd3827f417bd5f96dcc6137435b',
   'src/trust/AcceptableUse.tsx': '567c748c74918bf9c055a25ec7fc55a224718ff93ff4e75c0dffb98f63e0e802',
 };
 

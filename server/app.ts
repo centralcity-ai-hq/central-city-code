@@ -1,7 +1,12 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import cookie from '@fastify/cookie';
 import type { PGlite } from '@electric-sql/pglite';
-import { openPostgres, type Database, type Transaction as Tx } from './database.js';
+import {
+  openPostgres,
+  transientDatabaseError,
+  type Database,
+  type Transaction as Tx,
+} from './database.js';
 import {
   agentMessageCountsMigration,
   agentTotalsMigration,
@@ -54,12 +59,14 @@ import {
   emptyWorkspace,
   event,
   hasPermission,
+  hostedHeartbeatDue,
   iso,
   LEASE_TTL,
   ownerAgent,
   publicAgent,
   publicJob,
   reachable,
+  listAgents,
   snapshot,
   stopJob,
   publicWorkflow,
@@ -72,6 +79,8 @@ import {
 } from './model.js';
 import { executeTemplate } from './templates.js';
 import { agentActivity, decodeCursor } from './activity.js';
+import { decodeAgentCursor } from './agent-pages.js';
+import { AGENT_PAGES, AGENTS_PATH } from '../shared/agent-pages.js';
 import {
   currentManifest,
   descendants,
@@ -122,9 +131,12 @@ import { registerRoomRepoRoutes } from './rooms/repos/routes.js';
 import { registerRoomTasksMigration } from './rooms/tasks-schema.js';
 import { registerRoomOverviewMigration } from './rooms/overview.js';
 import { registerRoomRoutes } from './rooms/routes.js';
+import { createRoomInvitations, type RoomInvitationDependencies } from './rooms/invitations.js';
+import { registerInvitationRoutes } from './rooms/invitations-routes.js';
+import { registerRoomInvitationsMigration } from './rooms/invitations-schema.js';
 import { createRoomPins, deliverBriefOnce, registerRoomPinsMigration } from './rooms/pins.js';
 import { registerPinRoutes } from './rooms/pins-routes.js';
-import { registerWakeMigration } from './wake/schema.js';
+import { registerWakeMigration, registerWakeUnreadRecountMigration } from './wake/schema.js';
 import { createWake, type WakeOptions } from './wake/service.js';
 import { inboxWaiter, registerWakeRoutes } from './wake/routes.js';
 import { wakeKeys } from './wake/webhooks.js';
@@ -152,12 +164,77 @@ import {
   type GoogleSignInOptions,
 } from './google/index.js';
 import { GOOGLE_SALT_NO_PASSWORD, GOOGLE_SALT_PENDING_NAME } from './google/routes.js';
-import { registerEmail, registerEmailMigration, type EmailOptions } from './email/index.js';
+import {
+  NEWSLETTER_RATE,
+  registerEmail,
+  registerEmailMigration,
+  type EmailOptions,
+} from './email/index.js';
 import { registerBaseMigration } from './base/schema.js';
 import { baseRegistrationStarted, registerShortLinks } from './base/identity/short-links.js';
 import { registerBaseRegistrationRoutes } from './base/identity/routes.js';
 import { chainRuntimes } from './base/chain/runtime.js';
 import { registerOnBaseRoutes } from './base/explorer/routes.js';
+import { registerServiceCallsRoutes } from './base/explorer/calls.js';
+import { registerDirectoryRoutes } from './directory/routes.js';
+import { registerDirectoryMigration } from './directory/schema.js';
+import { registerFeedRequestsMigration } from './feed/schema.js';
+import { createFeedRequests, feedCaps } from './feed/requests.js';
+import { registerFeedRoutes } from './feed/routes.js';
+import { feedEventLog, registerFeedReviewRoutes } from './feed/review.js';
+import { registerFeedCron } from './feed/cron.js';
+import { protocolFeeLedgerMigration } from './protocol/fees/ledger.js';
+import { registerProtocolFeeTimeIndexMigration } from './protocol/fees/time-index-schema.js';
+import { registerProtocolFeeRouterStartsMigration } from './protocol/fees/router-starts-schema.js';
+import { registerFeedPayFloatTargetMigration } from './feed/pay/router2-schema.js';
+import { offerPriceMaxRaw } from './feed/pay/router2.js';
+import { registerFeedPayFeeMigration } from './feed/pay/fee-schema.js';
+import { registerFeedPayIncludedMigration } from './feed/pay/included-schema.js';
+import { registerFeedPayPaidIndexMigration } from './feed/pay/paid-index-schema.js';
+import { registerPaidCallCountMigration } from './feed/pay/count-schema.js';
+import { registerPaidCallCountDropMigration } from './feed/pay/count-drop-schema.js';
+import { registerFeedPayTopUpRetryMigration } from './feed/pay/topup-retry-schema.js';
+import { registerFeedPayPayRetryMigration } from './feed/pay/pay-retry-schema.js';
+import { registerProtocolScreeningMigration } from './protocol/screening/schema.js';
+import { createScreeningGate, type ScreeningProvider } from './protocol/screening/gate.js';
+import { sanctionsOracleFor } from './protocol/screening/sanctions-oracle.js';
+import { registerProtocolFeeRoutes } from './protocol/fees/routes.js';
+import {
+  protocolFeeChainFromEnv,
+  protocolFeeChainId,
+  registerProtocolFeeCron,
+} from './protocol/fees/cron.js';
+import type { FeedSyncDeps } from './feed/ingest.js';
+import { registerFeedServiceRoutes } from './feed/services-routes.js';
+import { registerFeedServicesMigration } from './feed/services-schema.js';
+import { registerFeedOffersMigration } from './feed/offers/schema.js';
+import { registerFeedOfferKindsV2Migration } from './feed/offers/kinds-schema.js';
+import { registerFeedOfferPresetsMigration } from './feed/offers/preset-schema.js';
+import { registerFeedPayRouter2CapsMigration } from './feed/pay/router2-caps-schema.js';
+import { setOfferKindDeps } from './feed/offers/kinds.js';
+import { offerBaseReaderFromEnv } from './feed/offers/kinds-base.js';
+import {
+  createOfferStore,
+  OFFER_CAPS_DEFAULT,
+  offerCaps,
+  syncOfferListing,
+  type OfferCaps,
+} from './feed/offers/store.js';
+import { refreshHostedUses } from './feed/offers/uses.js';
+import { registerFeedPayIncludedSettledMigration } from './feed/offers/uses-schema.js';
+import { registerFeedPayMigration } from './feed/pay/schema.js';
+import { createFeedPayEngine, type FeedPayEngineDeps } from './feed/pay/engine.js';
+import { registerFeedPayRoutes } from './feed/pay/routes.js';
+import { createFeedPayAlerts } from './feed/pay/alerts.js';
+import { FeedPayToolError, feedPayRefusalFields } from './feed/pay/tool.js';
+import { FeedToolError } from './feed/tools.js';
+import { FeedBusyError, isFeedPath, sendFeedBusy } from './feed/busy.js';
+import { sendDatabaseBusy } from './busy.js';
+import { feedServicesStatus } from './feed/query.js';
+import { registerFeedRespondMigration } from './feed/respond-schema.js';
+import { createFeedRespond, type FeedRespondDependencies } from './feed/respond.js';
+import { registerFeedRespondRoutes } from './feed/respond-routes.js';
+import { feedEnabled } from './feed/flag.js';
 import { baseChainReader } from './base/explorer/head.js';
 import { registerBaseWalletRoutes, WALLET_CHAIN_ID, walletReaders } from './base/wallet/routes.js';
 import { ownerRevokePortFromEnv } from './base/chain/owner-revoke.js';
@@ -195,8 +272,11 @@ import {
   createPublicStats,
   parseExcludedOperators,
   registerPublicStatsRoutes,
+  sqlPublicStatsStore,
 } from './stats/public-stats.js';
+import { createBaseAgentsReader } from './stats/base-agents.js';
 import { registerFastCountCheckRoute } from './stats/fast-count-check.js';
+import { createPaidCallsReader } from './stats/paid-calls.js';
 import { loadPlatformSigner } from './autonomy/signing.js';
 import {
   createCountLog,
@@ -243,6 +323,12 @@ export interface AppOptions {
   /** Test-only injection for the remote MCP/OAuth front door (e.g. a client metadata fetcher). */
   remoteMcp?: RemoteMcpTestOptions;
   /**
+   * Feed offers (server/feed/offers/store.ts): the https origin offers are listed under (default:
+   * the hosted public origin, else https://centralcity.ai) and, for tests, the caps (default: the
+   * CITY_LIMIT_OFFERS_* settings).
+   */
+  offers?: { origin?: string; caps?: OfferCaps };
+  /**
    * Request rate limiter. Defaults to a PostgreSQL-backed shared limiter in hosted mode and a
    * bounded in-memory limiter locally. 'memory' and 'postgres' select a built-in explicitly.
    */
@@ -275,6 +361,10 @@ export interface AppOptions {
   messaging?: { inboxDepth?: number; sendsPerMinute?: number; crossPairPerMinute?: number };
   /** Room limit overrides (docs/ROOMS.md). */
   rooms?: Partial<RoomLimits>;
+  /** Tests only: room invitation pause points for the race suite (rooms/invitations.ts). */
+  roomInvitations?: Pick<RoomInvitationDependencies, 'pause'>;
+  /** Tests only: Feed Respond pause points for its race tests (server/feed/respond.ts). */
+  feedRespond?: Pick<FeedRespondDependencies, 'pause'>;
   /**
    * Tests only: the agent payment chain and the recipient reader of Base Pay P2c (fakes without
    * any network) instead of the wallet network's chain runtime and configured endpoint.
@@ -329,6 +419,23 @@ export interface AppOptions {
   google?: GoogleSignInOptions;
   /** Email (docs/EMAIL.md): the CITY_EMAIL_* environment and the provider transport (tests). */
   email?: EmailOptions;
+  /**
+   * Tests only: the fetch the Feed's Bazaar sweep reads the source with (server/feed/ingest.ts), a
+   * fake without any network, instead of the global fetch.
+   */
+  feed?: Pick<FeedSyncDeps, 'fetch'>;
+  /**
+   * Tests only: Feed pay's chain side, outbound transport, alerts and clock of its worker
+   * (server/feed/pay/engine.ts), and how long POST call and city_service_call wait.
+   */
+  feedPay?: Partial<
+    Pick<FeedPayEngineDeps, 'chain' | 'http' | 'alert' | 'sleep' | 'pollMs' | 'offerKinds'>
+  > & {
+    answerWaitMs?: number;
+    mcpWaitMs?: number;
+    /** Tests: the payment screening provider (never the network); null = none configured. */
+    screeningProvider?: () => ScreeningProvider | null;
+  };
 }
 export interface CityServices {
   tick(): Promise<void>;
@@ -450,6 +557,14 @@ const pairSchema = z
 const jobSchema = assistantJobSchema;
 const idFrom = (request: FastifyRequest) =>
   z.object({ id: z.string().uuid() }).parse(request.params).id;
+const AGENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Comma-separated agent ids (include=, ids=): at most `max`, each a UUID. */
+function agentIdsParam(value: string | undefined, max: number): string[] {
+  if (value === undefined || value === '') return [];
+  const ids = [...new Set(value.split(','))];
+  if (ids.length > max || ids.some((id) => !AGENT_ID.test(id))) fail(400, 'Invalid agent ids.');
+  return ids;
+}
 const workflowSchema = z
   .object({
     requesterId: z.string().uuid(),
@@ -534,6 +649,8 @@ async function createDatabaseApp(
   registerCrossConnectionsMigration();
   // 13: rooms; 14: universal join links.
   registerRoomsMigration();
+  // 101: room invitations (rooms/invitations-schema.ts; reads migration 100's agent_directory).
+  registerRoomInvitationsMigration();
   registerJoinLinksMigration();
   // 15: mentions and wake-up.
   registerWakeMigration();
@@ -553,6 +670,8 @@ async function createDatabaseApp(
   registerResponderMigration();
   // 26: responder execution (reply leases, usage, wake target kinds, unread_count, room columns).
   registerResponderExecutionMigration();
+  // 142: recounts unread_count from the mentions (person read marks left it high).
+  registerWakeUnreadRecountMigration();
   // 29: the verifiable agent count's append-only log (docs: AGENT_COUNT_TRANSPARENCY spec).
   registerCountLogMigration();
   // 39: Elric (first-party agent). The schema always exists; the feature is behind CITY_ELRIC=1.
@@ -572,6 +691,78 @@ async function createDatabaseApp(
   // 76: the email outbox and the newsletter consent (server/email/schema.ts).
   registerEmailMigration();
   registerBaseMigration();
+  // 100: the directory's per-agent settings (server/directory/schema.ts).
+  registerDirectoryMigration();
+  // Migration 103 (Feed requests): the tables of the Feed's requests (live unless CITY_FEED=0).
+  // 105: the requests search reads the tags too, through an expression index (server/feed/schema.ts).
+  registerFeedRequestsMigration();
+  // 104: the Feed's services, exclusions and source sweeps; 107: `hidden` is the operator's own
+  // hide, risk is recomputed every sweep (server/feed/services-schema.ts). The schema
+  // always exists; the routes, the sweep's cron and the MCP tool stop while CITY_FEED is '0'.
+  registerFeedServicesMigration();
+  // 122: Feed offers, services an owner's agents sell in the Feed (server/feed/offers/schema.ts):
+  // new tables, a nullable column with its index and one source row; nothing writes offers yet
+  // but the store (server/feed/offers/store.ts).
+  registerFeedOffersMigration();
+  // 108: Feed Respond, responses to requests as room invitations (server/feed/respond-schema.ts;
+  // needs the rooms tables and 103). The routes stop while CITY_FEED is '0'.
+  registerFeedRespondMigration();
+  // 112: Feed pay, "Use with my agent" (server/feed/pay/schema.ts): new tables only (Feed pay is
+  // live unless CITY_FEED_PAY is '0').
+  registerFeedPayMigration();
+  // 234: the owner's pot target on Feed pay agent settings (server/feed/pay/router2-schema.ts),
+  // fee router 2's one top-up up to 100 USDC; a new nullable column only.
+  registerFeedPayFloatTargetMigration();
+  // 113: the protocol fee ledger (server/protocol/fees/ledger.ts), filled by the scan cron and read
+  // by the public metrics route (both answer 404 only while CITY_PROTOCOL_FEES is '0').
+  registerMigration(protocolFeeLedgerMigration);
+  // 172: the index the public fee metrics read their days through
+  // (server/protocol/fees/time-index-schema.ts): one plain index, no data changes.
+  registerProtocolFeeTimeIndexMigration();
+  // 232: the fee routers the ledger started reading after router 1 (router 2 rewind, once each).
+  registerProtocolFeeRouterStartsMigration();
+  // 114: the protocol fee leg of a Feed pay call (server/feed/pay/fee-schema.ts): columns on the
+  // Feed pay calls and the 'protocol_fee' chain operation; no new fee is owed while
+  // CITY_PROTOCOL_FEES=0.
+  registerFeedPayFeeMigration();
+  // 123: a Feed pay call to a service sold by a Central City agent, fee included and delivered
+  // in-process (server/feed/pay/included-schema.ts): four nullable or defaulted columns on the
+  // Feed pay calls and two partial indexes.
+  registerFeedPayIncludedMigration();
+  // 115: payment screening decisions (server/protocol/screening/schema.ts) and the fee leg's
+  // screening hold; a new table and two nullable columns, unused while CITY_PROTOCOL_SCREENING=0.
+  registerProtocolScreeningMigration();
+  // 120: the index the public passport's "Paid for services" totals read through
+  // (server/feed/pay/paid-index-schema.ts); 116, 117 and 119 belong to other open changes.
+  registerFeedPayPaidIndexMigration();
+  // 125: the paid service calls count (server/feed/pay/count-schema.ts): a small table kept by a
+  // deferred trigger on feed_pay_calls that can never block a payment save; read by the public
+  // stats field `paid_calls` and checked daily (server/stats/paid-calls.ts).
+  registerPaidCallCountMigration();
+  // 127: the index the use counts of the services sold by Central City agents read through
+  // (server/feed/offers/uses-schema.ts): a partial index on the settled fee-included Feed pay calls;
+  // 126 belongs to another open change; 128 and 129 are already applied.
+  registerFeedPayIncludedSettledMigration();
+  // 128: the paid service calls count's -1 when a reorg drops a settled payment
+  // (server/feed/pay/count-drop-schema.ts): one more deferred trigger of the same kind, so it ships
+  // alone or last in its batch as well; 126 and 127 belong to other open changes.
+  registerPaidCallCountDropMigration();
+  // 129: a rate-limited float top-up planned again later (server/feed/pay/topup-retry-schema.ts):
+  // two defaulted or nullable columns on the Feed pay calls; 126 and 127 belong to other open
+  // changes; 128 (above) is already applied before this one ships.
+  registerFeedPayTopUpRetryMigration();
+  // 210: a rate-limited fee-included router payment planned again later
+  // (server/feed/pay/pay-retry-schema.ts): defaulted or nullable columns on the Feed pay calls.
+  registerFeedPayPayRetryMigration();
+  // 230: city_offers.kind accepts the ten kinds added after the first twenty
+  // (server/feed/offers/kinds-schema.ts): the column's CHECK replaced, nothing else.
+  registerFeedOfferKindsV2Migration();
+  // 231: city_offers.preset, an offer's fixed input fields (server/feed/offers/preset-schema.ts):
+  // one nullable column on the offers table only.
+  registerFeedOfferPresetsMigration();
+  // 233: the 0.10 USDC CHECKs of one Feed payment widened to 100 USDC for fee router 2
+  // (server/feed/pay/router2-caps-schema.ts); the code still enforces 0.10 unless router 2 is on.
+  registerFeedPayRouter2CapsMigration();
   await runMigrations(db);
   const caps = loadLimits(process.env, options.limits);
   // Number of trusted proxy hops nearest the socket; 0 disables X-Forwarded-For entirely.
@@ -632,6 +823,14 @@ async function createDatabaseApp(
         error = limited as typeof error;
       }
     }
+    // The Feed under database load, wherever the failure came from: the app's own request hook
+    // (the session, key or token lookup of the rate limit), the flag check or a handler. Busy,
+    // never the plain 500 (server/feed/busy.ts).
+    if (
+      isFeedPath(_request.url) &&
+      (error instanceof FeedBusyError || transientDatabaseError(error))
+    )
+      return sendFeedBusy(reply, error);
     const retryAfterMs = (error as { retryAfterMs?: unknown }).retryAfterMs;
     if (typeof retryAfterMs === 'number')
       reply.header('Retry-After', String(Math.max(1, Math.ceil(retryAfterMs / 1000))));
@@ -646,6 +845,9 @@ async function createDatabaseApp(
         .code(response.status)
         .send(response.body);
     }
+    // Any other route under database load: busy (503, Retry-After), never the plain 500
+    // (server/busy.ts). A2A keeps its JSON-RPC shape above.
+    if (transientDatabaseError(error)) return sendDatabaseBusy(reply, error);
     // Field-level detail (paths and constraints only, never received values).
     if (error instanceof z.ZodError) return reply.code(400).send(validationErrorBody(error));
     const possible = error as { statusCode?: number; message?: string };
@@ -662,6 +864,12 @@ async function createDatabaseApp(
                 errorCode === 'ask_timeout') ||
               // Base Pay: unavailable or no sponsor (503; nothing was sent, a retry may work).
               (error instanceof AgentPayError && error.statusCode === 503) ||
+              // The Feed's search before its first complete sweep (503 source_unavailable,
+              // retryable): never an empty success. Or under load (503 busy, with Retry-After).
+              (error instanceof FeedToolError && error.statusCode === 503) ||
+              // city_service_call: the service or Base could not be reached (502, 503; nothing
+              // was signed or sent, a retry may work), or busy.
+              (error instanceof FeedPayToolError && error.statusCode >= 500) ||
               // The responder provider could not be reached (502), or the feature has no root key (503).
               (error instanceof ResponderError &&
                 (error.statusCode === 502 || error.statusCode === 503)))
@@ -685,6 +893,9 @@ async function createDatabaseApp(
       error.details !== undefined
         ? { details: error.details }
         : {}),
+      // city_service_call's refusals (nothing signed, nothing sent): the same answer as over MCP,
+      // retryable, retry_after_ms and details (amounts as USDC text, the reason, input problems).
+      ...(code !== 500 && error instanceof FeedPayToolError ? feedPayRefusalFields(error) : {}),
     });
   });
   const limiter: RateLimiter =
@@ -702,6 +913,27 @@ async function createDatabaseApp(
         message ?? 'Too many requests. Try again later.',
         result.retryAfterMs,
       );
+  }
+  /** A newsletter budget on sign-up/onboarding: false when spent (429), never a refusal there. */
+  async function newsletterBudget(take: () => Promise<void>): Promise<boolean> {
+    try {
+      await take();
+      return true;
+    } catch (error) {
+      if (error instanceof ApiError && error.statusCode === 429) return false;
+      throw error;
+    }
+  }
+  /**
+   * The newsletter opt-in after a committed sign-up or onboarding: any error is logged and the
+   * opt-in skipped (no email queued), so the committed account always gets its normal reply.
+   */
+  async function bestEffortOptIn(request: FastifyRequest, run: () => Promise<void>) {
+    try {
+      await run();
+    } catch (error) {
+      request.log.warn({ err: error }, 'newsletter opt-in skipped');
+    }
   }
   // Session renewal happens during the operator lookup, which only receives the request.
   const replies = new WeakMap<FastifyRequest, FastifyReply>();
@@ -834,9 +1066,12 @@ async function createDatabaseApp(
       const response = await action(workspace, tx, time);
       syncWorkflows(workspace, time);
       // Pausing or resuming the workspace or an agent suspends or restores its published
-      // results in the same transaction, whichever path changed the pause state.
-      if (pauseKey(workspace) !== paused)
+      // results, and withdraws or lists again its agents' Feed offers, in the same transaction,
+      // whichever path changed the pause state.
+      if (pauseKey(workspace) !== paused) {
         await syncResultSuspension(tx, operatorId, workspace, time);
+        await syncOfferListing(tx, operatorId, workspace, time);
+      }
       const after = JSON.stringify(workspace);
       changed = before !== after;
       if (changed)
@@ -872,8 +1107,10 @@ async function createDatabaseApp(
       for (const id of ids) {
         const workspace = workspaces.get(id)!;
         syncWorkflows(workspace, time);
-        if (pauseKey(workspace) !== paused.get(id))
+        if (pauseKey(workspace) !== paused.get(id)) {
           await syncResultSuspension(tx, id, workspace, time);
+          await syncOfferListing(tx, id, workspace, time);
+        }
         const after = JSON.stringify(workspace);
         if (after === before.get(id)) continue;
         await tx.query('UPDATE workspaces SET data=$2::jsonb WHERE operator_id=$1', [id, after]);
@@ -1156,23 +1393,40 @@ async function createDatabaseApp(
           ])
         ).rows.length;
         if (taken) fail(409, 'That account name is unavailable.');
-        await tx.query('UPDATE operators SET name=$2, name_key=$3, salt=$4 WHERE id=$1', [
-          signedIn.id,
-          input.name,
-          input.name.toLowerCase(),
-          GOOGLE_SALT_NO_PASSWORD,
-        ]);
+        try {
+          await tx.query('UPDATE operators SET name=$2, name_key=$3, salt=$4 WHERE id=$1', [
+            signedIn.id,
+            input.name,
+            input.name.toLowerCase(),
+            GOOGLE_SALT_NO_PASSWORD,
+          ]);
+        } catch (error) {
+          // A concurrent claim of the same name passed the check: the unique name_key refuses
+          // ours. Throwing rolls the (now aborted) transaction back.
+          if ((error as { code?: string }).code === '23505')
+            fail(409, 'That account name is unavailable.');
+          throw error;
+        }
         current = input.name;
       }
       await recordAcceptance(tx, signedIn.id);
       // A new account created with Google: the welcome email, queued once (only when sending is on).
       if (row.salt === GOOGLE_SALT_PENDING_NAME || row.salt === GOOGLE_SALT_NO_PASSWORD)
         await email.queueWelcome(tx, signedIn.id, current, requestOrigin(request, options.hosted));
-      // The opt-in goes to the Google account's verified address.
-      if (input.newsletter === true)
-        await email.optIn(tx, signedIn.id, 'onboarding', requestOrigin(request, options.hosted));
       return current;
     });
+    // The opt-in goes to the Google account's verified address, only after onboarding is
+    // committed: a refused attempt spends no recipient budget, and a spent one (null) skips the
+    // opt-in and never blocks onboarding.
+    // Best effort: onboarding is already committed, so an error here is logged and skipped.
+    if (input.newsletter === true)
+      await bestEffortOptIn(request, async () => {
+        const admission = await email.admitOptIn(signedIn.id, 'onboarding');
+        if (admission)
+          await db.transaction((tx) =>
+            email.optIn(tx, admission, requestOrigin(request, options.hosted)),
+          );
+      });
     // Sent after the response path is free (never blocking sign-up); the cron drain retries.
     email.kick();
     return { operator: { id: signedIn.id, name }, onboarding: await onboardingOf(signedIn.id) };
@@ -1264,19 +1518,32 @@ async function createDatabaseApp(
       if (created === 'name_taken') fail(409, 'That account name is unavailable.');
       // The sign-up form states that creating the account accepts the Terms and Privacy Policy.
       await recordAcceptance(tx, operator.id);
-      // The newsletter opt-in (unticked by default): a pending sign-up and its confirmation email.
-      // Without the tick no address is collected or stored.
-      if (newsletter && address)
-        await email.optIn(
-          tx,
-          operator.id,
-          'signup',
-          requestOrigin(request, options.hosted),
-          address,
-        );
       await session(tx, reply, operator.id);
     });
-    if (newsletter) email.kick();
+    // The newsletter opt-in (unticked by default): a pending sign-up and its confirmation email.
+    // Without the tick no address is collected or stored. Only after the account is committed, so
+    // a refused sign-up spends no newsletter budget, and a spent budget skips the opt-in.
+    if (newsletter && address) {
+      // Best effort: the account is already committed, so an error here is logged and skipped.
+      await bestEffortOptIn(request, async () => {
+        // The ticked box queues an email: the same per-address budget as settings.
+        const addressAllowed = await newsletterBudget(() =>
+          limit(
+            `newsletter:address:${clientAddressKey(request.ip)}`,
+            NEWSLETTER_RATE.perAddress,
+            NEWSLETTER_RATE.windowMs,
+          ),
+        );
+        const admission = addressAllowed
+          ? await email.admitOptIn(operator.id, 'signup', address)
+          : null;
+        if (admission)
+          await db.transaction((tx) =>
+            email.optIn(tx, admission, requestOrigin(request, options.hosted)),
+          );
+      });
+      email.kick();
+    }
     return reply.code(201).send({ operator });
   });
   // Known-device cookie: a browser that has signed in to an account before carries an HMAC of
@@ -1373,9 +1640,18 @@ async function createDatabaseApp(
     db,
     originOf: (request) => requestOrigin(request, options.hosted),
     page: options.passportPage,
+    // The same per-IP limit as the card route it used to request.
+    limit: (request) =>
+      limit(`ip:${clientAddressKey(request.ip)}`, caps.apiRequestsPerMinute, 60_000),
   });
   // Keys, bundler and RPC from the environment; a missing setting answers 503 (fails closed).
-  const baseRuntimes = chainRuntimes(db, process.env);
+  const baseRuntimes = chainRuntimes(db, process.env, { hosted: Boolean(options.hosted) });
+  // Feed offers' built-in kinds (server/feed/offers/kind-core.ts): their one Base reader, set once
+  // here. Without the Base mainnet gate and endpoint it is null and the Base kinds answer
+  // 'unavailable' (503); the web kind's safe fetcher is the process default.
+  setOfferKindDeps({
+    readBase: offerBaseReaderFromEnv(process.env, { hosted: Boolean(options.hosted) }),
+  });
   registerBaseRegistrationRoutes(app, {
     db,
     env: process.env,
@@ -1400,10 +1676,12 @@ async function createDatabaseApp(
     currentWorkspace: async (request) =>
       (await optionalOperator(request)) ? owner(request) : null,
     runtime: baseRuntimes,
-    ...walletReaders(process.env),
+    ...walletReaders(process.env, { hosted: Boolean(options.hosted) }),
     // Built on first use; a missing setting answers 503 and is not cached.
     limitOperations: async () =>
-      (limitOperations ??= ownerRevokePortFromEnv(db, process.env, WALLET_CHAIN_ID)),
+      (limitOperations ??= ownerRevokePortFromEnv(db, process.env, WALLET_CHAIN_ID, {
+        hosted: Boolean(options.hosted),
+      })),
     limit,
     // The withdrawals sweep (vercel.json crons): expired and finished operations release the
     // sponsor's exposure even when nobody reads them.
@@ -1417,19 +1695,129 @@ async function createDatabaseApp(
     process.env[BASE_NETWORKS[BASE_MAINNET].bundlerEnv]?.trim() ||
     (options.hosted ? PUBLIC_BASE_RPC : undefined);
   const onBaseRegistry = BASE_NETWORKS[BASE_MAINNET].contracts.identityRegistry;
+  // The explorer's reads fall back to a second, keyless endpoint (Base's public RPC unless set):
+  // the configured endpoint also carries the paymaster and every wallet read, and a busy moment
+  // there must not leave the public list showing an old block.
+  const onBaseFallback =
+    process.env.CITY_BASE_READ_FALLBACK_RPC_URL?.trim() ||
+    (options.hosted ? PUBLIC_BASE_RPC : undefined);
+  const onBaseUrls = onBaseUrl
+    ? [onBaseUrl, ...(onBaseFallback && onBaseFallback !== onBaseUrl ? [onBaseFallback] : [])]
+    : [];
   registerOnBaseRoutes(app, {
     db,
     limit,
     chain:
       onBaseUrl && onBaseRegistry
         ? baseChainReader(
-            onBaseUrl,
+            onBaseUrls,
             BASE_MAINNET,
             onBaseRegistry,
             undefined,
             BASE_NETWORKS[BASE_MAINNET].contracts.reputationRegistry,
           )
         : undefined,
+  });
+  // The Agent Explorer's Service calls view: every paid service call on Base mainnet as its
+  // transaction (server/base/explorer/calls.ts). Public, read-only, cached; it shares the paid
+  // calls counter reader with the homepage stats, so both read that row at most once per 5 s.
+  const paidCallsReader = createPaidCallsReader({ db, clock });
+  registerServiceCallsRoutes(app, { db, limit, now: clock, counter: paidCallsReader });
+  // Operation Directory D1: the public directory search and the owner's "Show in the directory"
+  // settings per agent (server/directory/routes.ts), listing on the explorer's network.
+  registerDirectoryRoutes(app, {
+    db,
+    limit,
+    // The selected workspace owns the agent (as every /api/agents/:id route checks it).
+    owns: async (request, agentId) => {
+      if (!(await optionalOperator(request))) return 'signed_out';
+      const operator = await owner(request);
+      const workspace = await readWorkspace(db, operator.id);
+      return workspace.agents.some((agent) => agent.id === agentId) ? 'ok' : 'not_found';
+    },
+  });
+  // Operation Central City Feed, requests side (server/feed/routes.ts): every route answers 404
+  // while CITY_FEED is '0'. Locally without CITY_RATE_LIMIT_KEY, a per-process secret keys
+  // the address hashes; hosted deployments must set it (writes fail without it).
+  const feedLocalSecret = options.hosted ? undefined : randomBytes(32).toString('base64url');
+  // One JSON line per event on the console (the app's own logger is off), never an address; a
+  // request held or hidden for review also alerts CITY_OPS_ALERT_WEBHOOK when set (throttled).
+  const feedLog = feedEventLog(process.env, options.logLine ? { log: options.logLine } : {});
+  // One instance for the routes and city_request_search, so both read the same list.
+  const feedRequests = createFeedRequests({
+    db,
+    clock,
+    limit,
+    caps: feedCaps(),
+    secret: () => process.env.CITY_RATE_LIMIT_KEY || feedLocalSecret,
+    log: feedLog,
+  });
+  registerFeedRoutes(app, {
+    requests: feedRequests,
+    limit,
+    // The session counts only with the console's request header (a public POST skips that guard).
+    // Only the workspace: the person's sign-in name is never published on the Feed.
+    signedIn: async (request) => {
+      if (request.headers['x-city-request'] !== '1' || !request.cookies.cc_session) return null;
+      if (!(await optionalOperator(request))) return null;
+      return { ownerId: (await owner(request)).id };
+    },
+    agentOf: async (ownerId, agentId) => {
+      const agent = (await readWorkspace(db, ownerId)).agents.find(
+        (item) => item.id === agentId && !item.revokedAt,
+      );
+      return agent ? { id: agent.id, name: agent.name } : null;
+    },
+    // The Offered numbers of the status route (server/feed/query.ts).
+    services: () => feedServicesStatus(db, clock()),
+  });
+  // The operators' review queue of held and hidden requests and the posting pause
+  // (server/feed/review.ts): CITY_OPS_SECRET and the Feed on, read per request; 404 otherwise.
+  // A release holds the open caps posting holds.
+  registerFeedReviewRoutes(app, {
+    db,
+    clock,
+    env: process.env,
+    log: feedLog,
+    caps: feedRequests.caps,
+  });
+  // Operation Central City Feed (live unless CITY_FEED=0, read per request): the services the Feed
+  // lists as Offered, read from the x402 Bazaar (server/feed/services-routes.ts). Public and read-only. The status
+  // route (FEED_PATHS.status) is the requests slice's; it takes feedServicesStatus (query.ts).
+  registerFeedServiceRoutes(app, { db, env: process.env, limit, now: clock });
+  // Its Bazaar sweep (server/feed/cron.ts; vercel.json crons, every 15 minutes; CRON_SECRET): a
+  // sweep in progress resumes where the last run stopped, never in the noon checkpoint's window.
+  registerFeedCron(app, {
+    db,
+    env: process.env,
+    cronSecret: process.env.CRON_SECRET,
+    now: clock,
+    // A Bazaar record on the host Central City serves its own offers from is never a row
+    // ('hosted_here'): it is listed from its offer (server/feed/offers/store.ts).
+    hostedHost: options.hosted ? new URL(options.hosted.publicOrigin).hostname : null,
+    // Each run first recomputes the use counts of the services sold by Central City agents from
+    // their settled Feed pay calls (server/feed/offers/uses.ts).
+    hostedUses: (at) => refreshHostedUses(db, at),
+    ...(options.feed?.fetch ? { fetch: options.feed.fetch } : {}),
+    ...(options.logLine ? { log: options.logLine } : {}),
+  });
+  // Operation Protocol fees (docs/protocol/FEES.md, LIVE.md): the public daily metrics and the
+  // ledger scan (vercel.json crons; CRON_SECRET), live by default on Base mainnet with the router,
+  // treasury and start block fixed in code (shared/protocol.ts). Both answer 404 while
+  // CITY_PROTOCOL_FEES is '0'. The scan reads Base through CITY_PROTOCOL_RPC_URL, else the wallet
+  // network's RPC (CITY_BASE_CDP_RPC_URL); without either it answers 503 unavailable.
+  registerProtocolFeeRoutes(app, {
+    db,
+    clock,
+    limit,
+    chainId: () => protocolFeeChainId(process.env),
+  });
+  registerProtocolFeeCron(app, {
+    db,
+    env: process.env,
+    cronSecret: process.env.CRON_SECRET,
+    chainFor: protocolFeeChainFromEnv(process.env),
+    ...(options.logLine ? { log: options.logLine } : {}),
   });
   const email = registerEmail(app, {
     db,
@@ -1467,6 +1855,17 @@ async function createDatabaseApp(
   });
   app.get('/api/snapshot', async (request) => {
     const operator = await owner(request);
+    // include= only matters to a paged snapshot (shared/agent-pages.ts): the agents of the screen
+    // asking for it. Other query parameters are ignored, as before.
+    const include = agentIdsParam(
+      z
+        .object({ include: z.string().optional() })
+        .passthrough()
+        .parse(request.query ?? {}).include,
+      AGENT_PAGES.include,
+    );
+    const view = (workspace: Workspace) =>
+      snapshot(workspace, operator, clock(), include.length ? { include } : {});
     // Polling advances hosted demonstrations. Controls must apply without first
     // completing work that the operator is trying to cancel, pause or revoke.
     if (options.hosted) {
@@ -1476,11 +1875,47 @@ async function createDatabaseApp(
       const current = await readWorkspace(db, operator.id);
       if (!advances(current, clock())) {
         await sweepExpired();
-        return snapshot(current, operator, clock());
+        return view(current);
       }
       await performTick(operator.id);
     }
-    return snapshot(await readWorkspace(db, operator.id), operator, clock());
+    return view(await readWorkspace(db, operator.id));
+  });
+  // The owner's agents, one page at a time, newest first (shared/agent-pages.ts): how the console
+  // lists and searches a workspace too large for the snapshot to carry whole. Reads only; it
+  // advances no work. q= searches name, description and capability; ids= reads named agents;
+  // under= lists the live agents a removal of that agent takes with it; live=1 leaves removed
+  // agents out (the pickers of an agent to act as).
+  app.get(AGENTS_PATH, async (request) => {
+    const operator = await owner(request);
+    const query = z
+      .object({
+        limit: z
+          .string()
+          .regex(/^\d{1,3}$/)
+          .transform(Number)
+          .pipe(z.number().int().min(1).max(AGENT_PAGES.max))
+          .optional(),
+        cursor: z.string().min(1).max(AGENT_PAGES.cursor).optional(),
+        q: z.string().max(AGENT_PAGES.query).optional(),
+        ids: z.string().optional(),
+        under: z.string().uuid().optional(),
+        live: z.literal('1').optional(),
+      })
+      .strict()
+      .parse(request.query ?? {});
+    const cursor = query.cursor === undefined ? null : decodeAgentCursor(query.cursor);
+    if (query.cursor !== undefined && !cursor) fail(400, 'Invalid cursor.');
+    const ids = query.ids === undefined ? undefined : agentIdsParam(query.ids, AGENT_PAGES.ids);
+    const workspace = await readWorkspace(db, operator.id);
+    return listAgents(workspace, clock(), {
+      ...(query.limit === undefined ? {} : { limit: query.limit }),
+      cursor,
+      ...(query.q?.trim() ? { q: query.q } : {}),
+      ...(ids ? { ids } : {}),
+      ...(query.under === undefined ? {} : { under: query.under }),
+      ...(query.live ? { live: true } : {}),
+    });
   });
   app.get('/api/events', async (request, reply) => {
     const operator = await owner(request);
@@ -2051,6 +2486,31 @@ async function createDatabaseApp(
     handoffBrief: deliverBriefOnce,
   });
   registerRoomRoutes(app, { rooms, owner, originOf, limit });
+  // Room invitations (Operation Directory D2, rooms/invitations.ts): a host invites a listed
+  // Base agent; it joins only when it or its owner accepts. Always on.
+  const invitations = createRoomInvitations({
+    db: wake.db,
+    clock,
+    limit,
+    rooms,
+    ...options.roomInvitations,
+  });
+  // Feed Respond (server/feed/respond.ts, live unless CITY_FEED=0, read per request): a response
+  // to a signed-in request is a room invitation to its poster, answered in the same inbox.
+  const feedRespond = createFeedRespond({
+    db: wake.db,
+    clock,
+    limit,
+    rooms,
+    ...options.feedRespond,
+  });
+  registerInvitationRoutes(app, {
+    invitations,
+    owner,
+    originOf,
+    feed: { respond: feedRespond, enabled: () => feedEnabled() },
+  });
+  registerFeedRespondRoutes(app, { respond: feedRespond, owner, originOf });
   // Context pins (docs/ROOMS.md "Pins and the handoff brief"): console REST and MCP tools.
   const pins = createRoomPins({ db: wake.db, clock, limit });
   registerPinRoutes(app, { pins, owner, originOf });
@@ -2118,7 +2578,8 @@ async function createDatabaseApp(
     excludedOperators: parseExcludedOperators(process.env.CITY_STATS_EXCLUDED_OPERATORS),
     cronSecret: process.env.CRON_SECRET,
   });
-  // Homepage ticker: AI agents that ever joined, cached per instance and at the edge.
+  // Homepage ticker: AI agents that ever joined, cached per instance and at the edge; and the paid
+  // service calls on Base mainnet (migration 125), left out while CITY_PAID_CALLS_TICKER is '0'.
   registerPublicStatsRoutes(app, {
     stats: createPublicStats({
       db,
@@ -2126,6 +2587,10 @@ async function createDatabaseApp(
       excludedOperators: parseExcludedOperators(process.env.CITY_STATS_EXCLUDED_OPERATORS),
     }),
     limit,
+    paidCalls: paidCallsReader,
+    // The Agent Explorer's "On Base now" total, shared through its own public_stats row.
+    baseAgents: createBaseAgentsReader({ db, store: sqlPublicStatsStore(db), clock }),
+    clock,
   });
   // Base Pay P2c: agents pay other Central City agents on their own (tools behind CITY_BASE_WALLET=1
   // and CITY_BASE_AGENT_PAY=1, read per call). Payments use the wallet network's chain runtime and
@@ -2144,7 +2609,7 @@ async function createDatabaseApp(
     chain: agentPayChain,
     recipients: options.agentPay
       ? options.agentPay.recipients
-      : walletReaders(process.env).payChain,
+      : walletReaders(process.env, { hosted: Boolean(options.hosted) }).payChain,
   });
   // Its recovery cron (CRON_SECRET): the same payment chain, whatever the agent-pay flags say, so
   // reservations held by earlier payments still settle after the flags are turned off. Recovery
@@ -2159,6 +2624,94 @@ async function createDatabaseApp(
     cronSecret: process.env.CRON_SECRET,
     env: process.env,
     now: clock,
+  });
+  // Feed D6, "Use with my agent" (server/feed/pay, docs/FEED_PAY.md): live for every owner unless
+  // CITY_FEED or CITY_FEED_PAY is '0', read per request. The agent's spender
+  // account pays a listed x402 service from the agent's own wallet within the owner's limits; the
+  // chain side is the wallet network's runtime (feedPay), without which a call answers unavailable.
+  const feedPay = createFeedPayEngine({
+    db,
+    env: process.env,
+    now: clock,
+    chain:
+      options.feedPay?.chain ??
+      (async () => {
+        const runtime = await baseRuntimes(WALLET_CHAIN_ID);
+        if (!runtime.feedPay) throw new Error('Feed pay is not configured.');
+        return runtime.feedPay();
+      }),
+    ...(options.feedPay?.http ? { http: options.feedPay.http } : {}),
+    ...(options.feedPay?.sleep ? { sleep: options.feedPay.sleep } : {}),
+    ...(options.feedPay?.pollMs !== undefined ? { pollMs: options.feedPay.pollMs } : {}),
+    ...(options.feedPay?.offerKinds ? { offerKinds: options.feedPay.offerKinds } : {}),
+    alert:
+      options.feedPay?.alert ??
+      createFeedPayAlerts({
+        env: process.env,
+        ...(options.logLine ? { log: options.logLine } : {}),
+      }),
+    ...(options.logLine ? { log: options.logLine } : {}),
+    // One cap on a workspace's calls in flight, the same for every workspace
+    // (CITY_LIMIT_FEED_PAY_CALLS_IN_FLIGHT_PER_WORKSPACE).
+    callsInFlightMax: caps.feedPayCallsInFlightPerWorkspace,
+    // Payment screening (docs/protocol/SCREENING-GATE.md), live unless CITY_PROTOCOL_SCREENING is
+    // '0'. On Base mainnet the sanctions oracle is the one fixed in code (shared/protocol.ts); on a
+    // test network CITY_PROTOCOL_SCREENING_ORACLE names it. Without one, new payments are refused.
+    screening: createScreeningGate({
+      db,
+      env: process.env,
+      now: clock,
+      provider:
+        options.feedPay?.screeningProvider ??
+        (() =>
+          sanctionsOracleFor(process.env, WALLET_CHAIN_ID, async () => {
+            // Feed pay's own endpoint when CITY_FEED_PAY_CDP_RPC_URL is set (runtime.ts).
+            const runtime = await baseRuntimes(WALLET_CHAIN_ID);
+            const reader = runtime.feedPayReadClient?.() ?? runtime.readClient;
+            if (!reader) throw new Error('No read client.');
+            return reader;
+          })),
+    }),
+  });
+  registerFeedPayRoutes(app, {
+    engine: feedPay,
+    env: process.env,
+    // The person's own account (whichever workspace is selected), with the console's header.
+    person: async (request) => {
+      if (request.headers['x-city-request'] !== '1' || !request.cookies.cc_session) return null;
+      const person = await optionalOperator(request);
+      if (!person) return null;
+      const { rows } = await db.query<{ kind: string }>(
+        'SELECT kind FROM operators WHERE id = $1',
+        [person.id],
+      );
+      return rows[0]?.kind === 'owner' ? { accountId: person.id } : null;
+    },
+    limit,
+    cronSecret: process.env.CRON_SECRET,
+    ...(options.feedPay?.answerWaitMs !== undefined
+      ? { answerWaitMs: options.feedPay.answerWaitMs }
+      : {}),
+  });
+  // Feed offers (server/feed/offers): the services:sell tools write through this store. Offers are
+  // listed under the configured public origin, never a request's Host. A bad cap setting keeps the
+  // defaults (logged) instead of stopping the app.
+  let offerCapsNow: OfferCaps;
+  try {
+    offerCapsNow = options.offers?.caps ?? offerCaps(process.env);
+  } catch (error) {
+    app.log.error(
+      { err: error },
+      'Offer caps: a CITY_LIMIT_OFFERS_ setting is invalid; using defaults.',
+    );
+    offerCapsNow = { ...OFFER_CAPS_DEFAULT };
+  }
+  const offers = createOfferStore(db, {
+    origin: options.offers?.origin ?? options.hosted?.publicOrigin ?? 'https://centralcity.ai',
+    caps: offerCapsNow,
+    now: clock,
+    // Above 0.10 USDC only while fee router 2 is live (docs/protocol/FEE_ROUTER_2.md section 5).
+    priceMaxRaw: () => offerPriceMaxRaw(process.env),
   });
   const assistantAccess = await registerAssistantAccess(app, {
     db,
@@ -2182,6 +2735,14 @@ async function createDatabaseApp(
     wake,
     results,
     agentPay,
+    feedPay,
+    ...(options.feedPay?.mcpWaitMs !== undefined
+      ? { feedPayWaitMs: options.feedPay.mcpWaitMs }
+      : {}),
+    invitations,
+    now: clock,
+    feedRequests,
+    offers,
   });
   const oauthServer = await registerRemoteMcp(app, {
     roomInvites: links.invites,
@@ -2963,13 +3524,17 @@ async function createDatabaseApp(
     }
   }
   // Called only under the owner's workspace lock. Presence refresh never executes jobs.
+  // Hosted agents' synthetic heartbeat is renewed for all of them together, and only when one is
+  // new, not yet announced or HOSTED_HEARTBEAT_MS old (server/model.ts): every renewal changes
+  // the workspace document, and the caller then rewrites all of it. Renewing each agent on its own
+  // 30 s phase rewrote a workspace of thousands on nearly every read; now presence alone rewrites
+  // it at most once per interval, and hosted agents stay reachable (HOSTED_PRESENCE_TTL) between.
   function refreshPresence(workspace: Workspace, time: number): void {
+    const renewHosted = workspace.agents.some((agent) => hostedHeartbeatDue(agent, time));
     for (const agent of workspace.agents) {
       if (agent.revokedAt) continue;
-      if (
-        agent.mode === 'hosted' &&
-        (!agent.lastSeenAt || time - Date.parse(agent.lastSeenAt) >= 30_000)
-      ) {
+      if (agent.mode === 'hosted') {
+        if (!renewHosted) continue;
         agent.lastSeenAt = iso(time);
         agent.lastSequence++;
         // Synthetic presence refreshes silently; only the transition to online is an event.

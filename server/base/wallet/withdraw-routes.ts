@@ -51,6 +51,12 @@ export const retryable = (error: unknown) => {
 
 /** Per person: the open list may bring up to 20 operations up to date from Base per read. */
 export const OPEN_LIST_RATE = { prefix: 'wallet-open', max: 30, windowMs: 60_000 } as const;
+/**
+ * Per person: one withdrawal read brings its operation (and its cancel) up to date from Base and
+ * proves its settled block, all on the shared Base endpoint. The status screen polls every 3 s,
+ * so this leaves room for a few at once while one person cannot drain the endpoint for everyone.
+ */
+export const READ_RATE = { prefix: 'wallet-read', max: 120, windowMs: 60_000 } as const;
 
 const params = z.object({
   agentId: z.string().uuid(),
@@ -126,9 +132,10 @@ export function registerWithdrawalRoutes(app: FastifyInstance, deps: WithdrawalR
   });
 
   app.get(`${WITHDRAWALS_PATH}/:withdrawalId`, (request, reply) =>
-    handle(request, reply, 200, (accountId, agentId, withdrawalId) =>
-      deps.service.read(accountId, agentId, withdrawalId),
-    ),
+    handle(request, reply, 200, async (accountId, agentId, withdrawalId) => {
+      await deps.limit?.(`${READ_RATE.prefix}:${accountId}`, READ_RATE.max, READ_RATE.windowMs);
+      return deps.service.read(accountId, agentId, withdrawalId);
+    }),
   );
 
   app.post(`${WITHDRAWALS_PATH}/:withdrawalId/signature`, (request, reply) =>

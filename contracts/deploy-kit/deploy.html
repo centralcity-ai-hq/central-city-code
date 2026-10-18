@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Fee router deploy</title>
+    <style>
+      :root {
+        --bg: #f7f7f5;
+        --fg: #18181b;
+        --muted: #5b5b66;
+        --line: #d9d9de;
+        --accent: #1d4ed8;
+        --ok: #15803d;
+        --bad: #b91c1c;
+        color-scheme: light;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #111114;
+          --fg: #ececf1;
+          --muted: #a1a1aa;
+          --line: #2e2e35;
+          --accent: #7aa2ff;
+          --ok: #4ade80;
+          --bad: #f87171;
+          color-scheme: dark;
+        }
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font:
+          15px/1.5 system-ui,
+          -apple-system,
+          Segoe UI,
+          sans-serif;
+        padding: 24px 16px;
+      }
+      main {
+        max-width: 720px;
+        margin: 0 auto;
+        display: grid;
+        gap: 16px;
+      }
+      h1 {
+        font-size: 22px;
+        margin: 0;
+      }
+      section {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 16px;
+        display: grid;
+        gap: 10px;
+      }
+      h2 {
+        font-size: 15px;
+        margin: 0;
+      }
+      button {
+        font: inherit;
+        padding: 8px 14px;
+        border-radius: 8px;
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: #fff;
+        cursor: pointer;
+        justify-self: start;
+      }
+      button:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+      input {
+        font:
+          13px ui-monospace,
+          Consolas,
+          monospace;
+        padding: 8px;
+        border-radius: 8px;
+        border: 1px solid var(--line);
+        background: transparent;
+        color: var(--fg);
+        width: 100%;
+        box-sizing: border-box;
+      }
+      code,
+      .mono {
+        font:
+          13px ui-monospace,
+          Consolas,
+          monospace;
+        word-break: break-all;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .ok {
+        color: var(--ok);
+      }
+      .bad {
+        color: var(--bad);
+      }
+      dl {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: 4px 12px;
+        margin: 0;
+      }
+      dt {
+        color: var(--muted);
+      }
+      dd {
+        margin: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Central City fee router: deploy on Base</h1>
+      <p id="which"></p>
+      <p class="muted">
+        Deploys CentralCityFeeRouter from your own MetaMask on Base mainnet. Your key never leaves
+        MetaMask. The contract is immutable and ownerless: its only settings are USDC and the
+        treasury below, and it never holds funds. Gas is about one cent.
+      </p>
+
+      <section>
+        <h2>1. Contract</h2>
+        <dl id="kit">
+          <dt>Status</dt>
+          <dd>Loading the kit…</dd>
+        </dl>
+      </section>
+
+      <section>
+        <h2>2. Connect MetaMask (Base mainnet)</h2>
+        <button id="connect">Connect</button>
+        <dl>
+          <dt>Account</dt>
+          <dd id="account" class="mono">–</dd>
+          <dt>Network</dt>
+          <dd id="network">–</dd>
+        </dl>
+      </section>
+
+      <section>
+        <h2>3. Treasury (receives the 10% fee)</h2>
+        <input id="treasury" placeholder="Connect first" spellcheck="false" readonly />
+        <label
+          ><input type="checkbox" id="treasuryOk" /> This connected account is my treasury: it
+          receives every fee and can never be changed after deploying.</label
+        >
+        <p class="muted">
+          The treasury is always the connected MetaMask account. To use another treasury, connect
+          that account instead.
+        </p>
+      </section>
+
+      <section>
+        <h2>4. Deploy</h2>
+        <button id="deploy" disabled>Deploy fee router</button>
+        <dl>
+          <dt>Transaction</dt>
+          <dd id="tx" class="mono">–</dd>
+          <dt>Contract</dt>
+          <dd id="address" class="mono">–</dd>
+        </dl>
+      </section>
+
+      <section>
+        <h2>5. Read back from the deployed contract</h2>
+        <dl id="checks">
+          <dt>Status</dt>
+          <dd>After deploying.</dd>
+        </dl>
+      </section>
+    </main>
+    <script src="keccak.js"></script>
+    <script>
+      // The creation-bytecode hash approved in review (PR #353, b937f787). The page refuses to
+      // deploy anything else.
+      // deploy.html deploys router 1; deploy.html?router=2 deploys router 2 (Operation Fee Contract:
+      // the same contract with a 100 USDC cap, router2.json). Router 2 must use router 1's treasury.
+      const ROUTER2 = new URLSearchParams(location.search).get('router') === '2';
+      const KIT_FILE = ROUTER2 ? 'router2.json' : 'router.json';
+      const APPROVED_BYTECODE_SHA = ROUTER2
+        ? '0xc6e8fe84cc2dddbd3ebec6639f34d8a5a7fcf3d6486c1895a73322de04c4108e'
+        : '0x2450d7344badafdc4398ebae309e01b22782f8775a6a16db0b2f7574e8abd406';
+      const EXPECTED_MAX_TOTAL = ROUTER2 ? 100000000n : 100000n;
+      const ROUTER1_TREASURY = '0xAF36084a4dc0CE760A6dCfa46Cf129e140c92aa9';
+      const USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+      const BASE = '0x2105';
+      const SEL = {
+        token: '0xfc0c546a',
+        treasury: '0x61d027b3',
+        MAX_TOTAL: '0xcd60fe35',
+        MIN_INCLUDED: '0xa0dbd6f4',
+        FEE_BPS: '0xbf333f2c',
+      };
+      const $ = (id) => document.getElementById(id);
+      let kit = null,
+        account = null,
+        kitOk = false;
+      // Once a deploy transaction has a hash, this page never sends another (also after a reload).
+      // One latch per router: router 1's saved deploy never blocks router 2, and the reverse.
+      const LATCH = ROUTER2 ? 'cc-fee-router-2-deploy-tx' : 'cc-fee-router-deploy-tx';
+      let sentHash = null;
+      // Set before the first await of a deploy click: while MetaMask is asked, nothing (a reconnect,
+      // the treasury checkbox, a second click) can enable or start another deploy.
+      let submitting = false;
+      try {
+        sentHash = localStorage.getItem(LATCH);
+      } catch {
+        sentHash = null;
+      }
+      const isAddress = (a) => /^0x[0-9a-fA-F]{40}$/.test(a) && !/^0x0{40}$/i.test(a);
+      const word = (a) => a.toLowerCase().replace(/^0x/, '').padStart(64, '0');
+      const row = (dl, k, v, cls) => {
+        const dt = document.createElement('dt');
+        dt.textContent = k;
+        const dd = document.createElement('dd');
+        dd.textContent = v;
+        if (cls) dd.className = cls;
+        dl.append(dt, dd);
+      };
+      const eth = (method, params = []) => window.ethereum.request({ method, params });
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+      fetch(KIT_FILE)
+        .then((r) => r.json())
+        .then((k) => {
+          kit = k;
+          $('which').textContent = ROUTER2
+            ? 'Router 2 (up to $100 per payment). Connect the treasury account ' +
+              ROUTER1_TREASURY +
+              ': router 2 must pay the same treasury as router 1.'
+            : 'Router 1 (up to $0.10 per payment).';
+          const dl = $('kit');
+          dl.textContent = '';
+          row(dl, 'Contract', k.contract);
+          row(dl, 'Compiler', k.compiler);
+          row(dl, 'Source hash', k.sourceSha, 'mono');
+          row(dl, 'Bytecode hash', k.bytecodeSha, 'mono');
+          row(dl, 'USDC', k.usdc, 'mono');
+          let computed = '';
+          try {
+            computed = window.kitKeccak.keccak256(window.kitKeccak.hexToBytes(k.bytecode));
+          } catch {
+            computed = '';
+          }
+          const forBase = k.usdc.toLowerCase() === USDC.toLowerCase() && k.chainId === 8453;
+          const hashOk =
+            computed === APPROVED_BYTECODE_SHA && computed === String(k.bytecodeSha).toLowerCase();
+          kitOk = forBase && hashOk;
+          row(
+            dl,
+            'Bytecode check',
+            hashOk
+              ? 'Computed hash matches the approved hash'
+              : 'MISMATCH (' + (computed || 'not computable') + '): deployment blocked',
+            hashOk ? 'ok' : 'bad',
+          );
+          if (!forBase)
+            row(dl, 'Network check', 'Not for Base mainnet USDC: deployment blocked', 'bad');
+          ready();
+        })
+        .catch(() => {
+          $('kit').innerHTML =
+            '<dt>Status</dt><dd class="bad">' +
+            KIT_FILE +
+            ' missing: run the build script first.</dd>';
+        });
+
+      function ready() {
+        $('deploy').disabled = !(
+          kit &&
+          kitOk &&
+          account &&
+          !sentHash &&
+          !submitting &&
+          $('treasuryOk').checked &&
+          isAddress($('treasury').value.trim()) &&
+          $('treasury').value.trim().toLowerCase() === account.toLowerCase() &&
+          (!ROUTER2 || account.toLowerCase() === ROUTER1_TREASURY.toLowerCase())
+        );
+        if (sentHash && !$('tx').dataset.shown) {
+          $('tx').dataset.shown = '1';
+          $('tx').textContent =
+            'A deploy was already sent from this page: ' +
+            sentHash +
+            '. Check it on Basescan; do not deploy again.';
+        }
+      }
+      $('treasuryOk').addEventListener('change', ready);
+
+      $('connect').addEventListener('click', async () => {
+        if (!window.ethereum) {
+          $('account').textContent = 'MetaMask not found in this browser.';
+          return;
+        }
+        try {
+          [account] = await eth('eth_requestAccounts');
+          let chain = await eth('eth_chainId');
+          if (chain !== BASE) {
+            await eth('wallet_switchEthereumChain', [{ chainId: BASE }]);
+            chain = await eth('eth_chainId');
+          }
+          $('account').textContent = account;
+          $('network').textContent =
+            chain === BASE ? 'Base mainnet (8453)' : 'Wrong network: ' + chain;
+          $('network').className = chain === BASE ? 'ok' : 'bad';
+          $('treasury').value = account;
+          $('treasuryOk').checked = false;
+          if (chain !== BASE) account = null;
+        } catch (e) {
+          $('account').textContent = 'Not connected: ' + (e && e.message ? e.message : e);
+          account = null;
+        }
+        ready();
+      });
+
+      $('deploy').addEventListener('click', async () => {
+        const treasury = $('treasury').value.trim();
+        if (submitting || sentHash) return;
+        if (!isAddress(treasury) || !kit || !kitOk || !$('treasuryOk').checked) return;
+        if (treasury.toLowerCase() !== String(account).toLowerCase()) return;
+        if (ROUTER2 && treasury.toLowerCase() !== ROUTER1_TREASURY.toLowerCase()) return;
+        submitting = true;
+        $('deploy').disabled = true;
+        let chain = null;
+        try {
+          chain = await eth('eth_chainId');
+        } catch {
+          chain = null;
+        }
+        if (chain !== BASE) {
+          $('tx').textContent = 'Switch MetaMask to Base mainnet first.';
+          submitting = false;
+          ready();
+          return;
+        }
+        let hash = null;
+        try {
+          const data = kit.bytecode + word(USDC) + word(treasury);
+          hash = await eth('eth_sendTransaction', [{ from: account, data }]);
+          sentHash = hash;
+          try {
+            localStorage.setItem(LATCH, hash);
+          } catch {
+            /* the in-memory latch still holds for this page */
+          }
+          $('tx').innerHTML = '';
+          const a = document.createElement('a');
+          a.href = 'https://basescan.org/tx/' + hash;
+          a.target = '_blank';
+          a.rel = 'noopener';
+          a.textContent = hash;
+          $('tx').append(a);
+          let receipt = null;
+          for (let i = 0; i < 120 && !receipt; i++) {
+            await sleep(2000);
+            receipt = await eth('eth_getTransactionReceipt', [hash]);
+          }
+          if (!receipt || receipt.status !== '0x1' || !receipt.contractAddress) {
+            $('address').textContent = 'Deployment failed or not found.';
+            $('address').className = 'bad';
+            return;
+          }
+          const addr = receipt.contractAddress;
+          $('address').innerHTML = '';
+          const b = document.createElement('a');
+          b.href = 'https://basescan.org/address/' + addr;
+          b.target = '_blank';
+          b.rel = 'noopener';
+          b.textContent = addr;
+          $('address').append(b);
+          await readBack(addr, treasury, receipt.blockNumber);
+        } catch (e) {
+          const why = e && e.message ? e.message : e;
+          if (hash) {
+            // Sent: never offer to deploy again; the transaction is on its way or decided on Base.
+            $('address').textContent =
+              'Sent, but reading the result failed (' +
+              why +
+              '). Check the transaction on Basescan.';
+            $('address').className = 'bad';
+          } else if (e && e.code === 4001) {
+            // Rejected in MetaMask: nothing was sent, a new attempt is safe.
+            $('tx').textContent = 'Not sent: rejected in MetaMask.';
+            submitting = false;
+            ready();
+          } else {
+            // Unknown: MetaMask may still have sent it. Stay blocked until it is checked.
+            $('tx').textContent =
+              'Outcome unknown (' +
+              why +
+              '). Check MetaMask activity and Basescan for this account before deploying again.';
+          }
+        }
+      });
+
+      async function readBack(addr, treasury, block) {
+        const dl = $('checks');
+        dl.textContent = '';
+        // The wallet's node can answer before it has the new block: wait until the contract's code is
+        // visible, and retry an empty answer, before reading (up to about a minute).
+        for (let i = 0; i < 30; i++) {
+          const code = await eth('eth_getCode', [addr, 'latest']).catch(() => '0x');
+          if (code && code !== '0x') break;
+          await sleep(2000);
+        }
+        const call = async (sel) => {
+          for (let i = 0; i < 10; i++) {
+            const out = await eth('eth_call', [{ to: addr, data: sel }, 'latest']).catch(
+              () => '0x',
+            );
+            if (out && out !== '0x') return out;
+            await sleep(2000);
+          }
+          throw new Error('the contract did not answer ' + sel + '; check it on Basescan');
+        };
+        const asAddr = (w) => '0x' + w.slice(-40);
+        const token = asAddr(await call(SEL.token));
+        const tre = asAddr(await call(SEL.treasury));
+        const max = BigInt(await call(SEL.MAX_TOTAL));
+        const min = BigInt(await call(SEL.MIN_INCLUDED));
+        const bps = BigInt(await call(SEL.FEE_BPS));
+        const ok = (c) => (c ? 'ok' : 'bad');
+        row(dl, 'Deploy block', String(BigInt(block)));
+        row(dl, 'token', token, ok(token.toLowerCase() === USDC.toLowerCase()));
+        row(dl, 'treasury', tre, ok(tre.toLowerCase() === treasury.toLowerCase()));
+        row(
+          dl,
+          'MAX_TOTAL',
+          String(max) + (ROUTER2 ? ' ($100 incl. fee)' : ' ($0.10 incl. fee)'),
+          ok(max === EXPECTED_MAX_TOTAL),
+        );
+        row(dl, 'MIN_INCLUDED', String(min) + ' ($0.05)', ok(min === 50000n));
+        row(dl, 'FEE_BPS', String(bps) + ' (10%)', ok(bps === 1000n));
+        row(
+          dl,
+          'Next',
+          'Send the contract address, transaction hash and deploy block to the team.',
+        );
+      }
+    </script>
+  </body>
+</html>

@@ -579,11 +579,11 @@ function Message({
             <strong>{senderName}</strong>
             {isElric ? (
               <>
-                {/* §4.2: one badge for Elric, "built in". It still says "AI" to assistive
-                    technology (AI transparency), and the tooltip names the version. */}
+                {/* §4.2: one badge for Elric, "built-in AI" on a model reply (EU AI Act
+                    Art. 50: visible to everyone), and the tooltip names the version. */}
                 {tag ? (
                   <span className="rm-badge-elric rm3-tag" data-tone="accent" title={tooltip}>
-                    built in<span className="rm-visually-hidden"> {tag}</span>
+                    built-in {tag}
                   </span>
                 ) : (
                   <span className="rm3-tag" data-tone="accent">
@@ -682,6 +682,7 @@ export function MessageList({
   newSinceSummary,
   directFor,
   noteFor,
+  onPinnedChange,
   children,
 }: {
   messages: RoomMessage[];
@@ -730,9 +731,21 @@ export function MessageList({
   directFor?: (memberId: string) => ReactNode;
   /** A quiet line under one of your own messages (null for none). */
   noteFor?: (message: RoomMessage) => ReactNode;
+  /** Whether the reader follows the bottom (true) or scrolled or jumped away (false), on each change. */
+  onPinnedChange?: (pinned: boolean) => void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
+  const pinnedChange = useRef(onPinnedChange);
+  pinnedChange.current = onPinnedChange;
+  const setPinned = (value: boolean) => {
+    if (pinned.current !== value) pinnedChange.current?.(value);
+    pinned.current = value;
+  };
+  // A new list (another room, or the list shown again) reports where it starts.
+  useEffect(() => {
+    pinnedChange.current?.(pinned.current);
+  }, []);
   // The scroll position the last scroll event saw: only a move up releases the bottom.
   const lastTop = useRef(0);
   const previous = useRef<{ first?: string; last?: string; anchor: number; follow: number }>({
@@ -768,7 +781,7 @@ export function MessageList({
     const element = scroller.current;
     if (!element) return;
     element.scrollTop = element.scrollHeight;
-    pinned.current = true;
+    setPinned(true);
     setUnseen(0);
   };
   const offsetOf = (id: string | undefined) =>
@@ -783,7 +796,7 @@ export function MessageList({
   useLayoutEffect(() => {
     if (!focus) return;
     wanted.current = focus.id;
-    pinned.current = false;
+    setPinned(false);
   }, [focusKey]); // eslint-disable-line react-hooks/exhaustive-deps
   useLayoutEffect(() => {
     const element = scroller.current;
@@ -796,7 +809,7 @@ export function MessageList({
       const divider = element.querySelector<HTMLElement>('[data-testid="room-new-since"]');
       if (divider && divider.offsetTop < element.scrollHeight - element.clientHeight) {
         element.scrollTop = Math.max(0, divider.offsetTop - 16);
-        pinned.current = false;
+        setPinned(false);
       } else if (last) toBottom();
     } else {
       if (first !== before.first) {
@@ -822,13 +835,22 @@ export function MessageList({
       : null;
     if (!element) return;
     wanted.current = null;
-    pinned.current = false;
+    setPinned(false);
     element.scrollIntoView({ block: 'center' });
     // Keyboard and screen reader users land on the message too.
     element.tabIndex = -1;
     element.focus({ preventScroll: true });
     element.classList.add('rm-found');
     window.setTimeout(() => element.classList.remove('rm-found'), 2600);
+    // A thread that fits (or a jump that lands at the end) never scrolls, so no scroll event
+    // re-pins it: check once the layout settles, or new messages would stay unread.
+    window.requestAnimationFrame(() => {
+      const list = scroller.current;
+      if (list && list.scrollHeight - list.scrollTop - list.clientHeight < PINNED_PX) {
+        setPinned(true);
+        setUnseen(0);
+      }
+    });
   }, [messages, focusKey]);
   // Elric's forming answer sits under the viewer's post: while the reader is at the bottom,
   // keep it in view as it appears and grows (dots, then text revealed frame by frame), like a
@@ -1040,7 +1062,7 @@ export function MessageList({
           <div className="rm-byline">
             <strong>{ELRIC_NAME}</strong>
             <span className="rm-badge-elric rm3-tag" data-tone="accent" title={elricTooltip()}>
-              built in<span className="rm-visually-hidden"> {ELRIC_AI_TAG}</span>
+              built-in {ELRIC_AI_TAG}
             </span>
           </div>
           <div className="rm-bubble">
@@ -1075,8 +1097,8 @@ export function MessageList({
           // A scroll event arrives a frame after the scroll. If the thread grew in between (a
           // message rendered, Markdown swapped in), our own scroll to the bottom reads as "away
           // from the bottom"; only the reader moving up stops following.
-          if (element.scrollHeight - top - element.clientHeight < PINNED_PX) pinned.current = true;
-          else if (up) pinned.current = false;
+          if (element.scrollHeight - top - element.clientHeight < PINNED_PX) setPinned(true);
+          else if (up) setPinned(false);
           if (pinned.current) setUnseen(0);
           if (element.scrollTop < OLDER_PX && hasOlder && !loadingOlder) onOlder();
         }}

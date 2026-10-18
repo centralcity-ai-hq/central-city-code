@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { ELRIC_AI_TAG, ELRIC_NAME, elricTooltip } from '../../shared/elric-copy';
 import { ThinkingDots } from '../elric/ThinkingDots';
 import { CATCH_UP_NOTHING_TEXT, CATCH_UP_TITLE, useCatchUp } from './useCatchUp';
 import { catchUpView } from './catchUpView';
@@ -67,7 +68,12 @@ export function CatchUpSummary({
       aria-label={CATCH_UP_TITLE}
       aria-busy={view.kind === 'loading'}
     >
-      <h3 className="rm-catchup-title">{CATCH_UP_TITLE}</h3>
+      <h3 className="rm-catchup-title">
+        {CATCH_UP_TITLE} {/* Written by Elric: labelled as AI for everyone (EU AI Act Art. 50). */}
+        <span className="rm3-tag" data-tone="accent" title={elricTooltip()}>
+          {ELRIC_NAME} · {ELRIC_AI_TAG}
+        </span>
+      </h3>
       {view.kind === 'loading' ? (
         <ThinkingDots className="rm-catchup-thinking" />
       ) : view.kind === 'limited' ? (

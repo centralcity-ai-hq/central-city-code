@@ -9,8 +9,17 @@ import {
   type FastCountLog,
 } from '../server/stats/fast-count-check.js';
 import { AI_AGENTS_TOTAL_SCAN_SQL, AI_AGENTS_TOTAL_SQL } from '../server/stats/public-stats.js';
-import { COUNTED_AGENT_IDS_SQL } from '../server/stats/schema.js';
+import { COUNTED_AGENT_IDS_SQL, COUNTED_AGENT_IDS_SYNC_SQL } from '../server/stats/schema.js';
 import type { Database, Transaction } from '../server/database.js';
+import {
+  checkPaidCalls,
+  checkPaidCallsAllChains,
+  PAID_CALLS_CHECK_LOCK_SQL,
+  PAID_CALLS_REPAIR_SQL,
+  PAID_CALLS_CHECK_SQL,
+  PAID_CALLS_CHECK_TIMEOUT_MS,
+} from '../server/stats/paid-calls.js';
+import { base, call, counts, migrated, settle } from './paid-calls-fixtures.js';
 
 const SECRET = 'fast-count-cron-secret-0123456789';
 
@@ -19,6 +28,8 @@ async function seeded(t: { after: (fn: () => Promise<unknown>) => void }) {
   t.after(() => db.close());
   await db.exec('CREATE TABLE workspaces (operator_id text PRIMARY KEY, data jsonb NOT NULL)');
   await db.exec(COUNTED_AGENT_IDS_SQL);
+  // The trigger function as migration 111 replaced it.
+  await db.exec(COUNTED_AGENT_IDS_SYNC_SQL);
   const put = (operatorId: string, ids: string[], extra: unknown[] = []) =>
     db.query('INSERT INTO workspaces(operator_id,data) VALUES($1,$2::jsonb)', [
       operatorId,
@@ -512,5 +523,326 @@ test('cron: the agent count and the room counts check are wrapped separately', a
     assert.equal(response.statusCode, 200, response.body);
     assert.equal(response.json().drift, false);
     assert.deepEqual(lines.at(-1)?.fields, { event: 'room_counts_check_threw', error: 'error' });
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// The paid service calls count (migration 125, server/stats/paid-calls.ts checkPaidCalls), in the
+// same daily run.
+
+/** Wraps db.transaction: `before` runs ahead of each transaction (by index), `query` may throw. */
+function paidSpied(
+  db: Pick<Database, 'transaction'>,
+  hooks: {
+    before?: (index: number) => Promise<void>;
+    query?: (sql: string, tx: Transaction) => void | Promise<void>;
+    /** Rows to answer instead of running the statement. */
+    answer?: (sql: string) => Record<string, unknown>[] | undefined;
+  } = {},
+) {
+  const seen: string[] = [];
+  let index = 0;
+  const wrapped: Pick<Database, 'transaction'> = {
+    transaction: async (action) => {
+      await hooks.before?.(index++);
+      return db.transaction((tx) =>
+        action({
+          ...tx,
+          query: async (sql: string, params?: unknown[]) => {
+            seen.push(sql);
+            await hooks.query?.(sql, tx);
+            const rows = hooks.answer?.(sql);
+            if (rows) return { rows } as never;
+            return tx.query(sql, params);
+          },
+        } as Transaction),
+      );
+    },
+  };
+  return { wrapped, seen };
+}
+
+test('paid calls check: a match logs counts only and changes nothing', async (t) => {
+  const db = await migrated(t);
+  for (let i = 0; i < 3; i++) await settle(db, await call(db));
+  const { lines, log } = recorder();
+  const { wrapped, seen } = paidSpied(db);
+  assert.deepEqual(await checkPaidCalls(wrapped, { log }), {
+    counter: 3,
+    scan: 3,
+    drift: 0,
+    repaired: false,
+  });
+  assert.deepEqual(lines, [
+    {
+      level: 'info',
+      fields: {
+        event: 'paid_calls_check',
+        paid_calls_counter: 3,
+        paid_calls_scan: 3,
+        paid_calls_drift: 0,
+      },
+    },
+  ]);
+  // One read transaction; both numbers from one statement, each statement under the 3 s limit.
+  assert.equal(seen.filter((sql) => sql === PAID_CALLS_CHECK_SQL).length, 1);
+  assert.equal(PAID_CALLS_CHECK_TIMEOUT_MS, 3_000);
+  for (const sql of seen.filter((item) => item.startsWith('SET LOCAL statement_timeout')))
+    assert.ok(Number(/= (\d+)/.exec(sql)![1]) <= 3_000, sql);
+  assert.equal(await base(db), 3);
+});
+
+test('paid calls check: repairs a counter that is too low, too high or missing; other chains stay', async (t) => {
+  const db = await migrated(t);
+  for (let i = 0; i < 3; i++) await settle(db, await call(db));
+  await settle(db, await call(db, { chainId: 84532 }));
+  const cases: Array<[string, string, number | null]> = [
+    ['too low', 'UPDATE paid_call_count SET total = 1 WHERE chain_id = 8453', 1],
+    ['too high', 'UPDATE paid_call_count SET total = 10 WHERE chain_id = 8453', 10],
+    ['missing', 'DELETE FROM paid_call_count WHERE chain_id = 8453', null],
+  ];
+  for (const [label, sql, counter] of cases) {
+    await db.query(sql);
+    const { lines, log } = recorder();
+    const result = await checkPaidCalls(db, { log });
+    assert.deepEqual(
+      result,
+      { counter, scan: 3, drift: (counter ?? 0) - 3, repaired: true },
+      label,
+    );
+    assert.deepEqual(await counts(db), { 8453: 3, 84532: 1 }, label);
+    assert.deepEqual(
+      lines.map((line) => [line.level, line.fields]),
+      [
+        [
+          'error',
+          {
+            event: 'paid_calls_check',
+            paid_calls_counter: counter,
+            paid_calls_scan: 3,
+            paid_calls_drift: (counter ?? 0) - 3,
+            repaired: true,
+          },
+        ],
+      ],
+      label,
+    );
+  }
+  // Repaired, the next settle counts on top.
+  await settle(db, await call(db));
+  assert.equal(await base(db), 4);
+});
+
+test('paid calls check: a settle during the check is counted once', async (t) => {
+  const db = await migrated(t);
+  for (let i = 0; i < 3; i++) await settle(db, await call(db));
+  await db.query('UPDATE paid_call_count SET total = 1 WHERE chain_id = 8453');
+  // After the read and before the repair, one more payment settles; its +1 lands at its commit.
+  const inside = (tx: Transaction) =>
+    ({ transaction: async (fn: never) => (fn as (tx: Transaction) => unknown)(tx) }) as never;
+  const late = await call(db);
+  const { wrapped } = paidSpied(db, {
+    query: async (sql, tx) => {
+      if (sql === PAID_CALLS_REPAIR_SQL) assert.equal(await settle(inside(tx), late), true);
+    },
+  });
+  const result = await checkPaidCalls(wrapped, { log: () => {} });
+  assert.deepEqual(result, { counter: 1, scan: 3, drift: -2, repaired: true });
+  assert.equal(await base(db), 4);
+  // The same when the row was missing and the settle creates it meanwhile.
+  await db.query('DELETE FROM paid_call_count');
+  const later = await call(db);
+  const { wrapped: again } = paidSpied(db, {
+    query: async (sql, tx) => {
+      if (sql === PAID_CALLS_REPAIR_SQL) assert.equal(await settle(inside(tx), later), true);
+    },
+  });
+  assert.deepEqual(await checkPaidCalls(again, { log: () => {} }), {
+    counter: null,
+    scan: 4,
+    drift: -4,
+    repaired: true,
+  });
+  assert.equal(await base(db), 5);
+  assert.equal((await checkPaidCalls(db, { log: () => {} }))?.drift, 0);
+});
+
+test('paid calls check: overlapping runs add the difference once (read and repair under one lock)', async (t) => {
+  const db = await migrated(t);
+  for (let i = 0; i < 3; i++) await settle(db, await call(db));
+  await db.query('UPDATE paid_call_count SET total = 1 WHERE chain_id = 8453');
+  // A doubled cron delivery, or a manual run during the scheduled one.
+  const { wrapped, seen } = paidSpied(db);
+  const [a, b] = await Promise.all([
+    checkPaidCalls(wrapped, { log: () => {} }),
+    checkPaidCalls(wrapped, { log: () => {} }),
+  ]);
+  assert.equal(await base(db), 3, 'never above the settled calls');
+  assert.deepEqual([a, b].map((result) => result?.drift ?? null).sort(), [-2, 0].sort());
+  // The lock, the read and the repair run in one transaction, the lock first.
+  const order = seen.filter((sql) =>
+    [PAID_CALLS_CHECK_LOCK_SQL, PAID_CALLS_CHECK_SQL, PAID_CALLS_REPAIR_SQL].includes(sql),
+  );
+  assert.deepEqual(order.slice(0, 3), [
+    PAID_CALLS_CHECK_LOCK_SQL,
+    PAID_CALLS_CHECK_SQL,
+    PAID_CALLS_REPAIR_SQL,
+  ]);
+  // A run that finds the lock taken does nothing and says so.
+  const busy = paidSpied(db, {
+    answer: (sql) => (sql === PAID_CALLS_CHECK_LOCK_SQL ? [{ ok: false }] : undefined),
+  });
+  await db.query('UPDATE paid_call_count SET total = 1 WHERE chain_id = 8453');
+  const { lines, log } = recorder();
+  assert.equal(await checkPaidCalls(busy.wrapped, { log }), null);
+  assert.ok(!busy.seen.includes(PAID_CALLS_CHECK_SQL));
+  assert.ok(!busy.seen.includes(PAID_CALLS_REPAIR_SQL));
+  assert.deepEqual(lines, [{ level: 'info', fields: { event: 'paid_calls_check_skipped' } }]);
+  assert.equal(await base(db), 1);
+});
+
+test('paid calls check: every chain row is checked, Base mainnet first, in one budget', async (t) => {
+  const db = await migrated(t);
+  for (let i = 0; i < 3; i++) await settle(db, await call(db));
+  for (let i = 0; i < 2; i++) await settle(db, await call(db, { chainId: 84532 }));
+  // A skipped +1 on the Sepolia row, and a Base mainnet row too high.
+  await db.query('UPDATE paid_call_count SET total = 1 WHERE chain_id = 84532');
+  await db.query('UPDATE paid_call_count SET total = 4 WHERE chain_id = 8453');
+  const { lines, log } = recorder();
+  assert.deepEqual(await checkPaidCallsAllChains(db, { log }), [
+    { counter: 4, scan: 3, drift: 1, repaired: true },
+    { counter: 1, scan: 2, drift: -1, repaired: true, chain_id: 84532 },
+  ]);
+  assert.deepEqual(await counts(db), { 8453: 3, 84532: 2 });
+  assert.deepEqual(
+    lines.map((line) => line.fields.chain_id ?? 8453),
+    [8453, 84532],
+  );
+  // A chain with settled calls and no row at all gets its row.
+  await db.query('DELETE FROM paid_call_count WHERE chain_id = 84532');
+  assert.deepEqual(
+    (await checkPaidCallsAllChains(db, { log: () => {} })).map((result) => result.drift),
+    [0, -2],
+  );
+  assert.deepEqual(await counts(db), { 8453: 3, 84532: 2 });
+  // No budget left: nothing checked, logged as a timeout; never thrown.
+  const spent = recorder();
+  assert.deepEqual(await checkPaidCallsAllChains(db, { log: spent.log, timeoutMs: 0 }), []);
+  assert.equal(spent.lines.at(-1)?.fields.paid_calls_check_timeout, 1);
+});
+
+test('paid calls check: a timeout is logged, not thrown; nothing changes', async (t) => {
+  const db = await migrated(t);
+  for (let i = 0; i < 2; i++) await settle(db, await call(db));
+  await db.query('UPDATE paid_call_count SET total = 1 WHERE chain_id = 8453');
+  // The scan hits its statement timeout (57014).
+  const { wrapped } = paidSpied(db, {
+    query: (sql) => {
+      if (sql === PAID_CALLS_CHECK_SQL) throw sqlError('57014');
+    },
+  });
+  const { lines, log } = recorder();
+  assert.equal(await checkPaidCalls(wrapped, { log }), null);
+  assert.deepEqual(lines, [
+    {
+      level: 'error',
+      fields: { event: 'paid_calls_check_failed', paid_calls_check_timeout: 1, error: '57014' },
+    },
+  ]);
+  // A spent budget is a timeout too; any other failure is logged with its code.
+  const spent = recorder();
+  assert.equal(await checkPaidCalls(db, { log: spent.log, timeoutMs: 0 }), null);
+  assert.deepEqual(spent.lines.at(-1)?.fields, {
+    event: 'paid_calls_check_failed',
+    paid_calls_check_timeout: 1,
+    error: 'budget_exhausted',
+  });
+  const broken = paidSpied(db, {
+    query: (sql) => {
+      if (sql === PAID_CALLS_CHECK_SQL) throw sqlError('XX000');
+    },
+  });
+  const other = recorder();
+  assert.equal(await checkPaidCalls(broken.wrapped, { log: other.log }), null);
+  assert.deepEqual(other.lines.at(-1)?.fields, {
+    event: 'paid_calls_check_failed',
+    paid_calls_check_timeout: 0,
+    error: 'XX000',
+  });
+  assert.equal(await base(db), 1);
+  // Before migration 125 (or without Feed pay) there is nothing to check and nothing is logged.
+  const { db: bare } = await seeded(t);
+  const none = recorder();
+  assert.equal(await checkPaidCalls(bare, { log: none.log }), null);
+  assert.deepEqual(none.lines, []);
+});
+
+test('cron: the paid calls check runs after the others, and its failure never stops them', async (t) => {
+  const db = await migrated(t);
+  for (let i = 0; i < 2; i++) await settle(db, await call(db));
+  await db.query('UPDATE paid_call_count SET total = 1 WHERE chain_id = 8453');
+  // 1) The paid calls check fails: the agent count is still answered, the room counts checked.
+  {
+    const { wrapped } = paidSpied(db, {
+      query: (sql) => {
+        if (sql === PAID_CALLS_CHECK_SQL) throw sqlError('57014');
+      },
+    });
+    const app = Fastify();
+    t.after(() => app.close());
+    const { lines, log } = recorder();
+    registerFastCountCheckRoute(app, {
+      db: wrapped as never,
+      excludedOperators: [],
+      cronSecret: SECRET,
+      log,
+    });
+    const response = await app.inject({
+      url: '/api/cron/fast-count-check',
+      headers: { authorization: `Bearer ${SECRET}` },
+    });
+    assert.equal(response.statusCode, 200, response.body);
+    assert.equal(response.json().drift, false);
+    const events = lines.map((line) => line.fields.event);
+    assert.deepEqual(
+      [events[0], events.includes('room_counts_ok'), events.at(-1)],
+      ['fast_count_ok', true, 'paid_calls_check_failed'],
+    );
+    assert.equal(await base(db), 1);
+  }
+  // 2) The agent count check throws: the paid calls check still runs and repairs.
+  {
+    let first = true;
+    const failingFirst: Pick<Database, 'transaction'> = {
+      transaction: (action) => {
+        if (first) {
+          first = false;
+          return Promise.reject(Object.assign(new Error('boom'), { code: 'XX000' }));
+        }
+        return db.transaction(action);
+      },
+    };
+    const app = Fastify();
+    t.after(() => app.close());
+    const { lines, log } = recorder();
+    registerFastCountCheckRoute(app, {
+      db: failingFirst as never,
+      excludedOperators: [],
+      cronSecret: SECRET,
+      log,
+    });
+    const response = await app.inject({
+      url: '/api/cron/fast-count-check',
+      headers: { authorization: `Bearer ${SECRET}` },
+    });
+    assert.equal(response.statusCode, 500);
+    assert.deepEqual(lines.at(-1)?.fields, {
+      event: 'paid_calls_check',
+      paid_calls_counter: 1,
+      paid_calls_scan: 2,
+      paid_calls_drift: -1,
+      repaired: true,
+    });
+    assert.equal(await base(db), 2);
   }
 });

@@ -3,6 +3,11 @@
   "framework": "vite",
   "buildCommand": "pnpm build && rm -rf dist/.vite",
   "outputDirectory": "dist",
+  "git": {
+    "deploymentEnabled": {
+      "dependabot/**": false
+    }
+  },
   "functions": {
     "api/index.js": {
       "maxDuration": 300,
@@ -36,6 +41,18 @@
     },
     {
       "path": "/api/cron/base-wallet-sweep",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/protocol-fee-scan",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/feed-sync",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/feed-pay-recover",
       "schedule": "* * * * *"
     }
   ],
@@ -185,6 +202,30 @@
       "destination": "/share/elric.html"
     },
     {
+      "source": "/feed",
+      "destination": "/share/feed.html"
+    },
+    {
+      "source": "/feed/requests",
+      "destination": "/app.html"
+    },
+    {
+      "source": "/feed/requests/([A-Za-z0-9_-]{1,64})",
+      "destination": "/app.html"
+    },
+    {
+      "source": "/feed/requests/([A-Za-z0-9_-]{1,64})/manage",
+      "destination": "/app.html"
+    },
+    {
+      "source": "/feed/services/([A-Za-z0-9_-]{1,64})",
+      "destination": "/app.html"
+    },
+    {
+      "source": "/feed/calls/([A-Za-z0-9_-]{1,64})",
+      "destination": "/app.html"
+    },
+    {
       "source": "/results/([A-Za-z0-9_-]{1,64})",
       "destination": "/app.html"
     },
@@ -265,6 +306,10 @@
       "destination": "/share/explorer/base.html"
     },
     {
+      "source": "/explorer/calls",
+      "destination": "/share/explorer/calls.html"
+    },
+    {
       "source": "/docs",
       "destination": "/share/docs.html"
     },
@@ -291,6 +336,10 @@
     {
       "source": "/docs/mistral-le-chat",
       "destination": "/share/docs/mistral-le-chat.html"
+    },
+    {
+      "source": "/docs/feed",
+      "destination": "/share/docs/feed.html"
     },
     {
       "source": "/docs/api",
@@ -640,6 +689,15 @@
       ]
     },
     {
+      "source": "/docs/feed",
+      "headers": [
+        {
+          "key": "Link",
+          "value": "</docs/feed.md>; rel=\"alternate\"; type=\"text/markdown\""
+        }
+      ]
+    },
+    {
       "source": "/docs/api",
       "headers": [
         {
@@ -675,7 +733,7 @@
       ]
     },
     {
-      "source": "/(rooms|settings|agents|messages|signin|r|results|share|newsletter)",
+      "source": "/(rooms|settings|agents|messages|feed|signin|r|results|share|newsletter)",
       "headers": [
         {
           "key": "X-Robots-Tag",
@@ -684,7 +742,7 @@
       ]
     },
     {
-      "source": "/(rooms|settings|agents|messages|signin|r|results|share|newsletter)/(.*)",
+      "source": "/(rooms|settings|agents|messages|feed|signin|r|results|share|newsletter)/(.*)",
       "headers": [
         {
           "key": "X-Robots-Tag",

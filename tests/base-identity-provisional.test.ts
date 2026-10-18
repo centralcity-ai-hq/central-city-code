@@ -5,6 +5,8 @@ import Fastify from 'fastify';
 import type { Database } from '../server/database.js';
 import {
   BASE_IDENTITY_PROVISIONAL_SQL,
+  BASE_IDENTITY_HANDOVER_BACKOFF_SQL,
+  BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL,
   BASE_MIGRATION_SQL,
   BASE_PAYMENTS_MIGRATION_SQL,
   baseShortIdsMigration,
@@ -12,6 +14,9 @@ import {
 import {
   createIdentityService,
   handoverKey,
+  HANDOVER_BACKOFF_MAX_MS,
+  HANDOVER_BACKOFF_MS,
+  handoverBackoffMs,
   LOST_RETRY_MS,
   registerKey,
   transferKey,
@@ -84,6 +89,8 @@ async function setup(
   // Rows written before migration 85 (the legacy, final-only flow).
   await options.beforeMigration85?.(db);
   await pg.exec(BASE_IDENTITY_PROVISIONAL_SQL);
+  await pg.exec(BASE_IDENTITY_HANDOVER_BACKOFF_SQL);
+  await pg.exec(BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL);
   await db.query(
     `INSERT INTO base_wallets VALUES ('w1','a1','ws',$1,$2,'0x${'2'.repeat(40)}',$3,'v1:k','{}',
       'derived',1,1)`,
@@ -221,8 +228,11 @@ for (const order of ['transfer first', 'register first'] as const) {
 
     const app = Fastify();
     t.after(() => app.close());
-    app.get('/a2a/:agentId/.well-known/agent-card.json', async () => ({ name: 'Alphonse' }));
-    registerShortLinks(app, { db: ctx.db, originOf: () => 'https://centralcity.ai' });
+    registerShortLinks(app, {
+      db: ctx.db,
+      originOf: () => 'https://centralcity.ai',
+      card: async () => ({ name: 'Alphonse' }),
+    });
     const short = (
       await ctx.db.query<{ short_id: string }>(
         "SELECT short_id FROM base_short_ids WHERE agent_id = 'a1'",
@@ -813,11 +823,72 @@ test('a refused transfer (not held yet) keeps the same key and no error', async 
   assert.ok(
     ctx.logs.some((e) => e.event === 'identity.handover_refused' && e.code === 'IDENTITY_NOT_HELD'),
   );
+  // Each refusal backs off; the next try comes once that time has passed.
+  ctx.clock.at += HANDOVER_BACKOFF_MAX_MS;
   await ctx.advance();
   chain.transferError = null;
+  ctx.clock.at += HANDOVER_BACKOFF_MAX_MS;
   await ctx.advance();
   assert.deepEqual(chain.calls.transfer, [H(X), H(X), H(X)]);
   assert.deepEqual(chain.signedKeys(), { [R(0)]: 1, [H(X)]: 1 });
+});
+
+test('a refused hand-over backs off, then offers Try again; every try is the same key', async (t) => {
+  const ctx = await setup(t);
+  const { chain } = ctx;
+  await ctx.advance();
+  chain.include(R(0), mintOf());
+  // The rate limit refuses a node read before anything is stored, on every try for now.
+  chain.transferError = Object.assign(new Error('rate limited'), { code: 'RPC_UNAVAILABLE' });
+  const backoff = async () =>
+    (
+      await ctx.db.query<{ handover_refusals: number; retry_at: string | null }>(
+        `SELECT handover_refusals, handover_retry_at::text AS retry_at
+         FROM base_identities WHERE agent_id = 'a1'`,
+      )
+    ).rows[0];
+
+  // First refusal: 15 s before the next try; a poll meanwhile tries nothing.
+  const first = await ctx.advance();
+  assert.equal(first.stage, 'handing_over');
+  assert.deepEqual(chain.calls.transfer, [H(X)]);
+  assert.deepEqual(await backoff(), {
+    handover_refusals: 1,
+    retry_at: String(ctx.clock.at + HANDOVER_BACKOFF_MS),
+  });
+  const waiting = await ctx.advance();
+  assert.deepEqual(chain.calls.transfer, [H(X)], 'not tried during its backoff');
+  assert.equal(waiting.pollAfterMs, HANDOVER_BACKOFF_MS, 'the page asks again when it ends');
+  assert.equal(waiting.canRetry, false);
+
+  // Second and third refusals: the wait doubles; after the third the owner may try again.
+  ctx.clock.at += HANDOVER_BACKOFF_MS;
+  await ctx.advance();
+  assert.equal((await backoff()).retry_at, String(ctx.clock.at + 2 * HANDOVER_BACKOFF_MS));
+  ctx.clock.at += 2 * HANDOVER_BACKOFF_MS;
+  const third = await ctx.advance();
+  assert.equal(third.canRetry, true, 'Try again offered after three refusals');
+  assert.deepEqual(chain.calls.transfer, [H(X), H(X), H(X)]);
+
+  // Try again tries at once, inside the backoff, on the same bound key.
+  await ctx.advance({ retry: true });
+  assert.equal(chain.calls.transfer.length, 4);
+  // The read passes: the hand-over is stored and signed once, and the backoff ends.
+  chain.transferError = null;
+  const done = await ctx.advance({ retry: true });
+  assert.equal(done.canRetry, false);
+  assert.deepEqual(await backoff(), { handover_refusals: 0, retry_at: null });
+  assert.ok(
+    chain.calls.transfer.every((key) => key === H(X)),
+    'never another key',
+  );
+  assert.deepEqual(chain.signedKeys(), { [R(0)]: 1, [H(X)]: 1 });
+});
+
+test('the backoff never grows past its cap', () => {
+  assert.equal(handoverBackoffMs(1), HANDOVER_BACKOFF_MS);
+  assert.equal(handoverBackoffMs(2), 2 * HANDOVER_BACKOFF_MS);
+  assert.equal(handoverBackoffMs(50), HANDOVER_BACKOFF_MAX_MS);
 });
 
 test('polling with unchanged evidence writes nothing', async (t) => {
@@ -1254,6 +1325,7 @@ test("D4: the pre-send spender check is the port's; it never confirms anything",
   chain.finalize(R(0));
   chain.transferError = Object.assign(new Error('not held'), { code: 'IDENTITY_NOT_HELD' });
   for (let i = 0; i < 2; i++) {
+    ctx.clock.at += HANDOVER_BACKOFF_MAX_MS;
     const v = await ctx.advance();
     assert.equal(v.state, 'submitted');
     assert.equal(v.erc8004AgentId, '99029');
@@ -1262,6 +1334,7 @@ test("D4: the pre-send spender check is the port's; it never confirms anything",
   assert.equal(chain.calls.identityAt.length, 0, 'no destination read before a final hand-over');
   assert.ok(chain.calls.transfer.every((key) => key === H(X)));
   chain.transferError = null;
+  ctx.clock.at += HANDOVER_BACKOFF_MAX_MS;
   await ctx.advance();
   assert.equal(chain.signs.get(H(X)), 1);
 });

@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { Database, Transaction } from '../database.js';
 import { opsAuthorized } from '../elric/ops.js';
 import { cronAuthorized } from '../wake/cron.js';
+import { storedKeyHash } from '../rate-limit.js';
 import { NEWSLETTER_TEXT_VERSION, type NewsletterStatus } from '../../shared/newsletter.js';
 import { newsletterEmailSchema } from '../../shared/newsletter-schema.js';
 import {
@@ -54,6 +55,14 @@ export const EMAIL_LIMITS = {
 export type NewsletterSource = 'signup' | 'onboarding' | 'settings';
 /** Subscribe attempts from account settings: per account and per address (docs/EMAIL.md). */
 export const NEWSLETTER_RATE = { perAccount: 5, perAddress: 20, windowMs: 60 * MINUTE } as const;
+/**
+ * Confirmation emails per recipient address, whichever account or path asks for them, so sign-ups
+ * cannot be pointed at someone else's inbox over and over. The bucket key is a keyed hash of the
+ * normalized address (CITY_RATE_LIMIT_KEY), never the address itself.
+ */
+export const NEWSLETTER_RECIPIENT_RATE = { perRecipient: 3, windowMs: DAY } as const;
+export const newsletterRecipientKey = (email: string) =>
+  `newsletter:recipient:${storedKeyHash(0, `newsletter-recipient\n${email.trim().toLowerCase()}`)}`;
 
 export interface EmailOptions {
   /** The environment (CITY_EMAIL_*); defaults to process.env. */
@@ -91,6 +100,15 @@ export interface NewsletterRecord {
   unsubscribed_at: string | null;
 }
 
+/** An opt-in that passed the recipient budget; only admitOptIn makes one. */
+export interface NewsletterAdmission {
+  readonly operatorId: string;
+  readonly source: NewsletterSource;
+  readonly to: string | null;
+  /** False when the budget was not taken (no address, or already subscribed). */
+  readonly charged: boolean;
+}
+
 export interface EmailService {
   enabled(): boolean;
   /** The account's email address (its Google link), or null. */
@@ -98,17 +116,21 @@ export interface EmailService {
   /** Queues the welcome email once per account (no-op when off or without an address). */
   queueWelcome(tx: Q, operatorId: string, name: string, origin: string): Promise<void>;
   /**
-   * Records a newsletter opt-in (pending) and queues its confirmation email, to `email` or else
-   * the account's Google address. False when there is no address. Works while sending is off:
-   * the email stays queued until the provider is configured.
+   * Takes the per-recipient confirmation budget for an opt-in, before its transaction (the shared
+   * limiter never runs inside one). A spent budget is a 429 from settings; from sign-up and
+   * onboarding it is null, and the caller skips the opt-in so the account is still created.
    */
-  optIn(
-    tx: Q,
+  admitOptIn(
     operatorId: string,
     source: NewsletterSource,
-    origin: string,
     email?: string,
-  ): Promise<boolean>;
+  ): Promise<NewsletterAdmission | null>;
+  /**
+   * Records a newsletter opt-in (pending) and queues its confirmation email, to the admitted
+   * address (`email`, or else the account's Google address). False when there is no address.
+   * Works while sending is off: the email stays queued until the provider is configured.
+   */
+  optIn(tx: Q, admission: NewsletterAdmission, origin: string): Promise<boolean>;
   /** Withdraws the consent (no-op unless pending or subscribed); drops an unsent confirmation. */
   unsubscribe(tx: Q, operatorId: string): Promise<void>;
   /** The account's newsletter record for its data export, or null. */
@@ -215,6 +237,7 @@ export function registerEmail(app: FastifyInstance, d: EmailDeps): EmailService 
   }
 
   let draining: Promise<unknown> | null = null;
+  const admissions = new WeakSet<NewsletterAdmission>();
 
   const service: EmailService = {
     enabled: () => config() !== null,
@@ -235,12 +258,41 @@ export function registerEmail(app: FastifyInstance, d: EmailDeps): EmailService 
       const text = welcomeEmail({ name, origin, elric: d.elricEnabled() });
       await enqueue(tx, { operatorId, key: `welcome:${operatorId}`, kind: 'welcome', to, ...text });
     },
-    async optIn(tx, operatorId, source, origin, email) {
-      const to = email ?? (await service.emailOf(tx, operatorId));
+    async admitOptIn(operatorId, source, email) {
+      const to = email ?? (await service.emailOf(d.db, operatorId));
+      const admit = (charged: boolean): NewsletterAdmission => {
+        const admission = Object.freeze({ operatorId, source, to, charged });
+        admissions.add(admission);
+        return admission;
+      };
+      if (!to) return admit(false);
+      if ((await service.status(d.db, operatorId)) === 'subscribed') return admit(false);
+      try {
+        await d.limit(
+          newsletterRecipientKey(to),
+          NEWSLETTER_RECIPIENT_RATE.perRecipient,
+          NEWSLETTER_RECIPIENT_RATE.windowMs,
+          'Too many confirmation emails to this address today. Try again tomorrow.',
+        );
+      } catch (error) {
+        // Sign-up and onboarding never fail on the newsletter: no consent row and no email.
+        if (source !== 'settings' && (error as { statusCode?: number }).statusCode === 429)
+          return null;
+        throw error;
+      }
+      return admit(true);
+    },
+    async optIn(tx, admission, origin) {
+      if (!admissions.has(admission)) throw new Error('Newsletter opt-in without an admission.');
+      // One admission, one opt-in.
+      admissions.delete(admission);
+      const { operatorId, source, to } = admission;
       if (!to) return false;
       const time = d.clock();
       const current = await service.status(tx, operatorId);
       if (current === 'subscribed') return true;
+      // Subscribed when admitted (no budget taken) and not any more: nothing is queued.
+      if (!admission.charged) return true;
       // A new sign-up replaces an unsent confirmation of an earlier one.
       await tx.query(
         `DELETE FROM email_outbox WHERE operator_id=$1 AND kind='newsletter_confirm' AND sent_at IS NULL AND failed_at IS NULL`,
@@ -541,8 +593,10 @@ export function registerEmail(app: FastifyInstance, d: EmailDeps): EmailService 
         NEWSLETTER_RATE.perAddress,
         NEWSLETTER_RATE.windowMs,
       );
+      // Settings answers a spent recipient budget with a 429 (never null for this source).
+      const admission = (await service.admitOptIn(owner.id, 'settings', input.email))!;
       const queued = await d.db.transaction((tx) =>
-        service.optIn(tx, owner.id, 'settings', d.originOf(request), input.email),
+        service.optIn(tx, admission, d.originOf(request)),
       );
       if (!queued)
         return reply.code(400).send({

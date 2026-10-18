@@ -1718,3 +1718,30 @@ test('a manifest update that changes the display name shows as a rename in Activ
   );
   assert.equal(renames.length, 1);
 });
+
+test('concurrent metrics misses share one aggregation over every workspace', async (t) => {
+  let now = Date.parse('2026-10-15T06:00:00Z');
+  const app = await createApp({ dataDir: ':memory:', startWorkers: false, now: () => now });
+  t.after(() => app.close());
+  const cookie = await register(app, 'Metrics owner');
+  const db = app.city.db;
+  const original = db.query.bind(db);
+  let scans = 0;
+  (db as { query: typeof db.query }).query = ((text: string, params?: unknown[]) => {
+    if (typeof text === 'string' && text.includes("jsonb_array_elements(w.data->'agents')"))
+      scans++;
+    return original(text as never, params as never);
+  }) as typeof db.query;
+  const burst = async () =>
+    Promise.all(Array.from({ length: 6 }, () => ownerApi(app, cookie, '/api/metrics/agents')));
+  const first = await burst();
+  assert.ok(first.every((res) => res.statusCode === 200));
+  assert.equal(scans, 1);
+  assert.equal(new Set(first.map((res) => res.body)).size, 1);
+  // Cached: no new scan. After the cache expires, one more burst is one more scan.
+  await burst();
+  assert.equal(scans, 1);
+  now += 61_000;
+  await burst();
+  assert.equal(scans, 2);
+});

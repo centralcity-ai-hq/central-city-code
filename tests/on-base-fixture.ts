@@ -6,8 +6,12 @@ import { PGlite } from '@electric-sql/pglite';
 import type { Database } from '../server/database.js';
 import {
   BASE_IDENTITY_PROVISIONAL_SQL,
+  BASE_IDENTITY_HANDOVER_BACKOFF_SQL,
+  BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL,
   BASE_MIGRATION_SQL,
   BASE_PAYMENTS_MIGRATION_SQL,
+  BASE_RATED_AGENTS_SQL,
+  BASE_RATINGS_BY_RATED_SQL,
   BASE_SHARED_ADDITIONS_SQL,
   BASE_WALLET_LANES_SQL,
   BASE_WALLET_LIMITS_SQL,
@@ -18,6 +22,7 @@ import {
   BASE_WALLET_WITHDRAWALS_SQL,
   baseShortIdsMigration,
 } from '../server/base/schema.js';
+import { publicStatsMigration } from '../server/stats/schema.js';
 import { BASE_NETWORKS } from '../shared/base/chains.js';
 import { AGENT_URI_ORIGIN } from '../shared/base/on-base.js';
 
@@ -49,14 +54,18 @@ export async function setup(t: { after: (fn: () => Promise<unknown>) => void }) 
        manifest jsonb NOT NULL, created_at bigint NOT NULL,
        operator_id text NOT NULL REFERENCES operators(id), PRIMARY KEY(agent_id, revision));`,
   );
-  // The Base schema up to ratings (94) and lanes (95), in the order the wallet suites apply it:
-  // the list's score reads the ratings (base_wallet_withdrawals kind 'rate').
+  // The Base schema up to ratings (94), lanes (95), the ratings index (99) and the rated agents
+  // (120), in the order the wallet suites apply it: the list's score reads the ratings
+  // (base_wallet_withdrawals kind 'rate'), its rated agents base_rated_agents, shared through
+  // public_stats (28).
   for (const sql of [
     BASE_MIGRATION_SQL,
     BASE_PAYMENTS_MIGRATION_SQL,
     baseShortIdsMigration.sql,
     BASE_SHARED_ADDITIONS_SQL,
     BASE_IDENTITY_PROVISIONAL_SQL,
+    BASE_IDENTITY_HANDOVER_BACKOFF_SQL,
+    BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL,
     BASE_WALLET_VAULT_SQL,
     BASE_WALLET_WITHDRAWALS_SQL,
     BASE_WALLET_PAYMENTS_SQL,
@@ -64,6 +73,9 @@ export async function setup(t: { after: (fn: () => Promise<unknown>) => void }) 
     BASE_WALLET_ONE_UNSIGNED_SQL,
     BASE_WALLET_RATINGS_SQL,
     BASE_WALLET_LANES_SQL,
+    BASE_RATINGS_BY_RATED_SQL,
+    BASE_RATED_AGENTS_SQL,
+    publicStatsMigration.sql,
   ])
     await pg.exec(sql);
   const db: Database = {
@@ -103,6 +115,10 @@ export interface Fixture {
    * final one (erc8004_agent_id) while it waits for the hand-over to confirm.
    */
   finalIdStored?: boolean;
+  /** The card's description and skills (the directory's cards); none by default. */
+  description?: string;
+  skills?: string[];
+  capabilities?: string[];
 }
 
 /** A stored chain operation (base_chain_ops), only the columns the explorer reads. */
@@ -132,8 +148,16 @@ export async function add(db: Database, f: Fixture) {
       agent,
       index + 1,
       JSON.stringify({
-        metadata: { name: `agent-${f.n}`, displayName },
-        spec: { visibility: f.visibility ?? 'public' },
+        metadata: {
+          name: `agent-${f.n}`,
+          displayName,
+          ...(f.description === undefined ? {} : { description: f.description }),
+        },
+        spec: {
+          visibility: f.visibility ?? 'public',
+          ...(f.skills ? { skills: f.skills.map((name, i) => ({ id: `s${i}`, name })) } : {}),
+          ...(f.capabilities ? { capabilities: f.capabilities } : {}),
+        },
       }),
     ]);
   await db.query(

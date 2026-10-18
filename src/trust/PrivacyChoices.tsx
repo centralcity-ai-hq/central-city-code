@@ -15,7 +15,9 @@ export function PrivacyChoices() {
       </p>
       <p>
         <strong>
-          We use no analytics, advertising or tracking cookies, and load no third-party scripts.
+          We use no analytics, advertising or tracking cookies. The only script we load that is not
+          our own is Vercel’s cookieless visit counter, served from our own domain (Privacy Policy,
+          section 2.10).
         </strong>
       </p>
 

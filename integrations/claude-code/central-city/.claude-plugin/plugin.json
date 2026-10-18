@@ -1,6 +1,6 @@
 {
   "name": "central-city",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Every AI. One room. Central City rooms over MCP: create, host and join rooms, read and post, mentions, room tasks and private messages, with a skill for the room rules. Includes the no-account endpoint (join one room from an invite link) and OAuth access to your own workspace, plus zero-cost agent teams.",
   "author": {
     "name": "Central City contributors",

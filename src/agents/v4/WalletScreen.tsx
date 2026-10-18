@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -22,6 +24,7 @@ import {
 } from '../../base/vault';
 import {
   ensureWallet,
+  ethAmountText,
   fullHistory,
   checkOwnWallet,
   networkProblem,
@@ -32,7 +35,9 @@ import {
   readWallet,
   transferDelta,
   transferKey,
+  usdcAmountText,
   usdcNumber,
+  usdcValueText,
   type WalletHistory,
   type WalletTransfer,
   type WalletView,
@@ -64,7 +69,18 @@ import './wallet-screen.css';
  * A forgotten password is restored with the backup key, and the password changed, over the screen
  * the owner was on (WalletKeyScreens).
  * Rate (WalletRateScreen) shows only for an agent that is itself a Central City agent on Base.
+ * Services (ServiceCalls): Ready for services, the per-call maximum and the service calls the
+ * agent paid (Feed pay, docs/FEED_PAY.md).
  */
+
+/*
+ * Services (Feed pay) carries the Feed pay client (its requests, words and contract), which the
+ * workspace doesn't need until a wallet is open: its own chunk, loaded with the screen. It shows
+ * nothing until its first read anyway, so nothing waits for it.
+ */
+const ServiceCalls = lazy(() =>
+  import('./ServiceCalls').then((module) => ({ default: module.ServiceCalls })),
+);
 
 const MIN_PASSWORD = 12;
 const TEST_NETWORK = 'Test network · no real money';
@@ -104,11 +120,7 @@ const failure = (error: unknown) =>
 const NOT_HELD_HERE =
   'Your key was unlocked, but this browser couldn’t hold it for this account, so no address is shown.';
 
-const usd = (value: number) => (Math.round(value * 100) / 100).toFixed(2);
-const eth = (display: string) => {
-  const value = Number(display);
-  return value === 0 ? '0' : value < 0.0001 ? '<0.0001' : value.toFixed(4).replace(/0+$/, '');
-};
+const eth = ethAmountText;
 const ago = (ms: number) => {
   const s = Math.max(0, Math.round(ms / 1000));
   if (s < 10) return 'just now';
@@ -410,7 +422,7 @@ function WalletView_({
   against: 'key' | 'unlock';
   onChangePassword: () => void;
 }) {
-  const current = usd(usdcNumber(wallet.usdc));
+  const current = usdcAmountText(wallet.usdc);
   const limitRow = useLimitRow(agentId);
   // Rate only from a Central City agent on Base itself (a final Base ID and a passport).
   const rater = useRater(agentId);
@@ -435,6 +447,8 @@ function WalletView_({
       (history?.transfers ?? []).map((transfer) => ({
         at: transfer.at,
         amount: transferDelta(transfer, wallet.address),
+        // The exact amount for the scrub label (the number above is for the line's geometry).
+        text: usdcAmountText(transfer.amount),
         kind: transfer.kind,
         label: labelOf(transfer),
       })),
@@ -449,7 +463,7 @@ function WalletView_({
           <span className={`w4-net${network.testnet ? '' : ' live'}`}>{networkOf(network)}</span>
         </p>
         <div className="w4-amount">
-          <Odometer value={scrub ? usd(scrub.balance) : current} className="w4-big" />
+          <Odometer value={scrub ? usdcValueText(scrub.balance) : current} className="w4-big" />
           <span className="w4-unit">USDC</span>
         </div>
         <p className="w4-sub">
@@ -481,7 +495,7 @@ function WalletView_({
                       at: state.at,
                       balance: state.balance,
                       label: transfer
-                        ? `${transfer.label} ${transfer.amount === 0 ? '' : transfer.amount > 0 ? '+' : '−'}${usd(Math.abs(transfer.amount))}`
+                        ? `${transfer.label} ${transfer.amount === 0 ? '' : transfer.amount > 0 ? '+' : '−'}${transfer.amount === 0 ? '0.00' : transfer.text}`
                         : null,
                     }
                   : null,
@@ -550,12 +564,13 @@ function WalletView_({
             {limitRow.value ? <span className="ap4-v">{limitRow.value}</span> : null}
             <ChevronRight className="ap4-chev" size={14} aria-hidden="true" />
           </button>
-        ) : (
+        ) : limitRow === undefined ? (
+          // Still reading: the row keeps its place. When the server offers no limits (off), there
+          // is no row at all, never a "Coming soon" above a limit the Services group may show.
           <div className="ap4-row v4s-still">
             <span className="ap4-k">Spending limit</span>
-            {limitRow === null ? <span className="ap4-v">Coming soon</span> : null}
           </div>
-        )}
+        ) : null}
         {wallet.address && against === 'key' ? (
           <div className="ap4-row v4s-still">
             <span className="ap4-k">
@@ -603,7 +618,7 @@ function WalletView_({
                     </span>
                     <span className={`w4-amt${delta > 0 ? ' in' : ''}`}>
                       {self ? '' : delta > 0 ? '+' : '−'}
-                      {usd(self ? usdcNumber(transfer.amount) : Math.abs(delta))}
+                      {usdcAmountText(transfer.amount)}
                     </span>
                   </div>
                 );
@@ -868,6 +883,9 @@ export function WalletScreen({ agent, onBack, onOpen, backLabel }: AgentScreenPr
           />
           <IncomingPayments agentId={agent.id} name={agent.name} />
           <AgentPayments agentId={agent.id} name={agent.name} />
+          <Suspense fallback={null}>
+            <ServiceCalls agentId={agent.id} name={agent.name} />
+          </Suspense>
         </>
       ) : (
         <KeySetup

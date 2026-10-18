@@ -129,6 +129,26 @@ export interface CityLimits {
   inviteRequestsPerSitePerHour: number;
   inviteRequestsPerNetworkPerHour: number;
   inviteRequestsPerRegionPerHour: number;
+  /*
+   * city_service_call (docs/FEED_PAY.md section 11), the same bounds for every workspace. The
+   * call's idempotency key decides the bucket: a key that names an existing call is a re-read,
+   * any other key a new call.
+   */
+  /** New calls per grant or workspace key per minute. */
+  feedPayCallsPerGrantPerMinute: number;
+  /** New calls per workspace per minute, shared by all its grants and keys. */
+  feedPayCallsPerWorkspacePerMinute: number;
+  /** Same-key re-reads of an existing call per grant or workspace key per minute. */
+  feedPayReadsPerGrantPerMinute: number;
+  /** Same-key re-reads per workspace per minute, shared by all its grants and keys. */
+  feedPayReadsPerWorkspacePerMinute: number;
+  /**
+   * Feed pay calls in flight per workspace (reserved and not done yet, so still able to move money
+   * on Base), from the Feed and over MCP, counted in the database so it holds across instances. A
+   * new call at the cap is refused like a rate limit (429, retryable). Soft: new calls checked at
+   * the same moment can pass it together.
+   */
+  feedPayCallsInFlightPerWorkspace: number;
 }
 
 export const DEFAULT_LIMITS: Readonly<CityLimits> = Object.freeze({
@@ -193,6 +213,16 @@ export const DEFAULT_LIMITS: Readonly<CityLimits> = Object.freeze({
   inviteRequestsPerSitePerHour: 50_000,
   inviteRequestsPerNetworkPerHour: 100_000,
   inviteRequestsPerRegionPerHour: 200_000,
+  feedPayCallsPerGrantPerMinute: 20,
+  feedPayCallsPerWorkspacePerMinute: 20,
+  // A re-read pays nothing: one indexed read, then the same wait for the call as the first answer.
+  // Six times a new call's budget follows every call in flight closely and stays bounded.
+  feedPayReadsPerGrantPerMinute: 120,
+  feedPayReadsPerWorkspacePerMinute: 120,
+  // A call answers within seconds to a minute or two, so ten running at once is far more than a
+  // person or an AI client starts by hand; it keeps one workspace from holding an unbounded share
+  // of the payment work and the Base requests behind it.
+  feedPayCallsInFlightPerWorkspace: 10,
 });
 
 export const LIMIT_ENV: Readonly<Record<keyof CityLimits, string>> = Object.freeze({
@@ -255,6 +285,11 @@ export const LIMIT_ENV: Readonly<Record<keyof CityLimits, string>> = Object.free
   inviteRequestsPerSitePerHour: 'CITY_LIMIT_INVITE_REQUESTS_PER_SITE_PER_HOUR',
   inviteRequestsPerNetworkPerHour: 'CITY_LIMIT_INVITE_REQUESTS_PER_NETWORK_PER_HOUR',
   inviteRequestsPerRegionPerHour: 'CITY_LIMIT_INVITE_REQUESTS_PER_REGION_PER_HOUR',
+  feedPayCallsPerGrantPerMinute: 'CITY_LIMIT_FEED_PAY_CALLS_PER_GRANT_PER_MINUTE',
+  feedPayCallsPerWorkspacePerMinute: 'CITY_LIMIT_FEED_PAY_CALLS_PER_WORKSPACE_PER_MINUTE',
+  feedPayReadsPerGrantPerMinute: 'CITY_LIMIT_FEED_PAY_READS_PER_GRANT_PER_MINUTE',
+  feedPayReadsPerWorkspacePerMinute: 'CITY_LIMIT_FEED_PAY_READS_PER_WORKSPACE_PER_MINUTE',
+  feedPayCallsInFlightPerWorkspace: 'CITY_LIMIT_FEED_PAY_CALLS_IN_FLIGHT_PER_WORKSPACE',
 });
 
 /** `operators` accepts 0 (no ceiling); every other limit is at least 1. */

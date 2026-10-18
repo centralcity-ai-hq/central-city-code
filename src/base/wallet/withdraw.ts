@@ -546,6 +546,25 @@ export async function signAndSend(
   return api<WithdrawalView>(path, { signature });
 }
 
+/** A form's idempotency key and the request body it was last sent with (null: not sent yet). */
+export interface RequestKey {
+  key: string;
+  body: string | null;
+}
+export const newRequestKey = (): RequestKey => ({ key: crypto.randomUUID(), body: null });
+
+/**
+ * The key to send this body with. The same body again (a retry after a lost answer) keeps the key,
+ * so the server answers with what it kept; an edited body gets a new key, never refused as another
+ * use of the old one (idempotency_conflict).
+ */
+export function keyFor(held: RequestKey, body: unknown): string {
+  const text = JSON.stringify(body);
+  if (held.body !== null && held.body !== text) held.key = crypto.randomUUID();
+  held.body = text;
+  return held.key;
+}
+
 /** The screen locked while a signature was being made: it was dropped, nothing was sent. */
 export class WithdrawalLockedError extends Error {
   constructor() {
@@ -568,7 +587,13 @@ export interface WithdrawalAnchor {
    */
   payment?: { name: string; short: string; baseId: string; note: string | null };
 }
-const anchorKey = (agentId: string) => `cc-withdrawal:${agentId}`;
+/**
+ * Where an anchor is kept: a rating (WalletRateScreen) has its own, so Withdraw and Pay, which read
+ * theirs to resume a transfer, never take a rating for a withdrawal.
+ */
+export type AnchorStore = 'transfer' | 'rating';
+const anchorKey = (agentId: string, store: AnchorStore = 'transfer') =>
+  store === 'rating' ? `cc-rating:${agentId}` : `cc-withdrawal:${agentId}`;
 
 /** This browser couldn't keep the anchor, so the signature wasn't sent. */
 export class WithdrawalAnchorError extends Error {
@@ -584,19 +609,26 @@ export class WithdrawalAnchorError extends Error {
  * right before a signature is sent, that stops the sending, since a lost answer would then leave
  * nothing to resume or cancel from.
  */
-export function saveAnchor(agentId: string, anchor: WithdrawalAnchor) {
+export function saveAnchor(
+  agentId: string,
+  anchor: WithdrawalAnchor,
+  store: AnchorStore = 'transfer',
+) {
   try {
-    localStorage.setItem(anchorKey(agentId), JSON.stringify(anchor));
-    const kept = readAnchor(agentId);
+    localStorage.setItem(anchorKey(agentId, store), JSON.stringify(anchor));
+    const kept = readAnchor(agentId, store);
     if (kept?.withdrawalId === anchor.withdrawalId && kept.userOpHash === anchor.userOpHash) return;
   } catch {
     // Blocked or full: refused below.
   }
   throw new WithdrawalAnchorError();
 }
-export function readAnchor(agentId: string): WithdrawalAnchor | null {
+export function readAnchor(
+  agentId: string,
+  store: AnchorStore = 'transfer',
+): WithdrawalAnchor | null {
   try {
-    const value = JSON.parse(localStorage.getItem(anchorKey(agentId)) ?? 'null') as unknown;
+    const value = JSON.parse(localStorage.getItem(anchorKey(agentId, store)) ?? 'null') as unknown;
     if (!value || typeof value !== 'object') return null;
     const anchor = value as WithdrawalAnchor;
     if (
@@ -629,10 +661,14 @@ const same = (a: Operation, b: Operation) =>
  * Clears the anchor only while it is still this operation's: an older one finishing (in another
  * tab, say) never clears the one signed after it. True when nothing of this one is left anchored.
  */
-export function clearAnchor(agentId: string, operation: Operation): boolean {
+export function clearAnchor(
+  agentId: string,
+  operation: Operation,
+  store: AnchorStore = 'transfer',
+): boolean {
   try {
-    const kept = readAnchor(agentId);
-    if (kept && same(kept, operation)) localStorage.removeItem(anchorKey(agentId));
+    const kept = readAnchor(agentId, store);
+    if (kept && same(kept, operation)) localStorage.removeItem(anchorKey(agentId, store));
     return true;
   } catch {
     return false;

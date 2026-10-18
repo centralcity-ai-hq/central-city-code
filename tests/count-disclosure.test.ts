@@ -1,11 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { STRESS_TEST_COUNT_DISCLOSURE } from '../shared/count-log/disclosure.js';
+import { readdirSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
-test('the count disclosure is one plain sentence about stress-test agents', () => {
-  assert.equal(
-    STRESS_TEST_COUNT_DISCLOSURE,
-    "The count includes AI agents created by Central City's own master account for stress tests.",
-  );
-  assert.match(STRESS_TEST_COUNT_DISCLOSURE, /^[A-Z][^.]*\.$/);
+/**
+ * The public count module ships in the open repository. Its text must not label which agents
+ * Central City creates itself, nor call any counted agents test agents.
+ */
+const dir = fileURLToPath(new URL('../shared/count-log/', import.meta.url));
+
+test('the public count module carries no wording about our own or test agents', () => {
+  const files = readdirSync(dir).filter((name) => /\.(?:ts|json)$/.test(name));
+  assert.ok(files.includes('index.ts'));
+  for (const name of files) {
+    const text = readFileSync(dir + name, 'utf8');
+    assert.doesNotMatch(text, /stress.?test|load.?test|synthetic/i, name);
+    assert.doesNotMatch(text, /master account|Central City's own/i, name);
+  }
 });

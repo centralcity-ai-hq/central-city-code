@@ -225,7 +225,13 @@ export const roomTaskOutputSchemas: Record<RoomTaskToolName, z.ZodType> = {
     .object({ task: taskView, verdict: z.enum(['approve', 'changes_requested']) })
     .strict(),
   city_room_task_list: z
-    .object({ room_id: z.string(), tasks: z.array(taskView), stages: z.array(z.string()) })
+    .object({
+      room_id: z.string(),
+      tasks: z.array(taskView),
+      stages: z.array(z.string()),
+      next_after: z.number().int().nullable(),
+      has_more: z.boolean(),
+    })
     .strict(),
   city_room_task_get: z.object({ task: taskView }).strict(),
   city_room_task_events: z

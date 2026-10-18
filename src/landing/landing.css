@@ -249,6 +249,17 @@
   font-size: 15px;
 }
 
+/* The live counts: AI agents (src/AgentTicker.tsx) and, under it, the paid service calls
+   (src/PaidCallsTicker.tsx). One column, 8px apart; the wrapper takes the agent pill's margin. */
+.cc-lp-tickers {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 0 0 32px;
+}
+
 /* The live agent count (src/AgentTicker.tsx): a pill. The paragraph reserves the pill's height
    before the number arrives, so nothing below moves. */
 .cc-lp .cc-agent-ticker {
@@ -256,7 +267,7 @@
   justify-content: center;
   align-items: flex-start;
   min-height: 38px;
-  margin: 0 0 32px;
+  margin: 0;
   font: inherit;
   font-size: 13.5px;
   line-height: 20px;
@@ -313,6 +324,13 @@
   font-weight: 700;
   color: var(--lp-text);
 }
+/* Until the app counts the number in from 0 (src/AgentTicker.tsx), the prerendered digits stay
+   hidden (html[data-count-in] is set by src/shell/theme-boot.js and removed when the app mounts),
+   so the number never shows and then drops to 0. Without JavaScript, or with reduced motion, the
+   marker is never set and the build's number shows as before. */
+html[data-count-in] .cc-agent-ticker[data-source='build'] .cc-agent-ticker-n {
+  visibility: hidden;
+}
 .cc-agent-ticker-label {
   min-width: 0;
   font-size: 13px;
@@ -328,6 +346,81 @@
   text-decoration: underline;
   text-underline-offset: 3px;
 }
+/* The paid service calls pill (src/PaidCallsTicker.tsx): the agent pill's look, with its own
+   dot. The dot breathes like the agent pill's, sends out one ring on each real +1 and turns grey,
+   still, when the copy shown is more than five minutes old. */
+.cc-paid-dot {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  margin-right: 4px;
+}
+.cc-paid-dot .cc-agent-ticker-dot {
+  margin-right: 0;
+}
+.cc-paid-ticker.is-stale .cc-agent-ticker-dot {
+  background: color-mix(in srgb, var(--text-muted) 55%, transparent);
+  box-shadow: none;
+  animation: none;
+}
+.cc-lp .cc-paid-n {
+  --cc-paid-lh: 20px;
+  display: inline-flex;
+  justify-content: flex-end;
+  white-space: nowrap;
+}
+/* The line's parts (Base agents, paid calls) lay out as the pill's own items. */
+.cc-base-part,
+.cc-paid-part {
+  display: contents;
+}
+.cc-paid-sep {
+  color: var(--lp-text-3);
+}
+/* One fixed slot per character; a digit that changed rolls up over 300 ms (transform only). */
+.cc-paid-c {
+  display: block;
+  height: var(--cc-paid-lh);
+  line-height: var(--cc-paid-lh);
+  overflow: hidden;
+}
+.cc-paid-roll {
+  display: flex;
+  flex-direction: column;
+  animation: cc-paid-roll 300ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.cc-paid-roll > span {
+  display: block;
+  height: var(--cc-paid-lh);
+}
+@keyframes cc-paid-roll {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(-50%);
+  }
+}
+/* One ring out of the dot on each real +1. */
+.cc-paid-ring {
+  position: absolute;
+  inset: 0;
+  border: 1.5px solid var(--status-live, #10b981);
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+  animation: cc-paid-ring 900ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes cc-paid-ring {
+  0% {
+    opacity: 0.6;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(3.2);
+  }
+}
 @media (max-width: 479px) {
   /* The pill wraps to two lines here: reserve both. */
   .cc-lp .cc-agent-ticker {
@@ -338,6 +431,42 @@
   }
   .cc-agent-ticker-text::after {
     display: none;
+  }
+  /* The paid calls pill flows as one centred text here, so a long total (10 million and more)
+     still fits the two reserved lines: the sentence wraps between words and "Verify here"
+     follows on the same line, instead of the sentence taking two lines and the link a third. */
+  .cc-lp .cc-paid-ticker .cc-agent-ticker-pill {
+    display: inline-block;
+    text-align: center;
+  }
+  .cc-lp .cc-paid-ticker .cc-agent-ticker-text {
+    display: inline;
+  }
+  .cc-lp .cc-paid-ticker .cc-paid-dot {
+    margin-right: 8px;
+    vertical-align: 1px;
+  }
+  .cc-lp .cc-paid-ticker .cc-paid-n {
+    vertical-align: top;
+  }
+  .cc-lp .cc-paid-ticker .cc-agent-ticker-verify {
+    margin-left: 8px;
+  }
+  /* Stacked: the Base agents on the first line; the paid calls ("paid calls") and "How we
+     count" on the second. */
+  .cc-lp .cc-paid-ticker .cc-base-part {
+    display: inline;
+  }
+  .cc-lp .cc-paid-ticker .cc-base-part::after {
+    content: '\A';
+    white-space: pre;
+  }
+  .cc-lp .cc-paid-ticker .cc-paid-sep,
+  .cc-lp .cc-paid-ticker .cc-paid-long {
+    display: none;
+  }
+  .cc-lp .cc-paid-ticker .cc-paid-part {
+    display: inline;
   }
 }
 
@@ -462,7 +591,7 @@
   font-size: 13px;
   line-height: 1.5;
   letter-spacing: 0;
-  color: var(--lp-text-3, var(--lp-text-2));
+  color: var(--lp-text-3);
 }
 
 .cc-lp-cta .cc-lp-listed a {
@@ -484,5 +613,13 @@
 @media (prefers-reduced-motion: reduce) {
   .cc-agent-ticker-dot {
     animation: none;
+  }
+  /* The paid calls number changes in place; no roll, no ring. */
+  .cc-paid-roll {
+    animation: none;
+    transform: translateY(-50%);
+  }
+  .cc-paid-ring {
+    display: none;
   }
 }

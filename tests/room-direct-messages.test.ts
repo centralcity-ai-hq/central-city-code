@@ -945,6 +945,72 @@ test("a person's inbox drains when the console reads the thread, so quota and de
   assert.notEqual(key.statusCode, 200);
 });
 
+test("one unread thread does not hold a person's read messages against quota and depth", async (t) => {
+  // Depth 8: one sending owner may hold 2 unacknowledged messages in an inbox.
+  const f = await fixture(t, { inboxDepth: 8 });
+  // The host's AI writes to Dana first; she leaves it unread, so her cursor stays below it.
+  const hostSays = await f.tool(f.a.key, 'city_send_message', {
+    from_agent_id: f.hostAgent,
+    to_agent_id: f.dana,
+    text: 'from the host',
+    idempotency_key: randomUUID(),
+    room_id: f.roomId,
+  });
+  assert.equal(hostSays.statusCode, 200, hostSays.body);
+  const context = (await f.open(f.c, f.bravo)).json().context_id as string;
+  // Bravo and Dana chat on, past both limits (10 messages from Bravo against a depth of 8), and
+  // Dana reads each round.
+  for (let round = 0; round < 5; round++) {
+    for (const text of ['x', 'y']) {
+      const res = await bravoSays(f, `${text}${round}`, { room_id: f.roomId });
+      assert.equal(res.statusCode, 200, res.body);
+    }
+    const read = await f.console(f.c, 'POST', `/api/messages/direct/${context}/read`, {});
+    assert.equal(read.statusCode, 200, read.body);
+    assert.equal(read.json().acked[0].acked_seq, 0, 'the cursor stays below the unread one');
+  }
+  // Unread messages still count: two unread from Bravo, then remote_quota.
+  for (const text of ['p', 'q']) {
+    const res = await bravoSays(f, text, { room_id: f.roomId });
+    assert.equal(res.statusCode, 200, res.body);
+  }
+  const quota = await bravoSays(f, 'r', { room_id: f.roomId });
+  assert.equal(quota.statusCode, 429, quota.body);
+  assert.equal(quota.json().code, 'remote_quota');
+});
+
+test("a person's span above one unread thread stays capped, so the inbox scans stay bounded", async (t) => {
+  // Depth 4: one sending owner may hold 1 unacknowledged message; the span cap is 4 depths (16).
+  const f = await fixture(t, { inboxDepth: 4 });
+  const hostSays = await f.tool(f.a.key, 'city_send_message', {
+    from_agent_id: f.hostAgent,
+    to_agent_id: f.dana,
+    text: 'from the host',
+    idempotency_key: randomUUID(),
+    room_id: f.roomId,
+  });
+  assert.equal(hostSays.statusCode, 200, hostSays.body);
+  const context = (await f.open(f.c, f.bravo)).json().context_id as string;
+  // Dana reads every message from Bravo, never the host's: 15 read messages pile up above it.
+  for (let n = 0; n < 15; n++) {
+    const res = await bravoSays(f, `m${n}`, { room_id: f.roomId });
+    assert.equal(res.statusCode, 200, res.body);
+    const read = await f.console(f.c, 'POST', `/api/messages/direct/${context}/read`, {});
+    assert.equal(read.statusCode, 200, read.body);
+    assert.equal(read.json().acked[0].acked_seq, 0, 'the cursor stays below the unread one');
+  }
+  // The span is full: no more messages until the old thread is read.
+  const full = await bravoSays(f, 'over', { room_id: f.roomId });
+  assert.equal(full.statusCode, 429, full.body);
+  assert.equal(full.json().code, 'inbox_full');
+  const hostThread = (await f.open(f.c, f.hostAgent)).json().context_id as string;
+  const read = await f.console(f.c, 'POST', `/api/messages/direct/${hostThread}/read`, {});
+  assert.equal(read.statusCode, 200, read.body);
+  assert.equal(read.json().acked[0].acked_seq, 16, 'reading the old thread frees the span');
+  const again = await bravoSays(f, 'again', { room_id: f.roomId });
+  assert.equal(again.statusCode, 200, again.body);
+});
+
 /** owner_label of each member as the room's own member list shows it to `who`. */
 async function roomLabels(f: Awaited<ReturnType<typeof fixture>>, who: Owner) {
   const res = await f.console(who, 'GET', `/api/rooms/${f.roomId}/members`);
@@ -1248,6 +1314,80 @@ test('replying in a private thread marks it read for the replier, through the sa
   assert.equal((await listOf(f, f.b))[0]!.unread, 1);
   assert.equal((await bravoSays(f, 'five', { room_id: f.roomId })).statusCode, 200);
   assert.equal((await listOf(f, f.b))[0]!.unread, 1);
+  // Nor does a console reply sent as the AI: its runtime still reads from its own ack cursor.
+  const bravoAcked = async () =>
+    Number(
+      (
+        await f.app.city.db.query<{ acked_seq: number | string }>(
+          'SELECT acked_seq FROM inbox_cursors WHERE agent_id=$1',
+          [f.bravo],
+        )
+      ).rows[0]?.acked_seq ?? 0,
+    );
+  const before = await bravoAcked();
+  const asAi = await f.write(f.b, f.bravo, f.dana, 'answered from the console');
+  assert.equal(asAi.statusCode, 201, asAi.body);
+  assert.equal(await bravoAcked(), before);
+  const inbox = await f.ok(f.b.key, 'city_read_inbox', { agent_id: f.bravo });
+  assert.ok(
+    (inbox.messages as Array<{ seq: number }>).some((m) => m.seq > before),
+    'the AI runtime still receives the unread message',
+  );
+});
+
+test("reading or answering one private thread leaves a person's other threads unread", async (t) => {
+  const f = await fixture(t);
+  // The host's AI writes to Dana first (her inbox seq 1), then Bravo (seq 2).
+  const hostSays = await f.tool(f.a.key, 'city_send_message', {
+    from_agent_id: f.hostAgent,
+    to_agent_id: f.dana,
+    text: 'from the host',
+    idempotency_key: randomUUID(),
+    room_id: f.roomId,
+  });
+  assert.equal(hostSays.statusCode, 200, hostSays.body);
+  assert.equal((await bravoSays(f, 'from bravo', { room_id: f.roomId })).statusCode, 200);
+  const unreadOf = async (peer: string) => {
+    const threads = (await f.console(f.c, 'GET', '/api/messages/conversations?limit=100')).json()
+      .conversations as Array<Summary & { participants: string[] }>;
+    return threads.find((c) => c.participants.includes(peer))!.unread;
+  };
+  const badge = async () =>
+    (
+      (await f.console(f.c, 'GET', '/api/messages/summary')).json().inboxes as Array<{
+        agent_id: string;
+        unread: number;
+      }>
+    ).find((i) => i.agent_id === f.dana)!.unread;
+  assert.deepEqual(
+    [await unreadOf(f.hostAgent), await unreadOf(f.bravo), await badge()],
+    [1, 1, 2],
+  );
+  // Opening Bravo's thread clears only Bravo's.
+  const bravoThread = (await f.open(f.c, f.bravo)).json().context_id as string;
+  const read = await f.console(f.c, 'POST', `/api/messages/direct/${bravoThread}/read`, {});
+  assert.equal(read.statusCode, 200, read.body);
+  assert.deepEqual(
+    [await unreadOf(f.hostAgent), await unreadOf(f.bravo), await badge()],
+    [1, 0, 1],
+  );
+  // Answering Bravo after a new message of his clears it and still not the host's.
+  assert.equal((await bravoSays(f, 'again', { room_id: f.roomId })).statusCode, 200);
+  assert.equal((await f.write(f.c, f.dana, f.bravo, 'noted')).statusCode, 201);
+  assert.deepEqual(
+    [await unreadOf(f.hostAgent), await unreadOf(f.bravo), await badge()],
+    [1, 0, 1],
+  );
+  // Opening the host's thread clears it, and the cursor then covers the whole inbox again.
+  const hostThread = (await f.open(f.c, f.hostAgent)).json().context_id as string;
+  const all = await f.console(f.c, 'POST', `/api/messages/direct/${hostThread}/read`, {});
+  assert.deepEqual(all.json().acked, [
+    { agent_id: f.dana, acked_seq: 3, latest_seq: 3, unread: 0 },
+  ]);
+  assert.deepEqual(
+    [await unreadOf(f.hostAgent), await unreadOf(f.bravo), await badge()],
+    [0, 0, 0],
+  );
 });
 
 test('conversation unread reads rows bounded by the unread messages, not the thread history', async (t) => {
@@ -1337,4 +1477,63 @@ test('conversation unread reads rows bounded by the unread messages, not the thr
     read <= unread * 2,
     `messages rows read ${read} should track unread, not ${history} of history`,
   );
+});
+
+test('a mute silences the whole owner: no private messages through or to its other members', async (t) => {
+  const f = await fixture(t);
+  // B has a second AI in the room; the host mutes only Bravo.
+  const sibling = await f.agent(f.b, 'Bravo sibling');
+  await f.ok(f.b.key, 'city_join_room', {
+    link: f.link.link,
+    agent_id: sibling,
+    idempotency_key: randomUUID(),
+  });
+  const muted = await f.console(f.a, 'POST', `/api/rooms/${f.roomId}/mute`, {
+    agent_id: f.bravo,
+    muted: true,
+  });
+  assert.equal(muted.statusCode, 200, muted.body);
+  const from = await f.tool(f.b.key, 'city_send_message', {
+    from_agent_id: sibling,
+    to_agent_id: f.dana,
+    room_id: f.roomId,
+    text: 'hello through the sibling',
+    idempotency_key: randomUUID(),
+  });
+  assert.equal(from.statusCode, 403, from.body);
+  assert.equal(from.json().code, 'muted');
+  const to = await f.write(f.c, f.dana, sibling, 'hello sibling');
+  assert.equal(to.statusCode, 403, to.body);
+  assert.equal(to.json().code, 'recipient_muted');
+  // New message offers neither of B's members to Dana, and nobody to B.
+  const offered = (await f.console(f.c, 'GET', '/api/messages/recipients')).json()
+    .recipients as Array<{ member_id: string }>;
+  assert.deepEqual(offered.map((item) => item.member_id).sort(), [f.hostAgent]);
+  assert.deepEqual((await f.console(f.b, 'GET', '/api/messages/recipients')).json().recipients, []);
+  // Unmuted, the sibling messages again.
+  await f.console(f.a, 'POST', `/api/rooms/${f.roomId}/mute`, { agent_id: f.bravo, muted: false });
+  assert.equal((await f.write(f.c, f.dana, sibling, 'hello again')).statusCode, 201);
+});
+
+test('"Mute all AIs" leaves the owner\'s person able to message privately, never its AIs', async (t) => {
+  const f = await fixture(t);
+  // Dana brings her own AI; the host mutes all AIs. Her person is spared, her AI is not.
+  const danaAi = await f.agent(f.c, 'Dana assistant');
+  await f.ok(f.c.key, 'city_join_room', {
+    link: f.link.link,
+    agent_id: danaAi,
+    idempotency_key: randomUUID(),
+  });
+  const bulk = await f.console(f.a, 'POST', `/api/rooms/${f.roomId}/mute-ais`, { muted: true });
+  assert.equal(bulk.statusCode, 200, bulk.body);
+  assert.equal((await f.write(f.c, f.dana, f.hostAgent, 'from the person')).statusCode, 201);
+  const fromAi = await f.tool(f.c.key, 'city_send_message', {
+    from_agent_id: danaAi,
+    to_agent_id: f.hostAgent,
+    room_id: f.roomId,
+    text: 'from the AI',
+    idempotency_key: randomUUID(),
+  });
+  assert.equal(fromAi.statusCode, 403, fromAi.body);
+  assert.equal(fromAi.json().code, 'muted');
 });

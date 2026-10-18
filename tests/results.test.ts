@@ -376,6 +376,42 @@ test('3 room visibility: active members only, the from_join history rule, remova
   assert.equal((await rest(app, host.cookie, 'GET', `/api/results/${inFull.id}`)).statusCode, 200);
 });
 
+test('3b room visibility by id: a person in the room as itself opens the room result', async (t) => {
+  const app = await fixture(t);
+  const host = await person(app, 'Person room host');
+  const reader = await person(app, 'Person reader');
+  const hostAgent = await agent(app, host.key, 'Person host desk');
+  const r = await room(app, host, hostAgent, 'full');
+  const result = await published(app, host.key, hostAgent, {
+    title: 'Room answer for people',
+    visibility: 'room',
+    room_id: r.id,
+  });
+  // Before joining: the uniform 404.
+  assert.equal(
+    (await rest(app, reader.cookie, 'GET', `/api/results/${result.id}`)).statusCode,
+    404,
+  );
+  // The reader joins as itself, with no AI in the room.
+  const joined = await rest(app, reader.cookie, 'POST', '/api/rooms/join', {
+    link: r.link,
+    idempotency_key: randomUUID(),
+  });
+  assert.ok(joined.statusCode < 300, joined.body);
+  const opened = await rest(app, reader.cookie, 'GET', `/api/results/${result.id}`);
+  assert.equal(opened.statusCode, 200, opened.body);
+  assert.equal(opened.json().result.id, result.id);
+  // Removed people are out again.
+  await sql(app, 'UPDATE room_members SET removed_at=1 WHERE room_id=$1 AND owner_id=$2', [
+    r.id,
+    reader.id,
+  ]);
+  assert.equal(
+    (await rest(app, reader.cookie, 'GET', `/api/results/${result.id}`)).statusCode,
+    404,
+  );
+});
+
 test('4 revoke means gone: erased in storage, excluded from asks, 404 to others', async (t) => {
   const app = await fixture(t);
   const a = await person(app, 'Revoke A');
@@ -1210,9 +1246,12 @@ test('15b retry classification is an allowlist and every error with a window car
   const { RETRYABLE_CODES } = await import('../server/remote-mcp/tools.js');
   assert.deepEqual([...RETRYABLE_CODES].sort(), [
     'ask_timeout',
+    'busy',
+    'cursor_stale',
     'inbox_full',
     'rate_limited',
     'remote_quota',
+    'source_unavailable',
   ]);
 });
 
@@ -1306,7 +1345,9 @@ test('17 scopes: results:publish is opt-in, results:read starts checked, old cre
         scope !== 'rooms:host' &&
         scope !== 'rooms:apply' &&
         scope !== 'results:publish' &&
-        scope !== 'pay',
+        scope !== 'pay' &&
+        scope !== 'services:pay' &&
+        scope !== 'services:sell',
     ),
   );
 });

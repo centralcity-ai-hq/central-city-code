@@ -1,16 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createPendingAction } from '../server/elric/pending.js';
-import { pendingSummary, PENDING_SUMMARY_CHARS } from '../server/elric/activity.js';
+import {
+  pendingDetail,
+  pendingSummary,
+  PENDING_DETAIL_CHARS,
+  PENDING_SUMMARY_CHARS,
+} from '../server/elric/activity.js';
 import { elricFixture } from './elric-fixture.js';
 
 /**
  * The owner's approval gate routes (docs/ELRIC.md "Pending actions"): GET /api/elric/pending lists
- * open, unexpired actions with a safe summary only; POST /api/elric/pending/:id/reject is owner
+ * open, unexpired actions with the cleaned task title and description only; POST /api/elric/pending/:id/reject is owner
  * session only and idempotent; a rejected action can never be approved.
  */
 
-test('the pending list: owner only, open and unexpired, safe summary, never the stored arguments', async (t) => {
+test('the pending list: owner only, open and unexpired, the task title and body, no other argument', async (t) => {
   const f = await elricFixture(t);
   const s = await f.scene('Approval room');
   const create = (args: Record<string, unknown>, ttl: number, tool = 'room_task_create') =>
@@ -21,7 +26,7 @@ test('the pending list: owner only, open and unexpired, safe summary, never the 
       ttl,
     );
   const open = await create(
-    { room_id: s.room.id, title: 'Draft the launch note', body: 'stored-body-secret-4410' },
+    { room_id: s.room.id, title: 'Draft the launch note', body: 'Ask everyone to\u202e review it' },
     60_000,
   );
   const expired = await create({ room_id: s.room.id, title: 'Too late' }, 1_000);
@@ -37,6 +42,7 @@ test('the pending list: owner only, open and unexpired, safe summary, never the 
   assert.deepEqual(Object.keys(shown).sort(), [
     'args_hash',
     'created_at',
+    'detail',
     'expires_at',
     'id',
     'room',
@@ -44,10 +50,12 @@ test('the pending list: owner only, open and unexpired, safe summary, never the 
     'tool',
   ]);
   assert.equal(shown.summary, 'Draft the launch note');
+  // The owner sees the description the task would carry before approving, cleaned.
+  assert.equal(shown.detail, 'Ask everyone to review it');
   assert.equal(shown.args_hash, open.args_hash);
   assert.deepEqual(shown.room, { id: s.room.id, name: 'Approval room' });
   assert.equal(pending.find((item) => item.id === other.id)!.summary, null);
-  assert.ok(!res.body.includes('stored-body-secret-4410'));
+  assert.equal(pending.find((item) => item.id === other.id)!.detail, null);
   assert.ok(!res.body.includes('stored-arg-secret-8812'));
 
   // Another owner, the room host, no session and tokens: nothing.
@@ -148,5 +156,21 @@ test('the summary is the task title only, cleaned and capped', () => {
   assert.equal(pendingSummary('room_close', { title: 'not a task' }), null);
   const long = pendingSummary('room_task_create', { title: 'x'.repeat(500) })!;
   assert.equal(Array.from(long).length, PENDING_SUMMARY_CHARS);
+  assert.ok(long.endsWith('…'));
+});
+
+test('the detail is the task body only, cleaned (line breaks kept) and capped', () => {
+  assert.equal(
+    pendingDetail('room_task_create', {
+      title: 't',
+      body: '  Step one\u0000 now\r\n\n\n\nStep‮ two​  ',
+    }),
+    'Step one now\n\nStep two',
+  );
+  assert.equal(pendingDetail('room_task_create', { title: 'no body' }), null);
+  assert.equal(pendingDetail('room_task_create', { title: 't', body: ' \n​ ' }), null);
+  assert.equal(pendingDetail('room_close', { body: 'not a task' }), null);
+  const long = pendingDetail('room_task_create', { title: 't', body: 'y'.repeat(5_000) })!;
+  assert.equal(Array.from(long).length, PENDING_DETAIL_CHARS);
   assert.ok(long.endsWith('…'));
 });

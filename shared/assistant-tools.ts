@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { AGENT_PAGES } from './agent-pages.js';
 
 /**
  * Input schemas for the Phase 2 autonomy tools, shared by the remote MCP endpoint, the local
@@ -58,6 +59,28 @@ export const createAgentToolInput = z
   })
   .strict();
 export const listTemplatesToolInput = z.object({}).strict();
+/**
+ * city_workspace paging (shared/agent-pages.ts). Without limit or cursor a workspace of at most
+ * AGENT_PAGES.threshold agents answers in full, unchanged; a larger one, or any call with limit or
+ * cursor, answers one page of agents, newest first, with agents_total and next_cursor.
+ */
+export const workspaceToolInput = z
+  .object({
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(AGENT_PAGES.max)
+      .optional()
+      .describe(`Agents per page (default ${AGENT_PAGES.size}, at most ${AGENT_PAGES.max}).`),
+    cursor: z
+      .string()
+      .min(1)
+      .max(AGENT_PAGES.cursor)
+      .optional()
+      .describe('next_cursor of the previous page, for the next (older) agents.'),
+  })
+  .strict();
 export const planTeamToolInput = z
   .object({
     manifest: manifestDocument.optional(),

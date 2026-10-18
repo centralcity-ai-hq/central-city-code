@@ -15,15 +15,14 @@ const COLUMNS: [string, [string, string, boolean?][]][] = [
     [
       ['Elric', '/elric'],
       ['Workspace', '/#signin'],
-      ['Connect AI', '/connect'],
       ['Base Agents', '/explorer/base'],
-      ['Use cases', '/use-cases'],
     ],
   ],
   [
     'Developers',
     [
       ['Docs', '/docs'],
+      ['Use cases', '/use-cases'],
       ['Changelog', `${GITHUB}/central-city-code/blob/main/CHANGELOG.md`, true],
       ['Status', '/status'],
     ],
@@ -32,7 +31,7 @@ const COLUMNS: [string, [string, string, boolean?][]][] = [
     'Open Source',
     [
       ['Agent Explorer', '/explorer'],
-      ['Elric on GitHub', `${GITHUB}/central-city-code/tree/main/server/elric`, true],
+      // Elric's code is on /downtown, under Repository (the product owner, 15 Oct).
       ['Downtown', '/downtown'],
       ['Verify', '/downtown/verify'],
     ],

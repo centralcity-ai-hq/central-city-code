@@ -1165,9 +1165,12 @@ test('a registration in progress offers Try again only once the server accepts a
   await expect(screen.getByRole('button', { name: /Try again/ })).toHaveCount(0);
   await page.clock.fastForward(2_000);
   await answered(page, () => sent.length, 2);
-  // The server says it is stuck (canRetry): a new attempt, as the failed screen offers one.
+  // The server says the hand-over is stuck (canRetry after refusals): Try again retries the same
+  // hand-over now, on the same key (server/base/identity/service.ts handoverRefused).
   await expect(v4Value(screen, 'Registering on Base')).toHaveText('taking long');
-  await expect(screen.getByText('It isn’t moving. Try again starts a new attempt.')).toBeVisible();
+  await expect(
+    screen.getByText('It isn’t moving. Try again retries the same hand-over now.'),
+  ).toBeVisible();
   const retry = screen.getByRole('button', { name: 'Try again', exact: true });
   await expect(retry).toBeEnabled();
   await retry.click();
@@ -1476,4 +1479,173 @@ test('an owner other than the bound one is told which wallet controls the agent�
   await screen.getByRole('button', { name: 'Continue with that wallet', exact: true }).click();
   await expectV4Final(screen, '1532');
   expect(sent).toEqual([{ ownerAddress: OWNER }, { ownerAddress: BOUND_OWNER }]);
+});
+
+test('a final agent: Room invitations Ask or Don\u2019t accept, saved on the server; no directory switch', async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.route('**/api/base/agents/*/registration', (route) =>
+    route.fulfill({ json: { identities: [stagedRow(confirmedFields)] } }),
+  );
+  let settings = { listed: false, invitations: 'ask' };
+  const patches: unknown[] = [];
+  await page.route(`**/api/agents/${atlas.id}/directory`, async (route) => {
+    if (route.request().method() === 'PATCH') {
+      const patch = route.request().postDataJSON() as Record<string, unknown>;
+      patches.push(patch);
+      settings = { ...settings, ...patch };
+    }
+    return route.fulfill({ json: settings });
+  });
+  const pane = await openPane(page);
+  const screen = await openBaseScreen(page, pane);
+  await expectV4Final(screen, '1532');
+  // There is no directory any more: no listing switch.
+  await expect(screen.getByRole('switch', { name: /in Base Agents/ })).toHaveCount(0);
+  await expect(screen.getByText(/A room can invite Harbor by its passport number/)).toBeVisible();
+  await screen.getByRole('combobox', { name: 'Room invitations' }).selectOption('never');
+  await expect.poll(() => patches.at(-1)).toEqual({ invitations: 'never' });
+  await expect(screen.getByText("Rooms can't invite Harbor.", { exact: false })).toBeVisible();
+});
+
+test('a server without the directory shows no directory settings on the Base screen', async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.route('**/api/base/agents/*/registration', (route) =>
+    route.fulfill({ json: { identities: [stagedRow(confirmedFields)] } }),
+  );
+  await page.route(`**/api/agents/${atlas.id}/directory`, (route) =>
+    route.fulfill({ status: 404, json: { error: 'Not found' } }),
+  );
+  const pane = await openPane(page);
+  const screen = await openBaseScreen(page, pane);
+  await expectV4Final(screen, '1532');
+  await expect(screen.getByRole('switch', { name: /in Base Agents/ })).toHaveCount(0);
+});
+
+test('room invitations: requests in the agent’s Messages, counted on its row; Accept opens the way to the room', async ({
+  page,
+}) => {
+  await fixture(page);
+  const created = Date.now() - 12 * 60_000;
+  let open = [
+    {
+      id: 'inv-1',
+      room: { name: 'Launch week', members: 6 },
+      from: { name: 'Juna', baseId: '1400', short: 'Ju1400' },
+      note: 'Can you check the sources in our launch post?',
+      state: 'open',
+      createdAt: created,
+      expiresAt: created + 7 * 86_400_000,
+      roomId: null,
+    },
+    {
+      id: 'inv-2',
+      room: { name: 'Data desk', members: 1 },
+      from: { name: 'Orbit', baseId: null, short: null },
+      note: '',
+      state: 'open',
+      createdAt: created,
+      expiresAt: created + 7 * 86_400_000,
+      roomId: null,
+    },
+  ];
+  const decisions: Array<{ id: string; decision: string }> = [];
+  const blocks: unknown[] = [];
+  await page.route(`**/api/agents/${atlas.id}/invitation-blocks`, (route) => {
+    blocks.push(route.request().postDataJSON());
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.route(`**/api/agents/${atlas.id}/invitations`, (route) =>
+    route.fulfill({ json: { invitations: open } }),
+  );
+  await page.route(`**/api/agents/${atlas.id}/invitations/*/decide`, (route) => {
+    const id = route.request().url().split('/invitations/')[1]!.split('/')[0]!;
+    const { decision } = route.request().postDataJSON() as { decision: string };
+    decisions.push({ id, decision });
+    const item = open.find((invitation) => invitation.id === id)!;
+    open = open.filter((invitation) => invitation.id !== id);
+    return route.fulfill({
+      json: {
+        ...item,
+        state: decision === 'accept' ? 'accepted' : 'declined',
+        roomId: decision === 'accept' ? 'room-launch' : null,
+      },
+    });
+  });
+  const pane = await openPane(page);
+  // The Messages row counts the requests (no separate Invitations row).
+  const row = pane.getByRole('button', { name: /^Messages/ });
+  await expect(row).toContainText('2');
+  await expect(pane.getByRole('button', { name: /^Invitations/ })).toHaveCount(0);
+  await row.click();
+  const requests = pane.getByRole('region', { name: 'Invitation requests' });
+  await expect(requests.getByText('Launch week')).toBeVisible();
+  await expect(pane.getByText(/From Juna · CC-Ju1400 · 6 members/)).toBeVisible();
+  await expect(pane.getByText('Can you check the sources in our launch post?')).toBeVisible();
+  await expect(pane.getByText(/From Orbit · 1 member/)).toBeVisible();
+
+  // Block this owner: sends the invitation's id (never an inviter id it doesn't have).
+  await pane.getByRole('button', { name: 'Block this owner' }).nth(1).click();
+  expect(blocks).toEqual([{ invitationId: 'inv-2' }]);
+  await pane.getByRole('button', { name: 'Decline' }).nth(1).click();
+  await expect(pane.getByText('Data desk')).toHaveCount(0);
+  await pane.getByRole('button', { name: 'Accept' }).click();
+  await expect(pane.getByRole('button', { name: /Harbor joined “Launch week”/ })).toBeVisible();
+  expect(decisions).toEqual([
+    { id: 'inv-2', decision: 'decline' },
+    { id: 'inv-1', decision: 'accept' },
+  ]);
+  // Back home: nothing left to count on Messages.
+  await pane.getByRole('button', { name: 'Harbor', exact: true }).first().click();
+  await expect(pane.getByRole('button', { name: /^Messages/ })).not.toContainText('2');
+});
+
+test('a server without invitations shows no invitation requests', async ({ page }) => {
+  await fixture(page);
+  await page.route(`**/api/agents/${atlas.id}/invitations`, (route) =>
+    route.fulfill({ status: 404, json: { error: 'Not found' } }),
+  );
+  const pane = await openPane(page);
+  await expect(pane.getByRole('button', { name: /^Messages/ })).toBeVisible();
+  await expect(pane.getByRole('button', { name: /^Invitations/ })).toHaveCount(0);
+});
+
+test('Blocked owners: listed under Room invitations with Unblock; none, nothing shows', async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.route('**/api/base/agents/*/registration', (route) =>
+    route.fulfill({ json: { identities: [stagedRow(confirmedFields)] } }),
+  );
+  await page.route(`**/api/agents/${atlas.id}/directory`, (route) =>
+    route.fulfill({ json: { listed: false, invitations: 'ask' } }),
+  );
+  let blocks = [
+    {
+      invitationId: '11111111-1111-4111-8111-111111111111',
+      from: { name: 'Juna', baseId: '1400', short: 'Ju1400' },
+      blockedAt: Date.UTC(2026, 9, 12, 9, 0),
+    },
+  ];
+  const deleted: unknown[] = [];
+  await page.route(`**/api/agents/${atlas.id}/invitation-blocks`, (route) => {
+    if (route.request().method() === 'DELETE') {
+      deleted.push(route.request().postDataJSON());
+      blocks = [];
+      return route.fulfill({ json: { blocked: false } });
+    }
+    return route.fulfill({ json: { blocks } });
+  });
+  const pane = await openPane(page);
+  const screen = await openBaseScreen(page, pane);
+  await expectV4Final(screen, '1532');
+  const group = screen.getByRole('group', { name: 'Blocked owners' });
+  await expect(group).toContainText('Juna');
+  await expect(group).toContainText('CC-Ju1400');
+  await group.getByRole('button', { name: "Unblock Juna's owner" }).click();
+  await expect(screen.getByRole('group', { name: 'Blocked owners' })).toHaveCount(0);
+  expect(deleted).toEqual([{ invitationId: '11111111-1111-4111-8111-111111111111' }]);
 });

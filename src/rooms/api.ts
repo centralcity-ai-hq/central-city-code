@@ -8,7 +8,10 @@
  * surface as RoomsError (a code for the UI) or ApiError (status only) and are described with
  * describeError. Invite secrets travel only in request bodies, never in a URL.
  */
-import { api, ApiError } from '../api';
+import { api, ApiError, selectedWorkspaceId } from '../api';
+import { isPagedWorkspace, noteSnapshotPaging, snapshotPage } from '../agents/agentPages';
+import { searchLiveAgents } from '../agents/ownAgents';
+import type { AgentsPageInfo } from '../../shared/types';
 import type { MessagePart } from '../../server/messaging/contract';
 import { ELRIC_HOST_ONLY_CODE, ELRIC_HOST_ONLY_MESSAGE } from '../../shared/elric-copy';
 
@@ -185,6 +188,10 @@ export type Room = {
   privateAgentId?: string;
   /** The host muted the viewer here: it still reads, but cannot post or add tasks. */
   muted?: boolean;
+  /** With muted: 'ai' when only a bulk AI mute applies (posting as a person still works). */
+  muteScope?: 'all' | 'ai';
+  /** With muted: the host's reason (their words; render as plain text only), or null. */
+  muteReason?: string | null;
   /** Host switch: whether AI auto-replies / responders are allowed in this room. */
   respondersAllowed?: boolean;
   /** Host only: the built-in room template it started from (shared/room-templates.ts). */
@@ -246,6 +253,11 @@ export interface RoomsClient {
   listRooms(): Promise<Room[]>;
   listAgents(): Promise<Agent[]>;
   /**
+   * Agents to act as that match `q`, searched over the whole workspace: what a picker offers past
+   * the page listAgents gives in a paged workspace (agentSearchOf). Absent: no search.
+   */
+  searchAgents?(q: string, signal?: AbortSignal): Promise<Agent[]>;
+  /**
    * A new agent in the viewer's workspace (hosted: no runtime credential is issued), made like
    * "Create a CC agent" in My agents: with a private profile, so it has a Wallet and Base.
    */
@@ -256,7 +268,9 @@ export interface RoomsClient {
     idempotency_key: string;
     /** Server default: 'full'. */
     history?: History;
-    /** A built-in room template: its topic (the name sent here wins); never any tasks. */
+    /** Plain text, up to 280 characters; it replaces a template's topic. */
+    topic?: string;
+    /** A built-in room template: its topic (the name and topic sent here win); never any tasks. */
     room_template_id?: string;
   }): Promise<Room>;
   join(input: {
@@ -412,6 +426,8 @@ type ServerRoom = {
   person?: { id: string; name: string } | null;
   private_agent_id?: string;
   muted?: boolean;
+  mute_scope?: 'all' | 'ai' | null;
+  mute_reason?: string | null;
   responders_allowed?: boolean;
   template?: { id: string; version: string } | null;
 };
@@ -445,7 +461,16 @@ const room = (value: ServerRoom): Room => ({
       }),
   ...(value.person === undefined ? {} : { person: value.person }),
   ...(value.private_agent_id ? { privateAgentId: value.private_agent_id } : {}),
-  ...(value.muted === true ? { muted: true } : {}),
+  ...(value.muted === true
+    ? {
+        muted: true,
+        ...(value.mute_scope ? { muteScope: value.mute_scope } : {}),
+        muteReason: value.mute_reason ?? null,
+      }
+    : // A "Mute all AIs" that spares the viewer's person member: it still posts, as the person only.
+      value.mute_scope === 'ai'
+      ? { muteScope: 'ai' as const }
+      : {}),
   ...(value.responders_allowed !== undefined
     ? {
         respondersAllowed: value.responders_allowed !== false,
@@ -493,22 +518,60 @@ function mapped<T>(operation: Promise<T>, joining = false): Promise<T> {
   });
 }
 
+/**
+ * The workspace's agents a person may act as (host a room, join as, post in the Feed as): its
+ * live agents from GET /api/snapshot, never a revoked one and never the owner's own Elric. In a
+ * paged workspace (src/agents/agentPages.ts) that is the snapshot's page of the newest agents;
+ * the pickers search the rest with searchOwnAgents.
+ */
+export async function listOwnAgents(signal?: AbortSignal): Promise<Agent[]> {
+  const workspace = selectedWorkspaceId();
+  const [snapshot, elric] = await Promise.all([
+    api<{
+      agents: Array<Agent & { status?: string; revokedAt?: string | null }>;
+      agentsPage?: AgentsPageInfo;
+    }>('/api/snapshot', undefined, 'GET', signal),
+    getElricStatus(signal),
+  ]);
+  noteSnapshotPaging(workspace, snapshot);
+  const elricId = elric?.agent_id ?? null;
+  return snapshotPage(snapshot)
+    .filter((agent) => !agent.revokedAt && agent.status !== 'revoked' && agent.id !== elricId)
+    .map(({ id, name }) => ({ id, name }));
+}
+
+/**
+ * The agents a person may act as that match `q`, over the whole workspace (GET /api/agents): live,
+ * never the owner's own Elric. For the pickers of a paged workspace.
+ */
+export async function searchOwnAgents(q: string, signal?: AbortSignal): Promise<Agent[]> {
+  const [found, elric] = await Promise.all([searchLiveAgents(q, signal), getElricStatus(signal)]);
+  const elricId = elric?.agent_id ?? null;
+  return found
+    .filter((agent) => !agent.revokedAt && agent.status !== 'revoked' && agent.id !== elricId)
+    .map(({ id, name }) => ({ id, name }));
+}
+
+/**
+ * The search an act-as picker offers: the client's, in a workspace whose agents are paged (the
+ * list it has is only the newest page); null everywhere else, where the list is every agent.
+ */
+export function agentSearchOf(
+  client: Pick<RoomsClient, 'searchAgents'>,
+): ((q: string, signal: AbortSignal) => Promise<Agent[]>) | null {
+  const search = client.searchAgents;
+  if (!search || !isPagedWorkspace(selectedWorkspaceId())) return null;
+  return (q, signal) => search.call(client, q, signal);
+}
+
 /** The live transport over the console REST routes. */
 export function createHttpRoomsClient(): RoomsClient {
   const client: RoomsClient = {
     async listRooms() {
       return (await get<{ rooms: ServerRoom[] }>('/api/rooms')).rooms.map(room);
     },
-    async listAgents() {
-      const snapshot = await get<{
-        agents: Array<Agent & { status?: string; revokedAt?: string | null }>;
-      }>('/api/snapshot');
-      // Never offer the owner's Elric as an identity to act as (host, join as, post as).
-      const elric = (await getElricStatus())?.agent_id ?? null;
-      return snapshot.agents
-        .filter((agent) => !agent.revokedAt && agent.status !== 'revoked' && agent.id !== elric)
-        .map(({ id, name }) => ({ id, name }));
-    },
+    listAgents: () => listOwnAgents(),
+    searchAgents: (q, signal) => searchOwnAgents(q, signal),
     async createAgent({ name }) {
       const { agent } = await api<{ agent: Agent }>('/api/agents', {
         name,
@@ -804,9 +867,9 @@ export async function getRoomTemplateTasks(): Promise<boolean | null> {
  * Gets Elric status for the signed-in owner (GET /api/elric).
  * Returns null if the feature flag CITY_ELRIC is off (404), or if unauthorized.
  */
-export async function getElricStatus(): Promise<ElricStatus | null> {
+export async function getElricStatus(signal?: AbortSignal): Promise<ElricStatus | null> {
   try {
-    const status = await api<ElricStatus>('/api/elric', undefined, 'GET');
+    const status = await api<ElricStatus>('/api/elric', undefined, 'GET', signal);
     // The server answers `eligible` only for a verified adult (the age check passed), so a saved
     // date of birth is never asked again ("Add Elric" a second time).
     return { ...status, over_18: status.over_18 ?? (status.eligible ? true : undefined) };

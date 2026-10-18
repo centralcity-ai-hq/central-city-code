@@ -6,6 +6,10 @@
  *    viem's three retries 150 ms apart, which multiply every call by four exactly while the
  *    endpoint is throttling.
  *
+ *    The chain runtime builds it through read-transport.ts, which lets a second endpoint answer
+ *    pinned reads, blocks, receipts and logs when this one cannot (never eth_blockNumber there,
+ *    never absence, never a bundler, paymaster, fee or unpinned read; see that module).
+ *
  * 2. blockTagCache: the head-of-chain reads are shared for a moment, process-wide, per client.
  *    eth_blockNumber and eth_getBlockByNumber('latest') for LATEST_TTL_MS, 'safe' and 'finalized'
  *    for SETTLED_TTL_MS, keyed by tag and the full-transactions flag. The age is counted from the
@@ -58,6 +62,13 @@ export const CDP_RETRY = { retryCount: 1, retryDelay: 1000 } as const;
 export function cdpTransport(url: string, config: Omit<HttpTransportConfig, 'retryCount'> = {}) {
   return http(url, { ...config, ...CDP_RETRY });
 }
+
+/**
+ * The widest block range one eth_getLogs call may ask for (inclusive: toBlock - fromBlock + 1).
+ * The endpoint refuses wider ranges, and every refused call still spends the shared budget, so
+ * every log search pages at most this many blocks at a time.
+ */
+export const MAX_LOG_RANGE_BLOCKS = 1_000n;
 
 export const LATEST_TTL_MS = 1000;
 export const SETTLED_TTL_MS = 2000;

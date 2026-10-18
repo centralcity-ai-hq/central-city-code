@@ -198,6 +198,21 @@ test('create/get/list: T-numbers, replay, untrusted titles verbatim', async (t) 
   assert.equal(twice.replayed, true);
   assert.equal(twice.task.id, once.task.id);
   assert.equal((await tasks.list(p(a.id), { room_id: roomId })).tasks.length, 3);
+  // Pages: next_after is the last number shown, has_more says whether another page follows.
+  const page1 = await tasks.list(p(a.id), { room_id: roomId, limit: 2 });
+  assert.deepEqual(
+    page1.tasks.map((item) => item.number),
+    [1, 2],
+  );
+  assert.equal(page1.next_after, 2);
+  assert.equal(page1.has_more, true);
+  const page2 = await tasks.list(p(a.id), { room_id: roomId, limit: 2, after_number: 2 });
+  assert.deepEqual(
+    page2.tasks.map((item) => item.number),
+    [3],
+  );
+  assert.equal(page2.next_after, 3);
+  assert.equal(page2.has_more, false);
   // Same key, different body: conflict.
   const conflict = await failsCode(
     tasks.create(p(a.id), { room_id: roomId, title: 'Something else', idempotency_key: key }),

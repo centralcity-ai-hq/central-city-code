@@ -779,6 +779,43 @@ test('unverified clients show their redirect host and a warning; bad Basic auth 
   }
 });
 
+test('an owner without a password (Google sign-in) continues from the login page with their session', async (t) => {
+  const { app, cookie } = await fixture(t);
+  const client = await registerClient(app);
+  const { verifier, challenge } = pkce();
+  // The cross-site arrival carries no SameSite=Strict session cookie, so the login page shows.
+  const login = await openAuthorize(
+    app,
+    authorizeUrl({ client_id: client.client_id, code_challenge: challenge, scope: ALL_SCOPES }),
+  );
+  assert.equal(login.status, 200, login.body);
+  assert.match(login.body, /Operator name/);
+  const href = /<a href="(\/oauth\/authorize\?[^"]+)">continue here<\/a>/.exec(login.body)?.[1];
+  assert.ok(href, login.body);
+  // Clicking the same-origin link sends the session cookie: the consent page, no password.
+  const form = await openAuthorize(app, href.replaceAll('&amp;', '&'), cookie);
+  assert.equal(form.status, 200, form.body);
+  assert.match(form.body, /Allow .* to access Central City/);
+  const res = await consentPost(
+    app,
+    { ...form, cookie: `${form.cookie}; ${cookie}` },
+    { action: 'approve', scope: ['jobs:create'], expires_in_days: '7' },
+  );
+  assert.equal(res.statusCode, 200, res.body);
+  const back = redirectFrom(res.body);
+  assert.equal(back.searchParams.get('state'), 'synthetic-state');
+  const token = await tokenRequest(app, {
+    grant_type: 'authorization_code',
+    code: back.searchParams.get('code')!,
+    code_verifier: verifier,
+    client_id: client.client_id,
+    redirect_uri: REDIRECT,
+    resource: RESOURCE,
+  });
+  assert.equal(token.statusCode, 200, token.body);
+  assert.equal(token.json().scope, 'workspace:read jobs:create');
+});
+
 test('an attacker-published metadata document cannot turn authorize errors into an open redirect', async (t) => {
   const EVIL = 'https://evil.example.test/client.json';
   const evilCallback = 'https://evil.example.test/x';

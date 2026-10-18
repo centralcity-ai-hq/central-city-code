@@ -4,6 +4,7 @@ import {
   BUILD_AGENT_COUNT_TIMEOUT_MS,
   BUILD_AGENT_COUNT_URL,
   fetchBuildAgentCount,
+  fetchBuildHomeStats,
 } from '../scripts/prerender/agent-count.js';
 
 /*
@@ -164,6 +165,93 @@ test('CC_BUILD_AGENT_COUNT fixes the count without any request', async () => {
       await fetchBuildAgentCount({ env: { CC_BUILD_AGENT_COUNT: value }, fetch, now }),
       null,
       value,
+    );
+  assert.equal(calls.length, 0);
+});
+
+test('paid_calls in the response reserves the paid calls line; no number is carried', async () => {
+  const at = '2026-10-15T12:00:00.000Z';
+  const paid = (total: unknown) => ({
+    ai_agents_total: 114_251,
+    updated_at: at,
+    paid_calls: { total, as_of: at, recent_ms: [1_200], recent_complete: true },
+  });
+  const cases: Array<[string, unknown, boolean]> = [
+    ['shown', paid(1_284), true],
+    ['a total of 1', paid(1), true],
+    ['a total of 0 (hidden on the page)', paid(0), false],
+    ['not a count', paid('1284'), false],
+    ['no field (switched off, or no count yet)', { ai_agents_total: 7, updated_at: at }, false],
+    [
+      'only the Base agents number',
+      { ai_agents_total: 7, updated_at: at, base_agents: { total: 31_452, as_of: at } },
+      true,
+    ],
+    [
+      'Base agents 0 and no paid calls',
+      { ai_agents_total: 7, updated_at: at, base_agents: { total: 0, as_of: at } },
+      false,
+    ],
+  ];
+  for (const [label, body, reserved] of cases) {
+    const { fetch } = recorder(async () => json(body));
+    const stats = await fetchBuildHomeStats({ env: {}, fetch, warn: quiet().warn });
+    assert.equal(stats.paidCalls, reserved, label);
+    // Only whether to reserve the line: the build never holds the paid calls number.
+    assert.deepEqual(Object.keys(stats).sort(), ['count', 'paidCalls'], label);
+    assert.equal(typeof stats.paidCalls, 'boolean', label);
+  }
+  // The agent count is unchanged by the field, and a failure reserves nothing.
+  const { fetch } = recorder(async () => json(paid(1_284)));
+  assert.deepEqual(await fetchBuildAgentCount({ env: {}, fetch, warn: quiet().warn }), {
+    total: 114_251,
+    at: Date.parse(at),
+  });
+  const failing = recorder(async () => json({ error: 'down' }, 503));
+  assert.deepEqual(
+    await fetchBuildHomeStats({ env: {}, fetch: failing.fetch, warn: quiet().warn }),
+    {
+      count: null,
+      paidCalls: false,
+    },
+  );
+  // A body without a usable agent count still says whether to reserve the paid line.
+  const noCount = recorder(async () =>
+    json({ paid_calls: { total: 5, as_of: at, recent_ms: [], recent_complete: true } }),
+  );
+  assert.deepEqual(
+    await fetchBuildHomeStats({ env: {}, fetch: noCount.fetch, warn: quiet().warn }),
+    {
+      count: null,
+      paidCalls: true,
+    },
+  );
+});
+
+test('offline builds: CC_BUILD_PAID_CALLS=1 reserves the line with a fixed count, without any request', async () => {
+  const { calls, fetch } = recorder(async () => {
+    throw new Error('no request expected');
+  });
+  const now = () => Date.parse('2026-10-15T12:00:00.000Z');
+  assert.deepEqual(
+    await fetchBuildHomeStats({
+      env: { CC_BUILD_AGENT_COUNT: '123456', CC_BUILD_PAID_CALLS: '1' },
+      fetch,
+      now,
+    }),
+    { count: { total: 123_456, at: now() }, paidCalls: true },
+  );
+  for (const value of [undefined, '0', 'yes', '2'])
+    assert.equal(
+      (
+        await fetchBuildHomeStats({
+          env: { CC_BUILD_AGENT_COUNT: 'off', CC_BUILD_PAID_CALLS: value },
+          fetch,
+          now,
+        })
+      ).paidCalls,
+      false,
+      String(value),
     );
   assert.equal(calls.length, 0);
 });

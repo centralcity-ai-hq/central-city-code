@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { ApiError } from '../api';
 import { describe } from './useRoomThread';
+import { requestKey } from './requestKey';
 import { addComment, deleteComment, listComments, type TaskComment } from './tasks';
 
 /*
@@ -54,7 +55,7 @@ export function TaskComments({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [confirming, setConfirming] = useState<string | null>(null);
-  const key = useRef(crypto.randomUUID());
+  const key = useRef(requestKey());
   const fieldId = useId();
   const counterId = useId();
 
@@ -101,9 +102,16 @@ export function TaskComments({
     setBusy(true);
     setError('');
     try {
-      const comment = await addComment({ roomId, taskId, agentId, body, key: key.current });
-      // A new key only after success: a retry of the same text never adds it twice.
-      key.current = crypto.randomUUID();
+      // The same key for a retry of the same comment (it never adds it twice); an edited
+      // comment, or another member, takes a new key.
+      const comment = await addComment({
+        roomId,
+        taskId,
+        agentId,
+        body,
+        key: key.current.for({ roomId, taskId, agentId: agentId ?? null, body }),
+      });
+      key.current.done();
       setComments((list) => [...(list ?? []).filter((item) => item.id !== comment.id), comment]);
       setText('');
     } catch (err) {

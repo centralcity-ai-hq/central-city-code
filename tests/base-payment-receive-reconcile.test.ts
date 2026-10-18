@@ -23,6 +23,7 @@ import {
   RECEIVE_SEARCH_LOOKBACK_BLOCKS,
   type ReceiveReconcileClient,
 } from '../server/base/payments/receive-reconcile.js';
+import { MAX_LOG_RANGE_BLOCKS } from '../server/base/chain/rpc-budget.js';
 import { registerBaseMigration } from '../server/base/schema.js';
 import { listMigrations } from '../server/migrations.js';
 
@@ -68,6 +69,10 @@ function fakeChain() {
     fail: false,
     reads: 0,
     logReads: 0,
+    /** getLogs calls refused for their block range (each one spends the shared call budget). */
+    rangeRefusals: 0,
+    /** The widest block range any getLogs call asked for (inclusive). */
+    widestRange: 0n,
     /** A provider's per-call block range cap (null: none). */
     maxRange: null as bigint | null,
   };
@@ -96,9 +101,13 @@ function fakeChain() {
     }) => {
       guard();
       chain.logReads++;
-      assert.ok(args.toBlock - args.fromBlock < 10_000n, 'log pages stay bounded');
-      if (chain.maxRange !== null && args.toBlock - args.fromBlock + 1n > chain.maxRange)
+      const range = args.toBlock - args.fromBlock + 1n;
+      if (range > chain.widestRange) chain.widestRange = range;
+      assert.ok(range <= MAX_LOG_RANGE_BLOCKS, 'log pages never exceed the endpoint range cap');
+      if (chain.maxRange !== null && range > chain.maxRange) {
+        chain.rangeRefusals++;
         throw new Error('block range too large');
+      }
       return chain.logs
         .filter(
           (log) =>
@@ -332,6 +341,25 @@ test('a provider that caps the log block range still finds the settlement (small
     'pending',
   );
   assert.equal((await s.rowOf(stuck)).transaction_hash, null);
+});
+
+test('a search wider than the endpoint cap pages 1,000 blocks at a time; no call is refused', async (t) => {
+  const s = await setup(t);
+  const b = { ...base, nonce: nonce(11) };
+  const receiptId = await s.strand(b); // searches from block 400
+  const hash = word(0xcb);
+  s.include(b, hash, 3_150n);
+  s.chain.head = 3_300n;
+  s.chain.finalized = 3_200n;
+  s.chain.maxRange = MAX_LOG_RANGE_BLOCKS;
+  const before = s.chain.logReads;
+  const recovered = await s.run(b, async () => assert.fail('never settles again'), true);
+  assert.equal(recovered.kind, 'paid');
+  assert.equal((await s.rowOf(receiptId)).transaction_hash, hash);
+  assert.equal(s.chain.rangeRefusals, 0, 'no call is refused (and retried) for its range');
+  assert.equal(s.chain.widestRange, MAX_LOG_RANGE_BLOCKS);
+  // 400..3300 is 2,901 blocks: three pages, two getLogs calls (used, canceled) per page.
+  assert.equal(s.chain.logReads - before, 6);
 });
 
 test('(b) event found but not finalized: pending, no delivery, nothing pinned', async (t) => {

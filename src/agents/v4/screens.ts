@@ -9,6 +9,8 @@ export type AgentScreenProps = {
   onOpen: (screen: string) => void;
   /** The back link's label (the screen it returns to). */
   backLabel?: string;
+  /** Opens a room's page (an invitation the agent just accepted). */
+  onOpenRoom?: (roomId: string) => void;
 };
 
 /** A screen id is "<name>" or "<name>:<param>" (for example "thread:ctx_1"). */

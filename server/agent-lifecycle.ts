@@ -4,10 +4,12 @@ import { closeAgentChat } from './rooms/private.js';
 import { resetPresence } from './presence.js';
 import { revokeAgentCrossConnections } from './connections/service.js';
 import { revokeAgentResults } from './results/store.js';
+import { removeAgentOffers, syncOfferProviderName } from './feed/offers/store.js';
 import { revokeResponderCredentials } from './responder/revoke.js';
 import { active, event, iso, stopJob, type StoredAgent, type Workspace } from './model.js';
 import { hashManifest } from './manifest/resolve.js';
 import type { ResolvedAgentManifest } from '../shared/manifest.js';
+import { forgetCardIndex } from './manifest/card-agent.js';
 
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
 
@@ -32,7 +34,9 @@ export function descendants(workspace: Workspace, rootId: string): StoredAgent[]
  * Pauses or resumes one agent inside the owner's workspace transaction (city_control and the
  * console's Pause / Resume). A pause stops the agent's active work; both leave an audit event.
  * Returns whether anything changed: pausing a paused agent, resuming a running one or touching a
- * revoked one is a no-op.
+ * revoked one is a no-op. The agent's Feed offers leave the Feed (or come back) in the same
+ * transaction: the workspace transaction runs syncOfferListing whenever the pause state changed
+ * (server/app.ts mutate), so a workspace pause does the same.
  */
 export function setAgentPaused(
   workspace: Workspace,
@@ -113,6 +117,12 @@ export async function updateStoredAgent(
       [agent.id, agent.revision, agent.manifestHash, JSON.stringify(next), time, operatorId],
     );
   }
+  // The agent's Feed listings carry its public name: the new revision's, or none while private.
+  if (manifest) {
+    const isPublic = (visibility ?? manifest.spec.visibility) === 'public';
+    const shown = agent.name.replace(/^ +| +$/g, '');
+    await syncOfferProviderName(tx, operatorId, agent.id, isPublic && shown ? shown : null);
+  }
   if (name !== null)
     event(workspace, time, 'agent.renamed', `Renamed ${previous} to ${name}.`, agent.id);
   if (visibility !== null) {
@@ -137,6 +147,7 @@ export async function revokeStoredAgent(
   await closeAgentChat(tx, operatorId, agent.id, time);
   if (agent.revokedAt) return false;
   agent.revokedAt = iso(time);
+  forgetCardIndex(operatorId);
   agent.announcedOnline = false;
   delete agent.credentialHint;
   await tx.query('DELETE FROM credentials WHERE agent_id=$1 AND operator_id=$2', [
@@ -149,6 +160,8 @@ export async function revokeStoredAgent(
   await revokeAgentCrossConnections(tx, operatorId, agent.id, time);
   // Its published results are revoked (content erased) in the same transaction.
   await revokeAgentResults(tx, operatorId, agent.id, time);
+  // Its Feed offers are removed for good and leave the Feed in the same transaction.
+  await removeAgentOffers(tx, operatorId, [agent.id], time);
   // Its stored responder key is deleted and auto-reply turned off (data minimization).
   await revokeResponderCredentials(
     tx,

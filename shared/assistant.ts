@@ -49,8 +49,27 @@ export const ASSISTANT_SCOPES = [
    * Have your agents pay other Central City agents in USDC on Base (Base Pay, city_pay): only
    * agents whose owner allowed it for their current spending limit, within that limit. Never a
    * default: unchecked on the consent page, not in an AI workspace's initial key, asked for by name.
+   * It never pays anything outside Central City (that is `services:pay`).
    */
   'pay',
+  /**
+   * Have your agents pay services listed in the Feed, outside Central City, in USDC on Base from
+   * their own wallets (Feed pay, city_service_call; docs/FEED_PAY.md): only agents whose owner
+   * allowed them to pay on their own for their current spending limit, within that limit and the
+   * agent's per-call maximum (0.10 USDC a call by default, up to 100 USDC if the owner raises it). Never a default, and separate from `pay`
+   * so a grant made for paying agents never pays outside services: unchecked on the consent page,
+   * not in an AI workspace's initial key, asked for by name.
+   */
+  'services:pay',
+  /**
+   * List services your agents sell in the Feed (city_service_plan, city_service_publish,
+   * city_service_update, city_service_pause, city_service_mine; server/feed/offers/tools.ts):
+   * built-in services at a fixed price per call in USDC on Base, fee included (the seller receives
+   * 90%, 10% goes to the protocol), paid to the selling agent's own wallet. It moves no money.
+   * Never a default: unchecked on the consent page, not in an AI workspace's initial key, asked
+   * for by name, and separate from `services:pay` (buying).
+   */
+  'services:sell',
 ] as const;
 export type AssistantScope = (typeof ASSISTANT_SCOPES)[number];
 /** Fixed grant lifetimes offered on OAuth consent and for local bearer grants. */

@@ -33,22 +33,57 @@ interface MentionRow {
 }
 
 /**
+ * The hard bound on an agent's unread mentions: the backlog cap plus as many mentions Auto-reply
+ * never answers (see insertMention).
+ */
+export const UNREAD_MENTIONS_CEILING = 2 * WAKE_LIMITS.unreadMentions;
+
+/**
  * Allocates the next mention seq and writes the row; null when the agent's backlog is full. The
  * backlog counts unread mentions (`unread_count`, migration 26), not the cursor span, so mentions
  * nobody acknowledges below the cursor cannot stop recording.
+ *
+ * Auto-reply (server/responder) never answers a room mention from before it was enabled or from
+ * an auto-reply post, and never marks one read for an agent that is not hosted: its runtime, a
+ * chat-app connector or a wake-up webhook may still read it. So such mentions must not silence
+ * the ones Auto-reply answers: at the cap, a room mention that is not from an auto-reply post is
+ * still recorded for an agent with Auto-reply on while the unread mentions other than those stay
+ * under the cap, up to UNREAD_MENTIONS_CEILING in all. The count runs only at the cap and
+ * starts at the mention cursor.
  */
-async function insertMention(tx: Tx, row: MentionRow): Promise<number | null> {
+async function insertMention(
+  tx: Tx,
+  row: MentionRow,
+  options: { autoReply?: boolean } = {},
+): Promise<number | null> {
   await tx.query(
     'INSERT INTO wake_cursors(agent_id,next_mention_seq,acked_mention_seq,updated_at) VALUES($1,1,0,$2) ON CONFLICT (agent_id) DO NOTHING',
     [row.agentId, row.time],
   );
-  const allocated = (
+  let allocated = (
     await tx.query<{ seq: number | string }>(
       `UPDATE wake_cursors SET next_mention_seq=next_mention_seq+1, unread_count=unread_count+1, updated_at=$2
        WHERE agent_id=$1 AND unread_count < $3 RETURNING next_mention_seq-1 AS seq`,
       [row.agentId, row.time, WAKE_LIMITS.unreadMentions],
     )
   ).rows[0];
+  if (!allocated && row.sourceKind === 'room' && !options.autoReply)
+    allocated = (
+      await tx.query<{ seq: number | string }>(
+        `WITH s AS (SELECT enabled_at FROM responder_settings
+                     WHERE agent_id=$1 AND enabled AND enabled_at IS NOT NULL)
+         UPDATE wake_cursors c SET next_mention_seq=c.next_mention_seq+1,
+           unread_count=c.unread_count+1, updated_at=$2
+          WHERE c.agent_id=$1 AND c.unread_count < $4 AND EXISTS (SELECT 1 FROM s)
+            AND (SELECT count(*) FROM mentions m, s WHERE m.agent_id=$1
+                   AND m.seq > c.acked_mention_seq AND m.read_at IS NULL
+                   AND NOT (m.source_kind='room' AND (m.created_at < s.enabled_at
+                     OR EXISTS (SELECT 1 FROM room_messages rm WHERE rm.room_id=m.room_id
+                                  AND rm.seq=m.source_seq AND rm.auto_reply IS NOT NULL)))) < $3
+          RETURNING c.next_mention_seq-1 AS seq`,
+        [row.agentId, row.time, WAKE_LIMITS.unreadMentions, UNREAD_MENTIONS_CEILING],
+      )
+    ).rows[0];
   if (!allocated) return null;
   const seq = Number(allocated.seq);
   await tx.query(
@@ -233,7 +268,8 @@ export async function roomPosted(
     // people in the room by their room-unique display name (migration 31). A member whose owner
     // the host muted (migration 35), or who muted the room's notifications for itself (migration
     // 38), still counts as a name (so "@Ann Lee" never falls back to "@Ann"), but no mention is
-    // recorded for it.
+    // recorded for it. A bulk "Mute all AIs" (mute_scope 'ai') mutes only the owner's AIs: the
+    // owner's person member is still mentioned.
     // Only members that can match a mention token are loaded (indexed name_key / slug_key /
     // id, migration 62), plus the sender (for its own-host rule), the addressed agent (by id) and
     // members whose keys are not known yet; findMentions over them is the same as over every
@@ -267,7 +303,9 @@ export async function roomPosted(
          UNION ALL
          SELECT m.agent_id, m.owner_id, m.display_name AS name, 'person' AS kind, m.role,
             EXISTS (SELECT 1 FROM room_members x WHERE x.owner_id=m.owner_id
-              AND x.room_id=m.room_id AND (x.muted_at IS NOT NULL OR x.notifications_muted)) AS muted FROM room_members m
+              AND x.room_id=m.room_id AND (x.notifications_muted
+                OR (x.muted_at IS NOT NULL AND x.mute_scope IS DISTINCT FROM 'ai'))) AS muted
+          FROM room_members m
           WHERE m.room_id=$1 AND m.removed_at IS NULL AND m.visible_from_seq < $2
             AND m.agent_id IN (SELECT agent_id FROM c)
             AND m.kind='person' AND m.display_name IS NOT NULL`,
@@ -313,20 +351,24 @@ export async function roomPosted(
     // Sorted, so concurrent posts lock wake_cursors rows in one global order.
     for (const agentId of [...ids].sort()) {
       if (muted.has(agentId)) continue;
-      const mentionSeq = await insertMention(tx, {
-        agentId,
-        ownerId: owners.get(agentId)!,
-        sourceKind: 'room',
-        sourceId: row.id,
-        roomId: row.room_id,
-        sourceSeq: seq,
-        contextId: null,
-        fromAgentId: row.sender_agent_id,
-        fromName: row.sender_name,
-        fromOwnerLabel: row.sender_owner_label,
-        excerpt: excerptAt(text, found.offsets.get(agentId) ?? 0),
-        time,
-      });
+      const mentionSeq = await insertMention(
+        tx,
+        {
+          agentId,
+          ownerId: owners.get(agentId)!,
+          sourceKind: 'room',
+          sourceId: row.id,
+          roomId: row.room_id,
+          sourceSeq: seq,
+          contextId: null,
+          fromAgentId: row.sender_agent_id,
+          fromName: row.sender_name,
+          fromOwnerLabel: row.sender_owner_label,
+          excerpt: excerptAt(text, found.offsets.get(agentId) ?? 0),
+          time,
+        },
+        { autoReply: row.auto_reply !== undefined && row.auto_reply !== null },
+      );
       if (mentionSeq !== null) {
         mentioned.push(agentId);
         signals.push({ kind: 'mention', id: agentId, seq: mentionSeq });
@@ -381,7 +423,8 @@ export async function roomPosted(
  * review request or verdict mentions the agents it concerns (the requested reviewer; or the
  * claimer and the host), the same way an @mention in a room post does: a mention record, a
  * webhook or hosted-responder wake-up, and an in-process signal. Members whose owner is muted in
- * the room (by the host or by themselves) get nothing, like any mention. Inside the caller's
+ * the room (by the host or by themselves) get nothing, like any mention; a bulk "Mute all AIs"
+ * (mute_scope 'ai') spares the owner's person member, as in roomPosted. Inside the caller's
  * transaction, after the line was written.
  */
 export async function taskReviewNotice(
@@ -407,7 +450,8 @@ export async function taskReviewNotice(
     await tx.query<{ agent_id: string; owner_id: string; muted: boolean }>(
       `SELECT m.agent_id, m.owner_id,
           EXISTS (SELECT 1 FROM room_members x WHERE x.owner_id=m.owner_id
-            AND x.room_id=m.room_id AND (x.muted_at IS NOT NULL OR x.notifications_muted)) AS muted
+            AND x.room_id=m.room_id AND (x.notifications_muted OR (x.muted_at IS NOT NULL
+              AND (m.kind <> 'person' OR x.mute_scope IS DISTINCT FROM 'ai')))) AS muted
         FROM room_members m WHERE m.room_id=$1 AND m.agent_id = ANY($2::text[]) AND m.removed_at IS NULL`,
       [n.roomId, [...new Set(n.agentIds)].filter((id) => id !== n.fromAgentId)],
     )

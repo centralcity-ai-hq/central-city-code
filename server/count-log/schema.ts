@@ -2,6 +2,7 @@ import { registerMigration, type Migration } from '../migrations.js';
 import {
   countLogFeedIndexesMigration,
   countLogPendingBackfillMigration,
+  countLogPendingLinearMigration,
   countLogPendingMigration,
 } from './pending.js';
 
@@ -103,4 +104,6 @@ export function registerCountLogMigration(): void {
   // Migration 60: the feed's indexes (pending.ts).
   registerMigration(countLogFeedIndexesMigration);
   registerMigration(countLogCheckpointV2Migration);
+  // Migration 110: the pending recorder in one pass instead of quadratic (pending.ts).
+  registerMigration(countLogPendingLinearMigration);
 }

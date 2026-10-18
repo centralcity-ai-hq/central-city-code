@@ -68,6 +68,7 @@ import {
   type ToolCallRecord,
   type TurnInput,
 } from './turns.js';
+import { forgetCardIndex } from '../manifest/card-agent.js';
 
 /**
  * Elric, Central City's first-party agent: the server core of the Phase 2 slice
@@ -380,12 +381,20 @@ export function createElric(d: ElricDependencies) {
   }
 
   /** Cancels queued invocations (no reservation is held before a run). */
-  async function cancelQueued(tx: Q, agentId: string, reason: string, time: number) {
+  /** `invokerKind` limits it to one invoker kind (the host, when the owner withdraws consent). */
+  async function cancelQueued(
+    tx: Q,
+    agentId: string,
+    reason: string,
+    time: number,
+    invokerKind?: 'host',
+  ) {
     const rows = (
       await tx.query<InvocationRow>(
         `UPDATE elric_invocations SET status='cancelled', finished_at=$2
-          WHERE agent_id=$1 AND status='queued' RETURNING *`,
-        [agentId, time],
+          WHERE agent_id=$1 AND status='queued' AND ($3::text IS NULL OR invoker_kind=$3)
+          RETURNING *`,
+        [agentId, time, invokerKind ?? null],
       )
     ).rows;
     for (const row of rows) {
@@ -436,6 +445,7 @@ export function createElric(d: ElricDependencies) {
         );
         const agent = workspace.agents.find((item) => item.id === own.agent_id);
         if (agent && !agent.revokedAt) agent.revokedAt = iso(time);
+        forgetCardIndex(ownerId);
         await cancelQueued(tx, own.agent_id, 'revoked', time);
         event(workspace, time, 'elric.revoked', 'Elric revoked by the owner.', own.agent_id);
       } else {
@@ -457,13 +467,21 @@ export function createElric(d: ElricDependencies) {
   }
 
   async function setHostMayInvoke(ownerId: string, allowed: boolean) {
-    const done = await d.db.query<{ agent_id: string }>(
-      `UPDATE elric_agents SET host_may_invoke=$2, updated_at=$3, updated_by='the owner'
-        WHERE owner_id=$1 AND status <> 'revoked' RETURNING agent_id`,
-      [ownerId, allowed, d.clock()],
-    );
-    if (!done.rows.length) throw new ElricError(404, 'elric_not_found', 'You have no Elric.');
-    return { agent_id: done.rows[0]!.agent_id, host_may_invoke: allowed };
+    const time = d.clock();
+    const agentId = await d.db.transaction(async (tx) => {
+      const done = await tx.query<{ agent_id: string }>(
+        `UPDATE elric_agents SET host_may_invoke=$2, updated_at=$3, updated_by='the owner'
+          WHERE owner_id=$1 AND status <> 'revoked' RETURNING agent_id`,
+        [ownerId, allowed, time],
+      );
+      const agentId = done.rows[0]?.agent_id;
+      // Consent withdrawn: the host's queued and deferred invocations go too (reservations
+      // released); a run already started is refused by run() rechecking the flag.
+      if (agentId && !allowed) await cancelQueued(tx, agentId, 'host_not_allowed', time, 'host');
+      return agentId;
+    });
+    if (!agentId) throw new ElricError(404, 'elric_not_found', 'You have no Elric.');
+    return { agent_id: agentId, host_may_invoke: allowed };
   }
 
   async function usageView(ownerId: string): Promise<ElricUsageView> {
@@ -995,6 +1013,9 @@ export function createElric(d: ElricDependencies) {
       )
     ).rows[0];
     if (!invoker) return finish('refused_access', 'invoker_left');
+    // The owner may have withdrawn the host's consent after this was queued.
+    if (inv.invoker_kind === 'host' && !access.elric.host_may_invoke)
+      return finish('refused_access', 'host_not_allowed', { refund: true });
     const requestText = (Array.isArray(trigger.parts) ? trigger.parts : [])
       .map((part) =>
         part && typeof part === 'object' && (part as { type?: string }).type === 'text'
@@ -1393,7 +1414,7 @@ export function createElric(d: ElricDependencies) {
     if (!checked.ok)
       return checked.reason === 'credential_in_reply'
         ? finish('refused_credential', 'credential_in_reply')
-        : finish('error', 'empty_reply', { refund: true });
+        : finish('error', 'empty_reply', { refund: usage.units === 0 });
     text = checked.text;
     if (checked.stripped) reason = reason ?? `citations_stripped:${checked.stripped}`;
 

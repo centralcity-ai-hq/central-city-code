@@ -12,13 +12,16 @@
  * `settled: true` reads at a block that no longer reorgs (the finalized block on mainnet, the
  * network's confirmation depth below head elsewhere): a revocation is only ever concluded there.
  * The URL may carry a key (the CDP endpoint), so it is never logged or returned.
+ *
+ * `url` may be a list (read-transport.ts): a second endpoint answers when the configured one cannot.
+ * The read block is chosen first (its number) and the one aggregate3 call is pinned to it on
+ * whichever node answers, so the values still describe one block.
  */
 import {
   createPublicClient,
   decodeFunctionResult,
   encodeFunctionData,
   getAddress,
-  http,
   multicall3Abi,
   size,
   type PublicClient,
@@ -31,6 +34,7 @@ import {
 } from '../../../shared/base/chains.js';
 import type { SpendPermission } from '../../../shared/base/types.js';
 import { spendPermissionManagerAbi } from './permissions.js';
+import { baseReadTransport } from './read-transport.js';
 
 export type PermissionPhase = 'before_start' | 'active' | 'ended';
 
@@ -191,12 +195,18 @@ export function permissionReaderFor(client: PublicClient, network: BaseNetwork):
 }
 
 export function basePermissionReader(
-  url: string,
+  url: string | readonly string[],
   network: BaseNetwork,
   timeoutMs = 3_000,
 ): PermissionReader {
   return permissionReaderFor(
-    createPublicClient({ transport: http(url, { timeout: timeoutMs, retryCount: 0 }) }),
+    createPublicClient({
+      transport: baseReadTransport(url, {
+        chainId: network.chainId,
+        timeoutMs,
+        headNumberMayFallBack: true,
+      }),
+    }),
     network,
   );
 }

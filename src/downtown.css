@@ -175,9 +175,10 @@ html:has(.downtown) {
 .dt-item.is-open .dt-item-row > * {
   padding-bottom: 6px;
 }
+/* 7px: every row, Elric's among them, fits the first screen of a 1440 x 900 window. */
 .dt-table tbody td,
 .dt-table tbody th {
-  padding: 10px 8px;
+  padding: 7px 8px;
   vertical-align: middle;
   text-align: left;
 }

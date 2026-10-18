@@ -182,7 +182,9 @@ for (const viewport of [
     await expect(card).toHaveCount(0);
     await page.reload();
     await expect(page.getByRole('heading', { level: 1, name: 'Launch crew' })).toBeAttached();
-    await expect(page.locator('.rm-empty').getByRole('button', { name: 'Invite' })).toBeVisible();
+    await expect(
+      page.locator('.rm-empty').getByRole('button', { name: 'Invite', exact: true }),
+    ).toBeVisible();
     await expect(page.getByRole('region', { name: 'Who should join?' })).toHaveCount(0);
     expect(errors).toEqual([]);
     await context.close();

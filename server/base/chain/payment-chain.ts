@@ -26,7 +26,13 @@ import {
 import type { ChainOpReceipt, PaymentSource, SpendPermission } from '../../../shared/base/types.js';
 import { spenderAccountRecipe } from './derive.js';
 import { limitPeriodOf } from '../../../shared/base/spend-limits.js';
-import { assertWithinCalendarLimit, CalendarLimitError } from './calendar-limit.js';
+import {
+  assertWithinCalendarLimit,
+  assertWithinPeriodAllowance,
+  basePeriodWindow,
+  CalendarLimitError,
+  PeriodAllowanceError,
+} from './calendar-limit.js';
 import {
   SPONSOR_PAYMASTERS,
   sponsoredWithoutCharge,
@@ -137,6 +143,8 @@ interface PermissionRow {
   cap_raw?: string | null;
   /** SpendPermissionManager.getHash of the limit (migration 90); null for older rows. */
   permission_hash?: string | null;
+  /** When the limit was stored (ms, decimal). */
+  created_at?: string | null;
 }
 
 /** The spending limit a payment spends under: the wallet and the limit's id and hash. */
@@ -169,7 +177,8 @@ async function selectPermission(
   input: { chainId: number; walletId: string; token: Address; spender: Address },
 ): Promise<PermissionRow | null> {
   const { rows } = await q.query<PermissionRow>(
-    `SELECT permission_id, permission, signature, state, cap_raw::text AS cap_raw, permission_hash
+    `SELECT permission_id, permission, signature, state, cap_raw::text AS cap_raw, permission_hash,
+            created_at::text AS created_at
      FROM base_spend_permissions
      WHERE wallet_id = $1 AND chain_id = $2 AND state IN ('signed','onchain')
      ORDER BY created_at DESC`,
@@ -221,13 +230,43 @@ function receipt(row: StoredOperation): ChainOpReceipt {
 
 export function createPaymentChain(deps: PaymentChainDeps) {
   const clock = deps.now ?? Date.now;
-  const submitDeps = (signer: Parameters<typeof submitOperation>[0]['signer']) => ({
+  const submitDeps = (
+    signer: Parameters<typeof submitOperation>[0]['signer'],
+    beforeRebroadcast?: (row: StoredOperation) => Promise<void>,
+  ) => ({
     network: deps.network,
     client: deps.client,
     store: deps.operations,
     bundler: deps.bundler,
     signer,
+    ...(beforeRebroadcast ? { beforeRebroadcast } : {}),
   });
+
+  /**
+   * The current authority of a payment, as its first send checks it (submit's beforeBroadcast):
+   * wallet still usable, permission not revoked, and whatever the payment service checks (consent,
+   * grants, policy). Run before an ambiguous first send is sent again.
+   */
+  async function authorityNow(intent: PaymentIntent, stored: StoredOperation) {
+    const token = allowedToken(deps.network, intent.token);
+    if (!token) throw new PaymentChainError('TOKEN_NOT_ALLOWED', 'This token is not allowed.');
+    const now = await loadWallet(intent);
+    const permission = await loadPermission(
+      now.wallet_id,
+      token.address,
+      getAddress(stored.sender),
+    );
+    await deps.authorize?.(intent, {
+      walletId: now.wallet_id,
+      permissionId: permission.permission_id,
+      permissionHash: permission.permission_hash ?? null,
+    });
+  }
+
+  /** Recovery has no payment intent to check authority against: it never sends one again. */
+  const neverResend = async (): Promise<void> => {
+    throw new Error('Recovery never sends an ambiguous first send again.');
+  };
 
   async function loadWallet(intent: PaymentIntent): Promise<WalletRow> {
     if (!('agentId' in intent.source))
@@ -378,7 +417,14 @@ export function createPaymentChain(deps: PaymentChainDeps) {
       }
       const wallet = await walletOfOperation(intent, stored);
       const row =
-        (await refreshFinality(submitDeps(readOnly(stored)), intent.operationKey)) ?? stored;
+        (await refreshFinality(
+          submitDeps(readOnly(stored), () => authorityNow(intent, stored)),
+          intent.operationKey,
+          {
+            retireLapsed: true,
+            ownLane: true,
+          },
+        )) ?? stored;
       await settle(intent.operationKey, row, wallet.wallet_id);
       return receipt(row);
     },
@@ -421,14 +467,20 @@ export function createPaymentChain(deps: PaymentChainDeps) {
       const nowSeconds = Math.floor(nowMs / 1000);
       if (nowSeconds < permission.start || nowSeconds >= permission.end)
         throw new PaymentChainError('NO_PERMISSION', 'The spending limit is not active now.');
+      // A limit not approved on Base yet has spent nothing there.
+      let onchainSpend = 0n;
+      // Taken before the read: a payment settled after this moment may be missing from it.
+      let chainReadAtMs: number | null = null;
       if (permissionRow.state === 'onchain') {
+        chainReadAtMs = clock();
         const period = await deps.client.readContract({
           address: deps.network.contracts.spendPermissionManager,
           abi: spendPermissionManagerAbi,
           functionName: 'getCurrentPeriod',
           args: [permission],
         });
-        if (BigInt(period.spend) + amount > permission.allowance)
+        onchainSpend = BigInt(period.spend);
+        if (onchainSpend + amount > permission.allowance)
           throw new PaymentChainError(
             'OVER_ALLOWANCE',
             'The spending limit for this period is used up.',
@@ -440,6 +492,20 @@ export function createPaymentChain(deps: PaymentChainDeps) {
       const calendar = limitPeriodOf(permission.period);
       try {
         await deps.db.transaction(async (tx) => {
+          // Payments sent but not on Base yet count against the period's allowance too: without
+          // this, two at once each fit what Base reports and the second reverts on Base.
+          await assertWithinPeriodAllowance(tx, {
+            walletId: wallet.wallet_id,
+            chainId: intent.chainId,
+            token: token.address,
+            amount,
+            allowance: permission.allowance,
+            onchainSpend,
+            window: basePeriodWindow(permission, nowSeconds),
+            limitCreatedAtMs: Number(permissionRow.created_at ?? 0),
+            chainReadAtMs,
+            holderRef: intent.operationKey,
+          });
           if (calendar)
             await assertWithinCalendarLimit(tx, {
               walletId: wallet.wallet_id,
@@ -463,6 +529,8 @@ export function createPaymentChain(deps: PaymentChainDeps) {
       } catch (error) {
         if (error instanceof CalendarLimitError)
           throw new PaymentChainError('OVER_CALENDAR_LIMIT', error.message);
+        if (error instanceof PeriodAllowanceError)
+          throw new PaymentChainError('OVER_ALLOWANCE', error.message);
         // Already consumed: the payment happened; report its operation instead of sending again.
         if (!(error instanceof ReservationError && error.code === 'RESERVATION_CLOSED'))
           throw error;
@@ -536,12 +604,17 @@ export function createPaymentChain(deps: PaymentChainDeps) {
           // limit this operation spends under.
           beforeBroadcast: async () => {
             const now = await loadWallet(intent);
-            await loadPermission(now.wallet_id, token.address, spender);
+            const current = await loadPermission(now.wallet_id, token.address, spender);
             await deps.authorize?.(intent, {
               walletId: wallet.wallet_id,
               permissionId: permissionRow.permission_id,
               permissionHash: permissionRow.permission_hash ?? null,
             });
+            // Still the limit this operation was built with: one revoked meanwhile (and a new one
+            // set after it) is never approved or spent from here (the owner's consent, checked
+            // just above, is bound to that limit too).
+            if (current.permission_id !== permissionRow.permission_id)
+              throw new PaymentChainError('NO_PERMISSION', 'The spending limit changed.');
           },
         });
       } catch (error) {
@@ -702,7 +775,11 @@ export function createPaymentChain(deps: PaymentChainDeps) {
       result.released++;
       return;
     }
-    const row = (await refreshFinality(submitDeps(readOnly(stored)), held.holder_ref)) ?? stored;
+    const row =
+      (await refreshFinality(submitDeps(readOnly(stored), neverResend), held.holder_ref, {
+        retireLapsed: true,
+        ownLane: true,
+      })) ?? stored;
     await settle(held.holder_ref, row, held.wallet_id);
     if (row.status === 'final' || row.status === 'failed') result.settled++;
   }

@@ -4,7 +4,8 @@
  *
  * The public pages are "/" plus every share card (shared/share-cards.ts) that is its own
  * canonical page; an alias such as /docs/start or /downtown/log points its canonical elsewhere and
- * is left out. App routes (rooms, settings, …) have no share card and are not indexed.
+ * is left out. App routes (rooms, settings, …) have no share card, or one that is not `indexed`
+ * (the Feed), and are not indexed.
  */
 
 import { SHARE_CARDS, SITE, type ShareCard } from './share-cards.js';
@@ -13,7 +14,7 @@ import { USE_CASES, useCasePath } from './use-cases.js';
 /** The paths a search engine should index, "/" first, in share-card order. */
 export const PUBLIC_PATHS: readonly string[] = Object.freeze([
   '/',
-  ...SHARE_CARDS.filter((card) => card.canonical === `${SITE}${card.path}`).map(
+  ...SHARE_CARDS.filter((card) => card.indexed && card.canonical === `${SITE}${card.path}`).map(
     (card) => card.path,
   ),
 ]);
@@ -44,6 +45,7 @@ export const PAGE_SOURCES: Readonly<Record<string, readonly string[]>> = Object.
   '/elric': ['src/elric/ElricSignedOut.tsx'],
   '/explorer': ['src/verify/LiveLog.tsx'],
   '/explorer/base': ['src/verify/OnBase.tsx'],
+  '/explorer/calls': ['src/verify/ServiceCalls.tsx'],
   '/connect': ['src/Connect.tsx', 'src/shell/roomInvite.ts'],
   '/invite': ['src/Invite.tsx'],
   '/workflows': ['src/WorkflowsPage.tsx'],
@@ -53,6 +55,7 @@ export const PAGE_SOURCES: Readonly<Record<string, readonly string[]>> = Object.
   '/docs/coding': ['docs/CODING_IN_ROOMS.md'],
   '/docs/microsoft-copilot': ['docs/MICROSOFT_COPILOT.md'],
   '/docs/mistral-le-chat': ['docs/MISTRAL_LE_CHAT.md'],
+  '/docs/feed': ['docs/FEED_GUIDE.md'],
   '/docs/api': ['src/docs/DocsPages.tsx'],
   '/use-cases': ['shared/use-cases.ts'],
   ...Object.fromEntries(

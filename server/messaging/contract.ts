@@ -130,6 +130,18 @@ export interface InboxAck {
   latest_seq: number;
   unread: number;
 }
+/** GET /api/messages/summary. */
+export interface InboxSummaryPage {
+  inboxes: InboxSummary[];
+  /** Open room invitations per agent of the owner (Operation Directory D2); agents with none absent. */
+  invitations: Record<string, number>;
+  /**
+   * Open responses to the owner's Feed requests (Feed Respond, shared/feed.ts), for the Messages
+   * badge; absent while the Feed is switched off (CITY_FEED=0).
+   */
+  requestResponses?: number;
+}
+
 export interface InboxSummary {
   agent_id: string;
   latest_seq: number;
@@ -156,6 +168,13 @@ export interface ConversationSummary {
   direct?: DirectThread;
 }
 
+/**
+ * Text the database can store: Postgres text and jsonb refuse the NUL character, so a NUL is a
+ * 400 at validation, never a failed write (a plain 500).
+ */
+export const noNul = (value: string) => !value.includes('\u0000');
+export const NO_NUL_MESSAGE = 'Text may not contain NUL characters.';
+
 function jsonBytes(value: unknown): number {
   return new TextEncoder().encode(JSON.stringify(value) ?? '').length;
 }
@@ -163,20 +182,23 @@ const jsonValue = z.unknown().superRefine((value, context) => {
   let count = 0;
   const visit = (item: unknown, depth: number): boolean => {
     if (depth > 16 || ++count > 4000) return false;
-    if (item === null || typeof item === 'string' || typeof item === 'boolean') return true;
+    if (typeof item === 'string') return noNul(item);
+    if (item === null || typeof item === 'boolean') return true;
     if (typeof item === 'number') return Number.isFinite(item);
     if (Array.isArray(item)) return item.every((entry) => visit(entry, depth + 1));
     if (typeof item === 'object')
       return Object.entries(item as Record<string, unknown>).every(
         ([key, entry]) =>
-          !['__proto__', 'prototype', 'constructor'].includes(key) && visit(entry, depth + 1),
+          !['__proto__', 'prototype', 'constructor'].includes(key) &&
+          noNul(key) &&
+          visit(entry, depth + 1),
       );
     return false;
   };
   if (value === undefined || !visit(value, 0))
     context.addIssue({
       code: 'custom',
-      message: 'data must be plain JSON (16 levels, 4000 values).',
+      message: 'data must be plain JSON (16 levels, 4000 values, no NUL characters).',
     });
   else if (jsonBytes(value) > MESSAGE_LIMITS.dataBytes)
     context.addIssue({
@@ -188,7 +210,7 @@ export const messagePartSchema = z.discriminatedUnion('type', [
   z
     .object({
       type: z.literal('text'),
-      text: z.string().min(1).max(MESSAGE_LIMITS.textChars),
+      text: z.string().min(1).max(MESSAGE_LIMITS.textChars).refine(noNul, NO_NUL_MESSAGE),
     })
     .strict(),
   z
@@ -236,6 +258,7 @@ export const sendFields = {
     .string()
     .min(1)
     .max(MESSAGE_LIMITS.textChars)
+    .refine(noNul, NO_NUL_MESSAGE)
     .optional()
     .describe('Shorthand for parts: [{type: "text", text}].'),
   parts: messagePartsSchema

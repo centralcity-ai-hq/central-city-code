@@ -285,7 +285,7 @@ test('Home: the orb, one line, three suggestions, the top bar and a disabled sen
   await page.goto('/elric');
   await expect(page.getByRole('heading', { name: 'Elric', level: 1 })).toBeVisible();
   // One "built in" badge that still says AI to assistive technology.
-  await expect(page.locator('.elx-title .elx-tag')).toHaveText(`built in ${ELRIC_AI_TAG}`);
+  await expect(page.locator('.elx-title .elx-tag')).toHaveText(`built-in ${ELRIC_AI_TAG}`);
   await expect(page.getByRole('heading', { name: 'What can I help with?' })).toBeVisible();
   await expect(page.locator('.elx3-home .elx3-mark-orb')).toBeVisible();
   // Home is minimal: no approval pill without approvals, no example cards, no sub-headline.
@@ -398,7 +398,7 @@ test('a message posts "@Elric …" as the person member and the reply shows its 
   await expect(page.getByTestId('elric-reply')).toContainText('short answer', { timeout: 10_000 });
   await expect(thinking).toHaveCount(0);
   const byline = page.getByTestId('elric-reply').locator('.elx-byline');
-  await expect(byline).toHaveText(/^Elric\s*built in\s*AI$/);
+  await expect(byline).toHaveText(/^Elric\s*built-in AI$/);
   await expect(byline).toHaveAttribute('title', 'Elric v1.0');
   // No model name anywhere users see.
   await expect(page.locator('body')).not.toContainText('gemma');

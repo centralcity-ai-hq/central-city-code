@@ -1,5 +1,6 @@
 import { roomCallFromConsole } from '../rooms/private.js';
 import type { Transaction as Tx } from '../database.js';
+import { lockMentionCursor } from '../wake/cursor-lock.js';
 import { dayOf, elricEnabled } from './config.js';
 import { recordTurn } from './turns.js';
 
@@ -39,6 +40,7 @@ export async function ackElricMention(
   sourceSeq: number,
   time: number,
 ): Promise<void> {
+  await lockMentionCursor(q, agentId);
   const marked = await q.query(
     `UPDATE mentions SET read_at=$4 WHERE agent_id=$1 AND source_kind='room' AND room_id=$2
        AND source_seq=$3 AND read_at IS NULL RETURNING seq`,

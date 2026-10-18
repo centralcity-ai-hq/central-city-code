@@ -1,6 +1,8 @@
 import { registerMigration, type Migration } from '../migrations.js';
 import type { Database, Transaction as Tx } from '../database.js';
-import { DAY_MS } from './config.js';
+import { purgeRoomMentions } from '../rooms/mention-purge.js';
+import { settle } from './budget.js';
+import { DAY_MS, type ElricKind } from './config.js';
 import { registerElricTokenCostMigration } from './token-cost.js';
 
 /**
@@ -98,8 +100,13 @@ export async function purgeRooms(tx: Pick<Tx, 'query'>, rooms: string[]): Promis
   );
   for (const sql of ROOM_GRANDCHILDREN)
     if (tables.has(/FROM (\w+)/.exec(sql)![1])) await tx.query(sql, [rooms]);
+  // @mentions go first, and each agent's unread backlog follows (wake_cursors rows in sorted
+  // order, like the room-delete path): a mention still unread, such as an owner post whose
+  // Elric run was pending, would otherwise stay counted against the agent's unread cap.
+  // The cursors are locked before the mention rows (purgeRoomMentions), like every ack path.
+  if (tables.has('mentions')) await purgeRoomMentions(tx, rooms);
   // Tables referencing another room_id table go first (foreign keys have no cascade).
-  const order = [...tables].filter((t) => t !== 'rooms').sort();
+  const order = [...tables].filter((t) => t !== 'rooms' && t !== 'mentions').sort();
   const refs = (
     await tx.query<{ child: string; parent: string }>(
       `SELECT tc.table_name AS child, ccu.table_name AS parent
@@ -122,6 +129,41 @@ export async function purgeRooms(tx: Pick<Tx, 'query'>, rooms: string[]): Promis
   for (const table of sequence)
     await tx.query(`DELETE FROM ${quoteIdent(table)} WHERE room_id = ANY($1)`, [rooms]);
   await tx.query('DELETE FROM rooms WHERE id = ANY($1)', [rooms]);
+}
+
+/**
+ * Releases the reservations of invocations about to be deleted (queued, deferred or running): a
+ * run's finish() settles only while its row exists, so without this the units would stay counted
+ * against the global ceiling (and the owner's allowance) until the day rolls over. What a row
+ * already spent, plus a model call in flight, counts as spent; the allowance comes back only when
+ * nothing was spent and no call was in flight (as a run cut off mid-flight settles).
+ */
+async function settleDeleted(tx: Pick<Tx, 'query'>, where: string, params: unknown[]) {
+  const rows = (
+    await tx.query<{
+      owner_id: string;
+      kind: ElricKind | null;
+      usage_day: string | null;
+      reserved_units: string | number;
+      spent_units: string | number;
+      inflight_units: string | number;
+    }>(
+      `SELECT owner_id, kind, usage_day, reserved_units, spent_units, inflight_units
+         FROM elric_invocations WHERE ${where} AND reserved_units > 0 FOR UPDATE`,
+      params,
+    )
+  ).rows;
+  for (const row of rows) {
+    if (!row.kind || !row.usage_day) continue;
+    await settle(tx, {
+      ownerId: row.owner_id,
+      kind: row.kind,
+      day: row.usage_day,
+      reserved: Number(row.reserved_units),
+      spent: Number(row.spent_units) + Number(row.inflight_units),
+      refund: Number(row.spent_units) + Number(row.inflight_units) === 0,
+    });
+  }
 }
 
 /**
@@ -162,6 +204,8 @@ export async function eraseElricOwner(
     );
     // The owner's cached room catch-ups (migration 66): summaries for this owner only.
     await tx.query('DELETE FROM elric_catch_ups WHERE owner_id=$1', [ownerId]);
+    // Before the invocations go: their reservations leave the global ceiling.
+    await settleDeleted(tx, 'owner_id=$1', [ownerId]);
     const result: ElricEraseResult = {
       turns: await del('DELETE FROM elric_turns WHERE owner_id=$1'),
       posts: await del('DELETE FROM elric_posts WHERE owner_id=$1'),
@@ -211,6 +255,8 @@ export async function purgeElricConversation(
       'UPDATE elric_agents SET chat_room_id=NULL WHERE owner_id=$1 AND chat_room_id=$2',
       [ownerId, roomId],
     );
+    // Before the room's invocations go: an in-flight or deferred run releases its reservation.
+    await settleDeleted(tx, 'room_id=$1', [roomId]);
     await purgeRooms(tx, [roomId]);
     await tx.query("SELECT set_config('elric.erase_owner', '', true)");
     return true;

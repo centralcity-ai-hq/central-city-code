@@ -229,7 +229,7 @@ test('a stress-test host is held exactly to its own ceiling under parallel joins
   const redeems = [];
   for (let i = 0; i < 30; i++) redeems.push(await pickup(rooms[i % rooms.length]!.code));
   const results = await Promise.all(redeems.map((redeem) => redeem()));
-  assert.deepEqual(tally(results), { ok: 9, '429 stress_test_capacity': 21 });
+  assert.deepEqual(tally(results), { ok: 9, '429 invite_host_capacity': 21 });
   assert.equal(await liveGuests(h.operatorId), 9);
 });
 

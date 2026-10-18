@@ -3,6 +3,7 @@ import { formatUnits } from 'viem';
 import { ApiError } from '../../api';
 import type { WalletView } from '../../base/wallet/api';
 import { usePasswordLock } from '../../base/wallet/usePasswordLock';
+import { usdcText } from '../../base/wallet/limits';
 import {
   askCancel,
   cancelSignaturePath,
@@ -54,7 +55,8 @@ export const signingFailure = (error: unknown) =>
 export const shortHex = (value: string) => `${value.slice(0, 6)}…${value.slice(-4)}`;
 export const shownAmount = (raw: bigint, token: WithdrawalToken) => {
   const text = formatUnits(raw, DECIMALS[token]);
-  return token === 'USDC' ? Number(text).toFixed(2) : text;
+  // Exact: every digit that is signed is shown (at least two decimals).
+  return token === 'USDC' ? usdcText(raw) : text;
 };
 
 /** The operation a cancel must sit at the nonce of: as checked and signed in this browser. */

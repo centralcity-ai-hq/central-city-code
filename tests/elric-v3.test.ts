@@ -2,13 +2,31 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import test from 'node:test';
-import { gateSteps, liveLine, messageClock, usageShare, waitingLabel } from '../src/elric/elricV3';
+import {
+  gateSteps,
+  isOpenChat,
+  liveLine,
+  messageClock,
+  sendAttempt,
+  usageShare,
+  waitingLabel,
+} from '../src/elric/elricV3';
 
 /*
  * Workspace v3, Elric (docs/design/WORKSPACE_V3_ELRIC_AGENTS.md §1): the words the page draws
  * from real data, and its styles: the Rooms v2 / v3 tokens, AA contrast in both themes, sizes in
  * the workspace units, and no orange or amber anywhere on Elric.
  */
+
+test('a late read or post merges only into the chat still open', () => {
+  assert.equal(isOpenChat('room-a', 'room-a'), true);
+  // Chat B was picked while chat A was loading: A’s messages are dropped.
+  assert.equal(isOpenChat('room-b', 'room-a'), false);
+  // "New chat" (no room yet) matches nothing, not even another empty id.
+  assert.equal(isOpenChat('', 'room-a'), false);
+  assert.equal(isOpenChat('', ''), false);
+  assert.equal(isOpenChat(undefined, 'room-a'), false);
+});
 
 test('Home approval pill: one line for one or more actions, nothing for none', () => {
   assert.equal(waitingLabel(0), '');
@@ -207,4 +225,21 @@ test('the top bar is 10% smaller than the room top bar, and phones keep 44px tar
     tokensCss,
     /@media \(prefers-reduced-motion: reduce\) \{\s*\.elx3-mark-orb \{\s*animation: none;/,
   );
+});
+
+test('a resend of the same text to the same room keeps the idempotency key', () => {
+  let n = 0;
+  const next = () => `key-${++n}`;
+  const first = sendAttempt(null, 'room-a', 'hello', next);
+  assert.equal(first.key, 'key-1');
+  // The response was lost: the same text again to the same room is the same post.
+  assert.equal(sendAttempt(first, 'room-a', 'hello', next).key, 'key-1');
+  // Other text, or another room, is a new post.
+  assert.equal(sendAttempt(first, 'room-a', 'hello again', next).key, 'key-2');
+  assert.equal(sendAttempt(first, 'room-b', 'hello', next).key, 'key-3');
+  assert.equal(sendAttempt(null, 'room-a', 'hello', next).key, 'key-4');
+  // Both posts of the Elric page take their key from the last attempt, never a fresh one.
+  const page = readFileSync(resolve('src/elric/ElricDashboard.tsx'), 'utf8');
+  assert.doesNotMatch(page, /idempotency_key:\s*crypto\.randomUUID\(\)/);
+  assert.equal(page.match(/idempotency_key: attempt\.key/g)?.length, 2);
 });

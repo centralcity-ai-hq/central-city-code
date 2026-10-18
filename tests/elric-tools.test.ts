@@ -336,3 +336,24 @@ test('room_task_create rechecks inside the create transaction: revoked just befo
   );
   assert.equal((await f.usage(s.owner.operatorId))!.tool, 0, 'refunded');
 });
+
+test('a billed run whose reply is empty after checks keeps the allowance count (no refund)', async (t) => {
+  const f = await elricFixture(t);
+  const s = await f.scene();
+  const trigger = await f.say(s.owner, s.room, '@Elric reply with only a tool name', s.person);
+  f.small.push({ text: 'city_control' });
+  const result = await f.elric.run({
+    agentId: s.elricId,
+    roomId: s.room.id,
+    sourceSeq: trigger.message.seq,
+  });
+  assert.equal(result?.outcome, 'error');
+  assert.equal(result?.reason, 'empty_reply');
+  assert.ok((await f.messages(s.room.id)).every((row) => row.sender_agent_id !== s.elricId));
+  const turn = (await f.turns(s.owner.operatorId))[0]!;
+  assert.ok(Number(turn.cost_units) > 0, 'the model call was billed');
+  const usage = (await f.usage(s.owner.operatorId))!;
+  assert.equal(usage.short, 1, 'a billed empty reply still counts against the allowance');
+  assert.equal(Number(usage.spent_units), Number(turn.cost_units));
+  assert.equal(Number(usage.reserved_units), 0);
+});

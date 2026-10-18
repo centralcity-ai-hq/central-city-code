@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowUpRight, Check, Copy, LoaderCircle, Search } from 'lucide-react';
+import { Check, Copy, LoaderCircle, Search } from 'lucide-react';
 import { scoreLine } from '../../shared/base/rating-score';
+import { ON_BASE_QUERY_MAX } from '../../shared/base/on-base';
 import { PublicHeader } from '../shell/PublicHeader';
 import { json, number } from './countLogClient';
 import { ExplorerSwitch } from './ExplorerSwitch';
@@ -105,6 +106,7 @@ export function OnBase() {
   const [checks, setChecks] = useState<Record<string, VerifyState>>({});
   const [more, setMore] = useState(false);
   const [all, setAll] = useState<number | null>(null);
+  const [calls, setCalls] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const generation = useRef(0);
 
@@ -113,8 +115,12 @@ export function OnBase() {
     return () => window.clearInterval(timer);
   }, []);
   useEffect(() => {
-    json<{ ai_agents_total: number }>('/api/public/stats')
-      .then((stats) => setAll(stats.ai_agents_total))
+    json<{ ai_agents_total: number; paid_calls?: { total?: number } }>('/api/public/stats')
+      .then((stats) => {
+        setAll(stats.ai_agents_total);
+        // The paid service calls on Base mainnet, for the switch (absent while switched off).
+        if (typeof stats.paid_calls?.total === 'number') setCalls(stats.paid_calls.total);
+      })
       .catch(() => undefined);
   }, []);
 
@@ -220,7 +226,12 @@ export function OnBase() {
             Downtown · Transparency · <a href="/downtown/verify">Verify the count</a>
           </p>
           <h1>Agent Explorer</h1>
-          <ExplorerSwitch current="base" all={all} onBase={data?.totals.onBase ?? null} />
+          <ExplorerSwitch
+            current="base"
+            all={all}
+            onBase={data?.totals.onBase ?? null}
+            calls={calls}
+          />
           <p className="vf-lede">
             Every Central City agent with a Base ID. Owners are read from Base, and Verify checks
             any agent again in your own browser, directly on Base.
@@ -264,6 +275,7 @@ export function OnBase() {
             className="vf-input"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
+            maxLength={ON_BASE_QUERY_MAX}
             placeholder="Base ID, wallet or agent name"
             autoComplete="off"
             spellCheck={false}
@@ -306,6 +318,19 @@ export function OnBase() {
                 <dd className="ob-stat-sub">final in 15–30 min</dd>
               </div>
               <div>
+                <dt>Rated agents</dt>
+                <dd>
+                  {!data ? (
+                    <span className="ob-sk" />
+                  ) : typeof data.totals.ratedAgents === 'number' ? (
+                    number.format(data.totals.ratedAgents)
+                  ) : (
+                    '—'
+                  )}
+                </dd>
+                <dd className="ob-stat-sub">final on Base</dd>
+              </div>
+              <div>
                 <dt>Read from Base block</dt>
                 <dd>
                   {!data ? (
@@ -332,7 +357,7 @@ export function OnBase() {
               </span>
               {data ? (
                 <a href={basescanRegistry(data.registry)} target="_blank" rel="noreferrer">
-                  See the registry on Basescan <ArrowUpRight size={13} aria-hidden="true" />
+                  See the registry on Basescan
                 </a>
               ) : null}
             </p>

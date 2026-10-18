@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Database, Transaction as Tx } from '../database.js';
 import { event, type Workspace } from '../model.js';
 import type { Claimed, TargetOutcome } from '../wake/webhooks.js';
+import { lockMentionCursor } from '../wake/cursor-lock.js';
 import type { ResponderKeyring } from './keys.js';
 import { findModel, type Provider } from './models.js';
 import { buildPrompt, type PromptMessage } from './prompt.js';
@@ -169,6 +170,7 @@ export function createResponderDelivery(d: DeliveryDependencies) {
 
   /** Marks one mention read and keeps unread_count and the cursor in step (review B6). */
   async function ack(q: Pick<Tx, 'query'>, agentId: string, seq: number, time: number) {
+    await lockMentionCursor(q, agentId);
     const marked = await q.query(
       'UPDATE mentions SET read_at=$3 WHERE agent_id=$1 AND seq=$2 AND read_at IS NULL RETURNING seq',
       [agentId, seq, time],
@@ -754,6 +756,57 @@ export function createResponderDelivery(d: DeliveryDependencies) {
     return 'next';
   }
 
+  /**
+   * Marks read the room mentions the responder will never answer (from before it was enabled, or
+   * from an auto-reply post) and keeps unread_count and the cursor in step, as ack() does. Hosted
+   * agents only (nothing else reads their mentions). The scan starts at the mention cursor, so it
+   * is bounded by the unread mentions.
+   */
+  async function skipUnanswerable(agentId: string, enabledAt: number, time: number) {
+    await d.db.transaction(async (tx) => {
+      await lockMentionCursor(tx, agentId);
+      const marked = await tx.query(
+        `UPDATE mentions m SET read_at=$3
+          WHERE m.agent_id=$1 AND m.read_at IS NULL AND m.source_kind='room'
+            AND m.seq > COALESCE((SELECT c.acked_mention_seq FROM wake_cursors c WHERE c.agent_id=$1), 0)
+            AND (m.created_at < $2 OR EXISTS (SELECT 1 FROM room_messages rm
+                  WHERE rm.room_id=m.room_id AND rm.seq=m.source_seq AND rm.auto_reply IS NOT NULL))
+            AND NOT EXISTS (SELECT 1 FROM responder_replies r WHERE r.agent_id=m.agent_id
+                  AND r.mention_seq=m.seq AND r.status IN ('pending','generated'))
+          RETURNING m.seq`,
+        [agentId, enabledAt, time],
+      );
+      if (!marked.rows.length) return;
+      await tx.query(
+        `UPDATE wake_cursors c SET unread_count=GREATEST(0, c.unread_count-$3), updated_at=$2,
+           acked_mention_seq=GREATEST(c.acked_mention_seq, COALESCE(
+             (SELECT min(m.seq)-1 FROM mentions m WHERE m.agent_id=$1 AND m.read_at IS NULL),
+             c.next_mention_seq-1))
+         WHERE c.agent_id=$1`,
+        [agentId, time, marked.rows.length],
+      );
+    });
+  }
+
+  /**
+   * Whether the agent is hosted (run by the platform): then nothing but Auto-reply reads its
+   * mentions. Any other agent may have a reader the server cannot rule out (a runtime, connected
+   * or not, a chat-app connector over /mcp, or a wake-up webhook), so the mentions Auto-reply
+   * never answers are never marked read for it; the backlog cap skips them instead
+   * (wake/hooks.ts insertMention). An agent not found counts as not hosted.
+   */
+  async function hosted(ownerId: string, agentId: string): Promise<boolean> {
+    const agent = (
+      await d.db.query<{ mode: string | null }>(
+        `SELECT a->>'mode' AS mode
+           FROM workspaces w, jsonb_array_elements(w.data->'agents') a
+          WHERE w.operator_id=$1 AND a->>'id'=$2 LIMIT 1`,
+        [ownerId, agentId],
+      )
+    ).rows[0];
+    return agent?.mode === 'hosted';
+  }
+
   /** The outbox handler for kind 'responder'. */
   async function handle(row: Claimed, deadline: number): Promise<TargetOutcome> {
     const time = d.clock();
@@ -776,6 +829,12 @@ export function createResponderDelivery(d: DeliveryDependencies) {
       await cancelOpen(row.agent_id, 'responder_off');
       return { outcome: 'paused' };
     }
+    // Only a hosted agent, which has no reader besides Auto-reply: any other may read the
+    // mentions Auto-reply never answers (a runtime, a connector or a webhook), so they stay
+    // unread for it (R2-11). The backlog cap does not count them for an agent with Auto-reply
+    // on, so they never stop Auto-reply either way (R1-30, wake/hooks.ts insertMention).
+    if (await hosted(s!.owner_id, row.agent_id))
+      await skipUnanswerable(row.agent_id, Number(s!.enabled_at ?? time), time);
     const due = (
       await d.db.query<Due>(
         `SELECT m.seq, m.room_id, m.source_id AS message_id, m.source_seq, m.from_agent_id, m.from_name,

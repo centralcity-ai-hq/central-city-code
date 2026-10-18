@@ -80,17 +80,19 @@ export function registerMessagingRoutes(app: FastifyInstance, d: MessagingRouteD
   });
   app.get('/api/messages/conversations', async (request) => {
     const operator = await d.owner(request);
-    const { limit } = z
+    const { limit, agent_id: agentId } = z
       .object({
         limit: z
           .string()
           .regex(/^\d{1,3}$/)
           .transform(Number)
           .optional(),
+        // Only the threads one of the owner's own members takes part in (the agent pane).
+        agent_id: z.string().min(1).max(128).optional(),
       })
       .strict()
       .parse(request.query);
-    return d.messaging.conversations(operator.id, limit);
+    return d.messaging.conversations(operator.id, limit, agentId);
   });
   app.get('/api/messages/conversations/:contextId', async (request) => {
     const operator = await d.owner(request);

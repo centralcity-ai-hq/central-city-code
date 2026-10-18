@@ -179,7 +179,9 @@ test('embedded on desktop: global chrome gone, rooms list, actions and room head
   await expect(sidebar.getByRole('button', { name: 'New room' })).toBeVisible();
   await expect(sidebar.getByRole('button', { name: 'Join a room' })).toBeVisible();
   // The open room keeps its header and actions.
-  await expect(host.page.getByRole('button', { name: 'Invite' }).first()).toBeVisible();
+  await expect(
+    host.page.getByRole('button', { name: 'Invite', exact: true }).first(),
+  ).toBeVisible();
   // New room still opens its dialog.
   await sidebar.getByRole('button', { name: 'New room' }).click();
   await expect(host.page.getByRole('dialog', { name: 'New room' })).toBeVisible();

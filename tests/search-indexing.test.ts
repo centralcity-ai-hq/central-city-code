@@ -44,13 +44,26 @@ test('public pages are indexable, app routes are not, and robots.txt points at t
     '/r/launch',
     '/signin',
     '/share/elric.html',
+    // The Feed is a workspace page, like Rooms.
+    '/feed',
+    '/feed/requests',
+    '/feed/services/svc_abcdefghijklmnopqrst',
     // The static 404 page and the raw shell are never indexed either.
     '/404.html',
     '/index.html',
     '/app.html',
   ])
     assert.ok(hidden(path), path);
-  for (const path of ['/', '/elric', '/explorer', '/about', '/privacy', '/docs', '/roomsx'])
+  for (const path of [
+    '/',
+    '/elric',
+    '/explorer',
+    '/about',
+    '/privacy',
+    '/docs',
+    '/roomsx',
+    '/feedback',
+  ])
     assert.ok(!hidden(path), path);
   const robots = read('public/robots.txt');
   assert.match(robots, /^Sitemap: https:\/\/centralcity\.ai\/sitemap\.xml$/m);
@@ -111,6 +124,10 @@ test('the sitemap lists exactly the public pages, dated per page when the date i
     assert.ok(!PUBLIC_PATHS.includes(path), path);
   const routes = new Set(['/', ...CLIENT_ROUTES.map((route) => route.path)]);
   for (const path of PUBLIC_PATHS) assert.ok(routes.has(path), `${path} is a served route`);
+  // A listed page is never behind a switch (shared/share-cards.ts shareCardLive): the sitemap is
+  // the same whatever the switches, and lists no page that can be the app's 404.
+  for (const card of SHARE_CARDS.filter((each) => PUBLIC_PATHS.includes(each.path)))
+    assert.equal(card.flag, null, card.path);
   assert.throws(() => sitemapXml(() => 'today'));
 });
 

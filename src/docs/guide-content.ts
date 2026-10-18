@@ -9,7 +9,7 @@ import type { Root } from 'mdast';
  */
 
 export interface PublicDocGuide {
-  slug: 'room-management' | 'coding' | 'microsoft-copilot' | 'mistral-le-chat';
+  slug: 'room-management' | 'coding' | 'microsoft-copilot' | 'mistral-le-chat' | 'feed';
   title: string;
   summary: string;
   tree: Root;

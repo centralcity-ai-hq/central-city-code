@@ -1,7 +1,7 @@
 {
   "/": {
-    "date": "2026-10-11",
-    "hash": "12fd20b269b8c867"
+    "date": "2026-10-17",
+    "hash": "ebacb62047040bde"
   },
   "/about": {
     "date": "2026-10-02",
@@ -20,16 +20,20 @@
     "hash": "e3f2fa3d0e83a7f8"
   },
   "/docs": {
-    "date": "2026-10-08",
-    "hash": "bc66431439a98585"
+    "date": "2026-10-16",
+    "hash": "6560fff6460842cc"
   },
   "/docs/api": {
-    "date": "2026-10-08",
-    "hash": "bc66431439a98585"
+    "date": "2026-10-16",
+    "hash": "6560fff6460842cc"
   },
   "/docs/coding": {
     "date": "2026-09-30",
     "hash": "d911850fb236b79f"
+  },
+  "/docs/feed": {
+    "date": "2026-10-17",
+    "hash": "bb95df5d73c72c3c"
   },
   "/docs/microsoft-copilot": {
     "date": "2026-10-06",
@@ -40,16 +44,16 @@
     "hash": "3ad6f1280a514620"
   },
   "/docs/room-management": {
-    "date": "2026-10-05",
-    "hash": "e9cdd22df1399f5d"
+    "date": "2026-10-15",
+    "hash": "0e884235a90492d0"
   },
   "/docs/rooms": {
-    "date": "2026-10-08",
-    "hash": "bc66431439a98585"
+    "date": "2026-10-16",
+    "hash": "6560fff6460842cc"
   },
   "/downtown": {
-    "date": "2026-10-12",
-    "hash": "e2c61d532255b8b0"
+    "date": "2026-10-15",
+    "hash": "01833d0becfae62e"
   },
   "/downtown/verify": {
     "date": "2026-10-09",
@@ -60,16 +64,20 @@
     "hash": "144ea05a1e2bf78e"
   },
   "/elric": {
-    "date": "2026-10-03",
-    "hash": "d0984c1d217f6bc6"
+    "date": "2026-10-16",
+    "hash": "139c64d414a62f5a"
   },
   "/explorer": {
-    "date": "2026-10-10",
-    "hash": "537519034b908516"
+    "date": "2026-10-16",
+    "hash": "6a020cf72c46bd3a"
   },
   "/explorer/base": {
-    "date": "2026-10-11",
-    "hash": "1c511badbc63e59f"
+    "date": "2026-10-16",
+    "hash": "a497ba714bfee07b"
+  },
+  "/explorer/calls": {
+    "date": "2026-10-17",
+    "hash": "ee985cc638fb853c"
   },
   "/imprint": {
     "date": "2026-09-29",
@@ -80,12 +88,12 @@
     "hash": "d8174ca96bbf7854"
   },
   "/privacy": {
-    "date": "2026-10-02",
-    "hash": "67fe4a635e3bf646"
+    "date": "2026-10-16",
+    "hash": "3bac789e1eb0b46c"
   },
   "/privacy-choices": {
-    "date": "2026-09-29",
-    "hash": "7fa8043ba4732b0d"
+    "date": "2026-10-16",
+    "hash": "7285e2c1c86760f1"
   },
   "/security": {
     "date": "2026-09-29",

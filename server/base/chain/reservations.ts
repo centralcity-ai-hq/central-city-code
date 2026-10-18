@@ -20,8 +20,12 @@ import { randomUUID } from 'node:crypto';
 import type { Transaction } from '../../database.js';
 import type { Address } from '../../../shared/base/chains.js';
 
-/** `withdrawal`: an owner withdrawal (migration 89), holder ref = the withdrawal id. */
-export type HolderKind = 'payment' | 'fleet_job' | 'withdrawal';
+/**
+ * `withdrawal`: an owner withdrawal (migration 89), holder ref = the withdrawal id. `float`: a Feed
+ * pay float top-up (migration 110), holder ref = its operation key; it moves the agent's USDC into
+ * its own spender account, so the calendar counter never counts it.
+ */
+export type HolderKind = 'payment' | 'fleet_job' | 'withdrawal' | 'float';
 export type ReservationState = 'held' | 'consumed' | 'released';
 
 /**

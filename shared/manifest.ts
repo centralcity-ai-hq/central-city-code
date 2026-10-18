@@ -120,8 +120,12 @@ const slug = (max = 63) =>
     .min(1)
     .max(max)
     .regex(/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/, 'Use lowercase letters, digits and inner hyphens.');
-const text = (max: number) => z.string().trim().max(max);
-const requiredText = (max: number) => z.string().trim().min(1).max(max);
+// U+0000 is refused with a 400: Postgres jsonb cannot store it, so the save would fail with a 500.
+const NO_NUL = /^[^\u0000]*$/;
+const text = (max: number) =>
+  z.string().trim().max(max).regex(NO_NUL, 'Remove control characters.');
+const requiredText = (max: number) =>
+  z.string().trim().min(1).max(max).regex(NO_NUL, 'Remove control characters.');
 const mediaType = z
   .string()
   .max(100)

@@ -116,14 +116,24 @@ test('a person claims an AI-owned workspace and approves a cross-owner request',
   await agents.click();
   await expect(page.getByText('Scout').first()).toBeVisible();
 
-  // The incoming request is clearly labelled as from another person; the person approves it.
+  // The incoming request is clearly labelled as from another person (External, with their
+  // workspace); the person approves it.
   await openAdvanced(page, 'Agent permissions');
-  const panel = page.getByRole('region', { name: 'Connections with other people' });
-  await expect(panel.getByText('Bravo · Peer Lab')).toBeVisible();
-  await expect(panel.getByText('Another person', { exact: true })).toBeVisible();
-  await panel.getByRole('button', { name: 'Approve connection request from Bravo' }).click();
-  await expect(panel.getByText('Connection approved.')).toBeVisible();
-  await expect(panel.getByText('Connected')).toBeVisible();
+  const requests = page.getByRole('region', { name: 'Waiting for your approval', exact: true });
+  const request = requests.getByRole('listitem').filter({ hasText: 'Bravo' });
+  await expect(request.getByText('Bravo', { exact: true }).first()).toBeVisible();
+  await expect(request.getByText(/^Peer Lab · received /)).toBeVisible();
+  await expect(request.getByText('External', { exact: true })).toBeVisible();
+  await request.getByRole('button', { name: 'Approve connection request from Bravo' }).click();
+  const others = page.getByRole('region', { name: 'With other people', exact: true });
+  await expect(others.getByText('Connection approved.')).toBeVisible();
+  await expect(
+    others
+      .getByRole('list', { name: 'Connections with other people' })
+      .getByRole('listitem')
+      .filter({ hasText: 'Bravo' }),
+  ).toContainText('Connected');
+  await expect(requests).toHaveCount(0);
 
   // The peer AI can now message Scout; the co-owner sees it in the AI workspace.
   await tool(page.request, peer.workspace_key, 'city_send_message', {

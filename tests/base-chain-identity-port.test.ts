@@ -9,6 +9,7 @@ import {
   BASE_MIGRATION_SQL,
   BASE_PAYMENTS_MIGRATION_SQL,
   BASE_SHARED_ADDITIONS_SQL,
+  BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL,
   baseShortIdsMigration,
 } from '../server/base/schema.js';
 import { BASE_SEPOLIA, baseNetwork, type BaseNetwork } from '../shared/base/chains.js';
@@ -64,6 +65,7 @@ test(
     await pg.exec(BASE_PAYMENTS_MIGRATION_SQL);
     await pg.exec(baseShortIdsMigration.sql);
     await pg.exec(BASE_SHARED_ADDITIONS_SQL);
+    await pg.exec(BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL);
     const db: Database = {
       query: (sql, params) => pg.query(sql, params) as never,
       exec: (sql) => pg.exec(sql),
@@ -183,6 +185,7 @@ test(
     await pg.exec(BASE_MIGRATION_SQL);
     await pg.exec(BASE_PAYMENTS_MIGRATION_SQL);
     await pg.exec(BASE_SHARED_ADDITIONS_SQL);
+    await pg.exec(BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL);
     const db: Database = {
       query: (sql, params) => pg.query(sql, params) as never,
       exec: (sql) => pg.exec(sql),
@@ -257,6 +260,7 @@ test(
     await pg.exec(BASE_MIGRATION_SQL);
     await pg.exec(BASE_PAYMENTS_MIGRATION_SQL);
     await pg.exec(BASE_SHARED_ADDITIONS_SQL);
+    await pg.exec(BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL);
     const db: Database = {
       query: (sql, params) => pg.query(sql, params) as never,
       exec: (sql) => pg.exec(sql),
@@ -368,6 +372,7 @@ test(
     await pg.exec(BASE_MIGRATION_SQL);
     await pg.exec(BASE_PAYMENTS_MIGRATION_SQL);
     await pg.exec(BASE_SHARED_ADDITIONS_SQL);
+    await pg.exec(BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL);
     const db: Database = {
       query: (sql, params) => pg.query(sql, params) as never,
       exec: (sql) => pg.exec(sql),
@@ -458,6 +463,7 @@ test(
     await pg.exec(BASE_MIGRATION_SQL);
     await pg.exec(BASE_PAYMENTS_MIGRATION_SQL);
     await pg.exec(BASE_SHARED_ADDITIONS_SQL);
+    await pg.exec(BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL);
     const db: Database = {
       query: (sql, params) => pg.query(sql, params) as never,
       exec: (sql) => pg.exec(sql),
@@ -573,6 +579,7 @@ test(
     await pg.exec(BASE_MIGRATION_SQL);
     await pg.exec(BASE_PAYMENTS_MIGRATION_SQL);
     await pg.exec(BASE_SHARED_ADDITIONS_SQL);
+    await pg.exec(BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL);
     const db: Database = {
       query: (sql, params) => pg.query(sql, params) as never,
       exec: (sql) => pg.exec(sql),
@@ -688,6 +695,7 @@ async function forkSetup(t: { after(fn: () => unknown): void }, agentId: string,
   await pg.exec(BASE_MIGRATION_SQL);
   await pg.exec(BASE_PAYMENTS_MIGRATION_SQL);
   await pg.exec(BASE_SHARED_ADDITIONS_SQL);
+  await pg.exec(BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL);
   const db: Database = {
     query: (sql, params) => pg.query(sql, params) as never,
     exec: (sql) => pg.exec(sql),

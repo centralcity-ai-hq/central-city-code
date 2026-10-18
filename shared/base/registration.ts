@@ -14,6 +14,8 @@ export interface RegistrationFile {
   active: boolean;
   registrations: Array<{ agentId: number | string; agentRegistry: string }>;
   supportedTrust: string[];
+  /** When the registration last changed, Unix seconds (8004scan's freshness and completeness). */
+  updatedAt?: number;
 }
 
 export interface RegistrationInput {
@@ -22,6 +24,10 @@ export interface RegistrationInput {
   image?: string;
   cardUrl: string;
   a2aVersion?: string;
+  /** The agent's public page (its passport), listed as the `web` service. */
+  webUrl?: string;
+  /** When the registration last changed, ms since epoch; written as Unix seconds. */
+  updatedAtMs?: number;
   /** Confirmed on-chain identities of this agent. */
   identities: Array<{ chainId: number; registry: string; erc8004AgentId: string }>;
 }
@@ -88,6 +94,7 @@ export function buildRegistrationFile(input: RegistrationInput): RegistrationFil
         endpoint: input.cardUrl,
         ...(input.a2aVersion ? { version: input.a2aVersion } : {}),
       },
+      ...(input.webUrl ? [{ name: 'web', endpoint: input.webUrl }] : []),
     ],
     x402Support: false,
     active: true,
@@ -96,5 +103,8 @@ export function buildRegistrationFile(input: RegistrationInput): RegistrationFil
       agentRegistry: `eip155:${identity.chainId}:${identity.registry}`,
     })),
     supportedTrust: ['reputation'],
+    ...(Number.isFinite(input.updatedAtMs) && Math.floor((input.updatedAtMs ?? 0) / 1000) > 0
+      ? { updatedAt: Math.floor((input.updatedAtMs ?? 0) / 1000) }
+      : {}),
   };
 }

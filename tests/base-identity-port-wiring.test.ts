@@ -12,12 +12,15 @@ import {
 import type { Database } from '../server/database.js';
 import {
   BASE_IDENTITY_PROVISIONAL_SQL,
+  BASE_IDENTITY_HANDOVER_BACKOFF_SQL,
+  BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL,
   BASE_MIGRATION_SQL,
   BASE_PAYMENTS_MIGRATION_SQL,
   baseShortIdsMigration,
 } from '../server/base/schema.js';
 import {
   createIdentityService,
+  HANDOVER_BACKOFF_MAX_MS,
   handoverKey,
   registerKey,
   type IdentityEvent,
@@ -403,6 +406,8 @@ async function setup(
   await pg.exec(BASE_PAYMENTS_MIGRATION_SQL);
   await pg.exec(baseShortIdsMigration.sql);
   await pg.exec(BASE_IDENTITY_PROVISIONAL_SQL);
+  await pg.exec(BASE_IDENTITY_HANDOVER_BACKOFF_SQL);
+  await pg.exec(BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL);
   const db: Database = {
     query: (sql, params) => pg.query(sql, params) as never,
     exec: (sql) => pg.exec(sql),
@@ -532,11 +537,12 @@ async function setup(
     },
   };
   const logs: IdentityEvent[] = [];
+  const clock = { at: 2_000_000 };
   const svc = createIdentityService({
     db,
     chain: traced,
     env,
-    now: () => 2_000_000,
+    now: () => clock.at,
     log: (event) => logs.push(event),
   });
   const row = async () =>
@@ -573,6 +579,7 @@ async function setup(
     ).rows[0];
   return {
     svc,
+    clock,
     row,
     ops,
     sent,
@@ -737,6 +744,8 @@ for (const variant of [
     // Further advances only try to send the bound replacement: the real port has nothing stored
     // under it, so it stops at the signer lookup (no keys here); the key never moves on.
     for (let i = 0; i < 2; i++) {
+      // Each try waits out the backoff of the refusal before it (the same key every time).
+      ctx.clock.at += HANDOVER_BACKOFF_MAX_MS;
       const again = await ctx.svc.advance(AGENT, BASE_MAINNET);
       assert.equal(again.state, 'submitted');
       r = await ctx.row();

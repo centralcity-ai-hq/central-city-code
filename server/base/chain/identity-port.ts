@@ -36,6 +36,7 @@ import {
   SubmitError,
   refreshFinality,
   safeHead,
+  settledHead,
   headIsCanonical,
   type Bundler,
   type ChainOperationStore,
@@ -60,6 +61,17 @@ export interface IdentityPortDeps {
   signerOf(keyRef: string): Promise<Address>;
   /** Fee budget per identity operation (wei); required on mainnet. */
   maxCostWeiCap?: bigint;
+  /**
+   * The client `settledHeads` reads its hints with (a longer shared head cache, the second
+   * endpoint first; runtime.ts). Defaults to `client`.
+   */
+  hintClient?: PublicClient;
+  /**
+   * The client `identityAt` reads the finalized block with (the configured endpoint first; runtime.ts):
+   * an older finalized block from a lagging second node would read as evidence_behind. Defaults
+   * to `client`.
+   */
+  finalizedClient?: PublicClient;
 }
 
 /**
@@ -165,6 +177,12 @@ export interface IdentityEvidencePort extends IdentityChainPort {
    * when ownerOf reverts at that block (no such token), UNAVAILABLE when a read fails.
    */
   identityAt(input: IdentityAtInput): Promise<IdentitySnapshot>;
+  /**
+   * Hints for the identity service's settling gate: the safe and the settled (finalized on mainnet)
+   * head numbers, each null when it cannot be read. Read only, possibly shared for a while and
+   * from the second endpoint: never evidence, only "not yet" or "look now".
+   */
+  settledHeads(chainId: BaseChainId): Promise<{ safe: bigint | null; finalized: bigint | null }>;
 }
 
 export class IdentityPortError extends Error {
@@ -538,11 +556,18 @@ export function createIdentityChainPort(deps: IdentityPortDeps): IdentityEvidenc
     return (await nonceUsers(row)).landed ?? row;
   }
 
-  /** Reconciles the operation stored under a key, reported as its step's real outcome. */
+  /**
+   * Reconciles the operation stored under a key, reported as its step's real outcome. A stored
+   * operation that was never authorized for broadcast (queued: a crash or a failed write between
+   * store and the authority check) is not reported: null sends the caller down its submit path,
+   * where submitOperation runs the authority check and broadcasts exactly the stored operation at
+   * most once (queued → submitted compare-and-set). Reconciliation alone never sends a queued row.
+   */
   async function reconcileStep(key: string): Promise<IdentityChainOp | null> {
     const stored = await deps.operations.get(key);
     if (!stored) return null;
     checkStoredNetwork(stored);
+    if (stored.status === 'queued') return null;
     return describe(await outcomeOf(await refreshed(stored)));
   }
 
@@ -644,7 +669,7 @@ export function createIdentityChainPort(deps: IdentityPortDeps): IdentityEvidenc
       };
       // Live, never the shared head (rpc-budget.ts): the hand-over may have been declared final by
       // another worker a moment ago, and an older finalized block would read as evidence_behind.
-      const client = liveReads(deps.client);
+      const client = liveReads(deps.finalizedClient ?? deps.client);
       const block = await rpc(() => client.getBlock({ blockTag: 'finalized' }));
       if (block.number === null || block.number === undefined || !block.hash)
         throw new IdentityPortError('BLOCK_UNKNOWN', 'The finalized block has no number or hash.');
@@ -681,6 +706,16 @@ export function createIdentityChainPort(deps: IdentityPortDeps): IdentityEvidenc
         blockNumber: blockNumber.toString(10),
         blockHash,
       };
+    },
+
+    async settledHeads(chainId) {
+      checkNetwork(chainId);
+      const reader = { network: deps.network, client: deps.hintClient ?? deps.client };
+      const [safe, finalized] = await Promise.all([
+        safeHead(reader).catch(() => null),
+        settledHead(reader).catch(() => null),
+      ]);
+      return { safe: safe?.number ?? null, finalized: finalized?.number ?? null };
     },
 
     async transfer(input) {

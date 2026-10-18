@@ -73,6 +73,13 @@ export interface OnBaseTotals {
   new24h: number;
   finalizingNow: number;
   /**
+   * Rated agents: distinct Base IDs with at least one rating sent through Central City whose
+   * operation is FINAL on Base (server/base/explorer/store.ts RATED_AGENTS_SQL), from Central
+   * City's own records, every rater counted. Shared by every instance and counted about every
+   * 30 s; null only when it could not be counted yet.
+   */
+  ratedAgents: number | null;
+  /**
    * The Base block the answer's owners were read at and when (ms epoch, the server's clock): the
    * oldest read in the answer, with its true time, also when a later read failed. null only when
    * the server has neither read Base nor stored any evidence yet.
@@ -155,7 +162,10 @@ export interface OnBaseReputation {
    */
   readAtBlock: number | null;
   readAt: number | null;
-  /** Entries on Base (revoked ones not counted); 0 when not read. */
+  /**
+   * Entries on Base (revoked ones not counted); 0 when not read. Above the server's read bound
+   * (server/base/explorer/head.ts) it is the registry's count, revoked ones included.
+   */
   count: number;
   /**
    * At most ON_BASE_REPUTATION_MAX entries: the registry lists them per client in the order the

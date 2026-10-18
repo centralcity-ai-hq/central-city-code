@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { formatUnits, parseUnits } from 'viem';
 import { ApiError } from '../../api';
 import { readWallet, type WalletView } from '../../base/wallet/api';
+import { usdcText } from '../../base/wallet/limits';
 import {
   addressOrNull,
   carryAnchorOver,
@@ -11,10 +12,12 @@ import {
   createWithdrawal,
   discardUnsigned,
   dropLaneRecord,
+  keyFor,
   laneFor,
   laneRefusal,
   lanesOnServer,
   lanesRemembered,
+  newRequestKey,
   readAnchor,
   readLaneRecords,
   reconcileSignature,
@@ -101,7 +104,8 @@ const failure = (error: unknown) =>
 const short = (value: string) => `${value.slice(0, 6)}…${value.slice(-4)}`;
 const shown = (raw: bigint, token: WithdrawalToken) => {
   const text = formatUnits(raw, DECIMALS[token]);
-  return token === 'USDC' ? Number(text).toFixed(2) : text;
+  // Exact: every digit that is signed is shown (at least two decimals).
+  return token === 'USDC' ? usdcText(raw) : text;
 };
 
 export function WalletWithdrawScreen({ agent, onBack, backLabel }: AgentScreenProps) {
@@ -123,7 +127,7 @@ export function WalletWithdrawScreen({ agent, onBack, backLabel }: AgentScreenPr
   /** The withdrawal signed just now, for its History line to show at once. */
   const [signed, setSigned] = useState<SignedNow | null>(null);
   // One key per withdrawal the owner means: a retry of the same form never makes a second one.
-  const key = useRef(crypto.randomUUID());
+  const key = useRef(newRequestKey());
   // The typed password is dropped when the page is hidden or left, after IDLE_LOCK_MS without
   // input, or when this screen closes; a signature made meanwhile is dropped, never sent.
   const session = useRef(0);
@@ -199,7 +203,7 @@ export function WalletWithdrawScreen({ agent, onBack, backLabel }: AgentScreenPr
    * key: with the old key, an edited withdrawal would be refused as another use of it.
    */
   async function startOver(unsigned: string | null) {
-    key.current = crypto.randomUUID();
+    key.current = newRequestKey();
     if (unsigned) await discardUnsigned(agent.id, unsigned);
   }
 
@@ -286,11 +290,10 @@ export function WalletWithdrawScreen({ agent, onBack, backLabel }: AgentScreenPr
     setSigned(null);
     let prepared: string | null = null;
     try {
+      const body = { token, amount: raw, to: destination };
       const request = await createWithdrawal(agent.id, {
-        token,
-        amount: raw,
-        to: destination,
-        idempotencyKey: key.current,
+        ...body,
+        idempotencyKey: keyFor(key.current, body),
       });
       prepared = request.withdrawalId;
       const laned = request.lanes === true;
@@ -376,7 +379,7 @@ export function WalletWithdrawScreen({ agent, onBack, backLabel }: AgentScreenPr
       }
       setView(sent);
       // A new withdrawal from here on gets a new key.
-      key.current = crypto.randomUUID();
+      key.current = newRequestKey();
       setPhase({
         k: 'status',
         withdrawalId: phase.request.withdrawalId,

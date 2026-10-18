@@ -1,0 +1,392 @@
+/*
+ * The Agent Explorer's Service calls view (/explorer/calls; the approved mockup
+ * explorer-service-calls.html). The explorer's own tokens (verify.css) and On Base's pieces
+ * (on-base.css): stats, search, pills. Sizes follow the shipped explorer pages: cards radius 12,
+ * table text 13, mono 12, rows 52 high.
+ */
+.sc-main {
+  --sc-new: color-mix(in srgb, var(--v8-accent) 9%, transparent);
+  --sc-scrim: rgba(9, 9, 11, 0.36);
+}
+[data-theme='dark'] .sc-main,
+[data-theme='dark'] .sc-scrim {
+  --sc-scrim: rgba(0, 0, 0, 0.6);
+}
+
+/* Five numbers: the On Base layout (on-base.css .ob-main .ll-stats). */
+/* Hashes and addresses are searched here: the mono face, as in the mockup. */
+.sc-main .vf-input.sc-query {
+  font-family: var(--font-mono);
+  font-size: 15px;
+}
+.sc-hint {
+  margin: -8px 0 12px !important;
+  color: var(--v8-muted);
+  font-size: 12.5px;
+}
+
+.sc-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  margin-top: 8px;
+  border: 1px solid var(--v8-border);
+  border-radius: 12px;
+  background: var(--v8-card);
+}
+.sc-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--v8-border);
+}
+.sc-panel-head h2 {
+  flex: 1;
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+}
+.sc-shown {
+  color: var(--v8-muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.sc-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--v8-muted);
+  font-size: 12px;
+}
+
+.sc-tbl {
+  overflow-x: auto;
+}
+.sc-tbl table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.sc-tbl th {
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--v8-border);
+  background: var(--v8-quiet);
+  color: var(--v8-muted);
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  white-space: nowrap;
+}
+.sc-tbl td {
+  height: 52px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--v8-border);
+  white-space: nowrap;
+}
+.sc-tbl tbody tr:last-child td {
+  border-bottom: 0;
+}
+.sc-tbl tbody tr {
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.sc-tbl tbody tr:hover {
+  background: var(--v8-quiet);
+}
+.sc-tbl tbody tr.sc-sk-row {
+  cursor: default;
+}
+.sc-tbl tbody tr.sc-fresh {
+  animation: sc-fresh 1.6s ease-out;
+}
+@keyframes sc-fresh {
+  from {
+    background: var(--sc-new);
+  }
+  to {
+    background: transparent;
+  }
+}
+.sc-tbl a {
+  color: var(--v8-accent-text);
+  text-decoration: none;
+}
+.sc-tbl a:hover {
+  text-decoration: underline;
+}
+.sc-r {
+  text-align: right !important;
+}
+.sc-mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.sc-num {
+  font-variant-numeric: tabular-nums;
+}
+.sc-ago {
+  color: var(--v8-muted);
+}
+/* The service: the row's own button (keyboard), in the row's look. */
+.sc-open {
+  display: block;
+  max-width: 240px;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 500;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.sc-open:focus-visible,
+.sc-tbl a:focus-visible,
+.sc-pager button:focus-visible,
+.sc-x:focus-visible,
+.sc-scan:focus-visible {
+  outline: 2px solid var(--v8-accent);
+  outline-offset: 2px;
+}
+.sc-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--v8-live-bg);
+  color: var(--v8-live);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.sc-pager {
+  display: flex;
+  justify-content: center;
+  gap: 4px;
+  margin-top: auto;
+  padding: 12px;
+  border-top: 1px solid var(--v8-border);
+}
+.sc-pager button {
+  min-width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--v8-muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.sc-pager button[aria-current='page'] {
+  background: var(--v8-inset);
+  color: var(--v8-text);
+  font-weight: 600;
+}
+.sc-gap {
+  align-self: center;
+  padding: 0 4px;
+  color: var(--v8-muted);
+}
+
+/* The details sheet: from the right, over a scrim. */
+.sc-scrim {
+  position: fixed;
+  inset: 0;
+  /* Over the site header, like the Feed's sheets. */
+  z-index: 1001;
+  display: flex;
+  justify-content: flex-end;
+  background: var(--sc-scrim, rgba(9, 9, 11, 0.36));
+  animation: sc-fade 0.2s ease-out;
+}
+.sc-sheet {
+  --v8-card: var(--bg-surface-elevated, var(--surface));
+  --v8-border: var(--border);
+  --v8-text: var(--text-primary, var(--text));
+  --v8-muted: var(--text-muted);
+  --v8-accent: var(--accent, var(--primary));
+  --v8-accent-text: var(--accent-text, var(--link));
+  --v8-live: var(--status-live, var(--success));
+  --v8-live-bg: var(--status-live-bg, var(--success-tint));
+  width: min(440px, 100%);
+  height: 100%;
+  overflow-y: auto;
+  padding: 22px 22px 28px;
+  background: var(--v8-card);
+  box-shadow: var(--shadow-floating);
+  color: var(--v8-text);
+  font-size: 14px;
+  animation: sc-in 0.2s ease-out;
+}
+@keyframes sc-fade {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes sc-in {
+  from {
+    transform: translateX(24px);
+  }
+}
+.sc-sheet p {
+  margin: 0;
+}
+.sc-sheet-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.sc-sheet-head h2 {
+  flex: 1;
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+}
+.sc-x {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--v8-border);
+  border-radius: 8px;
+  background: var(--v8-card);
+  color: inherit;
+  cursor: pointer;
+}
+.sc-amount {
+  margin: 8px 0 2px !important;
+  font-size: 32px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.sc-amount small {
+  color: var(--v8-muted);
+  font-size: 15px;
+  font-weight: 500;
+}
+.sc-svc {
+  color: var(--v8-muted);
+}
+.sc-dl {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  margin: 18px 0 0;
+}
+.sc-dl dt,
+.sc-dl dd {
+  margin: 0;
+  padding: 11px 0;
+  border-top: 1px solid var(--v8-border);
+  font-size: 13px;
+}
+.sc-dl dt {
+  padding-right: 16px;
+  color: var(--v8-muted);
+}
+.sc-dl dd {
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+.sc-sheet a {
+  color: var(--v8-accent-text);
+  text-decoration: none;
+}
+.sc-sheet a:hover {
+  text-decoration: underline;
+}
+.sc-legs {
+  margin-top: 22px;
+}
+.sc-legs h3 {
+  margin: 0 0 8px;
+  color: var(--v8-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+.sc-leg {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--v8-border);
+  border-radius: 10px;
+  font-size: 13px;
+}
+.sc-leg span {
+  flex: 1;
+  min-width: 0;
+}
+.sc-leg em {
+  display: block;
+  color: var(--v8-muted);
+  font-size: 12px;
+  font-style: normal;
+}
+.sc-leg-note {
+  color: var(--v8-muted);
+  font-size: 12px;
+}
+.sc-sheet a.sc-scan {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 40px;
+  margin-top: 18px;
+  border: 1px solid var(--v8-border);
+  border-radius: 8px;
+  color: var(--v8-text);
+  font-weight: 500;
+}
+.sc-sheet a.sc-scan:hover {
+  background: var(--bg-surface, var(--surface-sunken));
+  text-decoration: none;
+}
+
+/* Phones: Block, Provider and Status give way. */
+@media (max-width: 760px) {
+  .sc-tbl th:nth-child(4),
+  .sc-tbl td:nth-child(4),
+  .sc-tbl th:nth-child(6),
+  .sc-tbl td:nth-child(6),
+  .sc-tbl th:nth-child(8),
+  .sc-tbl td:nth-child(8) {
+    display: none;
+  }
+  .sc-panel-head {
+    flex-wrap: wrap;
+    gap: 4px 14px;
+    padding: 14px 16px;
+  }
+  .sc-panel-head h2 {
+    flex-basis: 100%;
+  }
+  .sc-tbl th,
+  .sc-tbl td {
+    padding: 0 10px;
+  }
+  .sc-open {
+    max-width: 140px;
+  }
+  .sc-main .vf-input.sc-query {
+    font-size: 13px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sc-tbl tbody tr.sc-fresh,
+  .sc-scrim,
+  .sc-sheet {
+    animation: none;
+  }
+  .sc-tbl tbody tr {
+    transition: none;
+  }
+}

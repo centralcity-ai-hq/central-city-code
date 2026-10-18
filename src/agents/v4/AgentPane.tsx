@@ -16,6 +16,7 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from 'react';
+import { AGENT_NAME_MAX } from '../../../shared/agent-name';
 import type { Agent, Snapshot } from '../../../shared/types';
 import { api } from '../../api';
 import { relativeTime } from '../../messagesV2';
@@ -37,6 +38,7 @@ import {
 } from '../useAgentAnswering';
 import { useWalletRow } from '../../base/wallet/useWalletRow';
 import './agent-pane.css';
+import { useOpenInvitations } from './InvitationsScreen';
 
 export interface AgentPaneHandle {
   focus: () => void;
@@ -115,13 +117,16 @@ export const AgentPane = forwardRef<AgentPaneHandle, AgentPaneProps>(function Ag
   const heading = useRef<HTMLHeadingElement>(null);
   const message = useRef<HTMLButtonElement>(null);
   const chat = usePrivateRoom(agent, onOpenRoom, onOpenElric);
+  // Open room invitations: counted on the Messages row, answered in Messages.
+  const invitations = useOpenInvitations(agent.id, stack[stack.length - 1]);
   // Whether the agent can reply (the Auto-reply row): the server's word on Auto-reply and the
   // runtime, read while open. The model's name is read only while Auto-reply answers.
   const answering = useAgentAnswering(agent.revokedAt ? null : agent.id);
-  // The agent's wallet (test network): its balance or "Set up"; no row while wallets are off.
-  const wallet = useWalletRow(agent.revokedAt ? null : agent.id);
   const pane = useRef<HTMLElement>(null);
   const top = stack[stack.length - 1]!;
+  // The agent's wallet (test network): its balance or "Set up"; no row while wallets are off.
+  // Read again on each return home, after setup, a withdrawal or a payment in its screens.
+  const wallet = useWalletRow(agent.revokedAt ? null : agent.id, top === 'home');
   const autoReplyOn = Boolean(answering?.can && answering.auto_reply === 'on');
   const modelLabel = useAutoReplyModel(agent.id, autoReplyOn && !agent.revokedAt && top === 'home');
   const autoReply = autoReplyRowState(agent.name, agent.revokedAt ? null : answering, modelLabel);
@@ -334,7 +339,14 @@ export const AgentPane = forwardRef<AgentPaneHandle, AgentPaneProps>(function Ag
           <Row
             label="Messages"
             k="row-messages"
-            badge={unread ? (unread > 99 ? '99+' : String(unread)) : undefined}
+            // Unread messages and invitation requests (both answered in Messages).
+            badge={
+              unread + (invitations ?? 0)
+                ? unread + (invitations ?? 0) > 99
+                  ? '99+'
+                  : String(unread + (invitations ?? 0))
+                : undefined
+            }
             onClick={() => open('messages')}
           />
           <Row
@@ -404,6 +416,7 @@ export const AgentPane = forwardRef<AgentPaneHandle, AgentPaneProps>(function Ag
       onChanged: () => onChanged?.(),
       onBack: back,
       onOpen: open,
+      onOpenRoom,
       backLabel,
     });
   }
@@ -520,7 +533,7 @@ function RenameScreen({
           className="ap4-field"
           aria-label="Name"
           autoFocus
-          maxLength={80}
+          maxLength={AGENT_NAME_MAX}
           value={name}
           onChange={(event) => setName(event.target.value)}
         />

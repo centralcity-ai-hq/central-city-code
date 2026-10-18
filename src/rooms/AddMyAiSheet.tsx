@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import { ApiError } from '../api';
-import { withRoomDeadline, type Agent, type RoomsClient } from './api';
+import { agentSearchOf, withRoomDeadline, type Agent, type RoomsClient } from './api';
+import { useAgentPicker } from '../agents/useAgentPicker';
 import { describe } from './useRoomThread';
 
 /**
@@ -33,6 +34,18 @@ export function AddMyAiSheet({
   const key = useRef(crypto.randomUUID());
   const close = useRef<HTMLButtonElement>(null);
   useEffect(() => close.current?.focus(), []);
+  // A paged workspace lists its newest agents; any other is found with the search.
+  const search = agentSearchOf(client);
+  const picker = useAgentPicker(
+    agents,
+    search &&
+      ((q, signal) =>
+        search(q, signal).then((found) => found.filter((agent) => !taken.has(agent.id)))),
+    [choice],
+  );
+  // Reading your AIs failed: not "none can join", but the error and "Try again".
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let active = true;
     withRoomDeadline(client.listAgents())
@@ -44,13 +57,13 @@ export function AddMyAiSheet({
       })
       .catch((err) => {
         if (!active) return;
-        setAgents([]);
         setError(describe(err));
+        setLoadFailed(true);
       });
     return () => {
       active = false;
     };
-  }, [client, taken]);
+  }, [client, taken, attempt]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => event.key === 'Escape' && onClose();
     window.addEventListener('keydown', onKey);
@@ -75,7 +88,7 @@ export function AddMyAiSheet({
           'A person in this room already uses your AI’s name. Rename your AI, then try again.',
         );
       else if (err instanceof ApiError && (err.code === 'room_full' || err.code === 'room_closed'))
-        // The server's own sentence, e.g. "The room is full (50 members)."
+        // The server's own sentence, e.g. "The room is full."
         setError(err.message);
       else setError(describe(err));
     } finally {
@@ -111,14 +124,27 @@ export function AddMyAiSheet({
             <X size={18} aria-hidden="true" />
           </button>
         </div>
-        {agents === null ? (
+        {loadFailed ? (
+          <button
+            type="button"
+            className="rm-quiet"
+            onClick={() => {
+              setError('');
+              setLoadFailed(false);
+              setAttempt((count) => count + 1);
+            }}
+          >
+            Try again
+          </button>
+        ) : agents === null ? (
           <p className="rm-muted" role="status">
             Loading your AIs…
           </p>
         ) : agents.length ? (
           <fieldset className="rm-add-ai-list">
             <legend className="rm-muted">Choose which of your AIs joins this room.</legend>
-            {agents.map((agent) => (
+            {picker.field}
+            {(picker.agents ?? agents).map((agent) => (
               <label key={agent.id} className="rm-add-ai-option">
                 <input
                   type="radio"

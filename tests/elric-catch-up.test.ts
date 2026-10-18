@@ -26,7 +26,7 @@ type EvalCase = {
   id: string;
   messages: Array<{ seq: number; sender: string; text: string }>;
   model: string;
-  /** null: unparseable, reported as unavailable (never cached, allowance refunded). */
+  /** null: unparseable, reported as unavailable (never cached; a paid answer still counts). */
   expect: { decisions: CatchUpBullet[]; open_questions: CatchUpBullet[]; dropped: number } | null;
 };
 const CASES = (evalSet as { cases: EvalCase[] }).cases;
@@ -463,7 +463,7 @@ test('catch-up: a failed model call refunds the allowance and is not cached', as
   assert.equal((await f.usage(s.dana.operatorId))!.summary, 1);
 });
 
-test('catch-up: non-JSON model output is unavailable, refunded and not cached', async (t) => {
+test('catch-up: non-JSON model output is unavailable, not cached, and still counts', async (t) => {
   const lines: string[] = [];
   const f = await elricFixture(t, { log: (line) => lines.push(line) });
   const s = await catchUpScene(f);
@@ -475,7 +475,11 @@ test('catch-up: non-JSON model output is unavailable, refunded and not cached', 
   const body = res.json() as CatchUp;
   assert.equal(body.incomplete, 'unavailable');
   assert.equal(body.nothing_important, false, 'never reported as nothing important');
-  assert.equal((await f.usage(s.dana.operatorId))!.summary, 0, 'allowance given back');
+  assert.equal(
+    (await f.usage(s.dana.operatorId))!.summary,
+    1,
+    'a paid but unusable answer keeps the allowance spent',
+  );
   const global = await f.db.query<{ reserved_units: string }>(
     'SELECT reserved_units FROM elric_global_usage',
   );
@@ -489,6 +493,25 @@ test('catch-up: non-JSON model output is unavailable, refunded and not cached', 
   const again = await catchUp(f, s.dana, s.room, { after_seq: start });
   assert.equal(again.json().cached, false);
   assert.equal(again.json().nothing_important, true);
+});
+
+test('catch-up: paid unusable answers use up the allowance, then the call is refused', async (t) => {
+  const f = await elricFixture(t);
+  const s = await catchUpScene(f);
+  const start = await lastSeq(f, s.room);
+  await f.say(s.host, s.room, 'Let us decide tomorrow.', s.hostAgent);
+  const allowance = ELRIC_CONFIG.allowance.summary;
+  for (let i = 0; i < allowance; i++) {
+    f.small.push({ text: 'not json at all' });
+    const res = await catchUp(f, s.dana, s.room, { after_seq: start });
+    assert.equal(res.json().incomplete, 'unavailable', res.body);
+  }
+  assert.equal((await f.usage(s.dana.operatorId))!.summary, allowance);
+  const calls = f.adapterCalls();
+  f.small.push({ text: 'not json at all' });
+  const limited = await catchUp(f, s.dana, s.room, { after_seq: start });
+  assert.equal(limited.json().incomplete, 'limit', limited.body);
+  assert.equal(f.adapterCalls(), calls, 'no further paid model call');
 });
 
 test('catch-up: a failed settle is retried so the reservation is released', async (t) => {

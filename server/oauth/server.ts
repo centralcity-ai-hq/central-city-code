@@ -505,8 +505,21 @@ export async function registerOAuthRoutes(
     verified: pending.client_verified,
     redirectUri: pending.redirect_uri,
     scopes: pending.scopes,
+    continueUrl: continueUrl(pending),
     ...extra,
   });
+  /** The authorize request again, rebuilt from the stored row (the query itself is not kept). */
+  const continueUrl = (pending: PendingRow) =>
+    `/oauth/authorize?${new URLSearchParams({
+      response_type: 'code',
+      client_id: pending.client_id,
+      redirect_uri: pending.redirect_uri,
+      code_challenge: pending.code_challenge,
+      code_challenge_method: 'S256',
+      resource: pending.resource,
+      scope: pending.scopes.join(' '),
+      ...(pending.state === null ? {} : { state: pending.state }),
+    })}`;
   const cookieName = (id: string) => `cc_oauth_${id.replaceAll('-', '')}`;
   const cookieOptions = {
     httpOnly: true,

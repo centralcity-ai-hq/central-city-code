@@ -13,11 +13,13 @@ import { BASE_SEPOLIA, baseNetwork } from '../shared/base/chains.js';
 import {
   abandonBeforeBroadcast,
   refreshFinality,
+  SEARCH_PAGES_PER_REFRESH,
   type Bundler,
   type BundlerReceipt,
   type ChainOperationStore,
   type StoredOperation,
 } from '../server/base/chain/submit.js';
+import { MAX_LOG_RANGE_BLOCKS } from '../server/base/chain/rpc-budget.js';
 
 const network = baseNetwork(BASE_SEPOLIA)!;
 
@@ -193,6 +195,142 @@ test('a failing log lookup never concludes absence (stays reconciling)', async (
     },
   });
   assert.equal((await refreshFinality(deps(client, store), 'op:1'))?.status, 'reconciling');
+});
+
+test('the on-chain search pages at most 1,000 blocks per getLogs call and covers every block', async () => {
+  const store = memoryOps([consumed({ submittedBlock: '10' })]);
+  const ranges: Array<{ fromBlock: bigint; toBlock: bigint }> = [];
+  const client = chain({
+    head: 3_000n,
+    nonceLatest: 6n,
+    nonceAt: () => 6n,
+    logs: (range) => {
+      ranges.push(range);
+      // As the endpoint answers a wider range: refused (and the whole lookup is then unknown).
+      if (range.toBlock - range.fromBlock + 1n > MAX_LOG_RANGE_BLOCKS)
+        throw new Error('block range too large');
+      return [];
+    },
+  });
+  assert.equal((await refreshFinality(deps(client, store), 'op:1'))?.status, 'failed');
+  assert.ok(ranges.length > 1, 'paged');
+  assert.equal(ranges[0].fromBlock, 10n);
+  for (const [i, range] of ranges.entries()) {
+    assert.ok(range.toBlock - range.fromBlock + 1n <= MAX_LOG_RANGE_BLOCKS);
+    // Each search starts again at the submission block; within one, pages follow without a gap.
+    if (i > 0 && range.fromBlock !== 10n)
+      assert.equal(range.fromBlock, ranges[i - 1].toBlock + 1n, 'no gap, no overlap');
+  }
+});
+
+/** memoryOps plus the search cursor, as the Postgres store keeps it (never moved back). */
+function cursorOps(rows: StoredOperation[]) {
+  const store = memoryOps(rows);
+  const writes: Array<string | null> = [];
+  return Object.assign(store, {
+    writes,
+    async recordSearched(key: string, block: string | null) {
+      writes.push(block);
+      const row = store.rows.get(key)!;
+      const kept = row.searchedBlock ? BigInt(row.searchedBlock) : null;
+      const next =
+        block === null ? null : kept !== null && kept > BigInt(block) ? kept : BigInt(block);
+      store.rows.set(key, { ...row, searchedBlock: next === null ? null : next.toString(10) });
+    },
+  });
+}
+
+test('one refresh asks for at most SEARCH_PAGES_PER_REFRESH getLogs pages, however old the op', async () => {
+  // A day and more of Base blocks since submission: before, every refresh paged all of it.
+  const store = cursorOps([consumed({ submittedBlock: '10' })]);
+  const ranges: Array<{ fromBlock: bigint; toBlock: bigint }> = [];
+  let calls = 0;
+  const client = chain({
+    head: 50_000n,
+    nonceLatest: 6n,
+    nonceAt: () => 6n,
+    logs: (range) => {
+      calls++;
+      ranges.push(range);
+      return [];
+    },
+  });
+  const settled = 50_000n - 3n;
+  const pages = Number((settled - 10n) / MAX_LOG_RANGE_BLOCKS) + 1;
+  const refreshes = Math.ceil(pages / SEARCH_PAGES_PER_REFRESH);
+  for (let i = 1; i < refreshes; i++) {
+    const before = calls;
+    const row = await refreshFinality(deps(client, store), 'op:1');
+    assert.ok(calls - before <= SEARCH_PAGES_PER_REFRESH, `refresh ${i}: ${calls - before} calls`);
+    assert.equal(calls - before, SEARCH_PAGES_PER_REFRESH);
+    // Nothing concluded from a search that has not covered every block yet.
+    assert.equal(row?.status, 'reconciling', `refresh ${i}`);
+    assert.equal(
+      store.rows.get('op:1')!.searchedBlock,
+      (10n + BigInt(i * SEARCH_PAGES_PER_REFRESH) * MAX_LOG_RANGE_BLOCKS - 1n).toString(10),
+      'the cursor moves on by the pages searched',
+    );
+  }
+  // The last refresh covers the rest and only then concludes; the cursor is cleared.
+  const before = calls;
+  assert.equal((await refreshFinality(deps(client, store), 'op:1'))?.status, 'failed');
+  assert.ok(calls - before <= SEARCH_PAGES_PER_REFRESH);
+  assert.equal(calls, pages, 'every page asked for exactly once over all refreshes');
+  assert.equal(store.rows.get('op:1')!.searchedBlock, null);
+  // Every block from the submission to the settled head, without a gap or an overlap.
+  assert.equal(ranges[0].fromBlock, 10n);
+  assert.equal(ranges.at(-1)!.toBlock, settled);
+  for (let i = 1; i < ranges.length; i++)
+    assert.equal(ranges[i].fromBlock, ranges[i - 1].toBlock + 1n, 'no gap, no overlap');
+});
+
+test('a resumed search still finds an event far past the first refresh, and clears the cursor', async () => {
+  const store = cursorOps([consumed({ submittedBlock: '10' })]);
+  let calls = 0;
+  const client = chain({
+    head: 50_000n,
+    nonceLatest: 6n,
+    nonceAt: () => 6n,
+    tx: { blockNumber: 7_500n },
+    logs: ({ fromBlock, toBlock }) => {
+      calls++;
+      return fromBlock <= 7_500n && 7_500n <= toBlock
+        ? [
+            {
+              args: { success: true, actualGasUsed: 1n, actualGasCost: 2n },
+              transactionHash: TX,
+              blockNumber: 7_500n,
+            },
+          ]
+        : [];
+    },
+  });
+  assert.equal((await refreshFinality(deps(client, store), 'op:1'))?.status, 'reconciling');
+  assert.equal((await refreshFinality(deps(client, store), 'op:1'))?.status, 'reconciling');
+  const row = await refreshFinality(deps(client, store), 'op:1');
+  assert.equal(row?.status, 'final');
+  assert.equal(row?.blockNumber, '7500');
+  assert.equal(calls, 8, 'pages 1-8 (block 7,500 is in page 8), each asked once');
+  assert.equal(store.rows.get('op:1')!.searchedBlock, null);
+});
+
+test('without a stored cursor every refresh stays within the page budget and concludes nothing', async () => {
+  const store = memoryOps([consumed({ submittedBlock: '10' })]);
+  let calls = 0;
+  const client = chain({
+    head: 50_000n,
+    nonceLatest: 6n,
+    nonceAt: () => 6n,
+    logs: () => {
+      calls++;
+      return [];
+    },
+  });
+  for (let i = 0; i < 3; i++) {
+    const before = calls;
+    assert.equal((await refreshFinality(deps(client, store), 'op:1'))?.status, 'reconciling');
+    assert.equal(calls - before, SEARCH_PAGES_PER_REFRESH);
+  }
 });
 
 test('without a known submission block, absence is never concluded', async () => {

@@ -61,3 +61,39 @@ CREATE INDEX IF NOT EXISTS wake_outbox_due ON wake_outbox(next_attempt_at);
 export function registerWakeMigration(): void {
   registerMigration(wakeMigration);
 }
+
+/**
+ * Migration 142 `wake_unread_recount`: one-time recount of `wake_cursors.unread_count` (added by
+ * migration 26) from the mentions table. A person's read mark (POST /api/rooms/:room/read) used to
+ * set mentions read without lowering the count, so a person's count only grew and, at the backlog
+ * cap, their mentions stopped recording. The cursor moves to just below the lowest unread mention,
+ * as every ack does. Needs migration 26.
+ */
+export const wakeUnreadRecountMigration: Migration = {
+  version: 142,
+  name: 'wake_unread_recount',
+  sql: `
+UPDATE wake_cursors c SET
+  unread_count = (SELECT count(*) FROM mentions m WHERE m.agent_id = c.agent_id AND m.read_at IS NULL),
+  acked_mention_seq = GREATEST(c.acked_mention_seq, COALESCE(
+    (SELECT min(m.seq) - 1 FROM mentions m WHERE m.agent_id = c.agent_id AND m.read_at IS NULL),
+    c.next_mention_seq - 1));
+`,
+  report: {
+    event: 'wake_unread_recount',
+    async measure(tx) {
+      const row = (
+        await tx.query<{ drifted: number | string }>(
+          `SELECT count(*) AS drifted FROM wake_cursors c WHERE c.unread_count <>
+             (SELECT count(*) FROM mentions m WHERE m.agent_id = c.agent_id AND m.read_at IS NULL)`,
+        )
+      ).rows[0];
+      return { drifted: Number(row?.drifted ?? 0) };
+    },
+  },
+};
+
+/** Registered by createApp after migration 26 (it recounts the column 26 adds). */
+export function registerWakeUnreadRecountMigration(): void {
+  registerMigration(wakeUnreadRecountMigration);
+}

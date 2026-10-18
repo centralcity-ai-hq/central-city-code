@@ -7,6 +7,7 @@ import { BASE_MAINNET, BASE_NETWORKS, BASE_SEPOLIA } from '../shared/base/chains
 import {
   LIMIT_PERIOD_SECONDS,
   LIMIT_PERMISSION_END,
+  berlinDayStart,
   nextBerlinMidnight,
   onchainAllowance,
   permissionToJson,
@@ -68,8 +69,10 @@ const AGENT = '11111111-1111-4111-8111-111111111111';
 const WALLET = expectedWallet(OWNER, AGENT);
 const OTHER_WALLET = getAddress(`0x${'6b'.repeat(20)}`);
 const SPENDER = getAddress(`0x${'3c'.repeat(20)}`);
-// Saturday 10 Oct 2026, 14:00 in Berlin (CEST); the next Berlin midnight is Sunday 00:00.
+// Saturday 10 Oct 2026, 14:00 in Berlin (CEST): the day started at Saturday 00:00, the next
+// Berlin midnight is Sunday 00:00.
 const NOW = Date.UTC(2026, 9, 10, 12, 0, 0);
+const TODAY = Date.UTC(2026, 9, 9, 22, 0, 0) / 1000;
 const MIDNIGHT = Date.UTC(2026, 9, 10, 22, 0, 0) / 1000;
 const CAP = '20000000';
 
@@ -84,7 +87,7 @@ function permission(
     token: USDC,
     allowance: onchainAllowance(BigInt(CAP), model),
     period: LIMIT_PERIOD_SECONDS[period],
-    start: MIDNIGHT,
+    start: TODAY,
     end: LIMIT_PERMISSION_END,
     salt: 0x1234_5678_9abc_def0_1234_5678_9abc_def0n,
     extraData: '0x',
@@ -123,7 +126,7 @@ test('the exact limit passes (half, the product owner’s model), and the owner 
     const hash = spendPermissionHash(WALLET_CHAIN_ID, p);
     assert.equal(checked.hash, hash);
     assert.equal(checked.allowance, model === 'half' ? 10_000_000n : 20_000_000n);
-    assert.equal(checked.start, MIDNIGHT);
+    assert.equal(checked.start, TODAY);
     assert.deepEqual(checked.typedData, smartWalletMessageTypedData(WALLET_CHAIN_ID, WALLET, hash));
     // Real signing: the signature recovers to the owner over exactly that typed data.
     const owner = privateKeyToAccount(generatePrivateKey());
@@ -150,19 +153,32 @@ test('the exact limit passes (half, the product owner’s model), and the owner 
       now: NOW,
     });
   }
-  // Prepared seconds before midnight, the server may already see the midnight after.
-  const late = permission({ start: MIDNIGHT + 86_400 });
-  checkLimit({
-    prepared: prepared(late),
-    wallet: WALLET,
-    owner: OWNER,
-    agentId: AGENT,
-    spender: SPENDER,
-    capRaw: CAP,
-    period: 'day',
-    now: MIDNIGHT * 1000 - 30_000,
-  });
-  assert.equal(nextBerlinMidnight(MIDNIGHT * 1000), MIDNIGHT + 86_400);
+  // Seconds before midnight the server may already be on the next day (its start is midnight),
+  // and seconds after it still on the previous one (its start is yesterday's midnight).
+  const around = (start: number, now: number) =>
+    checkLimit({
+      prepared: prepared(permission({ start })),
+      wallet: WALLET,
+      owner: OWNER,
+      agentId: AGENT,
+      spender: SPENDER,
+      capRaw: CAP,
+      period: 'day',
+      now,
+    });
+  assert.equal(around(MIDNIGHT, MIDNIGHT * 1000 - 30_000).start, MIDNIGHT);
+  assert.equal(around(TODAY, MIDNIGHT * 1000 + 30_000).start, TODAY);
+  assert.equal(berlinDayStart(NOW), TODAY);
+  assert.equal(nextBerlinMidnight(NOW), MIDNIGHT);
+  // On the DST days the start is that day's true 00:00 Berlin: 25 Oct 2026 (25 hours, began at
+  // 00:00 CEST = 22:00 UTC) and 28 Mar 2027 (23 hours, began at 00:00 CET = 23:00 UTC).
+  for (const [start, now] of [
+    [Date.UTC(2026, 9, 24, 22) / 1000, Date.UTC(2026, 9, 25, 12)],
+    [Date.UTC(2027, 2, 27, 23) / 1000, Date.UTC(2027, 2, 28, 12)],
+  ] as const) {
+    assert.equal(berlinDayStart(now), start);
+    assert.equal(around(start, now).start, start);
+  }
 });
 
 test('anything other than that limit is refused before signing', () => {
@@ -222,10 +238,18 @@ test('anything other than that limit is refused before signing', () => {
   // Another period than chosen, or a length that isn't one of Base's fixed ones.
   refused(check(permission(), { period: 'week' }), /different period/);
   refused(check(permission({ period: 3_600 })), /different period/);
-  // A start in the past, an hour early, a day late; an end of its own.
-  refused(check(permission({ start: MIDNIGHT - 86_400 })), /in the past/);
-  refused(check(permission({ start: MIDNIGHT - 3_600 })), /next midnight/);
-  refused(check(permission({ start: MIDNIGHT + 86_400 })), /next midnight/);
+  // A start other than 00:00 today in Berlin: yesterday, an hour early or late, the next midnight
+  // (as limits started before) or later, and the next midnight or yesterday away from midnight;
+  // an end of its own.
+  const today = /start today at 00:00 Berlin time/;
+  refused(check(permission({ start: TODAY - 86_400 })), today);
+  refused(check(permission({ start: TODAY - 3_600 })), today);
+  refused(check(permission({ start: TODAY + 3_600 })), today);
+  refused(check(permission({ start: MIDNIGHT })), today);
+  refused(check(permission({ start: MIDNIGHT + 86_400 })), today);
+  refused(check(permission({ start: 0 })), today);
+  refused(check(permission({ start: MIDNIGHT }), { now: MIDNIGHT * 1000 - 6 * 60_000 }), today);
+  refused(check(permission({ start: TODAY - 86_400 }), { now: TODAY * 1000 + 6 * 60_000 }), today);
   refused(check(permission({ end: MIDNIGHT + 30 * 86_400 })), /end of its own/);
   refused(check(permission({ extraData: '0x01' })), /extra data/);
   // A hash that isn't this permission's (the owner would sign something else).

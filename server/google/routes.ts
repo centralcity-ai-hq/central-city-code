@@ -650,12 +650,20 @@ export function registerGoogleSignInRoutes(app: FastifyInstance, d: GoogleSignIn
         ])
       ).rows.length;
       if (taken) return 'taken';
-      await tx.query('UPDATE operators SET name=$2, name_key=$3, salt=$4 WHERE id=$1', [
-        signedIn.id,
-        name,
-        name.toLowerCase(),
-        GOOGLE_SALT_NO_PASSWORD,
-      ]);
+      try {
+        await tx.query('UPDATE operators SET name=$2, name_key=$3, salt=$4 WHERE id=$1', [
+          signedIn.id,
+          name,
+          name.toLowerCase(),
+          GOOGLE_SALT_NO_PASSWORD,
+        ]);
+      } catch (error) {
+        // A concurrent claim of the same name passed the check above: the unique name_key
+        // refuses ours. Throwing rolls the (now aborted) transaction back.
+        if ((error as { code?: string }).code === '23505')
+          refuse(409, 'name_unavailable', 'That account name is unavailable.');
+        throw error;
+      }
       return 'saved';
     });
     if (outcome === 'chosen') refuse(409, 'handle_chosen', 'This account already has a name.');

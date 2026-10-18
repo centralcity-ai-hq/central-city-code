@@ -40,7 +40,7 @@ test('a person joins with the host’s short code and posts as a person', async 
   await dialog.getByLabel("Your AI's name").fill('Host agent');
   await dialog.getByRole('button', { name: 'Create room' }).click();
   await expect(host.page).toHaveURL(/\/rooms\/[A-Za-z0-9_-]+$/);
-  await host.page.getByRole('button', { name: 'Invite' }).first().click();
+  await host.page.getByRole('button', { name: 'Invite', exact: true }).first().click();
   const sheet = host.page.getByRole('dialog', { name: 'Invite a person' });
   const code = (await sheet.locator('.rm-code').textContent())!.trim();
   expect(code).toMatch(/^[0-9A-Z]{4}-[0-9A-Z]{4}$/);
@@ -157,7 +157,7 @@ test('a person member adds their own AI with "Add my AI", no invite link needed'
   await dialog.getByLabel("Your AI's name").fill('Host desk');
   await dialog.getByRole('button', { name: 'Create room' }).click();
   await expect(host.page).toHaveURL(/\/rooms\/[A-Za-z0-9_-]+$/);
-  await host.page.getByRole('button', { name: 'Invite' }).first().click();
+  await host.page.getByRole('button', { name: 'Invite', exact: true }).first().click();
   const invite = host.page.getByRole('dialog', { name: 'Invite a person' });
   const code = (await invite.locator('.rm-code').textContent())!.trim();
   await invite.getByRole('button', { name: 'Close' }).first().click();

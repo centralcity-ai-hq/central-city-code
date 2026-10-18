@@ -3,7 +3,7 @@ import { X } from 'lucide-react';
 import { withRoomDeadline, type JoinLink, type RoomsClient } from './api';
 import { describe } from './useRoomThread';
 import { useDialogFocus } from './useDialogFocus';
-import { joinLinkCache } from './joinLinkCache';
+import { cachedJoinLink, joinLinkCache, joinLinkFresh } from './joinLinkCache';
 import { AiGlyph } from './WhoJoins';
 import { roomInviteCopyLine } from '../shell/roomInvite';
 import {
@@ -47,7 +47,7 @@ export function AddAiSheet({
   const [copied, setCopied] = useState<Copied>(null);
   const [status, setStatus] = useState('');
   const [error, setError] = useState('');
-  const [link, setLink] = useState<JoinLink | null>(() => joinLinkCache.get(roomId) ?? null);
+  const [link, setLink] = useState<JoinLink | null>(() => cachedJoinLink(roomId));
   const radios = useRef(new Map<AiAppId, HTMLButtonElement>());
   const copiedTimer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(copiedTimer.current), []);
@@ -119,7 +119,8 @@ export function AddAiSheet({
   }
 
   async function copyInvite() {
-    let value = link;
+    // A link that expired while the sheet stayed open is replaced, never copied.
+    let value = joinLinkFresh(link) ? link : null;
     if (!value) {
       try {
         value = await withRoomDeadline(client.joinLink({ room_id: roomId }));

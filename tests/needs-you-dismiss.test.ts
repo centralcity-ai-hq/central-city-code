@@ -312,10 +312,25 @@ test('read mark: a person who saw the room clears the mentions they saw, and onl
     ],
   );
 
+  // The person's wake cursor: the backlog count must fall with every read mark, or it fills.
+  const cursor = async () => {
+    const row = (
+      await f.app.city.db.query<{ unread_count: number; acked_mention_seq: string | number }>(
+        `SELECT c.unread_count, c.acked_mention_seq FROM wake_cursors c
+           JOIN room_members m ON m.agent_id=c.agent_id
+          WHERE m.room_id=$1 AND m.kind='person' AND m.removed_at IS NULL`,
+        [r.id],
+      )
+    ).rows[0]!;
+    return [Number(row.unread_count), Number(row.acked_mention_seq)];
+  };
+  assert.deepEqual(await cursor(), [2, 0]);
+
   // Seen up to the first: that mention clears, the second still waits.
   const seen = await mira.rest('POST', `/api/rooms/${r.id}/read`, { seq: first });
   assert.equal(seen.statusCode, 200, seen.body);
   assert.deepEqual(seen.json(), { room_id: r.id, last_read_seq: first, mentions_read: 1 });
+  assert.deepEqual(await cursor(), [1, 1]);
   assert.deepEqual(
     (await queue(mira, r.id)).map((i) => i.message_seq),
     [second],
@@ -326,6 +341,10 @@ test('read mark: a person who saw the room clears the mentions they saw, and onl
   const far = await mira.rest('POST', `/api/rooms/${r.id}/read`, { seq: 1_000_000 });
   assert.deepEqual(far.json(), { room_id: r.id, last_read_seq: second, mentions_read: 1 });
   assert.deepEqual(await queue(mira, r.id), []);
+  assert.deepEqual(await cursor(), [0, 2]);
+  // A repeat mark changes nothing.
+  await mira.rest('POST', `/api/rooms/${r.id}/read`, { seq: 1_000_000 });
+  assert.deepEqual(await cursor(), [0, 2]);
 
   // Only the person's own mentions: an AI owner's console has no person row here, and its AI's
   // mention stays for the AI (its wake queue is not touched).

@@ -50,6 +50,19 @@ export function useSettingsLifecycle(
   };
 }
 
+/**
+ * Marks every Escape as handled (defaultPrevented) before anything else sees it, until the returned
+ * cleanup runs. The pane and the page leave a handled Escape alone, so neither goes back nor
+ * closes while a screen must stay open (e.g. a new key is on its way).
+ */
+export function holdEscape(target: Pick<EventTarget, 'addEventListener' | 'removeEventListener'>) {
+  const hold = (event: Event) => {
+    if ((event as Event & { key?: string }).key === 'Escape') event.preventDefault();
+  };
+  target.addEventListener('keydown', hold, { capture: true });
+  return () => target.removeEventListener('keydown', hold, { capture: true });
+}
+
 /** A pushed screen of the agent pane: back link, title, an optional line, the body, the toast. */
 export function SettingsFrame({
   backLabel,
@@ -69,6 +82,8 @@ export function SettingsFrame({
   notice?: string;
   children: ReactNode;
 }) {
+  // While Back is disabled, Escape does not go back or close the pane either.
+  useEffect(() => (backDisabled ? holdEscape(window) : undefined), [backDisabled]);
   return (
     <div className="ap4-wrap">
       <button type="button" className="ap4-back" onClick={onBack} disabled={backDisabled}>

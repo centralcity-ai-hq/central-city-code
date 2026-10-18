@@ -35,6 +35,7 @@ import {
 } from '../../base/useRegisterWithKey';
 import { useCityScore } from '../../base/useCityScore';
 import { scoreLine, type CityScore } from '../../../shared/base/rating-score';
+import { DirectoryGroup } from './DirectoryGroup';
 import './base-screen.css';
 
 /* The mockup's own icons (docs/design/my-agents-v4-mockup.html), drawn the same way. */
@@ -582,7 +583,11 @@ function BaseBody({
   const stuck = !stalled && openRetryOffered(identity, stage) && keyState.k !== 'loading';
   const retryOffer = stuck ? (
     <>
-      <p className="v4b-note">It isn’t moving. Try again starts a new attempt.</p>
+      <p className="v4b-note">
+        {identity?.stage === 'handing_over'
+          ? 'It isn’t moving. Try again retries the same hand-over now.'
+          : 'It isn’t moving. Try again starts a new attempt.'}
+      </p>
       {/* Only next to the button it refers to, so it goes when the server stops accepting one. */}
       {registration.retryFailed ? (
         <p className="v4b-note alone v4b-bad" role="alert">
@@ -740,6 +745,7 @@ function BaseBody({
               </a>
             ) : null}
           </div>
+          <DirectoryGroup agentId={agentId} agentName={agentName} />
           {wallets}
           {keyState.k === 'ready' &&
           wallet?.address?.toLowerCase() === keyState.expectedWallet.toLowerCase() ? (

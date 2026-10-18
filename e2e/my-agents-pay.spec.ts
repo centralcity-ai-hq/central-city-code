@@ -657,6 +657,12 @@ test('Pay finds the recipient by Base ID or passport, checked on Base; anything 
   await expect(review).toBeEnabled();
   await shot(page, 'pay-form');
 
+  // Another recipient typed: the one checked before can't be paid while the new one is looked up.
+  await to.fill(HARBOR.baseId);
+  expect(await review.isDisabled()).toBe(true);
+  await expect(card).toContainText(HARBOR.baseId);
+  await expect(review).toBeEnabled();
+
   // Change clears the recipient.
   await card.getByRole('button', { name: 'Change' }).click();
   await expect(to).toHaveValue('');

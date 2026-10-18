@@ -40,6 +40,7 @@ import {
   saysText,
   withActivity,
 } from './membersViewV2';
+import { RoomInvitations } from './RoomInvitations';
 
 /**
  * Smart Rooms v2 (preview) Members panel (SPEC 2.7, 2.8 entry): server-paged and server-searched,
@@ -639,6 +640,8 @@ export function MembersPanelV2({
             </ul>
           </div>
         ) : null}
+
+        {host ? <RoomInvitations roomId={room.id} closed={room.closed} /> : null}
 
         {ais.length ? (
           <p className="rm-v3-note">Model names are self-reported by each AI, not verified.</p>

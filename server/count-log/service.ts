@@ -263,7 +263,12 @@ export interface CountLog {
     from: number,
     to: number,
   ): Promise<{ tree_size: number; leaves: { idx: number; leaf_hash: string; day: string }[] }>;
-  withdrawn(): Promise<{ idx: number; reason: string; day: string }[]>;
+  /** Withdrawn leaves with from <= idx < to, in idx order, at most `limit` (LEAVES_PAGE_MAX). */
+  withdrawn(
+    from?: number,
+    to?: number,
+    limit?: number,
+  ): Promise<{ idx: number; reason: string; day: string }[]>;
   /**
    * The owner's proof for one of their own agents, or null when the agent is not theirs (the
    * caller answers 404 for both "not yours" and "does not exist").
@@ -694,10 +699,11 @@ export function createCountLog(deps: {
       };
     },
 
-    async withdrawn() {
+    async withdrawn(from = 0, to = 2_147_483_647, limit = LEAVES_PAGE_MAX) {
       return (
         await deps.db.query<{ idx: number; reason: string; day: string }>(
-          'SELECT idx, reason, day FROM count_log_withdrawn ORDER BY idx',
+          'SELECT idx, reason, day FROM count_log_withdrawn WHERE idx >= $1 AND idx < $2 ORDER BY idx LIMIT $3',
+          [from, to, Math.min(Math.max(1, limit), LEAVES_PAGE_MAX)],
         )
       ).rows.map((row) => ({ idx: Number(row.idx), reason: row.reason, day: row.day }));
     },

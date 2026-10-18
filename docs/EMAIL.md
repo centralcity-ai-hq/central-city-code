@@ -62,7 +62,11 @@ is transactional and sent once.
   The opt-in stores the address, the exact text version (`NEWSLETTER_TEXT_VERSION`), the source
   (`signup`, `onboarding` or `settings`) and the time (`opted_in_at`) in `newsletter_consents`,
   and queues a confirmation email. Settings subscribe attempts are rate limited (5 per account and
-  20 per address per hour).
+  20 per address per hour); a ticked password sign-up counts against the same per-address budget.
+  Every path is capped at 3 confirmation emails per recipient address per day, keyed by a keyed
+  hash of the normalized address (`NEWSLETTER_RECIPIENT_RATE`). Sign-up and onboarding take these
+  budgets only after the account is saved, and a spent one skips the opt-in (no consent, no email)
+  instead of refusing the account; only Settings answers a spent budget with a 429.
 
 - **Confirmation:** a signed link (HMAC under a key derived from `CITY_EMAIL_LINK_KEY`) to
   `/newsletter/confirm?t=`, valid for 7 days from sending, for that one sign-up (`confirmed_at`).

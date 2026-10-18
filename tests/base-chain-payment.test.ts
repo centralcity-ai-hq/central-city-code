@@ -17,6 +17,7 @@ import {
   BASE_MIGRATION_SQL,
   BASE_PAYMENTS_MIGRATION_SQL,
   BASE_SHARED_ADDITIONS_SQL,
+  BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL,
   BASE_WALLET_LIMITS_SQL,
 } from '../server/base/schema.js';
 import { BASE_SEPOLIA, NATIVE_ETH, baseNetwork } from '../shared/base/chains.js';
@@ -67,6 +68,7 @@ test(
     await pg.exec(BASE_MIGRATION_SQL);
     await pg.exec(BASE_PAYMENTS_MIGRATION_SQL);
     await pg.exec(BASE_SHARED_ADDITIONS_SQL);
+    await pg.exec(BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL);
     await pg.exec(BASE_WALLET_LIMITS_SQL);
     const db: Database = {
       query: (sql, params) => pg.query(sql, params) as never,

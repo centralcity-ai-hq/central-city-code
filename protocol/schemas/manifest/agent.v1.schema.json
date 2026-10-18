@@ -16,8 +16,13 @@
           "maxLength": 63,
           "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$"
         },
-        "displayName": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "description": { "type": "string", "maxLength": 300 },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "description": { "type": "string", "maxLength": 300, "pattern": "^[^\\u0000]*$" },
         "labels": {
           "type": "object",
           "propertyNames": {
@@ -76,7 +81,7 @@
           },
           "additionalProperties": false
         },
-        "instructions": { "type": "string", "maxLength": 8000 },
+        "instructions": { "type": "string", "maxLength": 8000, "pattern": "^[^\\u0000]*$" },
         "skills": {
           "maxItems": 32,
           "type": "array",
@@ -89,13 +94,28 @@
                 "maxLength": 64,
                 "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$"
               },
-              "name": { "type": "string", "minLength": 1, "maxLength": 64 },
-              "description": { "type": "string", "minLength": 1, "maxLength": 500 },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[^\\u0000]*$"
+              },
+              "description": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500,
+                "pattern": "^[^\\u0000]*$"
+              },
               "tags": {
                 "default": [],
                 "maxItems": 16,
                 "type": "array",
-                "items": { "type": "string", "minLength": 1, "maxLength": 32 }
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 32,
+                  "pattern": "^[^\\u0000]*$"
+                }
               },
               "inputModes": {
                 "maxItems": 8,
@@ -118,7 +138,12 @@
               "examples": {
                 "maxItems": 8,
                 "type": "array",
-                "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "pattern": "^[^\\u0000]*$"
+                }
               }
             },
             "required": ["id", "name", "description"],

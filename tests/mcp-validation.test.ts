@@ -303,6 +303,14 @@ const advertised = (schema: z.ZodType) =>
   );
 
 test('tools/list still advertises the exact input schemas on every endpoint', async (t) => {
+  // The core tools' schemas. The Feed's tools (live by default) are checked by their own tests
+  // (tests/feed-service-search-tool.test.ts and the Feed pay tests): switched off here.
+  const feedBefore = process.env.CITY_FEED;
+  process.env.CITY_FEED = '0';
+  t.after(() => {
+    if (feedBefore === undefined) delete process.env.CITY_FEED;
+    else process.env.CITY_FEED = feedBefore;
+  });
   const f = await fixture(t);
   const check = (
     tools: Array<{ name: string; inputSchema: unknown }>,

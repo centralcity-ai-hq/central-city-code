@@ -11,7 +11,7 @@ import {
   type ThreadView,
 } from './messagesRoomsModel';
 import {
-  CONVERSATIONS_PATH,
+  conversationsPath,
   ErrorLine,
   IconSend,
   LoadingRow,
@@ -48,7 +48,12 @@ export function ThreadScreen({
     `${agent.id}:${contextId}`,
     async (signal) => {
       const [list, page] = await Promise.all([
-        api<{ conversations: ConversationSummary[] }>(CONVERSATIONS_PATH, undefined, 'GET', signal),
+        api<{ conversations: ConversationSummary[] }>(
+          conversationsPath(agent.id),
+          undefined,
+          'GET',
+          signal,
+        ),
         api<{ messages: AgentMessage[] }>(
           `/api/messages/conversations/${encodeURIComponent(contextId)}?limit=${PAGE}`,
           undefined,

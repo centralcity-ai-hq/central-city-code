@@ -10,6 +10,7 @@ import {
   type WorkspaceMembership,
 } from '../../shared/assistant.js';
 import type { Operator } from '../../shared/types.js';
+import { NO_NUL_MESSAGE, noNul } from '../messaging/contract.js';
 import { clientAddressKey, clientAddressPrefixes } from '../rate-limit.js';
 import { emptyWorkspace, event, iso, type Workspace } from '../model.js';
 import { highEntropyKey, unclaimedScopeId } from '../autonomy/index.js';
@@ -26,8 +27,9 @@ import { revokeResponderCredentials } from '../responder/revoke.js';
 export const WORKSPACE_KEY = /^ccw_[A-Za-z0-9_-]{43}$/;
 /**
  * Scopes of the key an AI workspace is created with (anonymously, on /mcp/open or
- * /api/public/workspaces): everything except rooms:host, rooms:apply, results:publish and pay.
- * Hosting rooms, opening pull requests from rooms, publishing results and paying other agents need
+ * /api/public/workspaces): everything except rooms:host, rooms:apply, results:publish, pay,
+ * services:pay and services:sell. Hosting rooms, opening pull requests from rooms, publishing
+ * results, paying other agents or Feed services and selling services in the Feed need
  * a human co-owner, who mints a key with those scopes in the console (docs/ROOMS.md,
  * docs/ROOM_REPOS.md, docs/ANSWERS.md); keys the AI mints itself can never exceed its own scopes.
  */
@@ -36,7 +38,9 @@ export const INITIAL_KEY_SCOPES: readonly AssistantScope[] = ASSISTANT_SCOPES.fi
     scope !== 'rooms:host' &&
     scope !== 'rooms:apply' &&
     scope !== 'results:publish' &&
-    scope !== 'pay',
+    scope !== 'pay' &&
+    scope !== 'services:pay' &&
+    scope !== 'services:sell',
 );
 export const WORKSPACE_CLAIM_TOKEN = /^ccwclaim_[A-Za-z0-9_-]{43}$/;
 /** A co-owner claim link is valid for 7 days after the AI workspace was created. */
@@ -81,7 +85,13 @@ const scopeList = z
 export const listWorkspaceKeysToolInput = z.object({}).strict();
 export const createWorkspaceKeyToolInput = z
   .object({
-    label: z.string().trim().min(1).max(64).describe('Who or what will hold this key.'),
+    label: z
+      .string()
+      .trim()
+      .min(1)
+      .max(64)
+      .refine(noNul, NO_NUL_MESSAGE)
+      .describe('Who or what will hold this key.'),
     scopes: scopeList
       .optional()
       .describe('Subset of the calling credential scopes (default: all of them).'),
@@ -763,6 +773,9 @@ export function registerAiWorkspaces(
       ).rows[0];
       if (!locked?.claim_token_hash || !constantEqual(locked.claim_token_hash, tokenHash))
         invalid();
+      // Claims of one person for different AI workspaces lock different rows above; this lock
+      // makes them count one after the other, so two at once never pass the cap together.
+      await tx.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`ws-claim:${person.id}`]);
       const links = Number(
         (
           await tx.query<{ n: string | number }>(

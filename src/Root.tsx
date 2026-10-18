@@ -23,12 +23,21 @@ import { NotFound } from './shell/NotFound';
 import { prerendered, releasePrerendered, rememberSignedIn } from './shell/prerendered';
 import { INVITE_ROOMS_PATH, isRoomsPath, navigate, setSignedIn } from './shell/navigation';
 import { pendingJoinPath, safeNext } from './rooms/pendingJoin';
-import { installInAppLinks, pageCommitted, takeInAppChange } from './shell/pageNavigation';
+import { resultId } from './results/resultPath';
+import {
+  installInAppLinks,
+  markInAppChange,
+  pageCommitted,
+  takeInAppChange,
+} from './shell/pageNavigation';
 import { prefetchAgentCount } from './agentCount';
 import { useWorkspaceV2 } from './shell/workspaceV2';
 import { workspaceView, type WorkspaceView } from './shell/workspaceDestinations';
 import { workspaceLanding } from './shell/workspaceLanding';
 import { ElricSkeleton } from './elric/ElricSkeleton';
+import { FEED_PATH, feedRoute, forgetFeedSession, signedOutManageId } from './feed/feedPaths';
+import { feedSignInContext, leaveFeedSignIn, useFeedSignInAction } from './feed/feedSignIn';
+import { loadFeedGate, useFeedCheck, type FeedGate } from './feed/feedStatus';
 import {
   elricDashboardModule,
   readyElric,
@@ -53,10 +62,13 @@ const loadRooms = () => import('./RoomsShell');
 const loadTrust = () => import('./Trust');
 const loadLiveLog = () => import('./verify/LiveLog');
 const loadOnBase = () => import('./verify/OnBase');
+const loadServiceCalls = () => import('./verify/ServiceCalls');
 const loadPassportPage = () => import('./verify/Passport');
 const loadWorkflows = () => import('./WorkflowsPage');
 const loadUseCases = () => import('./use-cases/UseCasePage');
 const loadElricSignedOut = () => import('./elric/ElricSignedOut');
+// The Feed (/feed and below), a workspace page behind CITY_FEED (src/feed/Feed.tsx).
+const loadFeed = () => import('./feed/Feed');
 /** The use-case pages: /use-cases and /use-cases/<slug> (shared/use-cases.ts). */
 const USE_CASE_PATH = new RegExp(
   `^/use-cases(?:/(${USE_CASES.map((entry) => entry.slug).join('|')}))?/?$`,
@@ -84,8 +96,12 @@ const VerifyPage = lazy(() => loadVerify().then((module) => ({ default: module.V
 // The Live log (/downtown/log): the count log's entries, newest first, with a proof per entry.
 const LiveLog = lazy(() => loadLiveLog().then((module) => ({ default: module.LiveLog })));
 const OnBase = lazy(() => loadOnBase().then((module) => ({ default: module.OnBase })));
+const ServiceCalls = lazy(() =>
+  loadServiceCalls().then((module) => ({ default: module.ServiceCalls })),
+);
 // A Base agent's passport (/a/<id>), On Base's page per agent.
 const Passport = lazy(() => loadPassportPage().then((module) => ({ default: module.Passport })));
+const ResultPage = lazy(() => import('./results/ResultPage'));
 const ConnectPage = lazy(() => loadConnect().then((module) => ({ default: module.ConnectPage })));
 const Workspaces = lazy(() => loadApp().then((module) => ({ default: module.Workspaces })));
 // The Rooms experience (/rooms, /rooms/:id, /r/:slug) is its own chunk too.
@@ -101,6 +117,11 @@ const UseCasePage = lazy(() => loadUseCases().then((module) => ({ default: modul
 const UseCasesIndex = lazy(() =>
   loadUseCases().then((module) => ({ default: module.UseCasesIndex })),
 );
+const Feed = lazy(() => loadFeed().then((module) => ({ default: module.Feed })));
+const SignedOutManage = lazy(() =>
+  loadFeed().then((module) => ({ default: module.SignedOutManage })),
+);
+const PublicFeed = lazy(() => loadFeed().then((module) => ({ default: module.PublicFeed })));
 
 /**
  * Starts the likely screen's chunk at startup, in parallel with the session request, so the
@@ -123,6 +144,15 @@ export function prefetchInitialScreen() {
     return void loadPassportPage().catch(ignorePrefetchFailure);
   if (USE_CASE_PATH.test(window.location.pathname))
     return void loadUseCases().catch(ignorePrefetchFailure);
+  // The Feed opens inside the workspace: the console it sits in, and the Feed's own code only once
+  // GET /api/public/feed answers that it is on (the answer Root then reuses; off, it is the 404).
+  if (FEED_PATH.test(window.location.pathname)) {
+    void loadApp().catch(ignorePrefetchFailure);
+    void loadFeedGate().then((gate) => {
+      if (gate.phase === 'on') void loadFeed().catch(ignorePrefetchFailure);
+    });
+    return;
+  }
   if (!knownPath(window.location.pathname)) return;
   if (isRoomsPath(window.location.pathname)) return void loadRooms().catch(ignorePrefetchFailure);
   if (consolePathView(window.location.pathname)) return void loadApp().catch(ignorePrefetchFailure);
@@ -155,7 +185,7 @@ function inAppPage(pathname: string, sessionKnown: boolean, signedIn: boolean) {
   if (USE_CASE_PATH.test(path)) return loadUseCases;
   if (trustPage(path)) return loadTrust;
   if (
-    /^\/docs(?:\/(start|rooms|room-management|coding|api|microsoft-copilot|mistral-le-chat))?$/.test(
+    /^\/docs(?:\/(start|rooms|room-management|coding|api|microsoft-copilot|mistral-le-chat|feed))?$/.test(
       path,
     )
   )
@@ -163,6 +193,7 @@ function inAppPage(pathname: string, sessionKnown: boolean, signedIn: boolean) {
   if (path === '/downtown/verify') return loadVerify;
   if (path === '/downtown/log' || path === '/explorer') return loadLiveLog;
   if (path === '/explorer/base') return loadOnBase;
+  if (path === '/explorer/calls') return loadServiceCalls;
   if (PASSPORT_PATH.test(path)) return loadPassportPage;
   if (path === '/' && sessionKnown) return signedIn ? loadApp : loadLanding;
   // Signed out, /connect, /invite and /elric are public pages too: they change in place like the
@@ -193,6 +224,7 @@ const KNOWN_PATHS = new Set([
   '/downtown/log',
   '/explorer',
   '/explorer/base',
+  '/explorer/calls',
   '/docs',
   '/docs/start',
   '/docs/rooms',
@@ -201,6 +233,7 @@ const KNOWN_PATHS = new Set([
   '/docs/api',
   '/docs/microsoft-copilot',
   '/docs/mistral-le-chat',
+  '/docs/feed',
   // The use-case pages (shared/use-cases.ts).
   USE_CASES_INDEX.path,
   ...USE_CASES.map((entry) => useCasePath(entry.slug)),
@@ -336,7 +369,13 @@ export function consolePathView(pathname: string): WorkspaceView | null {
 
 export function knownPath(pathname: string) {
   const path = pathname.length > 1 ? pathname.replace(/\/$/, '') : pathname;
-  return KNOWN_PATHS.has(path) || isRoomsPath(path) || consolePathView(path) !== null;
+  return (
+    KNOWN_PATHS.has(path) ||
+    isRoomsPath(path) ||
+    resultId(path) !== null ||
+    consolePathView(path) !== null ||
+    FEED_PATH.test(path)
+  );
 }
 
 /**
@@ -421,6 +460,68 @@ function PrerenderedMarkup({ markup, busy = false }: { markup: string; busy?: bo
       data-prerendered=""
       dangerouslySetInnerHTML={{ __html: markup }}
     />
+  );
+}
+
+/**
+ * The Feed pages that need an account: a request's private page (close it) without its code, and
+ * a paid call's page (/feed/calls/<id>, its owner's only).
+ */
+const feedPrivatePath = (path: string) => {
+  const view = feedRoute(path)?.view;
+  return view === 'manage' || view === 'call';
+};
+
+/** The Feed's status could not be read: a 429 is too many tries, not a Feed that is down. */
+function feedProblem(gate: FeedGate | null): string {
+  return gate?.phase === 'error' && gate.limited
+    ? 'Too many tries. Try again in a minute.'
+    : 'The Feed couldn’t be loaded. The rest of Central City works as usual.';
+}
+
+/**
+ * Signed in, the Feed that could not be loaded is a page of the workspace: the sidebar stays, and
+ * the person's rooms are one tap away. Try again asks once more and keeps this page until the
+ * answer comes (Root then shows the Feed, the 404 if it was turned off, or this page again).
+ */
+function FeedUnavailable({ gate }: { gate: FeedGate | null }) {
+  const [busy, setBusy] = useState(false);
+  const retry = () => {
+    if (busy) return;
+    setBusy(true);
+    void loadFeedGate({ fresh: true }).finally(() => setBusy(false));
+  };
+  return (
+    <main id="main-content" tabIndex={-1} className="cc-state-page">
+      <section className="cc-state" aria-labelledby="feed-down-title">
+        <h1 id="feed-down-title">Feed</h1>
+        <p role="alert">{feedProblem(gate)}</p>
+        <div className="cc-not-found-actions">
+          <button
+            type="button"
+            className="button primary"
+            aria-disabled={busy || undefined}
+            onClick={retry}
+          >
+            {busy ? <LoaderCircle className="spin" size={15} aria-hidden="true" /> : null}
+            Try again
+          </button>
+          <a
+            className="button secondary"
+            href="/rooms"
+            onClick={(event) => {
+              if (event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
+                return;
+              event.preventDefault();
+              markInAppChange();
+              navigate('/rooms');
+            }}
+          >
+            Go to your rooms
+          </a>
+        </div>
+      </section>
+    </main>
   );
 }
 
@@ -555,6 +656,25 @@ export function Root() {
       setPath('/connect');
     }
   }, [session, path, route]);
+  // The Feed's private close tokens and "Yours" belong to the account that posted: signing out,
+  // or another account in this tab, drops them.
+  const feedOwner = useRef(operatorId ?? null);
+  useEffect(() => {
+    if (feedOwner.current && feedOwner.current !== (operatorId ?? null)) forgetFeedSession();
+    feedOwner.current = operatorId ?? null;
+  }, [operatorId]);
+  // The Feed (/feed and below), a workspace page behind CITY_FEED: GET /api/public/feed decides.
+  const feedPath = FEED_PATH.test(path);
+  const feedCheck = useFeedCheck(feedPath);
+  // Signed out, an action on the read-only Feed asked for sign-in at the same address.
+  const feedSignIn = useFeedSignInAction();
+  // The address stays, so no page change moves focus: the card takes it (the button that asked
+  // is gone), as a page change gives it. After the layout effects: a drawer that asked makes the
+  // page inert until its own cleanup (an effect too) runs, and focus can't land in it before.
+  const feedSignInCard = feedPath && feedSignIn !== null && session !== null && !session.operator;
+  useEffect(() => {
+    if (feedSignInCard) document.getElementById('main-content')?.focus({ preventScroll: true });
+  }, [feedSignInCard]);
   const publicPath = /^\/downtown\/?$/.test(path);
   const trust = trustPage(path);
   const known = knownPath(path);
@@ -662,7 +782,7 @@ export function Root() {
   // "Verify here": the public, in-browser verification of the agent count (no session needed;
   // the page asks for one only to check the visitor's own agent).
   const docs =
-    /^\/docs(?:\/(start|rooms|room-management|coding|api|microsoft-copilot|mistral-le-chat))?\/?$/.exec(
+    /^\/docs(?:\/(start|rooms|room-management|coding|api|microsoft-copilot|mistral-le-chat|feed))?\/?$/.exec(
       path,
     );
   if (docs)
@@ -684,6 +804,13 @@ export function Root() {
         <OnBase />
       </Screen>
     );
+  // The Agent Explorer's Service calls view: every paid service call as its Base transaction.
+  if (/^\/explorer\/calls\/?$/.test(path))
+    return (
+      <Screen>
+        <ServiceCalls />
+      </Screen>
+    );
   // The Agent Explorer: /explorer (its short address) and /downtown/log show the same page.
   if (/^\/(downtown\/log|explorer)\/?$/.test(path))
     return (
@@ -701,6 +828,8 @@ export function Root() {
     );
   // Hash routing still decides the view; any other path is a 404.
   if (!known) return <NotFound />;
+  // The Feed while it is off: every Feed address is the ordinary 404, signed in or out.
+  if (feedPath && feedCheck.answered && feedCheck.gate?.phase === 'off') return <NotFound />;
   if (!session)
     return sessionError ? (
       <Boot>
@@ -806,6 +935,76 @@ export function Root() {
         )}
       </Screen>
     );
+  // A published result's permalink (the `url` of the results API): signed out, sign in first.
+  const result = resultId(path);
+  if (result)
+    return (
+      <Screen>
+        {session.operator ? (
+          workspaceV2 ? (
+            workspace(<ResultPage key={result} id={result} embedded />, 'Result')
+          ) : (
+            <ResultPage key={result} id={result} />
+          )
+        ) : (
+          <Auth
+            initialRegister={false}
+            claimPending={false}
+            onSuccess={(operator) => setSession({ operator, setupRequired: false })}
+          />
+        )}
+      </Screen>
+    );
+  // The Feed. Until its status answers, nothing names it (it may be off: then the 404 above); a
+  // Feed this page load already saw on opens at once while the answer is renewed. On, it is a
+  // workspace page. Signed out it is read-only, between the public header and footer: services
+  // and requests can be browsed and opened, and each action (Respond, Report, Post a request)
+  // asks for sign-in at the same address (feedSignIn.ts), where the Feed then opens signed in, on
+  // the history entry the action came from.
+  // A private close link with its code needs no account: the code closes the request
+  // (shared/feed.ts PostedFeedRequest), so signed out it opens that page. Without the code (a
+  // reload, an address copied after the code left it) sign-in comes first: the account that
+  // posted the request then closes it.
+  if (feedPath) {
+    const { gate, answered, retry } = feedCheck;
+    if (gate?.phase !== 'on' && !answered) return <Boot />;
+    if (gate?.phase !== 'on')
+      return session.operator ? (
+        <Screen>{workspace(<FeedUnavailable gate={gate} />, 'Feed')}</Screen>
+      ) : (
+        <Boot>
+          <p role="alert">{feedProblem(gate)}</p>
+          <button className="button primary" onClick={retry}>
+            Try again
+          </button>
+        </Boot>
+      );
+    const manageId = session.operator ? null : signedOutManageId(path);
+    const signInFirst =
+      !session.operator && !manageId && (feedSignIn !== null || feedPrivatePath(path));
+    return (
+      <Screen>
+        {session.operator ? (
+          workspace(<Feed path={path} status={gate.status} />, 'Feed')
+        ) : manageId ? (
+          <SignedOutManage id={manageId} />
+        ) : signInFirst ? (
+          <Auth
+            initialRegister={false}
+            claimPending={false}
+            context={feedSignInContext(path, feedSignIn)}
+            onSuccess={(operator) => {
+              setSession({ operator, setupRequired: false });
+              // Back to the entry the action came from: one Close or Back then leaves the page.
+              leaveFeedSignIn();
+            }}
+          />
+        ) : (
+          <PublicFeed path={path} status={gate.status} />
+        )}
+      </Screen>
+    );
+  }
   if (consolePathView(path))
     return session.operator ? (
       // The effect above opens the console view.

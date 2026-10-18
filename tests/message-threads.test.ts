@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { createApp } from '../server/app.js';
 import type { Agent } from '../shared/types.js';
 import type { AgentMessage, ConversationSummary } from '../server/messaging/contract.js';
-import { pairKey } from '../server/messaging/service.js';
+import { CONVERSATION_SEND_SCAN, pairKey } from '../server/messaging/service.js';
 import { legacyPairContextId } from '../scripts/remediate-pair-contexts.js';
 
 /**
@@ -451,4 +451,73 @@ test('a cross-owner pair continues one conversation in both directions', async (
   assert.equal(again.context_id, first.context_id);
   assert.equal(first.context_id, await storedPairId(app, a1, b1));
   assert.notEqual(first.context_id, legacyPairContextId(a1, b1));
+});
+
+test('agent_id narrows the list to that agent, so newer threads of other agents never push it out', async (t) => {
+  const { app, cookie, a, b, c, send } = await setup(t);
+  const old = await send(a, { to_agent_id: c.id, text: 'Older, with C' });
+  await send(a, { to_agent_id: b.id, text: 'Newer, A and B only' });
+  const list = async (query: string) => {
+    const res = await call(app, cookie, 'GET', `/api/messages/conversations?${query}`);
+    assert.equal(res.statusCode, 200, res.body);
+    return res.json().conversations as ConversationSummary[];
+  };
+  // Without the filter the newest thread (A and B) fills a one-thread page.
+  assert.notEqual((await list('limit=1'))[0]!.context_id, old.context_id);
+  const forC = await list(`agent_id=${c.id}&limit=1`);
+  assert.deepEqual(
+    forC.map((item) => item.context_id),
+    [old.context_id],
+  );
+  assert.equal(forC[0]!.message_count, 1, 'counts stay those of the whole thread');
+  assert.equal((await list(`agent_id=${a.id}`)).length, 2);
+  assert.deepEqual(await list(`agent_id=${randomUUID()}`), [], 'an unknown id matches nothing');
+});
+
+test('the thread list never aggregates the whole history: a busy thread does not hide older ones', async (t) => {
+  const { app, cookie, a, b, c, send, conversations } = await setup(t);
+  const older = await send(a, { to_agent_id: c.id, text: 'Older, with C' });
+  const busy = await send(a, { to_agent_id: b.id, text: 'Busy, A and B' });
+  // More traffic in the busy thread than the sent-row scan covers.
+  await app.city.db.query(
+    `INSERT INTO messages(recipient_id,seq,id,sender_id,sender_owner_id,recipient_owner_id,
+       context_id,reply_to,kind,parts,created_at,origin,sender_owner_label,room_id)
+     SELECT recipient_id, seq + g, gen_random_uuid(), sender_id, sender_owner_id,
+       recipient_owner_id, context_id, reply_to, kind, parts, created_at + g, origin,
+       sender_owner_label, room_id
+       FROM messages, generate_series(1, $2::int) AS g WHERE id=$1`,
+    [busy.id, CONVERSATION_SEND_SCAN + 500],
+  );
+  const statements: string[] = [];
+  const db = app.city.db as { transaction: (fn: (tx: unknown) => Promise<unknown>) => unknown };
+  const transaction = db.transaction.bind(db);
+  db.transaction = (fn) =>
+    transaction((tx) => {
+      const inner = tx as { query: (sql: string, params?: unknown[]) => unknown };
+      return fn(
+        new Proxy(inner, {
+          get: (target, key) =>
+            key === 'query'
+              ? (sql: string, params?: unknown[]) => {
+                  statements.push(sql);
+                  return target.query(sql, params);
+                }
+              : Reflect.get(target, key),
+        }),
+      );
+    });
+  const list = await conversations();
+  db.transaction = transaction;
+  assert.deepEqual(
+    list.map((item) => item.context_id),
+    [busy.context_id, older.context_id],
+  );
+  assert.equal(list[0]!.message_count, CONVERSATION_SEND_SCAN + 501);
+  assert.equal(list[1]!.message_count, 1);
+  // The per-thread aggregate (counts, participants) reads only the threads of the page.
+  const aggregates = statements.filter(
+    (sql) => sql.includes('jsonb_agg') && sql.includes('FROM messages'),
+  );
+  assert.ok(aggregates.length > 0, 'the list aggregated nothing');
+  for (const sql of aggregates) assert.match(sql, /context_id = ANY\(\$2::text\[\]\)/);
 });

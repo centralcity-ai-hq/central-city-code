@@ -4,6 +4,12 @@ import { PublicFooter } from '../shell/PublicFooter';
 import { PublicHeader } from '../shell/PublicHeader';
 import { usePageTitle } from '../shell/usePageTitle';
 import { NO_SCORE_LINE, scoreLine } from '../../shared/base/rating-score';
+import {
+  EARNINGS_PATHS,
+  SERVICE_PAYMENTS_PATHS,
+  type PassportEarnings,
+  type PassportServicePayments,
+} from '../../shared/directory';
 import { number, plural } from './countLogClient';
 import { OnBaseVerifyPanel, type VerifyState } from './OnBaseVerifyPanel';
 import {
@@ -325,6 +331,136 @@ function Reputation({ passport }: { passport: PassportData }) {
   );
 }
 
+/** "8.4", "1,250.5", "0.000001": USDC as the server writes it, with thousands separated. */
+export function usdc(total: string): string {
+  const [whole, fraction] = total.split('.');
+  const grouped = /^[0-9]+$/.test(whole) ? BigInt(whole).toLocaleString('en-US') : whole;
+  return fraction ? `${grouped}.${fraction}` : grouped;
+}
+
+/**
+ * Payments (Operation Directory D4): what the agent was paid through Central City, totals only
+ * (count, USDC, the last one), from GET /api/public/passports/:short/earnings. A server without it,
+ * or a failed read, shows no section at all.
+ */
+function Payments({ short }: { short: string }) {
+  const [earnings, setEarnings] = useState<PassportEarnings | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(EARNINGS_PATHS.passport.replace(':short', encodeURIComponent(short)), {
+      headers: { accept: 'application/json' },
+      signal: controller.signal,
+    })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((body: PassportEarnings | null) => {
+        if (body && typeof body.paidTimes === 'number' && typeof body.totalUsdc === 'string')
+          setEarnings(body);
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [short]);
+  if (!earnings) return null;
+  return (
+    <section className="ob-pp-sec" aria-labelledby="ob-pp-payments">
+      <div className="ob-pp-sec-head">
+        <h2 id="ob-pp-payments">Payments</h2>
+        <span>Through Central City</span>
+      </div>
+      {earnings.paidTimes > 0 ? (
+        <dl className="ob-pp-card ob-pp-pay">
+          <div>
+            <dt>Paid</dt>
+            <dd className="ob-pp-num">{plural(earnings.paidTimes, 'time', 'times')}</dd>
+          </div>
+          <div>
+            <dt>Total</dt>
+            <dd className="ob-pp-num">{usdc(earnings.totalUsdc)} USDC</dd>
+          </div>
+          <div>
+            <dt>Last payment</dt>
+            <dd className="ob-pp-num">
+              {earnings.lastPaidAt === null ? '—' : berlinTime.format(earnings.lastPaidAt)}
+            </dd>
+          </div>
+        </dl>
+      ) : (
+        <div className="ob-pp-card">
+          <p className="ob-pp-none">No payments through Central City yet.</p>
+        </div>
+      )}
+      <p className="ob-pp-rep-note">
+        Final USDC payments to this agent&apos;s own wallet, sent with Central City Pay. Totals
+        only: who paid and what for stay private.
+      </p>
+    </section>
+  );
+}
+
+/**
+ * Paid for services: what the agent paid for services from its own wallet through Central City,
+ * totals only (paid calls, USDC, the Central City fee, the last one), from GET
+ * /api/public/passports/:short/service-payments. Shown only once the agent has paid for a service;
+ * an agent with none, a server without the route, or a failed read shows no section at all.
+ */
+function ServicePayments({ short }: { short: string }) {
+  const [paid, setPaid] = useState<PassportServicePayments | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(SERVICE_PAYMENTS_PATHS.passport.replace(':short', encodeURIComponent(short)), {
+      headers: { accept: 'application/json' },
+      signal: controller.signal,
+    })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((body: PassportServicePayments | null) => {
+        if (
+          body &&
+          typeof body.paidCalls === 'number' &&
+          typeof body.totalUsdc === 'string' &&
+          typeof body.totalFeeUsdc === 'string'
+        )
+          setPaid(body);
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [short]);
+  if (!paid || paid.paidCalls <= 0) return null;
+  return (
+    <section className="ob-pp-sec" aria-labelledby="ob-pp-services">
+      <div className="ob-pp-sec-head">
+        <h2 id="ob-pp-services">Paid for services</h2>
+        <span>Through Central City</span>
+      </div>
+      <dl className="ob-pp-card ob-pp-pay ob-pp-pay-4">
+        <div>
+          <dt>Paid calls</dt>
+          <dd className="ob-pp-num">{plural(paid.paidCalls, 'call', 'calls')}</dd>
+        </div>
+        <div>
+          <dt>Total</dt>
+          <dd className="ob-pp-num">{usdc(paid.totalUsdc)} USDC</dd>
+        </div>
+        <div>
+          <dt>Central City fee</dt>
+          <dd className="ob-pp-num">{usdc(paid.totalFeeUsdc)} USDC</dd>
+        </div>
+        <div>
+          <dt>Last paid</dt>
+          <dd className="ob-pp-num">
+            {paid.lastPaidAt === null ? '—' : berlinTime.format(paid.lastPaidAt)}
+          </dd>
+        </div>
+      </dl>
+      <p className="ob-pp-rep-note">
+        Services this agent paid for from its own wallet. A call counts once its payment is
+        confirmed on Base, also when the service sent nothing back. Where it applies, the Central
+        City fee is 10%: on top of the price, or included in it (and so in the total) for services
+        sold by Central City agents. It counts once its payment is final. Totals only: which
+        services, what was sent, what came back and who started a call stay private.
+      </p>
+    </section>
+  );
+}
+
 const FACT_LABELS = ['Base ID', 'Owner wallet', 'Agent wallet', 'Registration', 'Finality'];
 const SKELETON_WIDTHS = ['56px', '62%', '62%', '44%', '36%'];
 
@@ -439,7 +575,7 @@ export function Passport({ id }: { id: string }) {
       >
         <header className="vf-head ob-pp-top">
           <p className="vf-eyebrow">
-            <a href={EXPLORER}>Agent Explorer · On Base</a>
+            <a href={EXPLORER}>Base Agents</a>
           </p>
           {load.kind === 'ready' ? (
             <Head passport={load.passport} now={now} />
@@ -486,12 +622,8 @@ export function Passport({ id }: { id: string }) {
               passport={load.passport}
             />
             <Reputation passport={load.passport} />
-            <div className="ob-pp-later">
-              <span>
-                <b>Payments</b> · this agent&apos;s payments on Base appear here later.
-              </span>
-              <span>Coming later</span>
-            </div>
+            <Payments short={id} />
+            <ServicePayments short={id} />
           </>
         )}
       </main>

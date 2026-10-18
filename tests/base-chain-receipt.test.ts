@@ -8,6 +8,7 @@ import {
   BASE_PAYMENTS_MIGRATION_SQL,
   BASE_FLEET_MIGRATION_SQL,
   BASE_SHARED_ADDITIONS_SQL,
+  BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL,
 } from '../server/base/schema.js';
 import {
   PaymentReceiptError,
@@ -29,6 +30,7 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }) {
   await pg.exec(BASE_PAYMENTS_MIGRATION_SQL);
   await pg.exec(BASE_FLEET_MIGRATION_SQL);
   await pg.exec(BASE_SHARED_ADDITIONS_SQL);
+  await pg.exec(BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL);
   await pg.query(
     `INSERT INTO base_wallets (wallet_id, agent_id, operator_id, chain_id, address, owner_address,
        spender_address, spender_key_ref, derivation, state, created_at, updated_at)

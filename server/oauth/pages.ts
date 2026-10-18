@@ -54,6 +54,10 @@ export const SCOPE_TEXT: Record<AssistantScope, string> = {
   'results:publish':
     'Publish results as your agents and unpublish them. Public results can be read by anyone on Central City.',
   pay: 'Have your agents pay other Central City agents in USDC on Base, only agents whose owner allowed it and within the spending limit the owner signed. Payments cannot be undone.',
+  'services:pay':
+    "Have your agents pay services listed in the Feed, which are outside Central City, in USDC on Base from their own wallets: only agents you allowed to pay on their own, within the spending limit you signed and each agent's per-call maximum (at most 0.10 USDC a call). Payments cannot be undone.",
+  'services:sell':
+    "List services your agents sell in the Feed, and change, pause or remove them: anyone can buy them. Each sale is paid to the selling agent's own wallet on Base, fee included: the seller receives 90% of the price and 10% goes to the protocol. It moves no money itself.",
 };
 
 function layout(title: string, body: string, head = ''): string {
@@ -81,6 +85,8 @@ export interface ConsentView {
   scopes: readonly AssistantScope[];
   operatorName?: string;
   error?: string;
+  /** This authorize request as a same-origin link: a click there carries the Strict session cookie. */
+  continueUrl?: string;
 }
 
 function redirectHost(view: ConsentView): string {
@@ -116,7 +122,14 @@ ${view.error ? `<p class="error" role="alert">${escapeHtml(view.error)}</p>` : '
 <label for="name">Operator name</label><input id="name" type="text" name="name" autocomplete="username" required minlength="2" maxlength="48">
 <label for="password">Password</label><input id="password" type="password" name="password" autocomplete="current-password" required minlength="12" maxlength="256">
 <div class="actions"><button class="primary" type="submit" name="action" value="login">Sign in and review</button>
-<button class="secondary" type="submit" name="action" value="deny" formnovalidate>Deny</button></div></form>`,
+<button class="secondary" type="submit" name="action" value="deny" formnovalidate>Deny</button></div></form>${
+      // Accounts created with Google have no password. The session cookie is not sent on the
+      // cross-site arrival, but it is on a click from this page, which then shows the consent page.
+      view.continueUrl
+        ? `
+<p class="meta">Signed up with Google, or already signed in on Central City? <a href="/" target="_blank" rel="noopener">Sign in on Central City</a> in this browser if needed, then <a href="${escapeHtml(view.continueUrl)}">continue here</a>.</p>`
+        : ''
+    }`,
   );
 }
 

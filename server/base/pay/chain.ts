@@ -15,18 +15,24 @@
  * at most READ_ATTEMPTS times in all with a short pause: seen as occasional 503s ("Base cannot be
  * read right now") on ratings in the Base runs, each fine on the next try. Every attempt is still
  * one block; an invalid Base ID or another network is never retried.
+ *
+ * `url` may be a list (chain/read-transport.ts): a second endpoint answers what the configured one
+ * cannot right now. The head and the call may then come from two nodes; that is safe because the
+ * call names the head's HASH with requireCanonical: a node that does not hold that block as
+ * canonical fails the call (and the attempt is retried from a fresh head), it never answers for
+ * another block. A revert of the whole call is never asked of the second endpoint.
  */
 import {
   createPublicClient,
   decodeFunctionResult,
   encodeFunctionData,
   getAddress,
-  http,
   multicall3Abi,
   type Hex,
 } from 'viem';
 import { MULTICALL3, type Address, type BaseNetwork } from '../../../shared/base/chains.js';
 import { identityRegistryAbi } from '../chain/identity-chain.js';
+import { baseReadTransport } from '../chain/read-transport.js';
 
 export interface RecipientOwnerRead {
   block: bigint;
@@ -64,7 +70,7 @@ export const RETRY_PAUSE_MS = [250, 750] as const;
 class FinalReadError extends Error {}
 
 export function payChainReader(
-  url: string,
+  url: string | readonly string[],
   network: BaseNetwork,
   timeoutMs = 3_000,
   pause: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -72,7 +78,7 @@ export function payChainReader(
   const registry = network.contracts.identityRegistry;
   if (!registry) throw new Error('The wallet network has no identity registry.');
   const client = createPublicClient({
-    transport: http(url, { timeout: timeoutMs, retryCount: 0 }),
+    transport: baseReadTransport(url, { chainId: network.chainId, timeoutMs }),
   });
   let chainChecked = false;
   // A URL for another network must never answer for this one.

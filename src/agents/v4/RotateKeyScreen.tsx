@@ -42,8 +42,14 @@ export function RotateKeyScreen({ agent, onBack, backLabel }: AgentScreenProps) 
     );
 
   const hint = keyHint(current);
+  // While the rotate request runs, Back stays put: leaving would drop the new key unseen.
   return (
-    <SettingsFrame backLabel={back} onBack={onBack} title="Rotate key">
+    <SettingsFrame
+      backLabel={back}
+      onBack={onBack}
+      backDisabled={view.busy === 'rotate'}
+      title="Rotate key"
+    >
       {snapshot.state === 'loading' ? (
         <SettingsLoading />
       ) : snapshot.state === 'error' ? (

@@ -32,6 +32,16 @@ const leavesQuery = z
     to: z.coerce.number().int().min(1).optional(),
   })
   .strict();
+/**
+ * The withdrawn list, paged by leaf index like /leaves: other query strings would each be a
+ * separate edge-cache entry and a fresh read of the whole (append-only) table.
+ */
+const withdrawnQuery = z
+  .object({
+    from: z.coerce.number().int().min(0).max(2_147_483_647).default(0),
+    to: z.coerce.number().int().min(1).max(2_147_483_647).optional(),
+  })
+  .strict();
 // Only an optional day: other query strings would each be a separate edge-cache entry. The verify page adds ?after=<checkpoint day> to skip a stale cached list.
 const checkpointsQuery = z
   .object({ after: z.string().refine(isDay, 'Use YYYY-MM-DD.').optional() })
@@ -174,9 +184,14 @@ export function registerCountLogRoutes(
       .header('Cache-Control', settled ? IMMUTABLE : SHORT)
       .send({ from, tree_size: page.tree_size, leaves: page.leaves });
   });
-  app.get('/api/public/count-log/withdrawn', async (_request, reply) =>
-    reply.header('Cache-Control', SHORT).send({ withdrawn: await d.log.withdrawn() }),
-  );
+  app.get('/api/public/count-log/withdrawn', async (request, reply) => {
+    const { from, to } = withdrawnQuery.parse(request.query);
+    const withdrawn = await d.log.withdrawn(from, to, LEAVES_PAGE_MAX);
+    // A full page may have more after it: `next` is the `from` of the following page. Never
+    // immutable: a leaf in any range can still be withdrawn later.
+    const next = withdrawn.length === LEAVES_PAGE_MAX ? withdrawn.at(-1)!.idx + 1 : null;
+    return reply.header('Cache-Control', SHORT).send({ from, withdrawn, next });
+  });
   // The owner's own agents, id and name only, for "Check my agent" on /downtown/verify. Unlike
   // /api/snapshot it reads nothing else and advances no work.
   app.get('/api/count-log/my-agents', async (request, reply) => {

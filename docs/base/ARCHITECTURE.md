@@ -1,7 +1,29 @@
-# Base agents: architecture (phase 1, Base Sepolia)
+# Base agents: architecture
 
-Owner: the Base lead. Reviewers: the chain/security reviewer and the owner of each module below.
-Status: proposal for review. No implementation starts until this file is merged.
+Status: implementation overview reviewed 18 October 2026. Base mainnet (8453) is
+supported in the hosted product; Base Sepolia (84532) and local Anvil remain test networks.
+This document is not authorization to provision wallets, change production configuration or
+move funds.
+
+## Current implementation
+
+- `server/base/identity/` implements ERC-8004 identity and passport registration.
+- `server/base/wallet/`, `server/base/chain/` and `src/base/` implement non-custodial
+  owner wallets, browser-encrypted owner keys and limited server-held spending authority.
+- `server/base/payments/` handles wallet transfers; `server/feed/pay/` handles service
+  quotes, consent, reservations, payment state and recovery. These are different paths.
+- `contracts/fees/` and `server/protocol/fees/` implement the fee routers and finalized
+  accounting. Router 1 totals are at most 0.10 USDC; ready, enabled Router 2 supports totals
+  up to 100 USDC within owner limits. Existing calls retain their pinned router.
+- Included-fee service payments split in the router transaction. External x402 seller
+  payment and protocol fee are separate legs. Payment settlement does not prove delivery.
+
+See [wallet guide](../WALLET_GUIDE.md), [Feed pay](../FEED_PAY.md) and
+[Fee Router 2](../protocol/FEE_ROUTER_2.md). The numbered sections below retain the original
+phase-1 design and later decision record. Proposal schemas, cost targets, module ownership
+and testnet-only gates in that record are historical, not a current deployment inventory.
+
+## Historical phase-1 design
 
 This is the contract between the modules of the Base operation. Each module has one owner and one
 directory; modules talk only through the interfaces in `shared/base/` described here. Strategy and

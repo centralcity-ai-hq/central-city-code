@@ -24,6 +24,7 @@ export const GUIDE_SLUGS = [
   'coding',
   'microsoft-copilot',
   'mistral-le-chat',
+  'feed',
 ] as const;
 export type GuideSlug = (typeof GUIDE_SLUGS)[number];
 

@@ -10,6 +10,13 @@ import type { BrowserContext, Page } from '@playwright/test';
 /** The ticker's <p> in the prerendered HTML (its children are spans only). */
 export const PRERENDERED_TICKER = /<p class="cc-agent-ticker"[^>]*>[\s\S]*?<\/p>/;
 
+/**
+ * The paid calls line as a build writes it: empty and reserved when the build saw the count
+ * (data-paid-calls="1", scripts/prerender/agent-count.ts), never a number. A plain `pnpm build`
+ * reads production, so whether it is there depends on production at build time.
+ */
+export const PREBUILT_PAID_LINE = /<p class="cc-agent-ticker cc-paid-ticker"[^>]*>(?:<\/p>)?/;
+
 /** The empty, reserved line, as built without a count. */
 export const EMPTY_TICKER =
   '<p class="cc-agent-ticker" data-agent-ticker="true" data-ready="false" data-source="none">' +
@@ -32,7 +39,10 @@ export function builtTicker(total: number, at: string): string {
   );
 }
 
-/** Serves "/" as built, with its ticker replaced by `ticker` (default: the empty line). */
+/**
+ * Serves "/" as built, with its ticker replaced by `ticker` (default: the empty line) and no
+ * reserved paid calls line, so the specs see the same page whatever production had at build time.
+ */
 export async function landingWithTicker(
   page: Page | BrowserContext,
   ticker: string = EMPTY_TICKER,
@@ -41,7 +51,7 @@ export async function landingWithTicker(
     (url) => url.pathname === '/',
     async (route) => {
       const response = await route.fetch();
-      const html = await response.text();
+      const html = (await response.text()).replace(PREBUILT_PAID_LINE, '');
       if (!PRERENDERED_TICKER.test(html)) throw new Error('landingWithTicker: no ticker in "/"');
       await route.fulfill({ response, body: html.replace(PRERENDERED_TICKER, () => ticker) });
     },

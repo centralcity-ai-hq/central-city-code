@@ -162,10 +162,15 @@ test('links.ts has docs, and the footer mirrors the header groups, then Help & l
   assert.ok(!FOOTER_COLUMNS.some((col) => col.links.some((link) => link.href === LINKS.workflows)));
   // Elric leads Product, the way the site presents its AI assistant.
   assert.equal(productCol.links[0]!.label, 'Elric');
-  // Base Agents (the Agent Explorer's On Base view) follows Connect AI, with its own line.
+  // Product is Elric, Workspace and Base Agents (the Agent Explorer's On Base view, with its own
+  // line); connecting an AI is the header's Invite your AI, and Use cases sits under Developers.
   assert.deepEqual(
     NAV_GROUPS[0]!.items.map((item) => item.label),
-    ['Elric', 'Workspace', 'Connect AI', 'Base Agents', 'Use cases'],
+    ['Elric', 'Workspace', 'Base Agents'],
+  );
+  assert.deepEqual(
+    NAV_GROUPS[1]!.items.map((item) => item.label),
+    ['Docs', 'Use cases', 'Changelog', 'Status'],
   );
   const baseAgents = NAV_GROUPS[0]!.items.find((item) => item.label === 'Base Agents');
   assert.equal(baseAgents?.href, '/explorer/base');
@@ -214,13 +219,29 @@ test('no token is defined as a reference to itself', () => {
   assert.deepEqual(selfRefs, []);
 });
 
-test('"Elric on GitHub" has one switch and a public repository URL', () => {
+test("Elric's code on GitHub has one switch and is on Downtown, never in a menu", () => {
   assert.match(
     ELRIC_CODE_URL,
     /^https:\/\/github\.com\/centralcity-ai-hq\/central-city-code\/tree\/main\/server\/elric$/,
   );
   assert.ok(PUBLIC_REPOS.some((repo) => ELRIC_CODE_URL.startsWith(`${repo}/`)));
+  // The product owner, 15 Oct: Downtown lists it under Repository as Elric; the Open Source menu,
+  // and the footer that mirrors the menus, no longer do.
   const openSource = NAV_GROUPS.find((group) => group.id === 'open-source')!;
-  const listed = openSource.items.some((item) => item.href === ELRIC_CODE_URL);
-  assert.equal(listed, ELRIC_CODE_PUBLISHED, 'listed exactly when published');
+  assert.deepEqual(
+    openSource.items.map((item) => item.label),
+    ['Agent Explorer', 'Downtown', 'Verify'],
+  );
+  for (const link of [
+    ...NAV_GROUPS.flatMap((group) => group.items),
+    ...FOOTER_COLUMNS.flatMap((column) => column.links),
+  ]) {
+    assert.notEqual(link.href, ELRIC_CODE_URL, link.label);
+    assert.doesNotMatch(link.label, /Elric on GitHub/i);
+  }
+  // Downtown's row: named Elric, linking that folder, exactly while it is published.
+  const downtown = readFileSync(resolve(process.cwd(), 'src/Downtown.tsx'), 'utf8');
+  assert.match(downtown, /\.\.\.\(ELRIC_CODE_PUBLISHED\s*\?/);
+  assert.match(downtown, /folder: \{\s*name: 'Elric',[\s\S]*?url: ELRIC_CODE_URL,\s*\}/);
+  assert.equal(ELRIC_CODE_PUBLISHED, true);
 });

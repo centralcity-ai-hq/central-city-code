@@ -77,7 +77,9 @@ export type ChainOpKind =
   /** The owner's no-op on a withdrawal's nonce, so that withdrawal can never land. */
   | 'withdraw_cancel'
   /** An owner's star rating of another agent from an agent wallet (Reputation Registry). */
-  | 'rate';
+  | 'rate'
+  /** The protocol fee of a Feed pay call, from the spender account (CentralCityFeeRouter). */
+  | 'protocol_fee';
 
 export interface ChainOpRequest {
   /** Includes the chain id; the same key with a different intent hash is refused. */

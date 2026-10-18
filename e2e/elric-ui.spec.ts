@@ -539,9 +539,9 @@ test('message with server auto_reply.label renders Elric badge in post byline', 
 
   const badge = msg.locator('.rm-byline .rm-badge-elric');
   await expect(badge).toBeVisible();
-  // One badge, "built in"; "AI" stays for assistive technology.
-  await expect(badge).toHaveText('built in AI');
-  await expect(badge.locator('.rm-visually-hidden')).toHaveText('AI');
+  // One badge, "built-in AI", visible to everyone (EU AI Act Art. 50).
+  await expect(badge).toHaveText('built-in AI');
+  await expect(badge.locator('.rm-visually-hidden')).toHaveCount(0);
   await expect(msg.locator('.rm-byline .rm3-tag:visible')).toHaveCount(1);
   await expect(badge).toHaveAttribute('title', 'Elric v1.0');
 
@@ -1253,9 +1253,9 @@ test('owner sees Elric reply with avatar, Elric name, and AI badge even when mes
   // Byline displays AI badge with tooltip "Elric v1.0"
   const badge = msg.locator('.rm-byline .rm-badge-elric');
   await expect(badge).toBeVisible();
-  // One badge, "built in"; "AI" stays for assistive technology.
-  await expect(badge).toHaveText('built in AI');
-  await expect(badge.locator('.rm-visually-hidden')).toHaveText('AI');
+  // One badge, "built-in AI", visible to everyone (EU AI Act Art. 50).
+  await expect(badge).toHaveText('built-in AI');
+  await expect(badge.locator('.rm-visually-hidden')).toHaveCount(0);
   await expect(msg.locator('.rm-byline .rm3-tag:visible')).toHaveCount(1);
   await expect(badge).toHaveAttribute('title', 'Elric v1.0');
 });
@@ -1589,7 +1589,7 @@ test('inline approval card displays error and re-enables buttons on failure, and
     await route.fulfill({
       status: 400,
       contentType: 'application/json',
-      body: JSON.stringify({ message: 'Action revoked by host.' }),
+      body: JSON.stringify({ error: 'Action revoked by host.' }),
     });
   });
 

@@ -63,6 +63,8 @@ test('discovery metadata advertises OAuth 2.1, CIMD, DCR and the /mcp resource',
       'results:read',
       'results:publish',
       'pay',
+      'services:pay',
+      'services:sell',
     ]);
   }
   const as = (
@@ -844,6 +846,64 @@ test('private_key_jwt clients (ChatGPT) authenticate every token request with a 
   res = await plainExchange(withAssertion(assertion(rsa, claimsFor(PUBLIC_CLIENT, time))));
   assert.equal(res.json().error, 'invalid_client');
   assert.equal((await plainExchange({ client_id: PUBLIC_CLIENT })).statusCode, 200);
+});
+
+test('private_key_jwt accepts a fractional exp (RFC 7519 NumericDate) and still refuses its reuse', async (t) => {
+  const time = 1_800_000_000_000;
+  const rsa = signer('RS256', 'rsa-frac');
+  const documents = new Map<string, unknown>([
+    [
+      JWT_CLIENT,
+      {
+        client_id: JWT_CLIENT,
+        client_name: 'Signed Client',
+        redirect_uris: [REDIRECT],
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+        token_endpoint_auth_method: 'private_key_jwt',
+        token_endpoint_auth_signing_alg: 'RS256',
+        jwks_uri: JWT_KEYS,
+      },
+    ],
+    [JWT_KEYS, { keys: [rsa.jwk] }],
+  ]);
+  const { app } = await fixture(t, {
+    clock: () => time,
+    fetchClientMetadata: async (url) => {
+      if (!documents.has(url.href)) throw new Error('not found');
+      return structuredClone(documents.get(url.href));
+    },
+  });
+  const { verifier, challenge } = pkce();
+  const code = (
+    await approve(app, authorizeUrl({ client_id: JWT_CLIENT, code_challenge: challenge }))
+  ).searchParams.get('code')!;
+  // Microsecond precision, as `time.time() + 60` gives: not a whole number of milliseconds.
+  const fractional = (extra: Record<string, unknown> = {}) =>
+    assertion(rsa, claimsFor(JWT_CLIENT, time, { exp: time / 1000 + 60.123456, ...extra }));
+  const exchanged = await tokenRequest(app, {
+    grant_type: 'authorization_code',
+    code,
+    code_verifier: verifier,
+    redirect_uri: REDIRECT,
+    resource: RESOURCE,
+    ...withAssertion(fractional({ iat: time / 1000 + 0.5 })),
+  });
+  assert.equal(exchanged.statusCode, 200, exchanged.body);
+  const once = fractional();
+  let tokens = exchanged.json();
+  const refresh = () =>
+    tokenRequest(app, {
+      grant_type: 'refresh_token',
+      refresh_token: tokens.refresh_token,
+      ...withAssertion(once),
+    });
+  const first = await refresh();
+  assert.equal(first.statusCode, 200, first.body);
+  tokens = first.json();
+  const replay = await refresh();
+  assert.equal(replay.statusCode, 401);
+  assert.match(replay.json().error_description, /already used/);
 });
 
 test('private_key_jwt with an inline JWK Set (ES256, EdDSA); unusable key documents are refused', async (t) => {

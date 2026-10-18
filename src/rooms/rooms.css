@@ -2399,6 +2399,16 @@
   color: var(--text-primary);
   line-height: 1.4;
 }
+.rm-approval-detail {
+  margin: 0;
+  font-size: max(12px, calc(12.5 * var(--ws-type-px)));
+  color: var(--text-muted);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 12em;
+  overflow-y: auto;
+}
 .rm-approval-meta {
   font-size: 11.5px;
   color: var(--text-muted);

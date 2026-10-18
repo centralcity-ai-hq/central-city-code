@@ -66,20 +66,16 @@ test('an agent keeps one short id; the link serves its ERC-8004 registration fil
   );
   const app = Fastify();
   t.after(() => app.close());
-  // Stand-in for the card route: agent-1 is public, agent-2's card is not served.
-  app.get('/a2a/:agentId/.well-known/agent-card.json', async (request, reply) => {
-    const { agentId } = request.params as { agentId: string };
-    // Like production, the card route answers only the public host.
-    if (request.headers.host !== 'centralcity.ai')
-      return reply.code(403).send({ error: 'Host is not allowed.' });
-    if (agentId !== 'agent-1') return reply.code(404).send({ error: 'Agent Card not found.' });
-    return {
-      name: 'Harbor',
-      description: 'Research agent',
-      supportedInterfaces: [{ protocolVersion: '1.0' }],
-    };
-  });
-  registerShortLinks(app, { db, originOf: () => 'https://centralcity.ai' });
+  // The public card: agent-1's; agent-2 has none that is public.
+  const card = async (agentId: string) =>
+    agentId === 'agent-1'
+      ? {
+          name: 'Harbor',
+          description: 'Research agent',
+          supportedInterfaces: [{ protocolVersion: '1.0' }],
+        }
+      : null;
+  registerShortLinks(app, { db, originOf: () => 'https://centralcity.ai', card });
   const ok = await app.inject({ url: `/a/${id}`, headers: { host: 'centralcity.ai' } });
   assert.equal(ok.statusCode, 200);
   assert.equal(ok.headers['access-control-allow-origin'], '*');
@@ -94,6 +90,8 @@ test('an agent keeps one short id; the link serves its ERC-8004 registration fil
         endpoint: 'https://centralcity.ai/a2a/agent-1/.well-known/agent-card.json',
         version: '1.0',
       },
+      // The passport page, the human view of the same registration.
+      { name: 'web', endpoint: `https://centralcity.ai/a/${id}` },
     ],
     x402Support: false,
     active: true,

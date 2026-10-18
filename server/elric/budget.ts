@@ -38,6 +38,17 @@ export const elricCeilingAlertsMigration: Migration = {
   DEFAULT 0 CHECK (alerted_percent IN (0,50,80,95));`,
 };
 /**
+ * Migration 220: new conversations per owner and UTC day, on the owner's usage row. Deleting a
+ * conversation purges its room (erase.ts), so a count over rooms forgets it; this counter does
+ * not, and keeps create-then-delete churn inside CONVERSATIONS_PER_DAY (conversations.ts).
+ */
+export const elricConversationStartsMigration: Migration = {
+  version: 220,
+  name: 'elric_conversation_starts',
+  sql: `ALTER TABLE elric_usage ADD COLUMN IF NOT EXISTS conversations integer NOT NULL
+  DEFAULT 0 CHECK (conversations >= 0);`,
+};
+/**
  * Registers migration 42 next to Elric's migration 39 (createApp), never on import: a migrations
  * run without the Elric schema must not touch elric tables.
  */
@@ -51,6 +62,8 @@ export function registerElricCeilingMigration(): void {
   registerElricTitlesMigration();
   // Migration 66 (the room catch-up cache) too.
   registerElricCatchUpMigration();
+  // Migration 220 (new conversations per day) too.
+  registerMigration(elricConversationStartsMigration);
 }
 
 export interface CeilingAlert {

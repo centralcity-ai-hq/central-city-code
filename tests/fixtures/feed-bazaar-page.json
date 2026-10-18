@@ -1,0 +1,1136 @@
+{
+  "items": [
+    {
+      "accepts": [
+        {
+          "amount": "30000",
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "extra": {
+            "name": "USD Coin",
+            "version": "2"
+          },
+          "maxTimeoutSeconds": 120,
+          "network": "eip155:8453",
+          "payTo": "0x6B7a56B58c89631aB60E7153b6170677A1Af00be",
+          "scheme": "exact"
+        }
+      ],
+      "description": "Use to size competing or neighboring construction around one Rio Grande Valley address before you buy, lend, lease or build there: count, summed filed cost and each commercial project within radius_mi (default 1, max 5), nearest first. Hidalgo, Cameron, Starr and Willacy counties; about 68% of filings have a map point. An address we cannot place is a free 404. Example: \"How many commercial projects were filed within two miles of 1201 E Capote Central Ave, Pharr, and what are they worth?\"",
+      "extensions": {
+        "bazaar": {
+          "info": {
+            "input": {
+              "method": "GET",
+              "queryParams": {
+                "address": "1201 E Capote Central Ave",
+                "city": "Pharr",
+                "radius_mi": 2
+              },
+              "type": "http"
+            },
+            "output": {
+              "example": {
+                "as_of": "2026-10-04",
+                "by_type_of_work": [
+                  {
+                    "count": 4,
+                    "total_estimated_cost_usd": 13750000,
+                    "type_of_work": "Additions to Existing Building"
+                  }
+                ],
+                "cadence": "weekly",
+                "count": 11,
+                "coverage": {
+                  "counties": ["Cameron", "Hidalgo", "Starr", "Willacy"],
+                  "filings": 1478,
+                  "located": 999,
+                  "located_pct": 67.6,
+                  "note": "67.6% of the filings we hold have a map point. The rest (intersections, addresses with no house number, addresses not o…",
+                  "registered_since": "2024-10-01"
+                },
+                "dataset": "nearby",
+                "disclaimer": "Every value carries as_of, age_days, cadence and stale (weekly measures go stale after 14 days, monthly measures after …",
+                "largest_project_cost_usd": 12156468,
+                "location": {
+                  "county": "Hidalgo County, Texas",
+                  "lat": 26.089523,
+                  "lon": -98.189325,
+                  "matched_address": "1201 E CAPOTE CENTRAL AVE, PHARR TX",
+                  "placed_by": "parcel_centroid"
+                },
+                "newest_registration": "2026-09-14",
+                "note": "Nearest first, up to 100 projects; count and the totals cover every project in the radius. Distance is straight-line mi…",
+                "projects": [
+                  {
+                    "address": "1201 E Capote Central Ave ste 400 bldg H",
+                    "city": "Pharr",
+                    "county": "Hidalgo",
+                    "design_firm": null,
+                    "distance_mi": 0,
+                    "estimated_cost_usd": 100000,
+                    "estimated_end": "2026-12-23",
+                    "estimated_start": "2026-09-21",
+                    "facility": "Building \"H\"",
+                    "funding": "private",
+                    "geo_precision": "parcel_centroid",
+                    "id": "FSP-83c0e15113",
+                    "lat": 26.08952,
+                    "lon": -98.18932,
+                    "name": "Building \"H\"",
+                    "owner": "OCP Capote 2023 LP",
+                    "registered": "2026-09-14",
+                    "scope_of_work": "Renovation / Alteration to existing building",
+                    "source": "public state construction filing",
+                    "square_feet": 3300,
+                    "status": "Review Complete",
+                    "type_of_work": "Renovation/Alteration",
+                    "zip": "78577"
+                  }
+                ],
+                "projects_with_cost": 11,
+                "publisher": "Frontera Signal",
+                "query": {
+                  "address": "1201 E Capote Central Ave",
+                  "city": "Pharr",
+                  "radius_mi": 2
+                },
+                "radius_mi": 2,
+                "returned": 11,
+                "source": "public state construction filing",
+                "total_estimated_cost_usd": 44131468
+              },
+              "type": "json"
+            }
+          },
+          "schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "properties": {
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "method": {
+                    "enum": ["GET"],
+                    "type": "string"
+                  },
+                  "queryParams": {
+                    "properties": {
+                      "address": {
+                        "description": "Street address with house number, e.g. 800 S 10th St. A suite or unit is ignored.",
+                        "type": "string"
+                      },
+                      "city": {
+                        "description": "The city or town on the address, e.g. McAllen, Brownsville, Rio Grande City.",
+                        "type": "string"
+                      },
+                      "radius_mi": {
+                        "description": "Radius in miles, 0.1 to 5. Default 1.",
+                        "type": "number"
+                      }
+                    },
+                    "required": ["address", "city"],
+                    "type": "object"
+                  },
+                  "type": {
+                    "const": "http",
+                    "type": "string"
+                  }
+                },
+                "required": ["type", "method"],
+                "type": "object"
+              },
+              "output": {
+                "properties": {
+                  "example": {
+                    "properties": {
+                      "as_of": {
+                        "type": "string"
+                      },
+                      "by_type_of_work": {
+                        "items": {
+                          "properties": {
+                            "count": {
+                              "type": "integer"
+                            },
+                            "total_estimated_cost_usd": {
+                              "type": "integer"
+                            },
+                            "type_of_work": {
+                              "type": "string"
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "cadence": {
+                        "type": "string"
+                      },
+                      "count": {
+                        "type": "integer"
+                      },
+                      "coverage": {
+                        "properties": {
+                          "counties": {
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          "filings": {
+                            "type": "integer"
+                          },
+                          "located": {
+                            "type": "integer"
+                          },
+                          "located_pct": {
+                            "type": "number"
+                          },
+                          "note": {
+                            "type": "string"
+                          },
+                          "registered_since": {
+                            "type": "string"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "dataset": {
+                        "type": "string"
+                      },
+                      "disclaimer": {
+                        "type": "string"
+                      },
+                      "largest_project_cost_usd": {
+                        "type": "integer"
+                      },
+                      "location": {
+                        "properties": {
+                          "county": {
+                            "type": "string"
+                          },
+                          "lat": {
+                            "type": "number"
+                          },
+                          "lon": {
+                            "type": "number"
+                          },
+                          "matched_address": {
+                            "type": "string"
+                          },
+                          "placed_by": {
+                            "type": "string"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "newest_registration": {
+                        "type": "string"
+                      },
+                      "note": {
+                        "type": "string"
+                      },
+                      "projects": {
+                        "items": {
+                          "properties": {
+                            "address": {
+                              "type": "string"
+                            },
+                            "city": {
+                              "type": "string"
+                            },
+                            "county": {
+                              "type": "string"
+                            },
+                            "design_firm": {
+                              "type": ["null", "string"]
+                            },
+                            "distance_mi": {
+                              "type": "number"
+                            },
+                            "estimated_cost_usd": {
+                              "type": "integer"
+                            },
+                            "estimated_end": {
+                              "type": "string"
+                            },
+                            "estimated_start": {
+                              "type": "string"
+                            },
+                            "facility": {
+                              "type": "string"
+                            },
+                            "funding": {
+                              "type": "string"
+                            },
+                            "geo_precision": {
+                              "type": "string"
+                            },
+                            "id": {
+                              "type": "string"
+                            },
+                            "lat": {
+                              "type": "number"
+                            },
+                            "lon": {
+                              "type": "number"
+                            },
+                            "name": {
+                              "type": "string"
+                            },
+                            "owner": {
+                              "type": "string"
+                            },
+                            "registered": {
+                              "type": "string"
+                            },
+                            "scope_of_work": {
+                              "type": "string"
+                            },
+                            "source": {
+                              "type": "string"
+                            },
+                            "square_feet": {
+                              "type": "integer"
+                            },
+                            "status": {
+                              "type": "string"
+                            },
+                            "type_of_work": {
+                              "type": "string"
+                            },
+                            "zip": {
+                              "type": "string"
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "projects_with_cost": {
+                        "type": "integer"
+                      },
+                      "publisher": {
+                        "type": "string"
+                      },
+                      "query": {
+                        "properties": {
+                          "address": {
+                            "type": "string"
+                          },
+                          "city": {
+                            "type": "string"
+                          },
+                          "radius_mi": {
+                            "type": "integer"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "radius_mi": {
+                        "type": "integer"
+                      },
+                      "returned": {
+                        "type": "integer"
+                      },
+                      "source": {
+                        "type": "string"
+                      },
+                      "total_estimated_cost_usd": {
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": ["type"],
+                "type": "object"
+              }
+            },
+            "required": ["input"],
+            "type": "object"
+          }
+        }
+      },
+      "lastUpdated": "2026-10-08T06:26:00.24Z",
+      "quality": {
+        "l30DaysTotalCalls": 2,
+        "l30DaysUniquePayers": 2,
+        "lastCalledAt": "2026-10-08T06:26:00.097Z"
+      },
+      "resource": "https://fronterasignal.com/api/v1/nearby",
+      "serviceName": "Frontera Signal",
+      "tags": ["construction", "real-estate", "texas", "rio-grande-valley", "building-permits"],
+      "type": "http",
+      "x402Version": 2
+    },
+    {
+      "accepts": [
+        {
+          "amount": "10000",
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "extra": {
+            "name": "USD Coin",
+            "version": "2"
+          },
+          "maxTimeoutSeconds": 300,
+          "network": "eip155:8453",
+          "payTo": "0x548eFd4f4d4A5C3669dbb4CBB2B1A637FeeEc5F6",
+          "scheme": "exact"
+        },
+        {
+          "amount": "10000",
+          "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "extra": {
+            "feePayer": "BFK9TLC3edb13K6v4YyH3DwPb5DSUpkWvb7XnqCL9b4F"
+          },
+          "maxTimeoutSeconds": 300,
+          "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+          "payTo": "APer2AbhckyMWyJanW2MZ2eRLcpL9Lmhks8rkmXfqjRG",
+          "scheme": "exact"
+        }
+      ],
+      "description": "Lookup of standard physical constants (speed of light, gravitational constant, Planck constant, elementary charge, Avogadro number, Boltzmann constant, gas constant, electron mass) with exact published CODATA values.",
+      "extensions": {
+        "bazaar": {
+          "info": {
+            "input": {
+              "body": {
+                "constant": "speedOfLight"
+              },
+              "bodyType": "json",
+              "method": "POST",
+              "type": "http"
+            },
+            "output": {
+              "example": {
+                "data": {
+                  "description": "Speed of light in vacuum",
+                  "params": {
+                    "constant": "speedOfLight"
+                  },
+                  "unit": "m/s",
+                  "value": 299792458
+                },
+                "ok": true
+              },
+              "type": "json"
+            }
+          },
+          "schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "properties": {
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "body": {
+                    "properties": {
+                      "constant": {
+                        "description": "Which constant to look up.",
+                        "enum": [
+                          "speedOfLight",
+                          "gravitationalConstant",
+                          "planckConstant",
+                          "elementaryCharge",
+                          "avogadroNumber",
+                          "boltzmannConstant",
+                          "gasConstant",
+                          "electronMass"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": ["constant"],
+                    "type": "object"
+                  },
+                  "bodyType": {
+                    "enum": ["json", "form-data", "text"],
+                    "type": "string"
+                  },
+                  "method": {
+                    "enum": ["POST"],
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "http",
+                    "type": "string"
+                  }
+                },
+                "required": ["type", "method", "bodyType", "body"],
+                "type": "object"
+              },
+              "output": {
+                "properties": {
+                  "example": {
+                    "type": "object"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": ["type"],
+                "type": "object"
+              }
+            },
+            "required": ["input"],
+            "type": "object"
+          }
+        },
+        "builder-code": {
+          "info": {
+            "a": "x402_api_vendor",
+            "s": ["cdp_sdk_server"]
+          },
+          "schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "properties": {
+              "a": {
+                "description": "App builder code",
+                "pattern": "^[a-z0-9_]{1,32}$",
+                "type": "string"
+              },
+              "s": {
+                "description": "Service builder codes",
+                "items": {
+                  "pattern": "^[a-z0-9_]{1,32}$",
+                  "type": "string"
+                },
+                "maxItems": 11,
+                "type": "array"
+              },
+              "w": {
+                "description": "Wallet builder code",
+                "pattern": "^[a-z0-9_]{1,32}$",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "eip2612GasSponsoring": {},
+        "erc20ApprovalGasSponsoring": {}
+      },
+      "lastUpdated": "2026-10-08T06:25:59.321Z",
+      "quality": {
+        "l30DaysTotalCalls": 3,
+        "l30DaysUniquePayers": 2,
+        "lastCalledAt": "2026-10-08T06:25:59.205Z"
+      },
+      "resource": "https://ppu43fkyhimq5fiqpmo42eh5ri0yypid.lambda-url.us-east-1.on.aws/physicalConstants",
+      "serviceName": "Sindri",
+      "tags": ["physical constants", "CODATA", "physics reference"],
+      "type": "http",
+      "x402Version": 2
+    },
+    {
+      "accepts": [
+        {
+          "amount": "80000",
+          "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "extra": {
+            "feePayer": "BFK9TLC3edb13K6v4YyH3DwPb5DSUpkWvb7XnqCL9b4F"
+          },
+          "maxTimeoutSeconds": 300,
+          "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+          "payTo": "8tosK4UvkrkhBq1fFquS4ecZKvHpeYtjCoMRMgMvcsQz",
+          "scheme": "exact"
+        },
+        {
+          "amount": "80000",
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "extra": {
+            "name": "USD Coin",
+            "version": "2"
+          },
+          "maxTimeoutSeconds": 300,
+          "network": "eip155:8453",
+          "payTo": "0x30Eab9013826eD708ec072AF66AE08f4B379FE07",
+          "scheme": "exact"
+        }
+      ],
+      "description": "Transits: Transits to a natal chart at a moment, and exact hit times over a window of up to a year.",
+      "extensions": {
+        "bazaar": {
+          "info": {
+            "input": {
+              "body": {
+                "natal": {
+                  "datetime": "1990-05-15T14:30",
+                  "latitude": 48.8566,
+                  "longitude": 2.3522
+                },
+                "transit": {
+                  "datetime": "2026-10-01T12:00"
+                },
+                "window": {
+                  "end": "2026-12-31",
+                  "start": "2026-10-01"
+                }
+              },
+              "bodyType": "json",
+              "method": "POST",
+              "type": "http"
+            },
+            "output": {
+              "example": {
+                "endpoint": "western/transits",
+                "meta": {
+                  "deterministic": true,
+                  "engine": "astro-agents/1.0.3",
+                  "ephemeris": "NASA/JPL DE440 (1800-01-01..2200-01-01)",
+                  "llm_used": false,
+                  "result_sha256": "7e7a7b2568e4629efff09bbaa2b3757bb2da232061273d5aa32beb896236d9f0"
+                },
+                "result_excerpt": {
+                  "window": {
+                    "count": 95,
+                    "hits": [
+                      {
+                        "aspect": "square",
+                        "exact_utc": "2026-10-02T08:49Z",
+                        "natal_point": "uranus",
+                        "transit_point": "sun",
+                        "transit_retrograde": false
+                      },
+                      {
+                        "aspect": "square",
+                        "exact_utc": "2026-10-02T17:40Z",
+                        "natal_point": "jupiter",
+                        "transit_point": "sun",
+                        "transit_retrograde": false
+                      }
+                    ]
+                  }
+                }
+              },
+              "type": "json"
+            }
+          },
+          "schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "properties": {
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "body": {
+                    "properties": {
+                      "natal": {
+                        "properties": {
+                          "ambiguous_time": {
+                            "default": "earlier",
+                            "enum": ["earlier", "later"],
+                            "type": "string"
+                          },
+                          "date": {
+                            "type": "string"
+                          },
+                          "datetime": {
+                            "type": "string"
+                          },
+                          "latitude": {
+                            "maximum": 90,
+                            "minimum": -90,
+                            "type": "number"
+                          },
+                          "longitude": {
+                            "maximum": 180,
+                            "minimum": -180,
+                            "type": "number"
+                          },
+                          "time": {
+                            "type": "string"
+                          },
+                          "time_basis": {
+                            "default": "civil",
+                            "enum": ["civil", "utc", "lmt", "true_solar"],
+                            "type": "string"
+                          },
+                          "timezone": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["latitude", "longitude"],
+                        "type": "object"
+                      },
+                      "options": {
+                        "properties": {
+                          "aspects": {
+                            "oneOf": [
+                              {
+                                "enum": ["all"],
+                                "type": "string"
+                              },
+                              {
+                                "items": {
+                                  "enum": [
+                                    "conjunction",
+                                    "opposition",
+                                    "trine",
+                                    "square",
+                                    "sextile",
+                                    "quincunx",
+                                    "semisextile",
+                                    "semisquare",
+                                    "sesquiquadrate",
+                                    "quintile",
+                                    "biquintile"
+                                  ],
+                                  "type": "string"
+                                },
+                                "type": "array"
+                              }
+                            ]
+                          },
+                          "ayanamsa": {
+                            "default": "lahiri",
+                            "enum": [
+                              "fagan_bradley",
+                              "krishnamurti",
+                              "lahiri",
+                              "raman",
+                              "true_chitrapaksha",
+                              "yukteshwar"
+                            ],
+                            "type": "string"
+                          },
+                          "house_system": {
+                            "default": "placidus",
+                            "enum": [
+                              "alcabitius",
+                              "campanus",
+                              "equal",
+                              "koch",
+                              "meridian",
+                              "morinus",
+                              "placidus",
+                              "porphyry",
+                              "regiomontanus",
+                              "topocentric",
+                              "whole_sign"
+                            ],
+                            "type": "string"
+                          },
+                          "luminary_orb_bonus": {
+                            "default": 2,
+                            "maximum": 5,
+                            "minimum": 0,
+                            "type": "number"
+                          },
+                          "orbs": {
+                            "additionalProperties": {
+                              "maximum": 15,
+                              "minimum": 0,
+                              "type": "number"
+                            },
+                            "type": "object"
+                          },
+                          "points": {
+                            "oneOf": [
+                              {
+                                "enum": ["all"],
+                                "type": "string"
+                              },
+                              {
+                                "items": {
+                                  "enum": [
+                                    "sun",
+                                    "moon",
+                                    "mercury",
+                                    "venus",
+                                    "mars",
+                                    "jupiter",
+                                    "saturn",
+                                    "uranus",
+                                    "neptune",
+                                    "pluto",
+                                    "mean_node",
+                                    "true_node",
+                                    "mean_lilith"
+                                  ],
+                                  "type": "string"
+                                },
+                                "type": "array"
+                              }
+                            ]
+                          },
+                          "zodiac": {
+                            "default": "tropical",
+                            "enum": ["tropical", "sidereal"],
+                            "type": "string"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "transit": {
+                        "properties": {
+                          "datetime": {
+                            "type": "string"
+                          },
+                          "time_basis": {
+                            "default": "civil",
+                            "enum": ["civil", "utc", "lmt", "true_solar"],
+                            "type": "string"
+                          },
+                          "timezone": {
+                            "type": "string"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "window": {
+                        "properties": {
+                          "end": {
+                            "type": "string"
+                          },
+                          "include_moon": {
+                            "type": "boolean"
+                          },
+                          "start": {
+                            "type": "string"
+                          }
+                        },
+                        "type": "object"
+                      }
+                    },
+                    "required": ["natal"],
+                    "type": "object"
+                  },
+                  "bodyType": {
+                    "enum": ["json", "form-data", "text"],
+                    "type": "string"
+                  },
+                  "method": {
+                    "enum": ["POST", "PUT", "PATCH"],
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "http",
+                    "type": "string"
+                  }
+                },
+                "required": ["type", "method", "bodyType", "body"],
+                "type": "object"
+              },
+              "output": {
+                "properties": {
+                  "example": {
+                    "type": "object"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": ["type"],
+                "type": "object"
+              }
+            },
+            "required": ["input"],
+            "type": "object"
+          }
+        }
+      },
+      "lastUpdated": "2026-10-08T06:25:59.107Z",
+      "quality": {
+        "l30DaysTotalCalls": 3,
+        "l30DaysUniquePayers": 2,
+        "lastCalledAt": "2026-10-08T06:25:58.948Z"
+      },
+      "resource": "https://astro-agent.dev/v1/western/transits",
+      "serviceName": "Astro Agents",
+      "tags": ["transits", "forecast", "exact aspect dates", "retrograde", "astrology"],
+      "type": "http",
+      "x402Version": 2
+    },
+    {
+      "accepts": [
+        {
+          "amount": "10000",
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "description": "SYNTHORA top-crypto: Top N cryptocurrencies by market cap (default 10, max 50): rank, price, 24h change, volume and market cap in USD. Source: CoinGecko free API, keyless, timestamped.",
+          "extra": {
+            "name": "USD Coin",
+            "version": "2"
+          },
+          "maxAmountRequired": "10000",
+          "maxTimeoutSeconds": 300,
+          "mimeType": "application/json",
+          "network": "eip155:8453",
+          "payTo": "0xEf879BFD6C4AccB8F795136de90246e1EC245e06",
+          "resource": "https://api.hergertsynthora.com/v1/top-crypto",
+          "scheme": "exact"
+        }
+      ],
+      "description": "SYNTHORA top-crypto: Top N cryptocurrencies by market cap (default 10, max 50): rank, price, 24h change, volume and market cap in USD. Source: CoinGecko free API, keyless, timestamped.",
+      "extensions": {
+        "bazaar": {
+          "info": {
+            "input": {
+              "body": {
+                "limit": 10
+              },
+              "bodyType": "json",
+              "method": "POST",
+              "type": "http"
+            },
+            "output": {
+              "example": {
+                "niche": "top_crypto",
+                "ok": true,
+                "receipt": {
+                  "alg": "ed25519"
+                },
+                "result": {}
+              },
+              "schema": {
+                "properties": {
+                  "error": {
+                    "type": "string"
+                  },
+                  "niche": {
+                    "type": "string"
+                  },
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "receipt": {
+                    "type": "object"
+                  },
+                  "result": {
+                    "properties": {
+                      "as_of_utc": {
+                        "type": "string"
+                      },
+                      "coins": {
+                        "type": "array"
+                      },
+                      "count": {
+                        "type": "number"
+                      },
+                      "error": {
+                        "type": "string"
+                      },
+                      "source": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  }
+                },
+                "required": ["ok", "niche"],
+                "type": "object"
+              },
+              "type": "json"
+            }
+          },
+          "schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "properties": {
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "body": {
+                    "properties": {
+                      "limit": {
+                        "description": "top N, default 10, max 50",
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "bodyType": {
+                    "enum": ["json", "form-data", "text"],
+                    "type": "string"
+                  },
+                  "method": {
+                    "enum": ["POST", "PUT", "PATCH"],
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "http",
+                    "type": "string"
+                  }
+                },
+                "required": ["type", "method", "bodyType", "body"],
+                "type": "object"
+              },
+              "output": {
+                "properties": {
+                  "example": {
+                    "niche": {
+                      "type": "string"
+                    },
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "type": "object"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": ["type"],
+                "type": "object"
+              }
+            },
+            "required": ["input"],
+            "type": "object"
+          }
+        },
+        "delivery": {
+          "behaviour": "if the service FAILS (invalid input, timeout, stale cache, withdrawn product, malformed output) you receive 402 and are NOT charged",
+          "note": "unlike the signature -- which you verify BEFORE paying -- this one is checked afterwards, on-chain, from your own wallet",
+          "order": "compute -> failure gate -> verify -> settle -> deliver",
+          "policy": "no-charge-on-service-failure",
+          "scope": "this covers service FAILURE, not verdict quality",
+          "verify": "after a request of yours FAILS, check your own wallet on Base: no USDC settlement to our payTo will exist for it. If we had charged you, the transfer would be public and permanent"
+        },
+        "signature": {
+          "alg": "ed25519",
+          "canon": "json:sort_keys+separators(,:)+ensure_ascii+utf8",
+          "envelope": "{result, attestation:{alg,pubkey,sig,canon}}",
+          "jwksUrl": "https://api.hergertsynthora.com/.well-known/jwks.json",
+          "publicKeyUrl": "https://api.hergertsynthora.com/pubkey",
+          "sigEncoding": "hex(64B raw)",
+          "verify": "recompute canon from envelope.result, then VerifyKey(bytes.fromhex(pubkey)).verify(canon, bytes.fromhex(sig)) -- no name to trust, verify the signature yourself"
+        }
+      },
+      "lastUpdated": "2026-10-08T06:25:57.968Z",
+      "quality": {
+        "l30DaysTotalCalls": 4,
+        "l30DaysUniquePayers": 2,
+        "lastCalledAt": "2026-10-08T06:25:57.46Z"
+      },
+      "resource": "https://api.hergertsynthora.com/v1/top-crypto",
+      "serviceName": "SYNTHORA",
+      "tags": ["crypto", "market-cap", "coingecko", "realtime"],
+      "type": "http",
+      "x402Version": 2
+    },
+    {
+      "accepts": [
+        {
+          "amount": "40000",
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "extra": {
+            "name": "USD Coin",
+            "version": "2"
+          },
+          "maxTimeoutSeconds": 300,
+          "network": "eip155:8453",
+          "payTo": "0x1520Ef5530AA71350049BE2903Cf078B38c40AE5",
+          "scheme": "exact"
+        }
+      ],
+      "description": "FDA PDUFA Calendar ($0.04): upcoming FDA target-action dates as disclosed by sponsors in their own SEC EDGAR filings (10-K/10-Q/8-K) — not an estimate from trial-phase metadata. Body { ticker?, upcoming_days?: 1..730, include_past?: boolean }. Check free /v1/fda_pdufa_calendar/availability first.",
+      "extensions": {
+        "bazaar": {
+          "info": {
+            "input": {
+              "body": {
+                "upcoming_days": 180
+              },
+              "bodyType": "json",
+              "method": "POST",
+              "type": "http"
+            },
+            "output": {
+              "example": {
+                "brand": "draconic21",
+                "ok": true,
+                "product": "fda_pdufa_calendar"
+              },
+              "type": "json"
+            }
+          },
+          "schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "properties": {
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "body": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "include_past": {
+                        "type": "boolean"
+                      },
+                      "ticker": {
+                        "type": "string"
+                      },
+                      "upcoming_days": {
+                        "maximum": 730,
+                        "minimum": 1,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [],
+                    "type": "object"
+                  },
+                  "bodyType": {
+                    "enum": ["json", "form-data", "text"],
+                    "type": "string"
+                  },
+                  "method": {
+                    "enum": ["POST"],
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "http",
+                    "type": "string"
+                  }
+                },
+                "required": ["type", "method", "bodyType", "body"],
+                "type": "object"
+              },
+              "output": {
+                "properties": {
+                  "example": {
+                    "properties": {
+                      "brand": {
+                        "type": "string"
+                      },
+                      "ok": {
+                        "type": "boolean"
+                      },
+                      "product": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": ["type"],
+                "type": "object"
+              }
+            },
+            "required": ["input"],
+            "type": "object"
+          }
+        }
+      },
+      "lastUpdated": "2026-10-08T06:25:49.693Z",
+      "quality": {
+        "l30DaysTotalCalls": 2,
+        "l30DaysUniquePayers": 2,
+        "lastCalledAt": "2026-10-08T06:25:49.505Z"
+      },
+      "resource": "https://draconic21-x402-api.onrender.com/v1/fda_pdufa_calendar",
+      "serviceName": "d21 fda_pdufa_calendar",
+      "tags": ["fda", "pdufa", "biotech", "catalyst", "sec"],
+      "type": "http",
+      "x402Version": 2
+    }
+  ],
+  "pagination": {
+    "limit": 20,
+    "offset": 5000,
+    "total": 31638
+  },
+  "x402Version": 2
+}

@@ -871,7 +871,17 @@ test('sign-up with Google uses the password sign-up budget per address', async (
 
 test('return path: only allowlisted same-origin paths, never an open redirect', async (t) => {
   const { safeReturnPath } = await import('../shared/return-path.js');
-  for (const ok of ['/elric', '/elric/', '/rooms', '/settings/account', '/rooms/abc-123'])
+  for (const ok of [
+    '/elric',
+    '/elric/',
+    '/rooms',
+    '/settings/account',
+    '/rooms/abc-123',
+    '/feed',
+    '/feed/requests',
+    '/feed/requests/req_abcdefghijklmnopqrst',
+    '/feed/services/svc_abcdefghijklmnopqrst',
+  ])
     assert.ok(safeReturnPath(ok), ok);
   for (const bad of [
     'https://evil.example/elric',
@@ -883,6 +893,9 @@ test('return path: only allowlisted same-origin paths, never an open redirect', 
     '/elric/../admin',
     '/api/auth/logout',
     '/rooms/a/b',
+    '/feed/requests/req_abcdefghijklmnopqrst/manage',
+    '/feed/services',
+    '/feed/offered',
     'elric',
     '',
     undefined,
@@ -1112,4 +1125,53 @@ test('onboarding gate: an existing account signed in with Google needs a recorde
       .statusCode,
     200,
   );
+});
+
+test('a name claimed concurrently during Google onboarding is a 409, not a server error', async (t) => {
+  const f = await fixture(t);
+  const created = await callback(f, await start(f.app, 'signin'), {
+    sub: '100000000000000000041',
+    email: 'raced.person@example.com',
+  });
+  const cookie = sessionOf(created.res);
+  assert.ok(cookie, 'signed in');
+  await person(f.app, 'Raced Name');
+  // The race: the other claim commits after the availability check, so the check sees nothing
+  // and the UPDATE hits the unique name_key.
+  const db = f.app.city.db;
+  const transaction = db.transaction;
+  db.transaction = <T>(
+    action: (tx: Parameters<Parameters<typeof transaction>[0]>[0]) => Promise<T>,
+  ) =>
+    transaction.call<typeof db, [typeof action], Promise<T>>(db, (tx) =>
+      action({
+        ...tx,
+        query: (async (sql: string, params?: unknown[]) =>
+          sql.startsWith('SELECT 1 FROM operators WHERE name_key=')
+            ? { rows: [] }
+            : tx.query(sql, params)) as typeof tx.query,
+      }),
+    );
+  const post = (url: string, body: unknown) =>
+    f.app.inject({
+      method: 'POST',
+      url,
+      headers: { ...jsonHeaders, cookie },
+      payload: JSON.stringify(body),
+    });
+  const handle = await post('/api/auth/google/handle', { name: 'raced name' });
+  assert.equal(handle.statusCode, 409, handle.body);
+  assert.equal(handle.json().code, 'name_unavailable');
+  const { TERMS_VERSION } = await import('../shared/terms.js');
+  const onboarding = await post('/api/auth/onboarding', {
+    name: 'Raced Name',
+    terms_version: TERMS_VERSION,
+    accept_terms: true,
+  });
+  assert.equal(onboarding.statusCode, 409, onboarding.body);
+  assert.match(onboarding.json().error, /unavailable/);
+  db.transaction = transaction;
+  // Nothing was half-written: the account can still choose a free name.
+  const saved = await post('/api/auth/google/handle', { name: 'Free Name' });
+  assert.equal(saved.statusCode, 200, saved.body);
 });

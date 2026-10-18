@@ -19,6 +19,8 @@ import {
   BASE_WALLET_LIMITS_SQL,
 } from '../server/base/schema.js';
 import { createPaymentChain, PaymentChainError } from '../server/base/chain/payment-chain.js';
+import { FEED_PAY_FEE_SQL } from '../server/feed/pay/fee-schema.js';
+import { FEED_PAY_SQL } from '../server/feed/pay/schema.js';
 import { createReservationLedger } from '../server/base/chain/reservations.js';
 import {
   assertWithinCalendarLimit,
@@ -34,6 +36,7 @@ import type { SpendPermission } from '../shared/base/types.js';
 import {
   LIMIT_PERMISSION_END,
   berlinDate,
+  berlinDayStart,
   berlinMidnight,
   calendarPeriod,
   limitPeriodOf,
@@ -83,6 +86,62 @@ test('Berlin midnight and the next one, in summer, in winter and on both DST swi
     day: 25,
     weekday: 7,
   });
+});
+
+test('the start of the Berlin day (a new limit’s start): at or before now, across both DST switches', () => {
+  // 14:00 CEST and 14:00 CET: the midnight that began the day.
+  assert.equal(berlinDayStart(utc(2026, 10, 10, 12) * 1000), utc(2026, 10, 9, 22));
+  assert.equal(berlinDayStart(utc(2026, 11, 14, 13) * 1000), utc(2026, 11, 13, 23));
+  // At midnight itself it is that midnight; a second before, the previous one.
+  assert.equal(berlinDayStart(utc(2026, 10, 10, 22) * 1000), utc(2026, 10, 10, 22));
+  assert.equal(berlinDayStart(utc(2026, 10, 10, 22) * 1000 - 1), utc(2026, 10, 9, 22));
+  assert.equal(berlinDayStart((utc(2026, 10, 10, 22) - 1) * 1000), utc(2026, 10, 9, 22));
+  // 25 Oct 2026, the 25-hour day: 00:30 CEST, 02:30 CEST and 02:30 CET (the repeated hour),
+  // noon and 23:30 CET all began at 00:00 CEST.
+  for (const at of [
+    utc(2026, 10, 24, 22, 30),
+    utc(2026, 10, 25, 0, 30),
+    utc(2026, 10, 25, 1, 30),
+    utc(2026, 10, 25, 12),
+    utc(2026, 10, 25, 22, 30),
+  ])
+    assert.equal(
+      berlinDayStart(at * 1000),
+      utc(2026, 10, 24, 22),
+      new Date(at * 1000).toISOString(),
+    );
+  // The day after starts at 00:00 CET (23:00 UTC): 25 hours after the one before.
+  assert.equal(berlinDayStart(utc(2026, 10, 25, 23) * 1000), utc(2026, 10, 25, 23));
+  assert.equal(utc(2026, 10, 25, 23) - utc(2026, 10, 24, 22), 25 * HOUR);
+  // 28 Mar 2027, the 23-hour day: around the skipped hour (02:00 CET jumps to 03:00 CEST).
+  assert.equal(berlinDayStart(utc(2027, 3, 28, 0, 59) * 1000), utc(2027, 3, 27, 23));
+  assert.equal(berlinDayStart(utc(2027, 3, 28, 1, 1) * 1000), utc(2027, 3, 27, 23));
+  assert.equal(berlinDayStart(utc(2027, 3, 28, 21, 59) * 1000), utc(2027, 3, 27, 23));
+  assert.equal(berlinDayStart(utc(2027, 3, 28, 22) * 1000), utc(2027, 3, 28, 22));
+  // The other last Sundays: 29 Mar 2026 (23 hours, began at 00:00 CET) and 31 Oct 2027 (25 hours,
+  // began at 00:00 CEST; its repeated hour 02:00-03:00 is 00:00-01:00 and 01:00-02:00 UTC).
+  for (const at of [utc(2026, 3, 28, 23), utc(2026, 3, 29, 0, 59), utc(2026, 3, 29, 1, 1)])
+    assert.equal(berlinDayStart(at * 1000), utc(2026, 3, 28, 23));
+  assert.equal(berlinDayStart(utc(2026, 3, 29, 22) * 1000), utc(2026, 3, 29, 22));
+  for (const at of [utc(2027, 10, 30, 22), utc(2027, 10, 31, 0, 30), utc(2027, 10, 31, 1, 30)])
+    assert.equal(berlinDayStart(at * 1000), utc(2027, 10, 30, 22));
+  assert.equal(berlinDayStart(utc(2027, 10, 31, 22, 59) * 1000), utc(2027, 10, 30, 22));
+  assert.equal(berlinDayStart(utc(2027, 10, 31, 23) * 1000), utc(2027, 10, 31, 23));
+  assert.equal(utc(2026, 3, 29, 22) - utc(2026, 3, 28, 23), 23 * HOUR);
+  assert.equal(utc(2027, 10, 31, 23) - utc(2027, 10, 30, 22), 25 * HOUR);
+  // The year end and a leap day.
+  assert.equal(berlinDayStart(utc(2027, 1, 1, 0, 30) * 1000), utc(2026, 12, 31, 23));
+  assert.equal(berlinDayStart(utc(2028, 2, 29, 12) * 1000), utc(2028, 2, 28, 23));
+  // Always the calendar day's start, never after now, at most 25 hours before it, on a whole hour,
+  // and the next midnight is where the day ends.
+  for (let ms = Date.UTC(2026, 9, 1); ms < Date.UTC(2028, 0, 1); ms += 3 * 3_600_000 + 7 * 60_000) {
+    const start = berlinDayStart(ms);
+    assert.equal(start, calendarPeriod('day', ms).start);
+    assert.ok(start * 1000 <= ms);
+    assert.ok(ms - start * 1000 < 25 * HOUR * 1000);
+    assert.equal(start % HOUR, 0);
+    assert.equal(nextBerlinMidnight(ms), calendarPeriod('day', ms).end);
+  }
 });
 
 test('Berlin calendar days: 25 hours on 25 Oct 2026, 23 hours on 28 Mar 2027', () => {
@@ -252,6 +311,9 @@ async function database(t: { after: (fn: () => Promise<unknown>) => void }) {
   await pg.exec(BASE_PAYMENTS_MIGRATION_SQL);
   await pg.exec(BASE_SHARED_ADDITIONS_SQL);
   await pg.exec(BASE_WALLET_LIMITS_SQL);
+  // The calendar counter also sums the protocol fees of Feed pay calls (migrations 112 and 114).
+  await pg.exec(FEED_PAY_SQL);
+  await pg.exec(FEED_PAY_FEE_SQL);
   const db: Database = {
     query: (sql, params) => pg.query(sql, params) as never,
     exec: (sql) => pg.exec(sql),
@@ -366,13 +428,16 @@ async function spendPath(
     ],
   );
   const periodReads: number[] = [];
+  const onchain: { spend: bigint; onRead?: () => Promise<void> } = { spend: 0n };
   const client = {
     async readContract(request: { functionName: string }) {
       assert.equal(request.functionName, 'getCurrentPeriod');
       const now = Math.floor(clock.now / 1000);
       const start = signed.start + Math.floor((now - signed.start) / DAY) * DAY;
       periodReads.push(start);
-      return { start, end: start + DAY, spend: 0n };
+      const spend = onchain.spend;
+      await onchain.onRead?.();
+      return { start, end: start + DAY, spend };
     },
   } as unknown as PublicClient;
   const rows = new Map<string, StoredOperation>();
@@ -425,7 +490,7 @@ async function spendPath(
     intentHash: keccak256(toHex(ref)) as Hex,
     operationKey: ref,
   });
-  return { pg, chain, reserve, intent, periodReads, signed };
+  return { pg, chain, reserve, intent, periodReads, signed, onchain };
 }
 
 for (const model of ['full', 'half'] as const)
@@ -473,6 +538,152 @@ for (const model of ['full', 'half'] as const)
     // Never sent, so released again right away.
     assert.equal(held.rows[0].state, 'released');
   });
+
+test('half model: payments sent but not on Base yet count against the Base period', async (t) => {
+  // Wednesday 21 Oct, 10:00 UTC: the Base day began at 22:00 UTC, the Berlin day at the same time.
+  const clock = { now: utc(2026, 10, 21, 10) * 1000 };
+  const { pg, chain, reserve, intent, signed } = await spendPath(t, 'half', clock);
+  assert.equal(signed.allowance, 10_000_000n);
+  // A payment from the previous Base day never counts; one sent an hour ago is not on Base yet
+  // (the fake Base reports nothing spent in this period).
+  await reserve('payment:yesterday', 9_000_000n, utc(2026, 10, 20, 21));
+  await reserve('payment:in-flight', 6_000_000n, utc(2026, 10, 21, 9), 'held');
+  const refused = (ref: string, amount: bigint) =>
+    assert.rejects(chain.submit(intent(ref, amount)), (error: unknown) => {
+      assert.ok(error instanceof PaymentChainError);
+      assert.equal(error.code, 'OVER_ALLOWANCE');
+      return true;
+    });
+  // 6 + 6 fits the owner's 20 for the Berlin day, but not Base's 10 for its period.
+  await refused('payment:second', 6_000_000n);
+  const none = await pg.query(
+    `SELECT 1 FROM base_wallet_reservations WHERE holder_ref = 'payment:second'`,
+  );
+  assert.equal(none.rows.length, 0);
+  // 6 + 4 fits: it reaches the reservation (this test stops it before anything is signed).
+  await assert.rejects(chain.submit(intent('payment:fits', 4_000_000n)), /no signing in this test/);
+  // Payments before the limit was created spent under another limit and never count against it.
+  await pg.query(`UPDATE base_spend_permissions SET created_at = $1`, [
+    utc(2026, 10, 21, 9, 30) * 1000,
+  ]);
+  await assert.rejects(
+    chain.submit(intent('payment:new-limit', 6_000_000n)),
+    /no signing in this test/,
+  );
+});
+
+test('half model: a payment held from before the Base period began still counts in this one', async (t) => {
+  // Wednesday 21 Oct, 10:00 UTC; the Base period began at 22:00 UTC on 20 Oct.
+  const clock = { now: utc(2026, 10, 21, 10) * 1000 };
+  const { chain, reserve, intent } = await spendPath(t, 'half', clock);
+  // Reserved at 21:59 UTC (the previous period), still held: it may land in this period, and the
+  // fake Base reports nothing spent in this period yet.
+  await reserve('payment:boundary', 6_000_000n, utc(2026, 10, 20, 21, 59), 'held');
+  // A consumed one from the previous period does not count.
+  await reserve('payment:old-done', 9_000_000n, utc(2026, 10, 20, 20));
+  await assert.rejects(chain.submit(intent('payment:new', 6_000_000n)), (error: unknown) => {
+    assert.ok(error instanceof PaymentChainError);
+    assert.equal(error.code, 'OVER_ALLOWANCE');
+    return true;
+  });
+  // 6 held + 4 fits the 10.
+  await assert.rejects(
+    chain.submit(intent('payment:small', 4_000_000n)),
+    /no signing in this test/,
+  );
+});
+
+test('half model: a payment settled between the Base read and the admission still counts', async (t) => {
+  const clock = { now: utc(2026, 10, 21, 10) * 1000 };
+  const { pg, chain, reserve, intent, onchain } = await spendPath(t, 'half', clock);
+  await reserve('payment:landing', 6_000_000n, utc(2026, 10, 21, 9), 'held');
+  // Base answers "0 spent", and while that answer is on its way the held payment becomes final
+  // and is settled here: neither the read nor the held sum includes it any more.
+  onchain.onRead = async () => {
+    await pg.query(
+      `UPDATE base_wallet_reservations SET state = 'consumed', updated_at = $1
+       WHERE holder_ref = 'payment:landing'`,
+      [clock.now + 1],
+    );
+  };
+  await assert.rejects(chain.submit(intent('payment:next', 6_000_000n)), (error: unknown) => {
+    assert.ok(error instanceof PaymentChainError);
+    assert.equal(error.code, 'OVER_ALLOWANCE');
+    return true;
+  });
+});
+
+test('half model: a payment final in this period plus one still held count together', async (t) => {
+  const clock = { now: utc(2026, 10, 21, 10) * 1000 };
+  const { chain, reserve, intent, onchain } = await spendPath(t, 'half', clock);
+  // Reserved in the previous period and final in this one (consumed here, 6 in Base's count), plus
+  // a payment of this period still held (4): 10 committed, so another 4 would make 14 of 10.
+  await reserve('payment:old-final', 6_000_000n, utc(2026, 10, 20, 21, 59), 'consumed');
+  await reserve('payment:pending', 4_000_000n, utc(2026, 10, 21, 9), 'held');
+  onchain.spend = 6_000_000n;
+  await assert.rejects(chain.submit(intent('payment:another', 4_000_000n)), (error: unknown) => {
+    assert.ok(error instanceof PaymentChainError);
+    assert.equal(error.code, 'OVER_ALLOWANCE');
+    return true;
+  });
+});
+
+test('half model: a Feed pay float top-up not on Base yet counts against the Base period', async (t) => {
+  // Both spend the same limit through SpendPermissionManager.spend: Base's 10 for the period.
+  const clock = { now: utc(2026, 10, 21, 10) * 1000 };
+  const { pg, chain, reserve, intent, onchain } = await spendPath(t, 'half', clock);
+  const overAllowance = (error: unknown) => {
+    assert.ok(error instanceof PaymentChainError);
+    assert.equal(error.code, 'OVER_ALLOWANCE');
+    return true;
+  };
+  // A top-up of 6 held (sent, not in a block yet): Base reports nothing spent.
+  await reserve('feed-pay:top-up:held', 6_000_000n, utc(2026, 10, 21, 9), 'held', 'float');
+  await assert.rejects(chain.submit(intent('payment:after-held', 6_000_000n)), overAllowance);
+  // 6 + 4 fits.
+  await assert.rejects(chain.submit(intent('payment:fits', 4_000_000n)), /no signing in this test/);
+  await pg.query(`DELETE FROM base_wallet_reservations`);
+
+  // A top-up that became final and was settled here while Base's answer was on its way.
+  await reserve('feed-pay:top-up:landing', 6_000_000n, utc(2026, 10, 21, 9), 'held', 'float');
+  onchain.onRead = async () => {
+    await pg.query(
+      `UPDATE base_wallet_reservations SET state = 'consumed', updated_at = $1
+       WHERE holder_ref = 'feed-pay:top-up:landing'`,
+      [clock.now + 1],
+    );
+  };
+  await assert.rejects(chain.submit(intent('payment:after-landing', 6_000_000n)), overAllowance);
+  onchain.onRead = undefined;
+  await pg.query(`DELETE FROM base_wallet_reservations`);
+
+  // A top-up planned (its float move pending) whose hold is not taken yet counts too.
+  await pg.query(
+    `INSERT INTO feed_pay_float_moves (move_id, wallet_id, chain_id, kind, amount_raw, op_key,
+       intent_hash, state, created_at, updated_at)
+     VALUES ('m-1','w-1',${CHAIN_ID},'top_up',6000000,'feed-pay:top-up:m-1','0x00','pending',$1,$1)`,
+    [utc(2026, 10, 21, 9) * 1000],
+  );
+  await assert.rejects(chain.submit(intent('payment:after-planned', 6_000_000n)), overAllowance);
+  // Once it holds its reservation, it is counted once, not twice: 6 + 4 still fits.
+  await reserve('feed-pay:top-up:m-1', 6_000_000n, utc(2026, 10, 21, 9), 'held', 'float');
+  await assert.rejects(
+    chain.submit(intent('payment:fits-once', 4_000_000n)),
+    /no signing in this test/,
+  );
+  // A failed (released) top-up never spends.
+  await pg.query(`UPDATE feed_pay_float_moves SET state = 'failed'`);
+  await pg.query(
+    `UPDATE base_wallet_reservations SET state = 'released' WHERE holder_kind = 'float'`,
+  );
+  await pg.query(
+    `UPDATE base_wallet_reservations SET state = 'released' WHERE holder_kind = 'payment'`,
+  );
+  await assert.rejects(
+    chain.submit(intent('payment:after-failed', 6_000_000n)),
+    /no signing in this test/,
+  );
+});
 
 test('a revoke request blocks the agent at once', async (t) => {
   const clock = { now: utc(2026, 10, 21, 10) * 1000 };

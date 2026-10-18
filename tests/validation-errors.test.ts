@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { z } from 'zod';
 import {
+  FIXED_MESSAGE,
+  MAX_FIXED_MESSAGE_LENGTH,
   MAX_ISSUES,
   MAX_PATH_LENGTH,
   describeValidation,
@@ -76,6 +78,51 @@ test('received values are never echoed; attacker keys are sanitized and capped',
     assert.match(issue.path, /^[A-Za-z0-9_.?-]*$/);
     assert.ok(issue.path.length <= MAX_PATH_LENGTH);
   }
+});
+
+test('a custom message is shown only when its schema marks it as fixed text', () => {
+  const secret = 'SECRET-VALUE';
+  const schema = z
+    .object({
+      plan: z.string().refine(() => false, {
+        message: 'must name a known plan',
+        params: FIXED_MESSAGE,
+      }),
+      // Unmarked: zod lets a message carry the input, so it stays hidden.
+      echoed: z.string().refine(() => false, { error: (issue) => `got ${String(issue.input)}` }),
+      coded: z.string().refine(() => false, { message: 'must be coded', params: { code: 'x' } }),
+      long: z.string().refine(() => false, {
+        message: `must be shorté ${'x'.repeat(300)}`,
+        params: FIXED_MESSAGE,
+      }),
+    })
+    .superRefine((_value, context) =>
+      context.addIssue({
+        code: 'custom',
+        path: ['plan'],
+        message: 'must be sent alone',
+        params: FIXED_MESSAGE,
+      }),
+    );
+  const failure = describeValidation(
+    errorOf(schema, { plan: secret, echoed: secret, coded: secret, long: secret }),
+  );
+  assert.ok(!JSON.stringify(failure).includes(secret), JSON.stringify(failure));
+  assert.deepEqual(failure.issues.slice(0, 3), [
+    { path: 'plan', message: 'Must name a known plan' },
+    { path: 'echoed', message: 'Is not valid' },
+    { path: 'coded', message: 'Is not valid' },
+  ]);
+  // Printable ASCII and capped, like every other piece of the answer.
+  const long = failure.issues[3]!;
+  assert.equal(long.path, 'long');
+  assert.equal(long.message.length, MAX_FIXED_MESSAGE_LENGTH);
+  assert.match(long.message, /^Must be short\? x+~$/);
+  assert.deepEqual(failure.issues[4], { path: 'plan', message: 'Must be sent alone' });
+  assert.match(
+    failure.message,
+    /^Check these fields: plan \(must name a known plan\), echoed \(is not valid\), /,
+  );
 });
 
 test('at most ten issues, with a count of the rest', () => {

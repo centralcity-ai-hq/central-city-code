@@ -35,6 +35,7 @@ import type { Database } from '../../database.js';
 import type { BaseChainId } from '../../../shared/base/chains.js';
 import { baseNetwork } from '../../../shared/base/chains.js';
 import { shortAgentUri } from '../../../shared/base/short-id.js';
+import { transientChainError } from '../chain/transient.js';
 import { ensureShortId } from './short-links.js';
 
 export type IdentityState = 'pending' | 'submitted' | 'confirmed' | 'failed';
@@ -156,6 +157,12 @@ export interface IdentityChainPort {
     id: bigint;
     blockTag: 'finalized';
   }): Promise<IdentitySnapshot>;
+  /**
+   * Hints for the settling gate (see `settlingCanWait`): the safe and finalized head numbers, null
+   * when unknown. Possibly shared for a while or read from another node: never evidence, only
+   * "nothing can have settled yet". Without it every settling advance reads the chain in full.
+   */
+  settledHeads?(chainId: BaseChainId): Promise<{ safe: bigint | null; finalized: bigint | null }>;
 }
 
 /** One JSON line per event; never keys, signatures or secrets. */
@@ -164,6 +171,12 @@ export interface IdentityEvent {
   agentId: string;
   chainId: number;
   code?: string;
+  /** The JSON-RPC method of a failed chain call, when known (see errorDetail). */
+  method?: string;
+  /** The block parameter shape of that call: latest, a tag, number, hash or none. */
+  block?: string;
+  /** The node's own short error text, with URLs and long hex removed (see errorDetail). */
+  detail?: string;
   txHash?: string;
   latencyMs?: number;
 }
@@ -214,6 +227,14 @@ export interface IdentityRow {
   handover_block_hash: string | null;
   handover_finality: Finality | null;
   destination_mismatch: string | null;
+  /** Refusals in a row of the bound hand-over before anything was stored (migration 102). */
+  handover_refusals: number;
+  /** Not tried again before this (ms), unless the owner asks (migration 102). */
+  handover_retry_at: string | null;
+  /** Busy refusals in a row of the open register attempt, nothing stored yet (migration 109). */
+  register_refusals: number;
+  /** The register attempt is not tried again before this (ms), unless the owner asks (109). */
+  register_retry_at: string | null;
 }
 
 /** The columns IdentityRow needs; shared by the service and the status route (DB only). */
@@ -225,7 +246,8 @@ export const IDENTITY_COLUMNS = `agent_id, chain_id, state, op_id, tx_hash,
   handover_id::text AS handover_id, handover_tx_hash, evidence_rev::text AS evidence_rev,
   started_at::text AS started_at, mint_block_hash, mint_finality,
   handover_block::text AS handover_block, handover_block_hash, handover_finality,
-  destination_mismatch`;
+  destination_mismatch, handover_refusals, handover_retry_at::text AS handover_retry_at,
+  register_refusals, register_retry_at::text AS register_retry_at`;
 
 export type IdentityStage =
   | 'registering'
@@ -288,6 +310,60 @@ export const STUCK_RETRY_MS = 10 * 60 * 1000;
  */
 export const LOST_RETRY_MS = 30 * 60_000;
 
+/**
+ * A hand-over refused before anything was stored (a node read refused under load) waits before the
+ * next try: 15 s after the first refusal, doubling to at most 5 minutes. The cron skips the row until
+ * then; the owner's Try again tries at once. Every try uses the same bound key: never a second
+ * hand-over (identity-port.ts: one nonce lane per step, the same-key store and claim).
+ */
+export const HANDOVER_BACKOFF_MS = 15_000;
+export const HANDOVER_BACKOFF_MAX_MS = 5 * 60_000;
+/** Refusals in a row after which the owner is offered Try again for the hand-over. */
+export const HANDOVER_RETRY_AFTER = 3;
+
+export const handoverBackoffMs = (refusals: number) =>
+  Math.min(
+    HANDOVER_BACKOFF_MS * 2 ** Math.max(0, Math.min(refusals, 20) - 1),
+    HANDOVER_BACKOFF_MAX_MS,
+  );
+
+/** The bound hand-over has been refused HANDOVER_RETRY_AFTER times in a row. */
+function handoverRefused(row: IdentityRow): boolean {
+  return (
+    isOpen(row.state) &&
+    stageOf(row) === 'handing_over' &&
+    row.handover_refusals >= HANDOVER_RETRY_AFTER
+  );
+}
+
+/**
+ * A register attempt Base refused before anything was stored for it (a rate limit or busy answer,
+ * chain/transient.ts) waits like a refused hand-over (handoverBackoffMs: 15 s, doubling to 5
+ * minutes); the finalize cron skips the row until then. After REGISTER_RETRY_AFTER refusals in a
+ * row the owner is offered Try again, which asks at once. Every try uses the same attempt key: the
+ * port stores and signs at most one operation per key, so a refusal never leads to a second
+ * registration.
+ */
+export const REGISTER_RETRY_AFTER = 3;
+
+/** The open register attempt has been refused REGISTER_RETRY_AFTER times in a row. */
+function registerRefused(row: IdentityRow): boolean {
+  return (
+    row.state === 'pending' &&
+    row.mint_op_id === null &&
+    row.erc8004_agent_id === null &&
+    row.register_refusals >= REGISTER_RETRY_AFTER
+  );
+}
+
+/** A pending register attempt that was refused and waits for its backoff to end. */
+const registerBackingOff = (row: IdentityRow, now: number) =>
+  row.state === 'pending' &&
+  row.mint_op_id === null &&
+  row.erc8004_agent_id === null &&
+  row.register_retry_at !== null &&
+  now < Number(row.register_retry_at);
+
 const num = (value: string | null) => (value === null ? null : Number(value));
 const isOpen = (state: IdentityState) => state === 'pending' || state === 'submitted';
 
@@ -334,8 +410,9 @@ function stageOf(row: IdentityRow): IdentityStage {
 }
 
 /**
- * How soon the owner's page asks again. Finality takes 15–30 minutes and one finalizing poll costs
- * about 14 RPC calls on the shared endpoint, so the settling stages ask every 30 s.
+ * How soon the owner's page asks again. Finality takes 15–30 minutes and a full settling check
+ * reads about 14 chain values, so the settling stages ask every 30 s (and the settling gate skips
+ * the check while no head has reached either block; chainCheckIntervalMs bounds every stage).
  */
 const POLL_AFTER: Record<IdentityStage, number | null> = {
   registering: 2000,
@@ -346,6 +423,73 @@ const POLL_AFTER: Record<IdentityStage, number | null> = {
   confirmed: null,
   failed: null,
 };
+
+/**
+ * Least time between two chain advances of one open registration (owner polls on any number of
+ * tabs, instances and scripts, and the finalize cron, share it through `swept_at`; routes.ts).
+ * While both operations wait for SAFE / FINALIZED (15-30 minutes), SETTLING_CHECK_MS. While an
+ * operation is in flight or being rechecked, the panel's own pace while the row just moved, then
+ * slower the longer nothing changed (updated_at moves only on real progress), up to
+ * MOVING_CHECK_MAX_MS. Only how often the chain is asked changes; never what an advance does, and
+ * an inclusion that takes a while is seen at most a minute later.
+ */
+export const SETTLING_CHECK_MS = 30_000;
+export const MOVING_CHECK_MAX_MS = 60_000;
+/**
+ * Quiet time divided by this is the wait: the panel's pace for the first seconds, 10 s after 20 s
+ * without progress, 30 s after a minute, then once a minute (the cron's own pace) after two.
+ */
+const MOVING_CHECK_SLOWDOWN = 2;
+
+export function chainCheckIntervalMs(row: IdentityRow, now: number): number {
+  const stage = stageOf(row);
+  if (stage === 'finalizing' || stage === 'registered') return SETTLING_CHECK_MS;
+  const quiet = Math.max(0, now - Number(row.updated_at));
+  const pace = POLL_AFTER[stage] ?? POLL_AFTER.registering!;
+  return Math.min(Math.max(pace, quiet / MOVING_CHECK_SLOWDOWN), MOVING_CHECK_MAX_MS);
+}
+
+/** Whether an inclusion at `block`, recorded at depth `finality`, may have moved deeper by now. */
+function mayDeepen(
+  finality: Finality | null,
+  block: string | null,
+  heads: { safe: bigint | null; finalized: bigint | null },
+): boolean {
+  if (block === null || finality === null || finality === 'final') return true;
+  const at = BigInt(block);
+  const reached = (head: bigint | null) => head === null || head >= at;
+  return finality === 'included'
+    ? reached(heads.safe) || reached(heads.finalized)
+    : reached(heads.finalized);
+}
+
+/** Both operations landed and only wait to deepen (no confirmation or recheck is pending). */
+function settling(row: IdentityRow): boolean {
+  const stage = stageOf(row);
+  return (
+    (stage === 'finalizing' || stage === 'registered') &&
+    row.handover_finality !== 'final' &&
+    row.mint_lost_at === null
+  );
+}
+
+/**
+ * The settling gate: a registration whose mint and hand-over both landed and only wait to become
+ * SAFE or FINAL can change on an advance only once a head reached one of their blocks (or by a
+ * reorg, which is then found by that same check: a receipt gone, moved or not canonical). While
+ * neither head has reached either block, an advance would read ~14 chain values to conclude
+ * "unchanged"; it is skipped instead and the stored state stands. Unknown heads, an unknown block
+ * or depth, a final hand-over (the confirmation itself is pending) or any other stage: no skip.
+ */
+export function settlingCanWait(
+  row: IdentityRow,
+  heads: { safe: bigint | null; finalized: bigint | null },
+): boolean {
+  if (!settling(row)) return false;
+  const mintWaits =
+    row.erc8004_agent_id !== null || !mayDeepen(row.mint_finality, row.mint_block, heads);
+  return mintWaits && !mayDeepen(row.handover_finality, row.handover_block, heads);
+}
 
 /** The owner-facing view of a row. Pure; never exposes op ids or the evidence revision. */
 export function identityViewOf(row: IdentityRow, now: number): IdentityView {
@@ -362,8 +506,20 @@ export function identityViewOf(row: IdentityRow, now: number): IdentityView {
         ? row.provisional_agent_id
         : null,
     stage,
-    canRetry: row.state === 'failed' || stuckBeforeMint(row, now) || lostTooLong(row, now),
-    pollAfterMs: POLL_AFTER[stage],
+    canRetry:
+      row.state === 'failed' ||
+      stuckBeforeMint(row, now) ||
+      lostTooLong(row, now) ||
+      handoverRefused(row) ||
+      registerRefused(row),
+    // A refused hand-over or register attempt is not tried before its backoff ends: the page asks
+    // again then (at most a minute later, so a Try again or a change elsewhere still shows).
+    pollAfterMs:
+      stage === 'handing_over' && row.handover_retry_at !== null
+        ? Math.max(POLL_AFTER.handing_over!, Math.min(Number(row.handover_retry_at) - now, 60_000))
+        : registerBackingOff(row, now)
+          ? Math.max(POLL_AFTER.registering!, Math.min(Number(row.register_retry_at) - now, 60_000))
+          : POLL_AFTER[stage],
     mintTxHash: open ? row.mint_tx_hash : null,
     idSeenAt: num(row.mint_seen_at),
     startedAt: num(row.started_at),
@@ -410,9 +566,95 @@ interface Patch {
   bump?: true;
 }
 
-const errorCode = (error: unknown): string => {
+/**
+ * A log-safe code for an error: its string code; else, for RPC, bundler and paymaster errors (viem
+ * errors carry a numeric code), the error's class name and that number, walking the cause chain.
+ * Never the message: messages can carry endpoint URLs, and those can carry keys.
+ */
+export const errorCode = (error: unknown): string => {
   const code = (error as { code?: unknown } | null)?.code;
-  return typeof code === 'string' ? code : 'error';
+  if (typeof code === 'string') return code;
+  for (
+    let e = error as { name?: unknown; code?: unknown; status?: unknown; cause?: unknown } | null,
+      depth = 0;
+    e && typeof e === 'object' && depth < 6;
+    e = e.cause as typeof e, depth++
+  ) {
+    if (typeof e.code === 'string') return e.code;
+    const name = typeof e.name === 'string' && /^[A-Za-z]{1,60}$/.test(e.name) ? e.name : null;
+    const number =
+      typeof e.code === 'number' && Number.isInteger(e.code)
+        ? e.code
+        : typeof e.status === 'number' && Number.isInteger(e.status)
+          ? e.status
+          : null;
+    if (name && number !== null) return `${name}:${number}`;
+    if (number !== null) return `rpc:${number}`;
+  }
+  const name = (error as { name?: unknown } | null)?.name;
+  // A plain Error says nothing more than 'error' (the code the logs have always used for it).
+  return typeof name === 'string' && name !== 'Error' && /^[A-Za-z]{1,60}$/.test(name)
+    ? name
+    : 'error';
+};
+
+/**
+ * Where a failed chain call went, for the log: the JSON-RPC method and the shape of its block
+ * parameter (read from the request body viem keeps in metaMessages), and the node's own short
+ * error text. URLs and long hex values are removed and the text is capped, so no endpoint key,
+ * address or calldata reaches the log.
+ */
+export const errorDetail = (
+  error: unknown,
+): { method?: string; block?: string; detail?: string } => {
+  const out: { method?: string; block?: string; detail?: string } = {};
+  for (
+    let e = error as { metaMessages?: unknown; details?: unknown; cause?: unknown } | null,
+      depth = 0;
+    e && typeof e === 'object' && depth < 6;
+    e = e.cause as typeof e, depth++
+  ) {
+    if (!out.method && Array.isArray(e.metaMessages))
+      for (const line of e.metaMessages) {
+        if (typeof line !== 'string' || !line.startsWith('Request body: ')) continue;
+        try {
+          const body = JSON.parse(line.slice('Request body: '.length)) as {
+            method?: unknown;
+            params?: unknown;
+          };
+          if (typeof body.method === 'string' && /^[a-zA-Z_]{1,60}$/.test(body.method))
+            out.method = body.method;
+          const params = Array.isArray(body.params) ? body.params : [];
+          const last = params.length > 1 ? params[params.length - 1] : undefined;
+          out.block =
+            typeof last === 'string'
+              ? /^0x[0-9a-fA-F]{64}$/.test(last)
+                ? 'hash'
+                : /^0x[0-9a-fA-F]+$/.test(last)
+                  ? 'number'
+                  : /^[a-z]{1,12}$/.test(last)
+                    ? last
+                    : 'other'
+              : last && typeof last === 'object'
+                ? 'blockHash' in last
+                  ? 'hash'
+                  : 'blockNumber' in last
+                    ? 'number'
+                    : 'object'
+                : 'none';
+        } catch {
+          // not JSON: leave the method unknown
+        }
+      }
+    if (!out.detail && typeof e.details === 'string' && e.details)
+      out.detail = e.details
+        .replace(/https?:\/\/\S+/g, '<url>')
+        .replace(/\b[\w.-]+\.[a-z]{2,}(?:\/\S*)?/gi, '<host>')
+        .replace(/0x[0-9a-fA-F]{16,}/g, '0x…')
+        .replace(/[A-Za-z0-9_-]{24,}/g, '<token>')
+        .slice(0, 120);
+  }
+  return out;
 };
 
 /**
@@ -552,7 +794,10 @@ export function createIdentityService(deps: IdentityServiceDeps) {
         .set('handover_block', 'NULL')
         .set('handover_block_hash', 'NULL')
         .set('handover_finality', 'NULL')
-        .set('destination_mismatch', 'NULL');
+        .set('destination_mismatch', 'NULL')
+        // A new binding starts without the backoff of the one before it.
+        .set('handover_refusals', '0')
+        .set('handover_retry_at', 'NULL');
     if (patch.handover !== undefined) {
       const landed = patch.handover;
       sets
@@ -649,6 +894,39 @@ export function createIdentityService(deps: IdentityServiceDeps) {
       const registerFamily = registerKey(agentId, chainId);
       const isRegisterFamily = (key: string) => familyOf(key) === registerFamily;
 
+      /**
+       * A register attempt Base refused before anything was stored for it. Two statements, each
+       * touching only its own columns, never the state, the transaction or updated_at:
+       *   1. The attempt key is recorded so the finalize cron (it only moves rows with an attempt)
+       *      asks again with the same key, and only while the row has no attempt at all: still
+       *      pending, no key, and the evidence this call read. A call that stored the registration
+       *      meanwhile (submitted, with its transaction) is never moved back, and its attempt never
+       *      replaced.
+       *   2. The refusal is counted on this pending attempt and the next try waits
+       *      (handoverBackoffMs); after REGISTER_RETRY_AFTER refusals the owner may try again.
+       *      Counted in SQL, so concurrent refusals each count.
+       */
+      const registerRefusedNow = async (key: string, row: IdentityRow) => {
+        await deps.db
+          .query(
+            `UPDATE base_identities SET op_id = $3, register_op_id = $3
+             WHERE agent_id = $1 AND chain_id = $2 AND state = 'pending'
+               AND op_id IS NULL AND register_op_id IS NULL AND evidence_rev = $4::bigint`,
+            [agentId, chainId, key, row.evidence_rev],
+          )
+          .catch(() => undefined);
+        await deps.db
+          .query(
+            `UPDATE base_identities SET register_refusals = register_refusals + 1,
+               register_retry_at = $4::bigint + LEAST(
+                 $5::bigint * power(2, LEAST(register_refusals, 20))::bigint, $6::bigint)
+             WHERE agent_id = $1 AND chain_id = $2 AND state = 'pending' AND register_op_id = $3
+               AND mint_op_id IS NULL AND erc8004_agent_id IS NULL`,
+            [agentId, chainId, key, now(), HANDOVER_BACKOFF_MS, HANDOVER_BACKOFF_MAX_MS],
+          )
+          .catch(() => undefined);
+      };
+
       let S = await read();
 
       // E. Retries: only on the owner's explicit "Try again", one fenced statement per stage,
@@ -679,6 +957,7 @@ export function createIdentityService(deps: IdentityServiceDeps) {
                mint_op_id = NULL, provisional_agent_id = NULL, mint_tx_hash = NULL,
                mint_block = NULL, mint_block_hash = NULL, mint_finality = NULL,
                mint_seen_at = NULL, mint_lost_at = NULL,
+               register_refusals = 0, register_retry_at = NULL,
                started_at = $4::bigint, updated_at = $4::bigint, evidence_rev = evidence_rev + 1
              WHERE agent_id = $1 AND chain_id = $2 AND erc8004_agent_id IS NULL
                AND state = $5 AND op_id IS NOT DISTINCT FROM $6::text
@@ -710,6 +989,7 @@ export function createIdentityService(deps: IdentityServiceDeps) {
             `UPDATE base_identities SET state = 'pending', op_id = $3, transfer_op_id = $3,
                handover_id = erc8004_agent_id, handover_tx_hash = NULL, handover_block = NULL,
                handover_block_hash = NULL, handover_finality = NULL, destination_mismatch = NULL,
+               handover_refusals = 0, handover_retry_at = NULL,
                evidence_rev = evidence_rev + 1, updated_at = $4::bigint
              WHERE agent_id = $1 AND chain_id = $2 AND state = 'failed'
                AND erc8004_agent_id = $5::numeric AND op_id IS NOT DISTINCT FROM $6::text
@@ -728,12 +1008,32 @@ export function createIdentityService(deps: IdentityServiceDeps) {
         // of the step (one that landed under its own key): the next retry then gets a new number.
         const key =
           S.register_op_id ?? registerKey(agentId, chainId, attemptOf(S.op_id, 'register'));
-        const reported = await deps.chain.register({
-          operationKey: key,
-          chainId,
-          uri: S.agent_card_uri,
-          ...spender,
-        });
+        // Refused before and still backing off: not asked now (no node read, no sponsorship),
+        // unless the owner asked (Try again). The same key either way.
+        if (registerBackingOff(S, now()) && !options.retry) return view(S);
+        let reported: IdentityOp;
+        try {
+          reported = await deps.chain.register({
+            operationKey: key,
+            chainId,
+            uri: S.agent_card_uri,
+            ...spender,
+          });
+        } catch (error) {
+          // Base said "not now" (a rate limit or busy answer, also one inside an HTTP 200) before
+          // anything was stored for this attempt. Best effort; the caller still sees the error.
+          if (transientChainError(error)) await registerRefusedNow(key, S);
+          throw error;
+        }
+        // Asked and answered: the backoff ends (best effort, like its start).
+        if (S.register_refusals !== 0 || S.register_retry_at !== null)
+          await deps.db
+            .query(
+              `UPDATE base_identities SET register_refusals = 0, register_retry_at = NULL
+               WHERE agent_id = $1 AND chain_id = $2 AND register_op_id = $3`,
+              [agentId, chainId, key],
+            )
+            .catch(() => undefined);
         const op = { ...reported, idempotencyKey: key };
         if (reported.status === 'failed') {
           await write({ state: 'failed', op, registerOpId: key, bump: true }, S);
@@ -785,6 +1085,13 @@ export function createIdentityService(deps: IdentityServiceDeps) {
           await write({ state: 'submitted', op, registerOpId: key }, S);
           return current();
         }
+      }
+
+      // Settling gate: both operations landed and wait for SAFE / FINAL, and no head has reached
+      // either block yet: nothing can be concluded now, so the chain is not read (the hints are).
+      if (!options.retry && settling(S) && typeof deps.chain.settledHeads === 'function') {
+        const heads = await deps.chain.settledHeads(chainId).catch(() => null);
+        if (heads && settlingCanWait(S, heads)) return view(S);
       }
 
       // G. Evidence stage (fast path): what the pinned register operation's receipt says now.
@@ -975,6 +1282,14 @@ export function createIdentityService(deps: IdentityServiceDeps) {
         S = await read();
       }
       const bound = S.transfer_op_id!;
+      // Not landed, refused before and still backing off: not tried now (no node read, no
+      // sponsorship), unless the owner asked (Try again). The same bound key either way. A
+      // landed hand-over (finalizing, registered) is only read, never held back.
+      const backingOff =
+        S.handover_tx_hash === null &&
+        S.handover_retry_at !== null &&
+        now() < Number(S.handover_retry_at);
+      if (backingOff && !options.retry) return view(S);
       let t: IdentityOp;
       try {
         // The port's pre-send check (ownerOf == spender) lives in transfer(); it is never the
@@ -993,9 +1308,34 @@ export function createIdentityService(deps: IdentityServiceDeps) {
       } catch (error) {
         // Refused before storing (e.g. IDENTITY_NOT_HELD on a lagging read): the same key is
         // tried again on the next call, never a new one.
-        emit('identity.handover_refused', { code: errorCode(error) });
+        emit('identity.handover_refused', { code: errorCode(error), ...errorDetail(error) });
+        // A hand-over not landed yet backs off, for this binding only; updated_at is untouched
+        // (it marks real progress). Best effort: a busy database only skips the backoff.
+        if (S.handover_tx_hash === null) {
+          // Counted in SQL: concurrent refusals each count, and a hand-over that landed meanwhile
+          // is never held back. The wait doubles per refusal up to its cap (handoverBackoffMs).
+          await deps.db
+            .query(
+              `UPDATE base_identities SET handover_refusals = handover_refusals + 1,
+                 handover_retry_at = $4::bigint + LEAST(
+                   $5::bigint * power(2, LEAST(handover_refusals, 20))::bigint, $6::bigint)
+               WHERE agent_id = $1 AND chain_id = $2 AND transfer_op_id = $3
+                 AND handover_tx_hash IS NULL AND state IN ('pending','submitted')`,
+              [agentId, chainId, bound, now(), HANDOVER_BACKOFF_MS, HANDOVER_BACKOFF_MAX_MS],
+            )
+            .catch(() => undefined);
+        }
         return current();
       }
+      // Tried and answered: the backoff ends (best effort, like its start).
+      if (S.handover_refusals !== 0 || S.handover_retry_at !== null)
+        await deps.db
+          .query(
+            `UPDATE base_identities SET handover_refusals = 0, handover_retry_at = NULL
+             WHERE agent_id = $1 AND chain_id = $2 AND transfer_op_id = $3`,
+            [agentId, chainId, bound],
+          )
+          .catch(() => undefined);
       const ours = familyOf(t.idempotencyKey) === familyOf(bound);
       if (!ours) emit('identity.handover_foreign_report', { code: 'foreign_operation' });
       const top: IdentityOp = ours

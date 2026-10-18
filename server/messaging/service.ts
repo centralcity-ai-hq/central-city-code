@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Database, Transaction as Tx } from '../database.js';
 import { hasPermission, iso, type StoredAgent, type Workspace } from '../model.js';
 import { messageDelivered } from '../wake/hooks.js';
+import { feedEnabled } from '../feed/flag.js';
 import {
   HIDES_PER_MINUTE,
   MESSAGE_LIMITS,
@@ -15,6 +16,7 @@ import {
   type InboxAck,
   type InboxPage,
   type InboxSummary,
+  type InboxSummaryPage,
   type MessagePart,
 } from './contract.js';
 import { authorizeRoomPair, roomMemberNames, type RoomPair } from './room-direct.js';
@@ -25,6 +27,12 @@ import { authorizeRoomPair, roomMemberNames, type RoomPair } from './room-direct
  * snapshot (agents, pause state, connections), and the only rows locked are the recipient's
  * inbox cursor (sequence allocation) and the sender's idempotency receipt.
  */
+
+/**
+ * How many inbox depths a person's cursor span may reach. Read messages above an old unread one
+ * do not count toward its capacity, but the scans walk them, so the span is capped.
+ */
+export const PERSON_SPAN_DEPTHS = 4;
 
 /** Error with an HTTP status and a stable machine-readable code (surfaced as `code`). */
 export class MessagingError extends Error {
@@ -121,10 +129,12 @@ export interface Messaging {
   ): Promise<{ context_id: string; hidden_at: string }>;
   /** Members of the caller's rooms it can message privately (the console's New message). */
   recipients(operatorId: string): Promise<{ recipients: DirectRecipient[] }>;
-  summary(operatorId: string): Promise<{ inboxes: InboxSummary[] }>;
+  summary(operatorId: string): Promise<InboxSummaryPage>;
   conversations(
     operatorId: string,
     limit?: number,
+    /** Only threads this own member takes part in; others' ids match nothing. */
+    agentId?: string,
   ): Promise<{ conversations: ConversationSummary[] }>;
   conversation(
     operatorId: string,
@@ -180,6 +190,12 @@ export function pairKey(first: string, second: string): [string, string] {
 }
 /** Latest messages of each inbox searched for the pair's current conversation (a bounded PK range). */
 const PAIR_LOOKBACK = 1000;
+/**
+ * Newest sent rows of an owner searched for threads it only sent into (the conversation list).
+ * Threads the owner received in are always found; a thread with no reply whose last send is older
+ * than these rows is listed again when it gets a reply or a new send.
+ */
+export const CONVERSATION_SEND_SCAN = 2000;
 
 /**
  * The id #61 (reverted) gave a pair's default conversation: an RFC 4122 version 5 UUID over the
@@ -203,6 +219,10 @@ export function legacyPairContextId(first: string, second: string): string {
 
 export function createMessaging(d: MessagingDependencies): Messaging {
   const depth = d.inboxDepth ?? MESSAGE_LIMITS.inboxDepth;
+  // A person's cursor stops below its first message still unread in any thread, so read messages
+  // pile up above it. They do not count toward its capacity (heldFor), but every capacity, ack and
+  // unread scan walks them from the cursor, so the span itself stays capped at a few depths.
+  const personSpan = depth * PERSON_SPAN_DEPTHS;
   const perMinute = d.sendsPerMinute ?? MESSAGE_LIMITS.sendsPerMinute;
   const crossPair = d.crossPairPerMinute ?? 30;
   const crossInbound = d.crossInboundPerMinute ?? 600;
@@ -349,9 +369,10 @@ export function createMessaging(d: MessagingDependencies): Messaging {
 
   /**
    * The console read a private room thread: acknowledges the inbox of each of the viewer's
-   * PEOPLE that received messages in it, up to the newest of them (acks only move forward, like
-   * city_ack_inbox). A person has no other way to acknowledge, so without this a person's inbox
-   * would fill up (remote_quota, then inbox_full). AIs keep acknowledging their own inbox.
+   * PEOPLE that received messages in it, past every message read, up to the first one still unread
+   * in another thread (personAckLimit; acks only move forward, like city_ack_inbox). A person has
+   * no other way to acknowledge, so without this a person's inbox would fill up (remote_quota, then
+   * inbox_full). AIs keep acknowledging their own inbox.
    */
   async function readDirect(
     principal: MessagingPrincipal,
@@ -370,10 +391,12 @@ export function createMessaging(d: MessagingDependencies): Messaging {
           [contextId, principal.operatorId],
         )
       ).rows;
+      // The thread read first, so the ack below stops only at messages unread in other threads.
+      await markThreadRead(tx, principal.operatorId, contextId);
       const acked: InboxAck[] = [];
       for (const row of rows) {
         const cursor = await cursorOf(tx, row.recipient_id, true);
-        const seq = Math.max(cursor.acked, Math.min(Number(row.seq), cursor.latest));
+        const seq = await personAckLimit(tx, row.recipient_id, principal.operatorId, cursor);
         if (seq > cursor.acked)
           await tx.query('UPDATE inbox_cursors SET acked_seq=$2, updated_at=$3 WHERE agent_id=$1', [
             row.recipient_id,
@@ -387,20 +410,47 @@ export function createMessaging(d: MessagingDependencies): Messaging {
           unread: cursor.latest - seq,
         });
       }
-      // The owner read the thread, whichever of its members received it: messages up to the
-      // newest one it holds are no longer unread for the owner (conversation_reads). An AI's own
-      // inbox cursor stays where it is, so the AI still receives them.
-      await tx.query(
-        `INSERT INTO conversation_reads(owner_id,context_id,read_at)
-         SELECT $1, $2, newest.created_at FROM (SELECT m.created_at FROM messages m
-          WHERE m.recipient_owner_id=$1 AND m.context_id=$2
-          ORDER BY m.created_at DESC LIMIT 1) newest
-         ON CONFLICT (owner_id,context_id)
-         DO UPDATE SET read_at=GREATEST(conversation_reads.read_at, EXCLUDED.read_at)`,
-        [principal.operatorId, contextId],
-      );
       return { acked };
     });
+  }
+
+  /**
+   * The owner read the thread, whichever of its members received it: messages up to the newest
+   * one it holds are no longer unread for the owner (conversation_reads). An AI's own inbox cursor
+   * stays where it is, so the AI still receives them.
+   */
+  async function markThreadRead(tx: Tx, ownerId: string, contextId: string) {
+    await tx.query(
+      `INSERT INTO conversation_reads(owner_id,context_id,read_at)
+       SELECT $1, $2, newest.created_at FROM (SELECT m.created_at FROM messages m
+        WHERE m.recipient_owner_id=$1 AND m.context_id=$2
+        ORDER BY m.created_at DESC LIMIT 1) newest
+       ON CONFLICT (owner_id,context_id)
+       DO UPDATE SET read_at=GREATEST(conversation_reads.read_at, EXCLUDED.read_at)`,
+      [ownerId, contextId],
+    );
+  }
+
+  /**
+   * How far a person's single inbox cursor moves when the console reads or answers a thread: past
+   * every message the owner has read (this thread's, and other threads' read before), but never
+   * past one still unread for the owner in another thread (unreadFor), since the unread counts
+   * start at the cursor. Bounded by the person's span cap (personSpan).
+   */
+  async function personAckLimit(
+    tx: Tx,
+    personId: string,
+    ownerId: string,
+    cursor: { acked: number; latest: number },
+  ): Promise<number> {
+    const blocking = (
+      await tx.query<{ seq: number | string | null }>(
+        `SELECT min(m.seq) AS seq FROM messages m WHERE m.recipient_id=$1 AND m.seq > $3
+           AND m.seq <= $4 AND m.recipient_owner_id=$2 AND ${unreadFor('$2')}`,
+        [personId, ownerId, cursor.acked, cursor.latest],
+      )
+    ).rows[0]?.seq;
+    return blocking === null || blocking === undefined ? cursor.latest : Number(blocking) - 1;
   }
 
   /** The pair's one stored thread (pair_contexts, migration 19), created once on first use. */
@@ -553,14 +603,27 @@ export function createMessaging(d: MessagingDependencies): Messaging {
       return replay(tx, receipt, requestHash, workspace, principal.operatorId);
     }
     const contextId = await pairThread(tx, from.id, to.id, time);
+    // A person's cursor stops below the first message still unread in any thread (personAckLimit),
+    // so messages read above it are not held: for a person, quota and depth count only the
+    // messages its owner has not read yet in the console (heldFor), under the cursor row's lock.
+    // The span above the cursor stays capped (personSpan), which bounds these scans.
+    const person = to.kind === 'person';
+    if (person) {
+      await tx.query(
+        'INSERT INTO inbox_cursors(agent_id,next_seq,acked_seq,updated_at) VALUES($1,1,0,$2) ON CONFLICT (agent_id) DO NOTHING',
+        [to.id, time],
+      );
+      await cursorOf(tx, to.id, true);
+    }
+    const held = person ? ` AND m.recipient_owner_id=$3 AND ${heldFor('$3')}` : '';
     // The sender's owner may hold at most a quarter of the recipient's unacknowledged capacity.
     const quota = Math.max(1, Math.floor(depth / 4));
     const pending = Number(
       (
         await tx.query<{ n: number | string }>(
           `SELECT count(*) AS n FROM messages m WHERE m.recipient_id=$1 AND m.sender_owner_id=$2
-            AND m.seq > COALESCE((SELECT acked_seq FROM inbox_cursors WHERE agent_id=$1),0)`,
-          [to.id, principal.operatorId],
+            AND m.seq > COALESCE((SELECT acked_seq FROM inbox_cursors WHERE agent_id=$1),0)${held}`,
+          person ? [to.id, principal.operatorId, to.ownerId] : [to.id, principal.operatorId],
         )
       ).rows[0]?.n ?? 0,
     );
@@ -571,22 +634,43 @@ export function createMessaging(d: MessagingDependencies): Messaging {
         `${to.name}'s inbox already holds ${quota} unacknowledged messages from you; retry after it reads some.`,
         30_000,
       );
-    await tx.query(
-      'INSERT INTO inbox_cursors(agent_id,next_seq,acked_seq,updated_at) VALUES($1,1,0,$2) ON CONFLICT (agent_id) DO NOTHING',
-      [to.id, time],
-    );
+    if (person) {
+      const total = Number(
+        (
+          await tx.query<{ n: number | string }>(
+            `SELECT count(*) AS n FROM (SELECT 1 FROM messages m WHERE m.recipient_id=$1
+              AND m.seq > COALESCE((SELECT acked_seq FROM inbox_cursors WHERE agent_id=$1),0)
+              AND m.recipient_owner_id=$2 AND ${heldFor('$2')} ORDER BY m.seq LIMIT $3) x`,
+            [to.id, to.ownerId, depth],
+          )
+        ).rows[0]?.n ?? 0,
+      );
+      if (total >= depth)
+        fail(
+          429,
+          'inbox_full',
+          `${to.name}'s inbox holds ${depth} unacknowledged messages; retry after it acknowledges some.`,
+          30_000,
+        );
+    } else
+      await tx.query(
+        'INSERT INTO inbox_cursors(agent_id,next_seq,acked_seq,updated_at) VALUES($1,1,0,$2) ON CONFLICT (agent_id) DO NOTHING',
+        [to.id, time],
+      );
     const allocated = (
       await tx.query<{ seq: number | string }>(
         `UPDATE inbox_cursors SET next_seq=next_seq+1, updated_at=$2
          WHERE agent_id=$1 AND next_seq-1-acked_seq < $3 RETURNING next_seq-1 AS seq`,
-        [to.id, time, depth],
+        [to.id, time, person ? personSpan : depth],
       )
     ).rows[0];
     if (!allocated)
       fail(
         429,
         'inbox_full',
-        `${to.name}'s inbox holds ${depth} unacknowledged messages; retry after it acknowledges some.`,
+        person
+          ? `${to.name}'s inbox holds ${personSpan} messages since its oldest unread one; retry after it reads that conversation.`
+          : `${to.name}'s inbox holds ${depth} unacknowledged messages; retry after it acknowledges some.`,
         30_000,
       );
     const seq = Number(allocated!.seq);
@@ -620,22 +704,31 @@ export function createMessaging(d: MessagingDependencies): Messaging {
     ]);
     // A person replying in the console marks the thread read for the sender: its inbox cursor moves past the newest
     // message of this thread it holds, like the console's thread read (readDirect) and the
-    // inbox ack. The scan starts at the cursor, so it is bounded by the unread depth.
-    const replied = !principal.console
-      ? undefined
-      : (
-          await tx.query<{ seq: number | string }>(
-            `SELECT m.seq FROM messages m WHERE m.recipient_id=$1 AND m.context_id=$2
+    // inbox ack. The scan starts at the cursor, so it is bounded by the unread depth. Only a
+    // person: an AI's cursor is its runtime's, so a console reply sent as the AI leaves it put.
+    const replied =
+      !principal.console || from.kind !== 'person'
+        ? undefined
+        : (
+            await tx.query<{ seq: number | string }>(
+              `SELECT m.seq FROM messages m WHERE m.recipient_id=$1 AND m.context_id=$2
             AND m.seq > COALESCE((SELECT acked_seq FROM inbox_cursors WHERE agent_id=$1),0)
           ORDER BY m.seq DESC LIMIT 1`,
-            [from.id, contextId],
-          )
-        ).rows[0];
-    if (replied)
-      await tx.query(
-        'UPDATE inbox_cursors SET acked_seq=GREATEST(acked_seq,$2), updated_at=$3 WHERE agent_id=$1',
-        [from.id, Number(replied.seq), time],
-      );
+              [from.id, contextId],
+            )
+          ).rows[0];
+    if (replied) {
+      // Answering reads the thread; the cursor stops at messages still unread in other threads.
+      await markThreadRead(tx, from.ownerId, contextId);
+      const cursor = await cursorOf(tx, from.id, true);
+      const seq = await personAckLimit(tx, from.id, from.ownerId, cursor);
+      if (seq > cursor.acked)
+        await tx.query('UPDATE inbox_cursors SET acked_seq=$2, updated_at=$3 WHERE agent_id=$1', [
+          from.id,
+          seq,
+          time,
+        ]);
+    }
     // An AI recipient is woken like for any direct message (inbox long-poll, @mention, webhook),
     // unless it muted this room's notifications. A person reads it in the console's Messages.
     if (to.kind === 'agent')
@@ -1135,8 +1228,23 @@ export function createMessaging(d: MessagingDependencies): Messaging {
       conversation_reads r WHERE r.owner_id=${owner} AND r.context_id=m.context_id), -1)
       AND m.created_at > COALESCE((SELECT h.hidden_at FROM conversation_hidden h
       WHERE h.owner_id=${owner} AND h.context_id=m.context_id), -1)`;
+  /**
+   * Held in a person's inbox for its owner (`$owner`): not yet read (or hidden) in the console,
+   * whoever sent it, the owner's own members included. A person's capacity (remote_quota,
+   * inbox_full) counts these, since its cursor stays below the first message still unread.
+   */
+  const heldFor = (owner: string) =>
+    `m.created_at > COALESCE((SELECT r.read_at FROM
+      conversation_reads r WHERE r.owner_id=${owner} AND r.context_id=m.context_id), -1)
+      AND m.created_at > COALESCE((SELECT h.hidden_at FROM conversation_hidden h
+      WHERE h.owner_id=${owner} AND h.context_id=m.context_id), -1)`;
 
-  async function summary(operatorId: string): Promise<{ inboxes: InboxSummary[] }> {
+  // Whether room invitations exist on this database (migration 101); checked until they do.
+  let invitationsTable = false;
+  // Whether Feed Respond's table exists (migration 108); checked until it does.
+  let responsesTable = false;
+
+  async function summary(operatorId: string): Promise<InboxSummaryPage> {
     return d.db.transaction(async (tx) => {
       const workspace = await workspaceOf(tx, operatorId);
       const ids = workspace.agents.map((agent) => agent.id);
@@ -1163,7 +1271,49 @@ export function createMessaging(d: MessagingDependencies): Messaging {
           [ids, operatorId, UNREAD_CAP + 1],
         )
       ).rows;
+      // Open room invitations per agent of this owner (Operation Directory D2), so the My agents
+      // list shows them from the same poll: still open and not yet expired, the invited owner's own.
+      invitationsTable ||= (
+        await tx.query<{ ok: boolean }>("SELECT to_regclass('room_invitations') IS NOT NULL AS ok")
+      ).rows[0]!.ok;
+      const invitations: Record<string, number> = {};
+      if (invitationsTable && ids.length) {
+        const open = await tx.query<{ agent_id: string; n: number | string }>(
+          `SELECT invited_agent_id AS agent_id, count(*) AS n FROM room_invitations
+            WHERE invited_owner_id=$1 AND invited_agent_id = ANY($2::text[]) AND state='open'
+              AND expires_at > $3
+            GROUP BY invited_agent_id`,
+          [operatorId, ids, d.clock()],
+        );
+        for (const row of open.rows) invitations[row.agent_id] = Number(row.n);
+      }
+      // Open responses to the owner's Feed requests (Feed Respond, migration 108), behind
+      // CITY_FEED: counted like the inbox lists them (open, unexpired, request and room open).
+      let requestResponses: number | undefined;
+      if (feedEnabled()) {
+        responsesTable ||= (
+          await tx.query<{ ok: boolean }>(
+            "SELECT to_regclass('feed_request_invitations') IS NOT NULL AS ok",
+          )
+        ).rows[0]!.ok;
+        if (responsesTable)
+          requestResponses = Number(
+            (
+              await tx.query<{ n: number | string }>(
+                `SELECT count(*) AS n FROM feed_request_invitations v
+                  JOIN feed_requests q ON q.id = v.request_id
+                  JOIN rooms r ON r.id = v.room_id
+                  WHERE v.poster_owner_id=$1 AND v.state='open' AND v.expires_at > $2
+                    AND q.state='open' AND q.expires_at > $2
+                    AND r.closed_at IS NULL AND r.deleted_at IS NULL`,
+                [operatorId, d.clock()],
+              )
+            ).rows[0]?.n ?? 0,
+          );
+      }
       return {
+        invitations,
+        ...(requestResponses === undefined ? {} : { requestResponses }),
         inboxes: rows.map((row) => ({
           agent_id: row.agent_id,
           latest_seq: Number(row.next_seq) - 1,
@@ -1243,25 +1393,65 @@ export function createMessaging(d: MessagingDependencies): Messaging {
   async function conversations(
     operatorId: string,
     limit = 50,
+    agentId?: string,
   ): Promise<{ conversations: ConversationSummary[] }> {
     return d.db.transaction(async (tx) => {
       const workspace = await workspaceOf(tx, operatorId);
+      // The newest threads first, without reading the owner's whole history: the threads the
+      // owner received in come from a skip scan over (recipient_owner_id, context_id), one index
+      // probe per thread, and the threads the owner only sent into from the newest
+      // CONVERSATION_SEND_SCAN sent rows. Only the chosen page of threads is aggregated below.
+      const page = (
+        await tx.query<{ context_id: string }>(
+          `WITH RECURSIVE recv(context_id) AS (
+             (SELECT context_id FROM messages WHERE recipient_owner_id=$1 ORDER BY context_id LIMIT 1)
+             UNION ALL
+             SELECT (SELECT m.context_id FROM messages m WHERE m.recipient_owner_id=$1
+                       AND m.context_id > recv.context_id ORDER BY m.context_id LIMIT 1)
+               FROM recv WHERE recv.context_id IS NOT NULL
+           ), candidates AS (
+             SELECT context_id, max(last_at) AS last_at FROM (
+               SELECT r.context_id, (SELECT max(m.created_at) FROM messages m
+                        WHERE m.recipient_owner_id=$1 AND m.context_id=r.context_id) AS last_at
+                 FROM recv r WHERE r.context_id IS NOT NULL
+               UNION ALL
+               SELECT context_id, created_at FROM (SELECT context_id, created_at FROM messages
+                 WHERE sender_owner_id=$1 ORDER BY created_at DESC LIMIT $4) s
+             ) c GROUP BY context_id
+           )
+           SELECT c.context_id FROM candidates c
+            WHERE c.last_at > COALESCE((SELECT h.hidden_at FROM conversation_hidden h
+                    WHERE h.owner_id=$1 AND h.context_id=c.context_id), -1)
+              AND ($3::text IS NULL
+                OR EXISTS (SELECT 1 FROM messages m WHERE m.context_id=c.context_id
+                             AND m.sender_id=$3 AND m.sender_owner_id=$1)
+                OR EXISTS (SELECT 1 FROM messages m WHERE m.context_id=c.context_id
+                             AND m.recipient_id=$3 AND m.recipient_owner_id=$1))
+            ORDER BY c.last_at DESC, c.context_id LIMIT $2`,
+          [operatorId, Math.min(Math.max(limit, 1), 100), agentId ?? null, CONVERSATION_SEND_SCAN],
+        )
+      ).rows.map((row) => row.context_id);
+      if (!page.length) return { conversations: [] };
       const groups = (
         await tx.query<{
           context_id: string;
           message_count: number | string;
+          last_at: number | string;
           senders: string[];
           recipients: string[];
         }>(
           `SELECT context_id, count(*) AS message_count, max(created_at) AS last_at,
              jsonb_agg(DISTINCT sender_id) AS senders, jsonb_agg(DISTINCT recipient_id) AS recipients
-           FROM messages WHERE (recipient_owner_id=$1 OR sender_owner_id=$1) GROUP BY context_id
-           HAVING max(created_at) > COALESCE((SELECT h.hidden_at FROM conversation_hidden h
-             WHERE h.owner_id=$1 AND h.context_id=messages.context_id), -1)
-           ORDER BY last_at DESC, context_id LIMIT $2`,
-          [operatorId, Math.min(Math.max(limit, 1), 100)],
+           FROM messages WHERE context_id = ANY($2::text[])
+             AND (recipient_owner_id=$1 OR sender_owner_id=$1)
+           GROUP BY context_id`,
+          [operatorId, page],
         )
-      ).rows;
+      ).rows.sort(
+        (x, y) =>
+          Number(y.last_at) - Number(x.last_at) ||
+          (x.context_id < y.context_id ? -1 : x.context_id > y.context_id ? 1 : 0),
+      );
       if (!groups.length) return { conversations: [] };
       const latest = (
         await tx.query<MessageRow>(
@@ -1458,6 +1648,14 @@ export function createMessaging(d: MessagingDependencies): Messaging {
             AND r.deleted_at IS NULL AND r.closed_at IS NULL AND r.elric_private IS NOT TRUE
             AND r.members_may_dm IS NOT FALSE
             AND t.removed_at IS NULL AND t.muted_at IS NULL AND t.role<>'guest'
+            -- The host's mute silences a whole owner in the room, not only the muted row
+            -- (authorizeRoomPair, refuseIfMuted); "Mute all AIs" spares the person member.
+            AND NOT EXISTS (SELECT 1 FROM room_members m WHERE m.room_id=s.room_id
+              AND m.owner_id=s.owner_id AND m.muted_at IS NOT NULL
+              AND (COALESCE(s.kind,'agent')<>'person' OR m.mute_scope IS DISTINCT FROM 'ai'))
+            AND NOT EXISTS (SELECT 1 FROM room_members m WHERE m.room_id=t.room_id
+              AND m.owner_id=t.owner_id AND m.muted_at IS NOT NULL
+              AND (COALESCE(t.kind,'agent')<>'person' OR m.mute_scope IS DISTINCT FROM 'ai'))
             AND NOT (t.owner_id=$1 AND t.kind='person')
             AND (to_regclass('elric_agents') IS NULL OR NOT EXISTS (
               SELECT 1 FROM elric_agents e WHERE e.agent_id=t.agent_id))

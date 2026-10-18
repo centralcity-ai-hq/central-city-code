@@ -493,7 +493,9 @@ export function createRoomPins(d: PinDependencies): RoomPins {
     if (room.closed_at !== null)
       refuse(409, 'room_closed', 'The room is closed; its pins are read-only.');
     if (member!.role === 'guest') refuse(403, 'read_only', 'Guests can read but not pin.');
-    if (room.host_owner_id !== operatorId) await refuseIfMuted(q, room.id, operatorId);
+    // The writer's kind: a bulk "Mute all AIs" never silences the owner pinning as a person.
+    if (room.host_owner_id !== operatorId)
+      await refuseIfMuted(q, room.id, operatorId, member!.kind);
     return member!;
   }
 

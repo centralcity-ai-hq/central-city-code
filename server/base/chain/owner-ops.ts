@@ -455,7 +455,7 @@ export function createOwnerOperationsPort(deps: OwnerOperationsDeps): OwnerOpera
         },
       };
       try {
-        return await refreshFinality(readOnly, idempotencyKey);
+        return await refreshFinality(readOnly, idempotencyKey, { retireLapsed: true });
       } catch {
         // An RPC hiccup leaves the stored state as it is; the next read tries again.
         return deps.store.get(idempotencyKey);

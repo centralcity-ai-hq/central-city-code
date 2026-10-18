@@ -10,6 +10,8 @@ import {
 } from 'lucide-react';
 import type { Agent, Job, Snapshot, Workflow, WorkflowDetail } from '../shared/types';
 import { api } from './api';
+import { searchLiveAgents } from './agents/ownAgents';
+import { useAgentPicker } from './agents/useAgentPicker';
 import { EmptyState, formatDate, statusLabels } from './components';
 import { ReadableData } from './ui/ReadableData';
 import { ExchangeCircle, workflowExchangeState } from './circle';
@@ -201,16 +203,46 @@ function NewWorkflow({
   onClose: () => void;
   onCreated: (id: string) => void;
 }) {
-  const agents = snapshot.agents.filter((agent) => agent.status !== 'revoked');
+  const live = snapshot.agents.filter((agent) => agent.status !== 'revoked');
   const [requesterId, setRequester] = useState(
-    () => agents.find((agent) => agent.capability === 'extract')?.id ?? '',
+    () => live.find((agent) => agent.capability === 'extract')?.id ?? '',
   );
   const [researcherId, setResearcher] = useState(
-    () => agents.find((agent) => agent.capability === 'research')?.id ?? '',
+    () => live.find((agent) => agent.capability === 'research')?.id ?? '',
   );
   const [reviewerId, setReviewer] = useState(
-    () => agents.find((agent) => agent.capability === 'verify')?.id ?? '',
+    () => live.find((agent) => agent.capability === 'verify')?.id ?? '',
   );
+  // A paged workspace (src/agents/agentPages.ts) carries only some agents: each picker also
+  // searches every agent of the workspace.
+  const paged = Boolean(snapshot.agentsPage);
+  const searchOf = (capability?: Agent['capability']) =>
+    paged
+      ? (q: string, signal: AbortSignal) =>
+          searchLiveAgents(q, signal).then((found) =>
+            capability ? found.filter((agent) => agent.capability === capability) : found,
+          )
+      : null;
+  const requesters = useAgentPicker(live, searchOf(), [requesterId]);
+  const researchers = useAgentPicker(
+    live.filter((agent) => agent.capability === 'research'),
+    searchOf('research'),
+    [researcherId],
+  );
+  const reviewers = useAgentPicker(
+    live.filter((agent) => agent.capability === 'verify'),
+    searchOf('verify'),
+    [reviewerId],
+  );
+  const agents = [
+    ...new Map(
+      [
+        ...requesters.known.values(),
+        ...researchers.known.values(),
+        ...reviewers.known.values(),
+      ].map((agent) => [agent.id, agent]),
+    ).values(),
+  ];
   const [source, setSource] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -293,39 +325,48 @@ function NewWorkflow({
       </div>
       <form onSubmit={(event) => void submit(event)}>
         <div className="workflow-agent-selects">
-          <label>
-            Requesting agent
-            <select
-              value={requesterId}
-              disabled={busy}
-              onChange={(event) => setRequester(event.target.value)}
-              required
-            >
-              {choices(agents)}
-            </select>
-          </label>
-          <label>
-            Research agent
-            <select
-              value={researcherId}
-              disabled={busy}
-              onChange={(event) => setResearcher(event.target.value)}
-              required
-            >
-              {choices(agents.filter((agent) => agent.capability === 'research'))}
-            </select>
-          </label>
-          <label>
-            Checking agent
-            <select
-              value={reviewerId}
-              disabled={busy}
-              onChange={(event) => setReviewer(event.target.value)}
-              required
-            >
-              {choices(agents.filter((agent) => agent.capability === 'verify'))}
-            </select>
-          </label>
+          <>
+            <label>
+              Requesting agent
+              <select
+                value={requesterId}
+                disabled={busy}
+                onChange={(event) => setRequester(event.target.value)}
+                required
+              >
+                {choices(requesters.agents ?? [])}
+              </select>
+            </label>
+            {requesters.field}
+          </>
+          <>
+            <label>
+              Research agent
+              <select
+                value={researcherId}
+                disabled={busy}
+                onChange={(event) => setResearcher(event.target.value)}
+                required
+              >
+                {choices(researchers.agents ?? [])}
+              </select>
+            </label>
+            {researchers.field}
+          </>
+          <>
+            <label>
+              Checking agent
+              <select
+                value={reviewerId}
+                disabled={busy}
+                onChange={(event) => setReviewer(event.target.value)}
+                required
+              >
+                {choices(reviewers.agents ?? [])}
+              </select>
+            </label>
+            {reviewers.field}
+          </>
         </div>
         {!distinct ? (
           <p className="field-note">

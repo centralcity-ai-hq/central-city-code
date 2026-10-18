@@ -823,8 +823,13 @@ export async function checkRoomCounts(
         await db.transaction(async (tx) => {
           // The room row lock orders the repair with joins, removals and task writes.
           const room = await bounded(tx, 'SELECT 1 FROM rooms WHERE id=$1 FOR UPDATE', [roomId]);
-          if (room.rows.length) await bounded(tx, REPAIR_ROOM_SQL, [roomId]);
-          else await bounded(tx, 'DELETE FROM room_counts WHERE room_id=$1', [roomId]);
+          if (room.rows.length) {
+            // Some writers (the lapse sweep) take no room lock, but their trigger holds the counts
+            // row until commit. Waiting for that row first lets the scan below see their commit,
+            // so the absolute values it writes never overwrite a concurrent delta.
+            await bounded(tx, 'SELECT 1 FROM room_counts WHERE room_id=$1 FOR UPDATE', [roomId]);
+            await bounded(tx, REPAIR_ROOM_SQL, [roomId]);
+          } else await bounded(tx, 'DELETE FROM room_counts WHERE room_id=$1', [roomId]);
         });
         repaired++;
       } catch (error) {

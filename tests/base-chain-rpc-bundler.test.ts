@@ -1,14 +1,21 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import type { PublicClient } from 'viem';
+import { HttpRequestError, LimitExceededRpcError, type PublicClient } from 'viem';
 import type { UserOperation } from 'viem/account-abstraction';
 import {
   BundlerError,
   bundlerFees,
+  bundlerRateLimited,
+  bundlerRejection,
+  BUNDLER_429_WAITS_MS,
+  providerRateLimit,
+  retryAfterHeaderMs,
+  retryAfterMs,
   rpcBundler,
   SponsorError,
   type RpcBundlerOptions,
 } from '../server/base/chain/rpc-bundler.js';
+import { transientChainError } from '../server/base/chain/transient.js';
 
 const ENTRY_POINT = '0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789';
 const SECRET_URL = 'https://bundler.example/rpc/v1/base-sepolia/SECRETKEY123';
@@ -285,4 +292,378 @@ test('fees: twice the base fee plus tip clears a bundler minimum a plain estimat
   assert.ok(fees.maxFeePerGas >= 7_660_000n);
   // Never below the plain estimate.
   assert.equal((await bundlerFees(client(9_000_000n, 1_000n, 1_000n))).maxFeePerGas, 9_000_000n);
+});
+
+/** An endpoint that answers HTTP 200 with a JSON-RPC error body for every call. */
+const rpcErrorFetch = (error: { code: number; message: string }) =>
+  (async (_url: string, init: RequestInit) => {
+    const { id } = JSON.parse(String(init.body));
+    return new Response(JSON.stringify({ jsonrpc: '2.0', id, error }));
+  }) as typeof fetch;
+
+test('a rate limit or busy answer inside an HTTP 200 is classified busy (transient), and no other', async () => {
+  const busy = [
+    { code: -32002, message: 'resource unavailable' },
+    { code: -32005, message: 'limit exceeded' },
+    { code: 429, message: 'Too Many Requests' },
+    { code: -32603, message: 'request rate limited, try later' },
+  ];
+  for (const error of busy) {
+    // Paymaster first (a SponsorError keeps the classification and the code), then the bundler.
+    const sponsored = await rpcBundler(options(rpcErrorFetch(error)))
+      .prepare(op)
+      .catch((e: unknown) => e);
+    assert.ok(sponsored instanceof SponsorError, `code ${error.code}`);
+    assert.equal(sponsored.rejection, 'busy', `code ${error.code}`);
+    assert.equal(sponsored.rpcCode, error.code);
+    assert.equal(transientChainError(sponsored), true, `code ${error.code} is transient`);
+    const unsponsored = await rpcBundler(options(rpcErrorFetch(error)))
+      .prepare(op, { sponsor: false })
+      .catch((e: unknown) => e);
+    assert.ok(unsponsored instanceof BundlerError && !(unsponsored instanceof SponsorError));
+    assert.equal(unsponsored.rejection, 'busy');
+    assert.equal(transientChainError(unsponsored), true);
+    assert.ok(!unsponsored.message.includes(error.message), 'upstream text is never kept');
+  }
+  const real = [
+    { code: -32603, message: 'internal error' },
+    { code: -32602, message: 'invalid params: rate field' },
+    { code: -32500, message: 'AA21 didnt pay prefund' },
+  ];
+  for (const error of real) {
+    const rejected = bundlerRejection('eth_estimateUserOperationGas', error);
+    assert.equal(rejected.rejection, 'other', `code ${error.code}`);
+    assert.equal(transientChainError(rejected), false, `code ${error.code} is a real error`);
+  }
+  // Text alone, without a code, is never read as busy (the text is not ours to trust).
+  assert.equal(bundlerRejection('m', { message: 'rate limit' }).rejection, 'other');
+});
+
+test('only a rate limit is busy: spending policies, gas limits, denials and bare limits are real errors', () => {
+  const real = [
+    // A paymaster refusing its spending policy: asking again never helps.
+    { code: -32603, message: 'max spend limit exceeded for policy' },
+    { code: -32603, message: 'gas limit exceeded' },
+    { code: -32002, message: 'request denied' },
+    // -32603 without clear rate-limit text, and bare "limit exceeded"/"capacity" text.
+    { code: -32603, message: 'limit exceeded' },
+    { code: -32603, message: 'over capacity' },
+    { code: -32603, message: 'internal error' },
+    { code: -32002, message: 'something went wrong' },
+    // A -32005 that names a spending policy is that policy, not a rate.
+    { code: -32005, message: 'max spend limit exceeded for policy' },
+  ];
+  for (const error of real) {
+    const rejected = bundlerRejection('pm_getPaymasterData', error);
+    assert.equal(rejected.rejection, 'other', `${error.code} ${error.message}`);
+    assert.equal(transientChainError(new SponsorError(rejected)), false, error.message);
+    // A node error viem raised with that code and text is not transient either.
+    assert.equal(
+      transientChainError({ code: error.code, details: error.message, message: 'RPC error' }),
+      false,
+      `node ${error.code} ${error.message}`,
+    );
+  }
+  const busy = [
+    { code: -32603, message: 'rate limit exceeded' },
+    { code: -32603, message: 'Too Many Requests' },
+    { code: -32002, message: 'resource temporarily unavailable' },
+    { code: -32002, message: 'rate limited' },
+    { code: -32005, message: 'limit exceeded' },
+    { code: 429, message: 'slow down' },
+  ];
+  for (const error of busy) {
+    const rejected = bundlerRejection('pm_getPaymasterData', error);
+    assert.equal(rejected.rejection, 'busy', `${error.code} ${error.message}`);
+    assert.equal(transientChainError(rejected), true, error.message);
+  }
+});
+
+test('an HTTP 429 is asked again after short waits; a lasting one still fails, other errors at once', async () => {
+  const waits: number[] = [];
+  const sleep = async (ms: number) => {
+    waits.push(ms);
+  };
+  // Two rate-limited answers, then the receipt: one call, no error.
+  let limited = 2;
+  let asked = 0;
+  const flaky = (async (_url: string, init: RequestInit) => {
+    asked++;
+    const { id } = JSON.parse(String(init.body));
+    if (limited-- > 0) return new Response('slow down', { status: 429 });
+    return new Response(JSON.stringify({ jsonrpc: '2.0', id, result: null }));
+  }) as typeof fetch;
+  assert.equal(
+    await rpcBundler({ ...options(flaky), sleep, rateLimitWaitsMs: BUNDLER_429_WAITS_MS }).receipt(
+      '0x01',
+    ),
+    null,
+  );
+  assert.equal(asked, 3);
+  assert.deepEqual(waits, [500, 1_500]);
+
+  // Always 429: four tries in all, then the same RPC_UNAVAILABLE as before.
+  waits.length = 0;
+  asked = 0;
+  const always = (async () => {
+    asked++;
+    return new Response('slow down', { status: 429, headers: { 'retry-after': '1' } });
+  }) as typeof fetch;
+  const error = await rpcBundler({
+    ...options(always),
+    sleep,
+    rateLimitWaitsMs: BUNDLER_429_WAITS_MS,
+  })
+    .receipt('0x01')
+    .catch((e: Error) => e);
+  assert.ok(error instanceof BundlerError);
+  assert.equal(asked, 4);
+  assert.deepEqual(waits, [1_000, 1_000, 1_000]);
+
+  // A 500 is not retried.
+  asked = 0;
+  const http500 = (async () => {
+    asked++;
+    return new Response('oops', { status: 500 });
+  }) as typeof fetch;
+  await rpcBundler({ ...options(http500), sleep, rateLimitWaitsMs: BUNDLER_429_WAITS_MS })
+    .receipt('0x01')
+    .catch(() => null);
+  assert.equal(asked, 1);
+});
+
+test('Retry-After: short delays are kept, a longer one stops the retries, never an earlier try', () => {
+  const now = Date.parse('2026-10-15T19:00:00Z');
+  assert.equal(retryAfterMs('2', 500, now), 2_000);
+  assert.equal(retryAfterMs('0', 500, now), 0);
+  assert.equal(retryAfterMs('60', 500, now), null);
+  assert.equal(retryAfterMs('Thu, 15 Oct 2026 19:00:02 GMT', 500, now), 2_000);
+  assert.equal(retryAfterMs('Thu, 15 Oct 2026 19:01:00 GMT', 500, now), null);
+  assert.equal(retryAfterMs('soon', 500, now), 500);
+  assert.equal(retryAfterMs(null, 1_500, now), 1_500);
+});
+
+test('a longer Retry-After ends the retries at once with the usual transient failure', async () => {
+  let asked = 0;
+  const waits: number[] = [];
+  const long = (async () => {
+    asked++;
+    return new Response('slow down', { status: 429, headers: { 'retry-after': '60' } });
+  }) as typeof fetch;
+  const error = await rpcBundler({
+    ...options(long),
+    rateLimitWaitsMs: BUNDLER_429_WAITS_MS,
+    sleep: async (ms) => {
+      waits.push(ms);
+    },
+  })
+    .receipt('0x01')
+    .catch((e: Error) => e);
+  assert.ok(error instanceof BundlerError);
+  assert.equal(error.code, 'RPC_UNAVAILABLE');
+  assert.equal(asked, 1);
+  assert.deepEqual(waits, []);
+});
+
+test('send: a 429 then success resends the identical operation (same signature, nonce, params)', async () => {
+  const bodies: string[] = [];
+  let limited = 2;
+  const flaky = (async (_url: string, init: RequestInit) => {
+    const body = JSON.parse(String(init.body));
+    bodies.push(JSON.stringify({ method: body.method, params: body.params }));
+    if (limited-- > 0) return new Response('slow down', { status: 429 });
+    return new Response(
+      JSON.stringify({ jsonrpc: '2.0', id: body.id, result: '0x' + 'ab'.repeat(32) }),
+    );
+  }) as typeof fetch;
+  const signed = { ...op, signature: '0x' + 'cd'.repeat(65), nonce: 7n } as typeof op;
+  const hash = await rpcBundler({
+    ...options(flaky),
+    rateLimitWaitsMs: BUNDLER_429_WAITS_MS,
+    sleep: async () => {},
+  }).send(signed);
+  assert.equal(hash, '0x' + 'ab'.repeat(32));
+  assert.equal(bodies.length, 3);
+  assert.equal(new Set(bodies).size, 1);
+  assert.ok(bodies[0]!.includes('eth_sendUserOperation'));
+});
+
+test('send: a lasting 429 makes four tries and then fails transient (no timeout retry)', async () => {
+  let asked = 0;
+  const always = (async () => {
+    asked++;
+    return new Response('slow down', { status: 429 });
+  }) as typeof fetch;
+  const error = await rpcBundler({
+    ...options(always),
+    rateLimitWaitsMs: BUNDLER_429_WAITS_MS,
+    sleep: async () => {},
+  })
+    .send(op)
+    .catch((e: Error) => e);
+  assert.ok(error instanceof BundlerError);
+  assert.equal(asked, 4);
+  // A network failure (timeout) is never retried here.
+  asked = 0;
+  const down = (async () => {
+    asked++;
+    throw new Error('timeout');
+  }) as typeof fetch;
+  await rpcBundler({
+    ...options(down),
+    rateLimitWaitsMs: BUNDLER_429_WAITS_MS,
+    sleep: async () => {},
+  })
+    .send(op)
+    .catch(() => null);
+  assert.equal(asked, 1);
+});
+
+test('without rateLimitWaitsMs a 429 fails at once (bulk work is never multiplied)', async () => {
+  let asked = 0;
+  const limited = (async () => {
+    asked++;
+    return new Response('slow down', { status: 429 });
+  }) as typeof fetch;
+  await rpcBundler(options(limited))
+    .receipt('0x01')
+    .catch(() => null);
+  assert.equal(asked, 1);
+});
+
+test('a non-OK answer carries its HTTP status and the Retry-After as data (seconds or a date)', async () => {
+  const now = Date.parse('2026-10-15T19:00:00Z');
+  assert.equal(retryAfterHeaderMs('120', now), 120_000);
+  assert.equal(retryAfterHeaderMs('Thu, 15 Oct 2026 19:02:00 GMT', now), 120_000);
+  assert.equal(retryAfterHeaderMs('Thu, 15 Oct 2026 18:59:00 GMT', now), 0);
+  assert.equal(retryAfterHeaderMs('soon', now), null);
+  assert.equal(retryAfterHeaderMs(null, now), null);
+
+  const answering = (status: number, headers: Record<string, string> = {}) =>
+    (async () => new Response('slow down', { status, headers })) as typeof fetch;
+  // Without waits of its own (or past them), a 429 is thrown with its status and Retry-After.
+  const receipt = await rpcBundler(options(answering(429, { 'retry-after': '120' })))
+    .receipt('0x01')
+    .catch((e: Error) => e);
+  assert.ok(receipt instanceof BundlerError);
+  assert.equal(receipt.code, 'RPC_UNAVAILABLE');
+  assert.equal(receipt.httpStatus, 429);
+  assert.equal(receipt.retryAfterMs, 120_000);
+  assert.equal(bundlerRateLimited(receipt), true);
+  assert.doesNotMatch(receipt.message, /SECRETKEY123/);
+
+  // The paymaster's 429 is a SponsorError with the same data.
+  const sponsor = await rpcBundler(options(answering(429)))
+    .prepare(op)
+    .catch((e: Error) => e);
+  assert.ok(sponsor instanceof SponsorError);
+  assert.equal(sponsor.httpStatus, 429);
+  assert.equal(sponsor.retryAfterMs, null, 'no Retry-After: null, never a guess');
+  assert.equal(bundlerRateLimited(sponsor), true);
+
+  // A 500 carries its status but is no rate limit.
+  const failed = await rpcBundler(options(answering(500, { 'retry-after': '5' })))
+    .receipt('0x01')
+    .catch((e: Error) => e);
+  assert.ok(failed instanceof BundlerError);
+  assert.equal(failed.httpStatus, 500);
+  assert.equal(failed.retryAfterMs, 5_000);
+  assert.equal(bundlerRateLimited(failed), false);
+});
+
+test('only a 429 or a busy answer is a rate limit: policy, allowlist, funds and the rest are not', () => {
+  const busy = bundlerRejection('pm_getPaymasterStubData', {
+    code: -32005,
+    message: 'limit exceeded',
+  });
+  assert.equal(busy.rejection, 'busy');
+  assert.equal(bundlerRateLimited(busy), true);
+  assert.equal(bundlerRateLimited(new SponsorError(busy)), true);
+  for (const error of [
+    bundlerRejection('pm_getPaymasterStubData', {
+      code: -32002,
+      message: 'max spend limit exceeded for policy',
+    }),
+    bundlerRejection('pm_getPaymasterData', {
+      code: -32603,
+      message: 'not in allowlist: 0x12345678',
+    }),
+    bundlerRejection('eth_estimateUserOperationGas', {
+      code: -32500,
+      message: "AA21 didn't pay prefund",
+    }),
+    new BundlerError('RPC_UNAVAILABLE', 'eth_sendUserOperation: bundler not reachable.'),
+    new BundlerError('FEE_CAP_EXCEEDED', 'Network fees are above the configured cap.'),
+    new SponsorError(new Error('anything')),
+    new Error('HTTP 429: rate limited'),
+  ])
+    assert.equal(bundlerRateLimited(error), false, error.message);
+});
+
+test('busy -32002 and -32005 answers are rate limits for bundlerRateLimited', () => {
+  for (const answer of [
+    { code: -32002, message: 'resource unavailable' },
+    { code: -32002, message: 'rate limited' },
+    { code: -32005, message: 'limit exceeded' },
+  ]) {
+    const error = bundlerRejection('eth_estimateUserOperationGas', answer);
+    assert.equal(bundlerRateLimited(error), true, answer.message);
+    assert.equal(bundlerRateLimited(new SponsorError(error)), true, answer.message);
+  }
+});
+
+test('providerRateLimit: a bundler 429 or busy answer, or a node read refused for its rate', () => {
+  const bundler429 = new SponsorError(
+    new BundlerError(
+      'RPC_UNAVAILABLE',
+      'pm_getPaymasterStubData: HTTP 429.',
+      undefined,
+      undefined,
+      429,
+      7_000,
+    ),
+  );
+  assert.deepEqual(providerRateLimit(bundler429), { retryAfterMs: 7_000 });
+  assert.deepEqual(
+    providerRateLimit(
+      bundlerRejection('pm_getPaymasterStubData', {
+        code: -32002,
+        message: 'resource unavailable',
+      }),
+    ),
+    { retryAfterMs: null },
+  );
+  // viem's contract read (the operation's nonce) wrapping the endpoint's HTTP 429.
+  const http = new HttpRequestError({
+    status: 429,
+    url: SECRET_URL,
+    headers: new Headers({ 'retry-after': '20' }),
+  });
+  const read = Object.assign(new Error('getNonce failed'), { cause: http });
+  assert.deepEqual(providerRateLimit(read), { retryAfterMs: 20_000 });
+  assert.deepEqual(providerRateLimit(new HttpRequestError({ status: 429, url: SECRET_URL })), {
+    retryAfterMs: null,
+  });
+  // A JSON-RPC rate-limit answer of the node.
+  assert.deepEqual(providerRateLimit(new LimitExceededRpcError(new Error('limit exceeded'))), {
+    retryAfterMs: null,
+  });
+  for (const error of [
+    new HttpRequestError({ status: 500, url: SECRET_URL }),
+    bundlerRejection('pm_getPaymasterStubData', {
+      code: -32002,
+      message: 'max spend limit exceeded for policy',
+    }),
+    // A bundler's own non-rate refusal is not overruled by anything it wraps.
+    Object.assign(
+      new BundlerError('RPC_ERROR', 'eth_estimateUserOperationGas: rejected.', 'other'),
+      {
+        cause: new HttpRequestError({ status: 429, url: SECRET_URL }),
+      },
+    ),
+    new BundlerError('FEE_CAP_EXCEEDED', 'Network fees are above the configured cap.'),
+    new Error('HTTP 429: rate limited'),
+    new Error('timeout'),
+  ])
+    assert.equal(providerRateLimit(error), null, error.message);
 });

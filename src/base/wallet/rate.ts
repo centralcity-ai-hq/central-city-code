@@ -4,7 +4,7 @@
  * City Base agent, 1 to 5 stars, from one of their own agents' wallets. The server prepares the
  * rating as an owner operation, exactly as it prepares a withdrawal; this module checks it, and it
  * is signed and sent the way Pay does it: withdraw.ts signAndSend to signaturePath(agentId,
- * withdrawalId), the anchor kept first (saveAnchor), its status read by withdrawalId. There is no
+ * withdrawalId), the anchor kept first (saveAnchor, in its own 'rating' store), its status read by withdrawalId. There is no
  * signature route of its own. (A cancel isn't signed for a rating yet: withdraw.ts checkOperation
  * binds a cancel only to a withdrawal, so the browser refuses it.) Nothing is signed unless:
  *

@@ -169,11 +169,15 @@ its wallet per day, week or month. Base holds it to that limit, and you can revo
    periods start, and the spending key it's for.
 4. Type your **Wallet password** and click **Sign**.
 
+A limit works as soon as you sign it: the review says **Ada can use it as soon as you sign.**
+
 **Base enforces half the limit per Base period.** For a limit of 20.00 USDC a day the screen says
 **Base enforces 10.00 USDC per Base day, so even around midnight Ada stays within 20.00.** Base's
-periods have fixed lengths: Base days start at 00:00 Berlin time; Base weeks last 7 days and Base
-months 31 days, counted from the first 00:00 Berlin time after you sign. Central City's own counter
-resets at midnight, on Monday at midnight or on the 1st at midnight (Berlin time).
+periods have fixed lengths counted from one starting point: 00:00 Berlin time of the day the limit
+is prepared (signed just after midnight, it can be the previous day). From there a Base day lasts 24
+hours, a Base week 7 days and a Base month 31 days, so across a daylight-saving change a Base day can
+begin an hour away from local midnight. Central City's own counter resets
+at midnight, on Monday at midnight or on the 1st at midnight (Berlin time).
 
 The limit card then shows the limit (**20.00 USDC a day**), what is used
 (**Used today: 0.00 of 20.00 · resets at midnight (Berlin time)**), what is spent and left in the

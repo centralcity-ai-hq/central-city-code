@@ -2,6 +2,7 @@ import { timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type { Database, Transaction } from '../database.js';
 import { checkRoomCounts } from '../rooms/overview.js';
+import { checkPaidCallsAllChains } from './paid-calls.js';
 import { AI_AGENTS_TOTAL_SCAN_SQL, AI_AGENTS_TOTAL_SQL } from './public-stats.js';
 
 /**
@@ -253,7 +254,8 @@ function bearerMatches(header: string | undefined, secret: string | undefined): 
 
 /**
  * Vercel Cron (GET with Authorization: Bearer CRON_SECRET), daily at 12:30 UTC. Also checks the
- * room overview counters (server/rooms/overview.ts checkRoomCounts) in the same run.
+ * room overview counters (server/rooms/overview.ts checkRoomCounts) and the paid service calls
+ * count (server/stats/paid-calls.ts checkPaidCallsAllChains) in the same run.
  */
 export function registerFastCountCheckRoute(
   app: FastifyInstance,
@@ -285,6 +287,14 @@ export function registerFastCountCheckRoute(
       await checkRoomCounts(d.db, { repair: true, log });
     } catch (error) {
       log('error', { event: 'room_counts_check_threw', error: errorCode(error) });
+    }
+    // The paid service calls count (migration 125), every chain's row, Base mainnet first: one
+    // 3 s limit for all, so the function's worst case is 45 s + 5 s + 5 s + 3 s = 58 s of its
+    // 60 s. Counts only in the log.
+    try {
+      await checkPaidCallsAllChains(d.db, { log });
+    } catch (error) {
+      log('error', { event: 'paid_calls_check_threw', error: errorCode(error) });
     }
     if (!result) throw failure;
     return reply.header('Cache-Control', 'no-store').send(result);

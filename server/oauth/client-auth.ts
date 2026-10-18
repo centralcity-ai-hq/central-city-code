@@ -173,5 +173,7 @@ export function verifyAssertion(
   }
   if (typeof claims.jti !== 'string' || !claims.jti || claims.jti.length > 256)
     throw new ClientAuthError('The client assertion needs a jti.');
-  return { jti: claims.jti, expiresAt: exp };
+  // RFC 7519 allows a fractional NumericDate; the replay record stores whole milliseconds, rounded
+  // up so the jti is kept at least until the assertion expires.
+  return { jti: claims.jti, expiresAt: Math.ceil(exp) };
 }

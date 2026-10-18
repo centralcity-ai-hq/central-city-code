@@ -50,7 +50,8 @@ import {
 import { createAccountCall, deriveAddressLocal, type DerivationRecipe } from './derive.js';
 import { walletSignature } from './permissions.js';
 import { BundlerError, rpcBundler } from './rpc-bundler.js';
-import { cdpTransport } from './rpc-budget.js';
+import { CDP_RETRY } from './rpc-budget.js';
+import { baseReadTransport, baseReadUrls } from './read-transport.js';
 import { ChainRuntimeError, WALLET_FEE_CAP_SETTING, walletFeeCap } from './runtime.js';
 import { pgChainOperationStore } from './stores.js';
 import {
@@ -335,7 +336,7 @@ export function createOwnerRevokePort(deps: OwnerRevokeDeps): OwnerRevokePort {
         },
       };
       try {
-        return await refreshFinality(readOnly, idempotencyKey);
+        return await refreshFinality(readOnly, idempotencyKey, { retireLapsed: true });
       } catch {
         // An RPC hiccup leaves the stored state as it is; the next read tries again.
         return deps.store.get(idempotencyKey);
@@ -351,11 +352,14 @@ const POSITIVE_INT = /^[1-9][0-9]{0,77}$/;
  * network's bundler/RPC URL and CITY_BASE_MAX_FEE_PER_GAS_WEI; CITY_BASE_WALLET_FEE_CAP_WEI caps one
  * owner operation, by the same rule as W2's owner operations (runtime.ts walletFeeCap: mandatory on
  * mainnet, never malformed). A missing setting throws ChainRuntimeError (no value in any message).
+ * Its reads fall back like the runtime's (read-transport.ts); its bundler and paymaster calls, and
+ * the nonce and code reads that build an operation, stay on the CDP endpoint.
  */
 export function ownerRevokePortFromEnv(
   db: Database,
   env: Record<string, string | undefined>,
   chainId: BaseChainId,
+  options: { hosted?: boolean } = {},
 ): OwnerRevokePort {
   const network = baseNetwork(chainId, env);
   if (!network) throw new ChainRuntimeError('network');
@@ -373,7 +377,10 @@ export function ownerRevokePortFromEnv(
       nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
       rpcUrls: { default: { http: [url] } },
     },
-    transport: cdpTransport(url),
+    transport: baseReadTransport(baseReadUrls(url, env, network.chainId, options), {
+      chainId: network.chainId,
+      retry: CDP_RETRY,
+    }),
   });
   return createOwnerRevokePort({
     network,

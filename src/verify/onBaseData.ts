@@ -1,4 +1,5 @@
 import type { CityScore } from '../../shared/base/rating-score';
+import { ON_BASE_QUERY_MAX } from '../../shared/base/on-base';
 import { json } from './countLogClient';
 
 /*
@@ -54,6 +55,11 @@ export type OnBaseTotals = {
   /** Registered in the last 24 hours. */
   new24h: number;
   finalizingNow: number;
+  /**
+   * Agents with at least one rating sent through Central City that is final on Base, every rater
+   * counted. null when the server could not count it; absent from an older server.
+   */
+  ratedAgents?: number | null;
   /**
    * The Base block the list was read at, and when (ms epoch, the server's clock): its oldest read.
    * null only before the server has read Base or stored any evidence.
@@ -212,7 +218,9 @@ export function scoreClaim(
 
 export async function loadOnBase(query: { q?: string; before?: string | null } = {}) {
   const params = new URLSearchParams();
-  if (query.q?.trim()) params.set('q', query.q.trim());
+  // The server refuses a longer search (400), and retrying the same text would never clear it.
+  const q = query.q?.trim().slice(0, ON_BASE_QUERY_MAX).trim();
+  if (q) params.set('q', q);
   if (query.before) params.set('before', query.before);
   const search = params.toString();
   return json<OnBaseList>(`${ON_BASE_ROUTES.list}${search ? `?${search}` : ''}`);

@@ -803,7 +803,13 @@ test('an answer of another kind is never read as a wallet', async ({ page }) => 
     route.fulfill({ json: { kind: 'something_new', address: ELSEWHERE_WALLET, usdc: usdc(25) } }),
   );
   const panel = await openPane(page);
-  await expect(panel.locator('[data-k="row-wallet"]')).toHaveCount(0);
+  // A read that can't be used is a failed read: the row stays (so the Wallet screen and its retry
+  // open), but it shows no balance and no address.
+  const row = panel.locator('[data-k="row-wallet"]');
+  await expect(row).toContainText('Couldn’t load');
+  await expect(row).not.toContainText('USDC');
+  await expect(panel).not.toContainText(ELSEWHERE_WALLET);
+  await expect(panel).not.toContainText('In your own wallet');
 });
 
 test('with the key ready and no wallet yet, Create names the network the wallet goes on', async ({

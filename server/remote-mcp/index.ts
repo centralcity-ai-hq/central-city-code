@@ -26,6 +26,7 @@ import {
   openInviteTaskInputSchemas,
 } from './open-invite.js';
 import { describeValidation } from '../validation-errors.js';
+import { feedEnabled } from '../feed/flag.js';
 import { sendGuide, wantsGuide } from './guide.js';
 import {
   clientAddressKey,
@@ -34,6 +35,7 @@ import {
   presentedPrincipal,
 } from '../rate-limit.js';
 import { extendForWait } from '../wake/routes.js';
+import { OFFER_BATCH_TOOLS, OFFER_LIMITS, TOOL_BODY_MAX_BYTES } from '../../shared/feed-offers.js';
 
 /**
  * Scopes a client is told to request on its first 401 (RFC 6750 §3 `scope`), so a client that
@@ -124,8 +126,10 @@ export async function registerRemoteMcp(
         import('./validation.js'),
       ]);
     return createMcpHandler(
-      ({ authInfo }) => {
+      ({ authInfo, requestInfo }) => {
         const identity = authInfo?.extra as Identity | undefined;
+        // serveMcp aborts the request's signal when the client disconnects (ends a wait= early).
+        const signal = requestInfo?.signal;
         const server = createRemoteServer(
           (tool: string, args: unknown) => {
             if (!identity) return d.fail(401, 'Authentication is required.');
@@ -147,7 +151,7 @@ export async function registerRemoteMcp(
                 },
                 tool,
                 args,
-                { origin: identity.origin },
+                { origin: identity.origin, signal },
               );
             return d.access.executeTool(
               {
@@ -158,7 +162,7 @@ export async function registerRemoteMcp(
               },
               tool,
               args,
-              { origin: identity.origin },
+              { origin: identity.origin, signal },
             );
           },
           (error) => {
@@ -180,6 +184,10 @@ export async function registerRemoteMcp(
             grantedScopes: authInfo?.scopes,
             openInvites: d.roomInvites.enabled(),
             origin: identity?.origin,
+            workspaceId:
+              identity && !identity.anonymous && !('roomOnly' in identity)
+                ? identity.operatorId
+                : undefined,
           },
         );
         // Every schema failure answers with our invalid_arguments body (see validation.ts).
@@ -187,7 +195,8 @@ export async function registerRemoteMcp(
       },
       {
         legacy: 'stateless',
-        maxRequestBodySize: 65536,
+        // Fastify parses the body first (parsedBody below) under the route's own limit.
+        maxRequestBodySize: OFFER_LIMITS.batchBytesMax,
         keepAliveMs: 0,
         onerror: () => {},
       },
@@ -280,7 +289,8 @@ export async function registerRemoteMcp(
       // A plain GET (browser, or a fetch following a link) gets a public connection guide.
       // MCP stream GETs (Accept: text/event-stream), POST and DELETE continue below unchanged,
       // so the OAuth 401 + WWW-Authenticate challenge that clients discover OAuth from stays.
-      if (wantsGuide(request)) return sendGuide(request, reply, base, open);
+      if (wantsGuide(request))
+        return sendGuide(request, reply, base, open, feedEnabled(process.env));
       // Browsers attach Origin; only same-origin browser calls may reach the MCP endpoint.
       if (request.headers.origin !== undefined && request.headers.origin !== base)
         return reply.code(403).send({ error: 'Cross-origin MCP requests are not allowed.' });
@@ -405,9 +415,16 @@ export async function registerRemoteMcp(
       for (const [key, value] of Object.entries(request.headers))
         if (value !== undefined)
           for (const item of [value].flat()) headers.append(key, String(item));
+      // A client that disconnects before the answer aborts the call: a long-poll (wait=) stops
+      // waiting instead of holding the function to its deadline.
+      const disconnect = new AbortController();
+      reply.raw.once('close', () => {
+        if (!reply.raw.writableFinished) disconnect.abort();
+      });
       const webRequest = new Request(`${base}${request.url}`, {
         method: request.method,
         headers,
+        signal: disconnect.signal,
         ...(request.method === 'POST' ? { body: request.rawBody ?? '' } : {}),
       });
       const mcp = await loadMcp();
@@ -423,9 +440,15 @@ export async function registerRemoteMcp(
       if (!response.body) return reply.send();
       return reply.send(Readable.fromWeb(response.body as unknown as NodeReadableStream));
     }
+    // /mcp takes up to 1 MiB, but only for one tools/call of an offer batch tool
+    // (OFFER_BATCH_TOOLS); any other body over 64 KiB is refused with 413 once parsed.
     scope.route({
       method: ['GET', 'POST', 'DELETE'],
       url: MCP_PATH,
+      bodyLimit: OFFER_LIMITS.batchBytesMax,
+      preHandler: async (request) => {
+        if (!withinToolBodyLimit(request)) throw bodyTooLarge();
+      },
       handler: (request, reply) => serveMcp(request, reply),
     });
     // Open endpoint: a standard, stateless Streamable HTTP MCP server with no authorization at
@@ -439,6 +462,31 @@ export async function registerRemoteMcp(
   });
   // The wake-up stream (server/wake/routes.ts) accepts the same OAuth access tokens.
   return oauth;
+}
+
+/**
+ * Whether a parsed /mcp body may be this large: at most TOOL_BODY_MAX_BYTES, or a single
+ * JSON-RPC tools/call of an offer batch tool (the route's own limit bounds that one).
+ */
+function withinToolBodyLimit(request: FastifyRequest): boolean {
+  const raw = request.rawBody;
+  if (typeof raw !== 'string' || Buffer.byteLength(raw, 'utf8') <= TOOL_BODY_MAX_BYTES) return true;
+  const body = request.body as { method?: unknown; params?: { name?: unknown } } | null;
+  return (
+    !!body &&
+    !Array.isArray(body) &&
+    body.method === 'tools/call' &&
+    typeof body.params?.name === 'string' &&
+    OFFER_BATCH_TOOLS.includes(body.params.name)
+  );
+}
+
+/** The same 413 Fastify answers for a body over a route's limit. */
+function bodyTooLarge(): Error {
+  return Object.assign(new Error('Request body is too large'), {
+    statusCode: 413,
+    code: 'FST_ERR_CTP_BODY_TOO_LARGE',
+  });
 }
 
 /** Open room tools that take a room_credential argument (city_join_invite does not). */

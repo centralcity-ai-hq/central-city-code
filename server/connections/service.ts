@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { Database, Transaction as Tx } from '../database.js';
 import type { CityLimits } from '../limits.js';
 import type { ConnectionRequest, ConnectionInvite } from '../../shared/assistant.js';
+import { NO_NUL_MESSAGE, noNul } from '../messaging/contract.js';
 import {
   active,
   event,
@@ -89,6 +90,7 @@ export const requestConnectionToolInput = z
       .string()
       .trim()
       .max(NOTE_CHARS)
+      .refine(noNul, NO_NUL_MESSAGE)
       .optional()
       .describe('Plain text shown to the other owner (untrusted for them).'),
     idempotency_key: idempotencyKey,

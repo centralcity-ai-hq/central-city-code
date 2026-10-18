@@ -18,6 +18,16 @@ import { ELRIC_TABLES } from './elric/schema.js';
 import { GOOGLE_TABLES } from './google/schema.js';
 import { EMAIL_TABLES } from './email/schema.js';
 import { BASE_TABLES } from './base/schema.js';
+import { DIRECTORY_TABLES } from './directory/schema.js';
+import { FEED_REQUEST_TABLES } from './feed/schema.js';
+import { FEED_SERVICE_TABLES } from './feed/services-schema.js';
+import { FEED_OFFER_TABLES } from './feed/offers/schema.js';
+import { FEED_RESPOND_TABLES } from './feed/respond-schema.js';
+import { FEED_PAY_TABLES } from './feed/pay/schema.js';
+import { PAID_CALL_COUNT_TABLE } from './feed/pay/count-schema.js';
+import { PROTOCOL_FEE_TABLES } from './protocol/fees/ledger.js';
+import { PROTOCOL_SCREENING_TABLES } from './protocol/screening/schema.js';
+import { ROOM_INVITATION_TABLES } from './rooms/invitations-schema.js';
 import { ELRIC_ERASE_TABLES } from './elric/erase.js';
 import { ELRIC_DRAFT_TABLES } from './elric/draft.js';
 import { ELRIC_TITLE_TABLES } from './elric/titles.js';
@@ -436,12 +446,17 @@ export async function backupDatabase(dataPath: string, backupPath: string) {
         )
       ).rows
         .map((row) => row.table_name)
-        // Migration 28 public_stats, migration 59 counted_agent_ids and migration 64 room_counts
-        // are derived (recomputed from workspaces, room members and tasks): recognized on top of any schema and never exported, so they never
-        // decide whether a schema is supported.
+        // Migration 28 public_stats, migration 59 counted_agent_ids, migration 64 room_counts and
+        // migration 125 paid_call_count are derived (recomputed from workspaces, room members,
+        // tasks and Feed pay calls): recognized on top of any schema and never exported, so they
+        // never decide whether a schema is supported. After a restore the paid calls count is
+        // hidden or low until its daily check, never too high.
         .filter(
           (name) =>
-            name !== 'public_stats' && name !== 'counted_agent_ids' && name !== 'room_counts',
+            name !== 'public_stats' &&
+            name !== 'counted_agent_ids' &&
+            name !== 'room_counts' &&
+            name !== PAID_CALL_COUNT_TABLE,
         );
       const legacyTables = ['credentials', 'operators', 'replay_nonces', 'sessions', 'workspaces'];
       // Assistant grants and mutation receipts are authority, not recovery data.
@@ -545,6 +560,32 @@ export async function backupDatabase(dataPath: string, backupPath: string) {
       // block back (they expire within 30 days anyway).
       if (tables.includes('room_guest_blocks') && !tables.includes('room_members'))
         throw new Error('Unsupported database schema; no backup was written.');
+      // Migration 101 (room invitations and invitation blocks, rooms/invitations-schema.ts) may
+      // sit on top of any schema that has rooms: both tables or none, recognized and never
+      // exported, like the rooms they invite to (a restore brings no invitation or block back).
+      const roomInvitations = ROOM_INVITATION_TABLES.filter((name) => tables.includes(name));
+      if (
+        roomInvitations.length &&
+        (roomInvitations.length !== ROOM_INVITATION_TABLES.length ||
+          !tables.includes('room_members'))
+      )
+        throw new Error('Unsupported database schema; no backup was written.');
+      // Migration 103 (Feed requests, feed/schema.ts) may sit on top of any schema: all four
+      // tables or none.
+      const feedTables = FEED_REQUEST_TABLES.filter((name) => tables.includes(name));
+      if (feedTables.length && feedTables.length !== FEED_REQUEST_TABLES.length)
+        throw new Error('Unsupported database schema; no backup was written.');
+      // Migration 108 (Feed Respond) comes only on top of the Feed requests and the rooms.
+      if (
+        FEED_RESPOND_TABLES.some((name) => tables.includes(name)) &&
+        (!feedTables.length || !tables.includes('room_members'))
+      )
+        throw new Error('Unsupported database schema; no backup was written.');
+      // Migration 113 (protocol fee ledger, docs/protocol/FEES.md) may sit on top of any schema:
+      // both tables or none.
+      const protocolFees = PROTOCOL_FEE_TABLES.filter((name) => tables.includes(name));
+      if (protocolFees.length && protocolFees.length !== PROTOCOL_FEE_TABLES.length)
+        throw new Error('Unsupported database schema; no backup was written.');
       // Migration 68 (room pins and the handoff brief ledger, docs/ROOMS.md) may sit on top of any
       // schema that has rooms: both tables or none, recognized and never exported, like the
       // messages and tasks the pins point at.
@@ -619,6 +660,40 @@ export async function backupDatabase(dataPath: string, backupPath: string) {
         'room_task_comments',
         ...ROOM_CODE_TABLES,
         'room_guest_blocks',
+        // Migration 100 (Operation Directory): an owner's "Show in the directory" choice, never
+        // exported: after a restore every agent is unlisted again (the safe default) until its
+        // owner lists it.
+        ...DIRECTORY_TABLES,
+        // Migration 104 (Operation Central City Feed): services read from the x402 Bazaar and its
+        // sweep state, recognized and never exported (the next sweep reads them again).
+        ...FEED_SERVICE_TABLES,
+        // Migration 122 (Feed offers): the services an owner's agents sell and the publish
+        // receipts, recognized and never exported, like the wallets they are paid to: after a
+        // restore no agent sells anything until its owner publishes its offers again.
+        ...FEED_OFFER_TABLES,
+        // Migration 112 (Feed pay): calls, quotes, per-agent settings and float moves, recognized
+        // and never exported, like the Base payments they point at.
+        ...FEED_PAY_TABLES,
+        ...ROOM_INVITATION_TABLES,
+        // Migration 103 (Feed requests): public and short-lived, keyed by hashed client addresses,
+        // so never exported; a restore starts the Feed's requests empty.
+        ...FEED_REQUEST_TABLES,
+        // Migration 108 (Feed Respond): responses to those requests, never exported with them.
+        ...FEED_RESPOND_TABLES,
+        // Migration 113 (protocol fee ledger): recognized, never exported. Base is the record of
+        // every fee: after a restore the scan state is empty, so the next scans re-read the chain
+        // from the configured start block and rebuild every fee with its transfer proof and
+        // finality; public totals say history_complete: false until the scans reach the head.
+        // Seller-settlement verification of fee-on-top calls lives in the call records, not on
+        // Base: their prices count as volume again only once re-applied from those records
+        // (docs/protocol/FEES.md, "Ledger").
+        ...PROTOCOL_FEE_TABLES,
+        // Migration 232 (fee router 2's ledger start): recognized, never exported. After a restore
+        // the scan state is empty and the scans re-read every router from the start block anyway.
+        'protocol_fee_router_starts',
+        // Migration 115 (payment screening): short-lived decisions (minutes), recognized and never
+        // exported; after a restore every new payment is screened again.
+        ...PROTOCOL_SCREENING_TABLES,
         'conversation_hidden',
         'conversation_reads',
         ...messageCountTables,
@@ -799,6 +874,7 @@ export async function restoreDatabase(backupPath: string, destinationPath: strin
           agent.lastSeenAt = null;
           agent.lastSequence = -1;
           agent.announcedOnline = false;
+          delete agent.credentialHint; // The credentials table is restored empty.
         }
         for (const job of row.data.jobs) {
           job.leaseHash = null;

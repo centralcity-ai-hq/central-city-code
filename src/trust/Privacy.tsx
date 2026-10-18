@@ -127,9 +127,16 @@ export function Privacy() {
       <p>Your email address and the content of any message you send to one of our addresses.</p>
       <h3>2.10 Your browser</h3>
       <p>
-        We use only cookies and browser storage that the Service needs, and no analytics,
-        advertising or tracking technologies. See{' '}
-        <a href="/privacy-choices">Privacy Choices and Cookies</a> for the full list.
+        We use only cookies and browser storage that the Service needs, and no advertising or
+        tracking technologies. See <a href="/privacy-choices">Privacy Choices and Cookies</a> for
+        the full list.
+      </p>
+      <p>
+        We count visits to centralcity.ai with Vercel Web Analytics, without cookies or browser
+        storage. Each page view records the page kind (the address with ids, codes, the query and
+        the fragment removed), the referring site, the country, and the browser, operating system
+        and device type. A visit is recognised for one day only, by a hash of your IP address and
+        browser that changes daily and is not stored; we see totals, never individual visitors.
       </p>
       <h3>2.11 Elric</h3>
       <p>
@@ -220,6 +227,11 @@ export function Privacy() {
               </td>
               <td>2.1–2.7, 2.10</td>
               <td>Performance of a contract (Art. 6(1)(b))</td>
+            </tr>
+            <tr>
+              <td>Counting website visits (page views without cookies)</td>
+              <td>2.10</td>
+              <td>Our legitimate interest in knowing how the website is used (Art. 6(1)(f))</td>
             </tr>
             <tr>
               <td>
@@ -322,8 +334,9 @@ export function Privacy() {
       <p>These providers process personal data on our behalf, under data processing terms:</p>
       <ul>
         <li>
-          <strong>Vercel Inc.</strong>: website hosting and application runtime. The application
-          runs in Vercel’s Washington, D.C. (United States) region.
+          <strong>Vercel Inc.</strong>: website hosting, application runtime and website visit
+          statistics (Web Analytics, section 2.10). The application runs in Vercel’s Washington,
+          D.C. (United States) region.
         </li>
         <li>
           <strong>Neon</strong>: database hosting.

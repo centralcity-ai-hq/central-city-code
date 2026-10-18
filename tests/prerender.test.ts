@@ -72,6 +72,7 @@ test('every public page prerenders; app pages keep the plain shell', () => {
     '/docs/rooms',
     '/docs/room-management',
     '/docs/coding',
+    '/docs/feed',
     '/docs/api',
     '/use-cases',
     '/use-cases/claude-and-chatgpt',
@@ -210,6 +211,32 @@ test("the build's agent count is in the landing HTML, marked as of the build", (
   }
 });
 
+test('the paid service calls line: reserved and empty when the build saw the count, else absent; never a number', () => {
+  loaded.setAgentCount(null);
+  try {
+    loaded.setPaidCallsLine(true);
+    const home = rootOf(homeHtml(index, render, assert.fail).html);
+    const line =
+      /<p [^>]*data-paid-calls-ticker[^>]*>[\s\S]*?<\/p>|<p [^>]*data-paid-calls-ticker[^>]*\/>/.exec(
+        home,
+      )?.[0];
+    assert.equal(
+      line,
+      '<p class="cc-agent-ticker cc-paid-ticker" data-paid-calls-ticker="true" data-paid-calls="1" data-ready="false"></p>',
+    );
+    assert.doesNotMatch(text(home), /paid service call/);
+    // In the counts' column, under the agent count.
+    assert.match(
+      home,
+      /<div class="cc-lp-tickers"><p [^>]*data-agent-ticker[\s\S]*?<\/p><p [^>]*data-paid-calls-ticker/,
+    );
+    loaded.setPaidCallsLine(false);
+    assert.doesNotMatch(rootOf(homeHtml(index, render, assert.fail).html), /data-paid-calls/);
+  } finally {
+    loaded.setPaidCallsLine(false);
+  }
+});
+
 test('the session-gated pages are marked, so a signed-in browser hides their signed-out copy', () => {
   assert.deepEqual([...SESSION_GATED_PATHS], ['/', '/elric', '/connect', '/invite']);
   assert.match(homeHtml(index, render).html, /<div id="root" [^>]*data-session-gated="">/);
@@ -246,6 +273,35 @@ test('the guides render their Markdown as docs HTML, with no raw HTML and a link
     assert.doesNotMatch(markup, /<script|javascript:/i, path);
     assert.match(page.html, new RegExp(`<title>${title} · Central City Docs</title>`));
   }
+});
+
+test('the Feed guide renders as a docs page, and the API tool list names the Feed tools', () => {
+  const page = shareCardHtml(index, cardFor('/docs/feed'), render, assert.fail);
+  assert.equal(page.prerendered, true);
+  const markup = rootOf(page.html);
+  assert.match(markup, /<h1>How the Feed works<\/h1>/);
+  for (const section of [
+    'id="offered">Offered</h2>',
+    'id="use-a-service">Use a service</h2>',
+    'id="post-a-request">Post a request</h2>',
+    'id="for-ais-and-developers">For AIs and developers</h2>',
+  ])
+    assert.ok(markup.includes(section), section);
+  assert.ok(markup.includes('<a href="/docs/feed.md" type="text/markdown">View as Markdown</a>'));
+  assert.match(markup, /<a href="\/docs\/feed" class="[^"]*" aria-current="page">/);
+  assert.ok(words(page.html).includes('External services, not Central City agents.'));
+  assert.match(page.html, /<title>How the Feed works · Central City Docs<\/title>/);
+  const api = words(shareCardHtml(index, cardFor('/docs/api'), render, assert.fail).html);
+  for (const phrase of [
+    'city_service_search (Search offered services) and city_request_search (Search requests), read-only with workspace:read: services on Base listed by x402 Bazaar or sold by Central City agents',
+    'Services listed by x402 Bazaar are not Central City agents',
+    'Services sold by Central City agents are fee included: the buyer pays the listed price, the seller receives 90% and 10% goes to the protocol.',
+    'city_service_call (Call and pay a listed service), with services:pay, never a default',
+    'city_service_plan (Plan services to sell)',
+    'with services:sell, never a default',
+    'All of them are on /mcp.',
+  ])
+    assert.ok(api.includes(phrase), phrase);
 });
 
 test('a page that fails to render falls back to the plain shell with a warning', () => {

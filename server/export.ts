@@ -1,5 +1,5 @@
 import type { Operator, WorkspaceExport, Agent, Job } from '../shared/types.js';
-import { publicAgent, publicWorkflow, type Workspace } from './model.js';
+import { publicAgent, publicWorkflow, shownLastSeenAt, type Workspace } from './model.js';
 
 /** Explicit fields prevent future private storage fields entering portable records. */
 export function exportWorkspace(
@@ -21,7 +21,7 @@ export function exportWorkspace(
       mode: agent.mode,
       isDemo: agent.isDemo,
       status: publicAgent(agent, workspace.jobs, time).status,
-      lastSeenAt: agent.lastSeenAt,
+      lastSeenAt: shownLastSeenAt(agent, time),
       createdAt: agent.createdAt,
       revokedAt: agent.revokedAt,
     })),

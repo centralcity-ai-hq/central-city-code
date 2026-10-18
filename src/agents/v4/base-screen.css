@@ -468,3 +468,62 @@ a.v4b-row:hover {
     min-height: calc(44 * var(--ws-px));
   }
 }
+
+/* "Show in Base Agents" and "Room invitations" (DirectoryGroup.tsx). */
+.v4b-row-tall {
+  padding-top: calc(10 * var(--ws-px));
+  padding-bottom: calc(10 * var(--ws-px));
+}
+.v4b-hint {
+  display: block;
+  margin-top: calc(2 * var(--ws-px));
+  color: var(--v4b-muted);
+  font-size: calc(12.5 * var(--ws-type-px));
+  line-height: 1.4;
+}
+.v4b-select {
+  flex: none;
+  width: auto;
+  min-width: 0;
+  appearance: none;
+  height: calc(30 * var(--ws-px));
+  padding: 0 calc(24 * var(--ws-px)) 0 calc(10 * var(--ws-px));
+  border: 0;
+  border-radius: calc(8 * var(--ws-px));
+  background: var(--v4b-sunken)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none' stroke='%2364748b' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 1l4 4 4-4'/%3E%3C/svg%3E")
+    no-repeat right calc(9 * var(--ws-px)) center;
+  color: var(--v4b-text);
+  font: inherit;
+  font-size: calc(13.5 * var(--ws-type-px));
+  cursor: pointer;
+}
+.v4b-select:focus-visible {
+  outline: 2px solid var(--v4b-accent);
+  outline-offset: 1px;
+}
+.v4b-problem {
+  color: var(--v4b-bad);
+}
+
+/* Blocked owners (DirectoryGroup.tsx): Unblock as a quiet pill. */
+.v4b-unblock {
+  flex: none;
+  height: calc(30 * var(--ws-px));
+  padding: 0 calc(12 * var(--ws-px));
+  border: 0;
+  border-radius: 999px;
+  background: var(--v4b-sunken);
+  color: var(--v4b-text);
+  font: inherit;
+  font-size: calc(13 * var(--ws-type-px));
+  font-weight: 600;
+  cursor: pointer;
+}
+.v4b-unblock:hover:not(:disabled) {
+  background: var(--v4b-hover);
+}
+.v4b-unblock:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

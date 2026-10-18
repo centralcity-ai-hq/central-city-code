@@ -107,6 +107,24 @@ export function sponsoredValidUntil(paymasterAndData: string | undefined): numbe
   return until > 0n && until <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(until) : null;
 }
 
+/**
+ * Bundlers refuse an operation whose sponsorship ends within seconds, and EntryPoint refuses it once
+ * Base's block time is past the paymaster's signed validUntil (AA32). A signature for a sponsored
+ * operation is never taken that close to its sponsorship's end, whatever its signing deadline says:
+ * lanes off keeps a longer deadline, but the sponsorship still ends about two minutes after prepare.
+ */
+export const SPONSOR_SEND_MARGIN_MS = 10_000;
+
+/**
+ * Whether a sponsored operation's sponsorship ends too soon to send it at `now` (milliseconds).
+ * Owner-funded ('0x') never; data not in the pinned layout is left to the sponsor checks.
+ */
+export function sponsorshipEnding(paymasterAndData: string | undefined, now: number): boolean {
+  if (!paymasterAndData || paymasterAndData === '0x') return false;
+  const until = sponsoredValidUntil(paymasterAndData);
+  return until !== null && until <= now + SPONSOR_SEND_MARGIN_MS;
+}
+
 /** The most a caller may tolerate a fast device clock (see sponsoredWithinDeadline). */
 export const MAX_EXPIRY_SKEW_MS = 120_000;
 

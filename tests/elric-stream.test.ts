@@ -303,6 +303,39 @@ test('stale drafts: removed when a member reads the room, and by the drain sweep
   assert.equal(await count(), 0);
 });
 
+test('a revoked agent membership opens neither the drafts nor the room list', async (t) => {
+  const f = await elricFixture(t);
+  const s = await f.scene();
+  const guest = await f.account('Guest owner');
+  const guestAgent = await f.agent(guest, 'Guest desk');
+  await f.joinAgent(guest, s.room, guestAgent);
+  await f.db.query(
+    'INSERT INTO elric_drafts(agent_id,room_id,source_seq,text,updated_at) VALUES($1,$2,$3,$4,$5)',
+    [s.elricId, s.room.id, 1_000_000, 'forming', f.now()],
+  );
+  const url = `/api/rooms/${s.room.id}/elric-drafts`;
+  const listed = async () =>
+    ((await f.call(guest.cookie, 'GET', '/api/rooms')).json().rooms as Array<{ id: string }>).some(
+      (room) => room.id === s.room.id,
+    );
+  const before = await f.call(guest.cookie, 'GET', url);
+  assert.equal(before.statusCode, 200, before.body);
+  assert.equal(before.json().drafts.length, 1);
+  assert.equal(await listed(), true);
+  const revoked = await f.call(guest.cookie, 'POST', `/api/agents/${guestAgent}/revoke`, {});
+  assert.equal(revoked.statusCode, 200, revoked.body);
+  // The room's own reads refuse the revoked member; the drafts and the list follow the same rule.
+  assert.equal(
+    (await f.call(guest.cookie, 'GET', `/api/rooms/${s.room.id}/members`)).statusCode,
+    404,
+  );
+  const after = await f.call(guest.cookie, 'GET', url);
+  assert.equal(after.statusCode, 404, after.body);
+  assert.equal(await listed(), false);
+  // A person member still reads the drafts.
+  assert.equal((await f.call(s.owner.cookie, 'GET', url)).json().drafts.length, 1);
+});
+
 test('erasing an owner removes the drafts of their Elric', async (t) => {
   const f = await elricFixture(t);
   const s = await f.scene();

@@ -51,6 +51,7 @@ export function registerTaskRoutes(app: FastifyInstance, d: TaskRouteDependencie
         status: z.enum(['open', 'claimed', 'in_review', 'done', 'cancelled']).optional(),
         mine: z.enum(['true', 'false']).optional(),
         stage: z.string().min(1).max(64).optional(),
+        after_number: seq.optional(),
         limit: seq.pipe(z.number().int().min(1).max(TASK_LIMITS.pageSize)).optional(),
       })
       .strict()
@@ -60,6 +61,7 @@ export function registerTaskRoutes(app: FastifyInstance, d: TaskRouteDependencie
       status?: TaskStatus;
       mine?: boolean;
       stage?: string;
+      after_number?: number;
       limit?: number;
     } = {
       room_id: room,
@@ -67,6 +69,7 @@ export function registerTaskRoutes(app: FastifyInstance, d: TaskRouteDependencie
     if (query.status !== undefined) input.status = query.status;
     if (query.mine !== undefined) input.mine = query.mine === 'true';
     if (query.stage !== undefined) input.stage = query.stage;
+    if (query.after_number !== undefined) input.after_number = query.after_number;
     if (query.limit !== undefined) input.limit = query.limit;
     return d.tasks.list(p, taskListInput.parse(input));
   });

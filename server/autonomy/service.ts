@@ -33,6 +33,7 @@ import { descendants, revokeStoredAgent, setAgentPaused } from '../agent-lifecyc
 import { ELRIC_MANAGED, elricAgentIds } from '../elric/access.js';
 import { ELRIC_RESERVED_NAME_MESSAGE, reservedName } from '../elric/names.js';
 import { baseRegistrationStarted } from '../base/identity/short-links.js';
+import { syncOfferProviderName } from '../feed/offers/store.js';
 
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
 
@@ -505,6 +506,15 @@ export function createAutonomyService(caps: CityLimits) {
             time,
             actor.operatorId,
           ],
+        );
+        // The agent's Feed listings carry its public name: the new revision's, or none while
+        // private (as updateStoredAgent does for a rename or a visibility change).
+        const shown = agent.name.replace(/^ +| +$/g, '');
+        await syncOfferProviderName(
+          tx,
+          actor.operatorId,
+          agent.id,
+          visibility === 'public' && shown ? shown : null,
         );
         event(
           workspace,

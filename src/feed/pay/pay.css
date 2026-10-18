@@ -1,0 +1,674 @@
+/*
+ * "Use with my agent" (src/feed/pay): the use sheet in the service drawer, the call card and its
+ * result. Under the fp- prefix, inside .fd-page or .fd-layer, with the workspace tokens only (both
+ * themes); targets are var(--target), text never under 12px, and nothing is wider than the
+ * drawer at 360 px (long words and results wrap).
+ */
+.fp-sheet-wrap {
+  display: contents;
+}
+.fp-sheet {
+  gap: calc(22 * var(--ws-px));
+}
+.fp-head {
+  display: grid;
+  gap: calc(6 * var(--ws-px));
+}
+/* Section labels (the Operation DESIGN mockup): 12/500, muted, sentence case. */
+.fp-sheet .fd-sec h4,
+.fp-price-sec > h4,
+.fp-agents legend {
+  margin: 0;
+  padding: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.fp-sec-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px calc(12 * var(--ws-px));
+}
+/* Text buttons (Back to the service, Fill with example): 34 high, 44 on phones. */
+.fp-sheet .fp-back,
+.fp-sheet .fp-fill {
+  min-height: calc(34 * var(--ws-px));
+  font-size: calc(13 * var(--ws-type-px));
+}
+.fp-sheet .fp-back {
+  color: var(--text-secondary);
+  font-size: calc(13.5 * var(--ws-type-px));
+  font-weight: 500;
+}
+@media (hover: hover) {
+  .fp-sheet .fp-back:hover {
+    color: var(--text-primary);
+  }
+}
+.fp-fill:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+.fp-vh {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+.fp-head h3,
+.fp-call h3 {
+  margin: 0;
+  font-size: calc(17 * var(--ws-type-px));
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+:is(.fp-head h3, .fp-call h3):focus:not(:focus-visible) {
+  outline: none;
+}
+.fp-back {
+  justify-self: start;
+}
+
+/* What to send: the name left, Required or Optional right, inputs 40 high in the mono font. */
+.fp-inputs {
+  gap: calc(12 * var(--ws-px));
+}
+.fp-field {
+  gap: calc(5 * var(--ws-px));
+}
+.fp-field > label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 2px calc(12 * var(--ws-px));
+  font-size: calc(13 * var(--ws-type-px));
+  font-weight: 500;
+}
+.fp-field > label code {
+  min-width: 0;
+  font: 500 calc(13 * var(--ws-type-px)) / 1.4 var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.fp-req {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+.fp-req[data-req='true'] {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+.fp-field input.fd-input,
+.fp-field select.fd-input {
+  height: calc(40 * var(--ws-px));
+  min-height: calc(40 * var(--ws-px));
+  border-color: var(--border);
+  border-radius: calc(10 * var(--ws-px));
+  font: 400 calc(13 * var(--ws-type-px)) / 1.4 var(--font-mono);
+}
+.fp-field textarea.fd-input {
+  border-color: var(--border);
+  border-radius: calc(10 * var(--ws-px));
+}
+.fp-field .fd-input[aria-invalid='true'] {
+  border-color: var(--status-danger);
+}
+.fp-field .fd-input:focus {
+  border-color: var(--accent);
+}
+.fp-json {
+  font: 400 calc(13 * var(--ws-type-px)) / 1.45 var(--font-mono);
+}
+.fp-example code {
+  font: 12px / 1.5 var(--font-mono);
+  overflow-wrap: anywhere;
+}
+:is(.fp-call, .fp-max) .fd-btn:not(.fd-link) {
+  min-height: var(--target);
+}
+.fp-sheet .fd-btn:not(.fd-link) {
+  min-height: calc(34 * var(--ws-px));
+}
+
+/* The agent that pays: a row of cards (avatar, name, one muted line) that scrolls sideways
+   inside itself; the radios stay, drawn as the cards. */
+/* A fieldset is never a grid here: some browsers lay a grid fieldset's legend out as a
+   one-letter-wide column (16 Oct, "Agent that pays" read top to bottom). Block layout, a
+   full-width legend, and the section's gap as margins. */
+.fd-sec.fp-agents {
+  display: block;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.fp-agents > * + * {
+  margin-top: calc(10 * var(--ws-px));
+}
+.fp-agents legend {
+  display: block;
+  float: none;
+  width: 100%;
+  margin-bottom: calc(8 * var(--ws-px));
+  white-space: nowrap;
+}
+/* The agents wrap in a grid that fits the panel: every card is whole, none is cut at the edge,
+   and nothing scrolls sideways (one column on a narrow phone). */
+.fp-agent-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(calc(150 * var(--ws-px)), 1fr));
+  gap: calc(8 * var(--ws-px));
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.fp-agent {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: calc(12 * var(--ws-px));
+  background: var(--bg-surface-elevated);
+}
+.fp-agent[data-checked='true'] {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.fp-agent[data-blocked='true'] {
+  background: var(--bg-surface);
+}
+.fp-agent:has(input:focus-visible) {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+/* The whole card picks the agent: the radio lies over it, transparent. */
+.fp-a-pick {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: calc(10 * var(--ws-px));
+  min-width: 0;
+  min-height: calc(44 * var(--ws-px));
+  padding: calc(7 * var(--ws-px)) calc(14 * var(--ws-px)) calc(7 * var(--ws-px))
+    calc(8 * var(--ws-px));
+  cursor: pointer;
+}
+.fp-agent[data-blocked='true'] .fp-a-pick {
+  cursor: not-allowed;
+}
+.fp-a-pick input[type='radio'] {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: inherit;
+}
+.fp-a-pick .fp-a-av {
+  width: calc(28 * var(--ws-px));
+  height: calc(28 * var(--ws-px));
+  border-radius: calc(8 * var(--ws-px));
+  font-size: 12px;
+}
+.fp-agent[data-blocked='true'] .fp-a-av {
+  opacity: 0.45;
+}
+.fp-agent[data-blocked='true'] .fp-a-text b {
+  color: var(--text-muted);
+}
+.fp-a-text {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+/* One line each: the name and the muted line end in an ellipsis (the whole text in the title
+   and the screen-reader description). */
+.fp-a-text b,
+.fp-a-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fp-a-text b {
+  font-size: calc(13.5 * var(--ws-type-px));
+  font-weight: 500;
+  line-height: 1.25;
+}
+.fp-a-sub {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+.fp-a-lines {
+  font-variant-numeric: tabular-nums;
+}
+/* Under the row: why each agent that can't pay can't, once, with the link that fixes it. */
+.fp-whys {
+  display: grid;
+  gap: 0;
+  margin: calc(6 * var(--ws-px)) 0 0;
+  padding: 0;
+  list-style: none;
+}
+.fp-why {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 calc(10 * var(--ws-px));
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.35;
+}
+.fp-why .fd-link {
+  min-height: calc(28 * var(--ws-px));
+  font-size: 12px;
+}
+.fp-none {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 calc(10 * var(--ws-px));
+}
+.fp-none .fd-link {
+  min-height: var(--target);
+}
+
+/* The price and the confirm */
+.fp-price-sec {
+  display: grid;
+  gap: calc(8 * var(--ws-px));
+  min-width: 0;
+}
+/* Nothing to show yet (no price, no agent picked): no empty label. */
+.fp-price-sec:not(:has(.fp-quote > *, .fp-allow)) > h4 {
+  display: none;
+}
+.fp-quote {
+  display: grid;
+  gap: calc(12 * var(--ws-px));
+}
+.fp-quote:focus {
+  outline: none;
+}
+.fp-quote:empty {
+  display: none;
+}
+.fp-box {
+  display: grid;
+  gap: calc(8 * var(--ws-px));
+  padding: calc(14 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  background: var(--bg-surface);
+}
+/* A fresh price the agent can pay: plain lines, no box (the mockup's Price). */
+.fp-quote .fp-box[data-tone='ok'] {
+  padding: 0;
+  border: 0;
+  background: none;
+}
+.fp-box[data-tone='warn'] {
+  border-color: var(--status-pending);
+  background: var(--status-pending-bg);
+}
+.fp-box[data-tone='bad'] {
+  border-color: var(--status-danger);
+  background: var(--status-danger-bg);
+}
+.fp-box > b,
+.fp-box > p:not(.fd-fine) {
+  color: var(--text-primary);
+  font-size: calc(13.5 * var(--ws-type-px));
+}
+.fp-price {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px calc(12 * var(--ws-px));
+}
+.fp-price > span {
+  color: var(--text-secondary);
+  font-size: calc(13.5 * var(--ws-type-px));
+  font-weight: 500;
+}
+.fp-price b {
+  font-size: calc(15 * var(--ws-type-px));
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+/* The quote's lines in the sheet: quieter than on the call card, the total bold. */
+.fp-quote .fp-lines {
+  gap: calc(6 * var(--ws-px));
+}
+.fp-quote .fp-line[data-k='total'] {
+  padding-top: calc(6 * var(--ws-px));
+}
+.fp-quote .fp-line-v {
+  font-size: calc(13.5 * var(--ws-type-px));
+  font-weight: 500;
+}
+.fp-quote .fp-line[data-k='total'] .fp-line-v {
+  font-size: calc(15 * var(--ws-type-px));
+  font-weight: 650;
+}
+/* What the agent may still spend: a thin bar and one fine line. */
+.fp-allow {
+  display: grid;
+  gap: calc(6 * var(--ws-px));
+  min-width: 0;
+}
+.fp-bar {
+  height: calc(4 * var(--ws-px));
+  overflow: hidden;
+  border-radius: var(--radius-full);
+  background: var(--bg-inset);
+}
+.fp-bar > i {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+}
+.fp-allow-line {
+  font-variant-numeric: tabular-nums;
+}
+.fp-box > p.fp-ok {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(6 * var(--ws-px));
+  color: var(--status-live);
+  font-size: calc(12.5 * var(--ws-type-px));
+  font-weight: 500;
+}
+.fp-ok::before {
+  content: '';
+  flex: none;
+  width: calc(7 * var(--ws-px));
+  height: calc(7 * var(--ws-px));
+  border-radius: 50%;
+  background: currentColor;
+}
+/* Price, Central City's fee and the total: the label left, the amount right, the total last. */
+.fp-lines {
+  display: grid;
+  gap: calc(6 * var(--ws-px));
+  margin: 0;
+  min-width: 0;
+}
+.fp-line {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 2px calc(12 * var(--ws-px));
+}
+.fp-line dt {
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: calc(13.5 * var(--ws-type-px));
+  font-weight: 500;
+}
+.fp-line dd {
+  margin: 0;
+}
+.fp-line-v {
+  color: var(--text-primary);
+  font-size: calc(14 * var(--ws-type-px));
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+.fp-line-sub {
+  display: flex;
+  flex-wrap: wrap;
+  grid-column: 1 / -1;
+  align-items: center;
+  gap: 2px calc(10 * var(--ws-px));
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: calc(12.5 * var(--ws-type-px));
+  overflow-wrap: anywhere;
+}
+.fp-line-sub .fd-link {
+  min-height: var(--target);
+}
+.fp-line[data-k='total'] {
+  padding-top: calc(8 * var(--ws-px));
+  border-top: 1px solid var(--border);
+}
+.fp-line[data-k='total'] dt {
+  color: var(--text-primary);
+  font-weight: 650;
+}
+.fp-line[data-k='total'] .fp-line-v {
+  font-size: calc(18 * var(--ws-type-px));
+  font-weight: 750;
+}
+.fp-note {
+  color: var(--text-primary);
+  font-size: calc(13.5 * var(--ws-type-px));
+  font-weight: 600;
+}
+.fp-note[data-tone='warn'] {
+  color: var(--status-pending);
+}
+.fp-state {
+  display: flex;
+  align-items: flex-start;
+  gap: calc(8 * var(--ws-px));
+  color: var(--text-primary);
+  font-size: calc(14 * var(--ws-type-px));
+  font-weight: 600;
+}
+.fp-state .lucide {
+  margin-top: 2px;
+}
+.fp-state[data-tone='busy'] .lucide {
+  color: var(--text-muted);
+}
+.fp-state[data-tone='ok'] .lucide {
+  color: var(--status-live);
+}
+.fp-state[data-tone='warn'] .lucide {
+  color: var(--status-pending);
+}
+.fp-state[data-tone='bad'] .lucide {
+  color: var(--status-danger);
+}
+.fp-foot .fp-foot-line {
+  flex-basis: 100%;
+  margin: 0 0 calc(4 * var(--ws-px));
+  color: var(--text-primary);
+  font-size: calc(14 * var(--ws-type-px));
+  font-weight: 650;
+  line-height: 1.45;
+}
+.fp-foot .fp-foot-line[data-tone='bad'] {
+  color: var(--status-danger);
+}
+.fp-foot .fp-confirm:focus {
+  outline: none;
+}
+.fp-foot .fp-confirm:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+/* One main button (Check price, then Pay): 42 high and as wide as it can be; Cancel and Close
+   stay beside it, smaller. Pay is drawn in ink, as in the mockup. */
+.fp-foot {
+  align-items: center;
+}
+.fp-foot:has(.fp-main) > .fd-sp {
+  display: none;
+}
+.fp-foot .fd-btn.fp-main {
+  flex: 1 1 auto;
+  min-height: calc(42 * var(--ws-px));
+  font-size: calc(14.5 * var(--ws-type-px));
+}
+.fp-foot .fd-btn:not(.fp-main) {
+  min-height: calc(34 * var(--ws-px));
+}
+.fp-foot .fd-btn.fp-ink {
+  border-color: var(--text-primary);
+  background: var(--text-primary);
+  color: var(--bg-surface-elevated);
+}
+@media (hover: hover) {
+  .fp-foot .fd-btn.fp-ink:hover {
+    border-color: var(--text-secondary);
+    background: var(--text-secondary);
+  }
+}
+.fp-setup b {
+  color: var(--text-primary);
+  font-weight: 650;
+}
+
+/* The call and its result */
+.fp-call {
+  display: grid;
+  gap: calc(12 * var(--ws-px));
+  min-width: 0;
+}
+.fp-pay {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px calc(12 * var(--ws-px));
+  color: var(--text-secondary);
+  font-size: calc(13.5 * var(--ws-type-px));
+  font-variant-numeric: tabular-nums;
+}
+.fp-pay .fd-link {
+  min-height: var(--target);
+}
+/* A state, not a link: neutral, with a border (the accent colour is for links). */
+.fp-tag {
+  padding: 2px calc(8 * var(--ws-px));
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 650;
+}
+.fp-pay[data-money='no'] .fp-tag {
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+}
+.fp-result {
+  display: grid;
+  gap: calc(8 * var(--ws-px));
+  min-width: 0;
+  margin: 0;
+  padding: calc(12 * var(--ws-px));
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-m);
+  background: var(--bg-surface);
+}
+.fp-result figcaption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px calc(10 * var(--ws-px));
+  color: var(--text-secondary);
+  font-size: calc(13 * var(--ws-type-px));
+  font-weight: 600;
+}
+.fp-ext {
+  padding: 2px calc(9 * var(--ws-px));
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  background: var(--bg-surface-elevated);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.fp-result .fp-out {
+  max-height: calc(420 * var(--ws-px));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.fp-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+}
+.fp-row .fd-copy {
+  min-height: var(--target);
+}
+
+/* The per-call maximum, changed in place */
+.fp-max {
+  display: grid;
+  gap: calc(8 * var(--ws-px));
+  padding: calc(12 * var(--ws-px)) calc(14 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  background: var(--bg-surface-elevated);
+}
+.fp-max-t {
+  color: var(--text-primary);
+  font-size: calc(13.5 * var(--ws-type-px));
+  font-weight: 650;
+}
+
+/* The call's own page: the mark beside its title */
+.fp-mark {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: calc(44 * var(--ws-px));
+  height: calc(44 * var(--ws-px));
+  border-radius: var(--radius-m);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+}
+
+/* The drawer's actions with Use with my agent: four buttons, one row at the drawer's full width
+   (a little tighter than the other drawers' two or three). */
+.fd-d-foot:has(> [id^='fp-use-']) {
+  gap: calc(6 * var(--ws-px));
+}
+.fd-d-foot:has(> [id^='fp-use-']) > .fd-btn {
+  padding-inline: calc(11 * var(--ws-px));
+}
+
+/* Phones: every target 44 high (the drawer is a full sheet there). */
+@media (max-width: 639px) {
+  .fp-sheet .fd-btn:not(.fd-link),
+  .fp-sheet .fp-back,
+  .fp-sheet .fp-fill,
+  .fp-why .fd-link,
+  .fp-foot .fd-btn:not(.fp-main),
+  .fp-foot .fd-btn.fp-main {
+    min-height: var(--target);
+  }
+  .fp-field input.fd-input,
+  .fp-field select.fd-input {
+    height: var(--target);
+    min-height: var(--target);
+  }
+}

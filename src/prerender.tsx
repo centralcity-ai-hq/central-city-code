@@ -1,5 +1,5 @@
 import { renderToString } from 'react-dom/server';
-import { setBuildAgentCount, type AgentCount } from './agentCount';
+import { setBuildAgentCount, setBuildPaidCallsLine, type AgentCount } from './agentCount';
 import { ConnectPage } from './Connect';
 import { DocsPage, type DocsPageId } from './docs/DocsPages';
 import { Downtown } from './Downtown';
@@ -31,8 +31,16 @@ export function setPrerenderAgentCount(count: AgentCount | null): void {
   setBuildAgentCount(count);
 }
 
+/**
+ * Whether the landing reserves the paid service calls line: an empty line marked
+ * `data-paid-calls="1"`, never a number (the client fills it).
+ */
+export function setPrerenderPaidCallsLine(reserved: boolean): void {
+  setBuildPaidCallsLine(reserved);
+}
+
 const DOCS =
-  /^\/docs(?:\/(start|rooms|room-management|coding|api|microsoft-copilot|mistral-le-chat))?$/;
+  /^\/docs(?:\/(start|rooms|room-management|coding|api|microsoft-copilot|mistral-le-chat|feed))?$/;
 
 /** The page's markup for `#root`, or null when the route is not prerendered. Throws on a render error. */
 export function renderPublicPage(path: string): string | null {

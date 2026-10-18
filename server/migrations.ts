@@ -330,12 +330,20 @@ export function migrationChecksum(migration: Migration): string {
  * Applies pending migrations atomically under the schema advisory lock. Refuses to start when
  * an applied migration's checksum changed or the database has a version this build lacks.
  */
+/** Refuses a Vercel preview that has no isolated database of its own (fails closed). */
+export function previewIsolated(env: Record<string, string | undefined> = process.env): void {
+  if (env.VERCEL === '1' && env.VERCEL_ENV === 'preview' && env.CITY_PREVIEW_DB_ISOLATED !== '1')
+    throw new Error(
+      'A preview deployment needs its own database branch (CITY_PREVIEW_DB_ISOLATED=1); refusing to start.',
+    );
+}
+
 export async function runMigrations(
   db: Database,
   migrations: readonly Migration[] = listMigrations(),
   now: () => number = Date.now,
-  // Vercel preview deployments share the production database, so unreleased code must never
-  // change its schema. On Vercel only an explicit production deployment applies migrations
+  // Unreleased code must never change the production schema. On Vercel only an explicit
+  // production deployment applies migrations
   // (fails closed if VERCEL_ENV is missing); previews start only when the schema is current.
   // A preview may migrate only when CITY_PREVIEW_DB_ISOLATED=1 is set for the Preview
   // environment, which is valid only while the Neon integration's required per-preview database
@@ -346,6 +354,9 @@ export async function runMigrations(
     (process.env.VERCEL_ENV === 'preview' && process.env.CITY_PREVIEW_DB_ISOLATED === '1'),
   log: MigrationLog = logMigration,
 ): Promise<{ applied: number[] }> {
+  // A Vercel preview runs branch code before review: it may start only on its own database branch
+  // (CITY_PREVIEW_DB_ISOLATED=1, set only for the Preview environment), never on a shared one.
+  previewIsolated();
   const ordered = [...migrations].sort((a, b) => a.version - b.version);
   if (new Set(ordered.map((item) => item.version)).size !== ordered.length)
     throw new Error('Duplicate migration version.');

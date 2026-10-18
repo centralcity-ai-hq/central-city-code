@@ -59,6 +59,15 @@ export const CLIENT_ROUTES: readonly ClientRoute[] = Object.freeze([
   // The console's Messages view (opened at "/", like /agents and /settings).
   route('/messages'),
   route('/elric'),
+  // The Feed (shared/feed.ts FEED_CLIENT_PATHS), a workspace page: signed out, sign-in comes
+  // first. While the Feed is switched off (CITY_FEED=0), every Feed path shows the 404 page.
+  route('/feed'),
+  route('/feed/requests'),
+  route('/feed/requests/:id'),
+  route('/feed/requests/:id/manage'),
+  route('/feed/services/:id'),
+  // A paid call of the person's agent (shared/feed-pay.ts FEED_PAY_CLIENT_PATHS): the owner only.
+  route('/feed/calls/:id'),
   // Result permalinks: the same shell for every id; nothing is revealed signed out (A6).
   route('/results/:id'),
   route('/settings'),
@@ -87,6 +96,8 @@ export const CLIENT_ROUTES: readonly ClientRoute[] = Object.freeze([
   route('/explorer'),
   // The Agent Explorer's On Base view: the agents with a Base ID, read from Base.
   route('/explorer/base'),
+  // The Agent Explorer's Service calls view: every paid service call as its Base transaction.
+  route('/explorer/calls'),
   // The docs site.
   route('/docs'),
   route('/docs/start'),
@@ -95,6 +106,7 @@ export const CLIENT_ROUTES: readonly ClientRoute[] = Object.freeze([
   route('/docs/coding'),
   route('/docs/microsoft-copilot'),
   route('/docs/mistral-le-chat'),
+  route('/docs/feed'),
   route('/docs/api'),
   // The use-case pages (shared/use-cases.ts).
   route(USE_CASES_INDEX.path),

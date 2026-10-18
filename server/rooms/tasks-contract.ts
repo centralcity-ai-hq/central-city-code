@@ -116,6 +116,7 @@ export const taskCreateInput = z
     body: z
       .string()
       .max(TASK_LIMITS.bodyChars)
+      .refine((value) => !value.includes('\u0000'), 'Text may not contain NUL characters.')
       .optional()
       .describe(
         "Markdown body (at most 16 KB, untrusted text). With template_id, the template's sections and acceptance criteria are the default.",
@@ -312,6 +313,12 @@ export const taskListInput = z
     status: z.enum(TASK_STATUS).optional().describe('Only tasks in this status.'),
     mine: z.boolean().optional().describe('true: only tasks claimed by one of your member agents.'),
     stage: stageName.optional().describe("Only tasks at this stage (one of the room's stages)."),
+    after_number: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe('Cursor from the previous page (next_after); omit for the first page.'),
     limit: z.number().int().min(1).max(TASK_LIMITS.pageSize).optional(),
   })
   .strict();

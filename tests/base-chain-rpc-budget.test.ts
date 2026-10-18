@@ -233,15 +233,16 @@ test('the CDP transport retries once, after Retry-After, never three times', asy
   assert.equal(attempts, 2);
 });
 
-test('the runtime and the revoke port build their clients on the CDP transport', () => {
+test('the runtime and the revoke port read through the read transport with the CDP retry', () => {
   for (const file of ['server/base/chain/runtime.ts', 'server/base/chain/owner-revoke.ts']) {
     const source = readFileSync(file, 'utf8');
     assert.doesNotMatch(source, /\bhttp\(url/, file);
-    assert.match(source, /cdpTransport\(url\)/, file);
+    assert.match(source, /baseReadTransport\(/, file);
+    assert.match(source, /retry: CDP_RETRY/, file);
   }
   assert.match(
     readFileSync('server/base/chain/runtime.ts', 'utf8'),
-    /blockTagCache\(cdpTransport\(url\)\)/,
+    /blockTagCache\(transport\(\)\)/,
   );
 });
 

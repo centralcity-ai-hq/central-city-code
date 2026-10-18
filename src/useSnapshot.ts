@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Snapshot } from '../shared/types';
 import { api, ApiError, selectedWorkspaceId } from './api';
+import { noteSnapshotPaging, pollSnapshotPath } from './agents/agentPages';
 
 /*
  * The console's snapshot polling and stream hook. Kept out of src/api.ts so the entry chunk
@@ -32,8 +33,12 @@ export function useSnapshot(enabled: boolean, operatorId: string, onUnauthorized
       do {
         flight.again = false;
         try {
-          const next = await api<Snapshot>('/api/snapshot');
+          const workspace = selectedWorkspaceId();
+          // In a paged workspace the agent open in My agents is included, so its status is fresh.
+          const next = await api<Snapshot>(pollSnapshotPath(workspace));
           if (current !== generation.current) return;
+          // A paged workspace's screens of one agent ask the snapshot to include it.
+          noteSnapshotPaging(workspace, next);
           if (next.operator.id !== operatorId) {
             setSnapshot(null);
             unauthorizedRef.current();

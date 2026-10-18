@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import { ArrowDown, ArrowRight, ArrowUpRight, ChevronRight } from 'lucide-react';
+import { ChevronRight } from 'lucide-react';
 import { CopyButton } from './components';
 import { PublicFooter } from './shell/PublicFooter';
 import { PublicHeader } from './shell/PublicHeader';
+import { ELRIC_CODE_PUBLISHED, ELRIC_CODE_URL } from './shell/links';
 import { usePageTitle } from './shell/usePageTitle';
 import { PAGE_TITLES } from '../shared/page-titles';
 import './downtown.css';
@@ -12,8 +13,9 @@ import './downtown.css';
  * release process generates from one source of truth; versions, sync dates, licenses and links
  * all come from there. The page is one list: a table row per public repository, whose details
  * (version, sync date, changelog, projects) open in place. A repository the entries below do not
- * name still shows, under "Build on it". The data keeps the field name "districts"; the page says
- * "projects".
+ * name still shows, under "Build on it". Elric's code, a folder of the application repository,
+ * has its own row named Elric (the product owner, 15 Oct: Elric belongs here, under Repository, not
+ * in the Open Source menu). The data keeps the field name "districts"; the page says "projects".
  *
  * Render touches no browser globals (the page may be prerendered); window and document are only
  * used in effects and event handlers.
@@ -102,6 +104,12 @@ type Entry = {
   summary?: string;
   /** Extra actions: the Verify page, the security policy. */
   links?: { label: string; href: string }[];
+  /**
+   * A folder of `repo` with its own row (Elric's code): its name, short role, path and GitHub link.
+   * License and sync date are the repository's; it has no version or changelog of its own, so the
+   * row says Released without a version and its details name the repository's changelog.
+   */
+  folder?: { name: string; role: string; path: string; url: string };
 };
 const ENTRIES: Entry[] = [
   {
@@ -114,6 +122,22 @@ const ENTRIES: Entry[] = [
     summary:
       'The full application in a clean-history public repository: server, console, OAuth, MCP and A2A, with rooms, the protocol and agents on Base.',
   },
+  ...(ELRIC_CODE_PUBLISHED
+    ? [
+        {
+          key: 'elric',
+          group: 'platform' as const,
+          repo: 'centralcity-ai-hq/central-city-code',
+          folder: {
+            name: 'Elric',
+            role: "Central City's built-in AI assistant.",
+            path: 'server/elric',
+            url: ELRIC_CODE_URL,
+          },
+          summary: "Elric's code is part of the application's public repository, in one folder.",
+        },
+      ]
+    : []),
   {
     key: 'protocol',
     group: 'platform',
@@ -200,11 +224,13 @@ function itemsOf(data: DowntownData): Item[] {
     const repository = entry.repo
       ? data.public_repositories.find((repo) => repo.name === entry.repo)
       : undefined;
-    // A repository the data does not list is not shown.
+    // A repository the data does not list is not shown, nor a folder of it.
     if (entry.repo && !repository) continue;
-    const projects = repository
-      ? data.districts.filter((district) => district.repository === repository.url)
-      : [];
+    // A folder row lists none of the repository's projects: those stay on the repository's row.
+    const projects =
+      repository && !entry.folder
+        ? data.districts.filter((district) => district.repository === repository.url)
+        : [];
     let status: Item['status'] = 'policy';
     if (repository)
       status = repository.version
@@ -216,7 +242,9 @@ function itemsOf(data: DowntownData): Item[] {
       status === 'policy'
         ? 'Public policy'
         : status === 'released'
-          ? `v${repository!.version} ${statusLabel.released}`
+          ? entry.folder
+            ? statusLabel.released
+            : `v${repository!.version} ${statusLabel.released}`
           : statusLabel[status];
     // The first entry of each district also carries the district's old anchor (#district-N).
     const first = entry.district !== undefined && !districtIds.has(entry.district);
@@ -225,8 +253,8 @@ function itemsOf(data: DowntownData): Item[] {
       ...entry,
       id: first ? `district-${entry.district}` : `repo-${entry.key}`,
       repository,
-      name: repository ? repository.name.split('/').pop()! : entry.key,
-      title: entry.title ?? repository?.title ?? entry.key,
+      name: entry.folder?.name ?? (repository ? repository.name.split('/').pop()! : entry.key),
+      title: entry.title ?? entry.folder?.name ?? repository?.title ?? entry.key,
       summary: entry.summary ?? repository?.summary ?? '',
       status,
       pill,
@@ -303,8 +331,12 @@ function ItemDetails({ item, categories }: { item: Item; categories: Map<string,
             District {item.district} · {item.area}
           </span>
         ) : null}
-        {repo ? <code className="dt-slug">{repo.name}</code> : null}
-        {repo?.version ? <span>Version {repo.version}</span> : null}
+        {repo ? (
+          <code className="dt-slug">
+            {item.folder ? `${repo.name}/${item.folder.path}` : repo.name}
+          </code>
+        ) : null}
+        {repo?.version && !item.folder ? <span>Version {repo.version}</span> : null}
         <span>{repo ? `License: ${repo.license ?? 'Apache-2.0'}` : `Status: ${item.pill}`}</span>
         {repo?.last_synced ? (
           <span>
@@ -312,9 +344,13 @@ function ItemDetails({ item, categories }: { item: Item; categories: Map<string,
           </span>
         ) : null}
         {repo?.version ? (
-          <a href={repo.changelog} aria-label={`${repo.title} changelog`}>
-            Changelog
-          </a>
+          item.folder ? (
+            <a href={repo.changelog}>{repo.name.split('/').pop()} changelog</a>
+          ) : (
+            <a href={repo.changelog} aria-label={`${repo.title} changelog`}>
+              Changelog
+            </a>
+          )
         ) : null}
         {item.links?.map((link) => (
           <a key={link.href} href={link.href}>
@@ -397,7 +433,9 @@ function Overview({
                   <span>{item.repository ? item.name : item.title}</span>
                 </button>
               </th>
-              <td className="dt-col-desc">{item.repository?.summary ?? item.summary}</td>
+              <td className="dt-col-desc">
+                {item.folder?.role ?? item.repository?.summary ?? item.summary}
+              </td>
               <td className="dt-col-license">
                 {item.repository ? (
                   (item.repository.license ?? 'Apache-2.0')
@@ -413,12 +451,15 @@ function Overview({
               </td>
               <td className="dt-col-action">
                 {item.repository ? (
-                  <a href={item.repository.url} aria-label={`${item.repository.title} on GitHub`}>
-                    GitHub <ArrowUpRight size={14} aria-hidden="true" />
+                  <a
+                    href={item.folder?.url ?? item.repository.url}
+                    aria-label={`${item.folder?.name ?? item.repository.title} on GitHub`}
+                  >
+                    GitHub
                   </a>
                 ) : item.links?.[0] ? (
                   <a href={item.links[0].href} aria-label={item.links[0].label}>
-                    Overview <ArrowUpRight size={14} aria-hidden="true" />
+                    Overview
                   </a>
                 ) : null}
               </td>
@@ -651,7 +692,7 @@ export function Downtown() {
                 </>
               ) : null}
               <a href="/downtown/verify" className="dt-verify">
-                {verifyLabel} <ArrowUpRight size={14} aria-hidden="true" />
+                {verifyLabel}
               </a>
             </p>
           </div>
@@ -668,7 +709,7 @@ export function Downtown() {
             </li>
             <li>
               <a className="dt-chip" href="#start">
-                Start building <ArrowDown size={14} aria-hidden="true" />
+                Start building
               </a>
             </li>
           </ul>
@@ -762,10 +803,7 @@ export function Downtown() {
             </li>
           </ol>
           <p className="dt-link-line">
-            Using another client?{' '}
-            <a href="/#connect">
-              Connect your AI <ArrowRight size={14} aria-hidden="true" />
-            </a>
+            Using another client? <a href="/#connect">Connect your AI</a>
           </p>
         </section>
 
@@ -816,17 +854,11 @@ export function Downtown() {
             </li>
           </ol>
           <p className="dt-link-line">
-            <a href="/explorer/base">
-              Agents on Base <ArrowRight size={14} aria-hidden="true" />
-            </a>
+            <a href="/explorer/base">Agents on Base</a>
             <span aria-hidden="true"> · </span>
-            <a href="/docs/wallet.md">
-              Wallet, Pay and Rating guide <ArrowRight size={14} aria-hidden="true" />
-            </a>
+            <a href="/docs/wallet.md">Wallet, Pay and Rating guide</a>
             <span aria-hidden="true"> · </span>
-            <a href={`${orgUrl}/central-city-code`}>
-              Source code <ArrowUpRight size={14} aria-hidden="true" />
-            </a>
+            <a href={`${orgUrl}/central-city-code`}>Source code</a>
           </p>
         </section>
 
@@ -852,9 +884,7 @@ export function Downtown() {
                 ))}
               </ol>
               <p className="dt-link-line">
-                <a href={data.contribute.guide}>
-                  Read CONTRIBUTING.md <ArrowRight size={14} aria-hidden="true" />
-                </a>
+                <a href={data.contribute.guide}>Read CONTRIBUTING.md</a>
               </p>
             </>
           ) : null}

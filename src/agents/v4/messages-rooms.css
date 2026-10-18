@@ -466,3 +466,56 @@ button.amr4-gr:disabled {
     height: calc(44 * var(--ws-px));
   }
 }
+
+/* Room invitations (InvitationsScreen.tsx): one card per invitation. */
+.amr4-inv {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px;
+}
+.amr4-inv-room {
+  font-size: 15px;
+}
+.amr4-inv-meta {
+  color: var(--amr4-muted);
+  font-size: 12.5px;
+}
+.amr4-inv-note {
+  margin: 6px 0 2px;
+  padding-left: 10px;
+  border-left: 2px solid var(--amr4-line);
+  color: var(--amr4-text);
+  font-size: 13.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.amr4-inv-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.amr4-inv-joined {
+  cursor: pointer;
+}
+.amr4-inv-block {
+  margin-left: auto;
+  color: var(--amr4-muted);
+  font-size: 12.5px;
+}
+
+/* Invitation requests at the top of an agent's Messages. */
+.amr4-invs {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.amr4-inv-head {
+  margin: 0;
+  color: var(--amr4-muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}

@@ -295,7 +295,7 @@ test('join link: signed out → sign in → join; the code never appears in a UR
   await expect(page).toHaveURL(new RegExp(`^${APP}/rooms/${room.id}$`));
   expect(await page.evaluate(() => sessionStorage.getItem('cc.pendingJoin'))).toBeNull();
   // Members see no Invite (host only, E1).
-  await expect(page.getByRole('button', { name: 'Invite' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Invite', exact: true })).toHaveCount(0);
 
   // After capture: no navigation, history entry or request carried the code.
   const afterCapture = urls.slice(1);
@@ -471,7 +471,7 @@ test('host Invite sheet: one /j link, copy, live join status; members get no Inv
   const page = await host.context.newPage();
   await page.goto(`/rooms/${room.id}`);
   await expect(page.getByRole('heading', { name: 'This room is quiet' })).toBeVisible();
-  await page.getByRole('button', { name: 'Invite' }).first().click();
+  await page.getByRole('button', { name: 'Invite', exact: true }).first().click();
   const sheet = page.getByRole('dialog', { name: 'Invite a person' });
   await expect(sheet).toContainText('Share the link or the code.');
   // The room code sits under the wide copy button, with the code line below it.
@@ -538,7 +538,7 @@ test('Invite sheet: "Can read earlier messages" shows and changes the room histo
   expect(await history()).toBe('full');
   const page = await host.context.newPage();
   await page.goto(`/rooms/${room.id}`);
-  await page.getByRole('button', { name: 'Invite' }).first().click();
+  await page.getByRole('button', { name: 'Invite', exact: true }).first().click();
   const sheet = page.getByRole('dialog', { name: 'Invite a person' });
   // Room settings sit behind "Room access" (the sheet stays minimal).
   await sheet.getByText('Room access').click();
@@ -575,7 +575,7 @@ test('Invite sheet: a room read that answers while "Can read earlier messages" s
   const room = await hostRoom(host, 'Race room');
   const page = await host.context.newPage();
   await page.goto(`/rooms/${room.id}`);
-  await page.getByRole('button', { name: 'Invite' }).first().click();
+  await page.getByRole('button', { name: 'Invite', exact: true }).first().click();
   const sheet = page.getByRole('dialog', { name: 'Invite a person' });
   await sheet.getByText('Room access').click();
   const toggle = sheet.getByRole('checkbox', { name: 'Can read earlier messages' });
@@ -640,7 +640,7 @@ test('Invite sheet: the −/+ member limit steps by 10, saved on the click, floo
   const before = await cap();
   const page = await host.context.newPage();
   await page.goto(`/rooms/${room.id}`);
-  await page.getByRole('button', { name: 'Invite' }).first().click();
+  await page.getByRole('button', { name: 'Invite', exact: true }).first().click();
   const sheet = page.getByRole('dialog', { name: 'Invite a person' });
   await sheet.getByText('Room access').click();
   const shown = sheet.getByLabel('Member limit', { exact: true });
@@ -660,7 +660,7 @@ test('Invite sheet: the −/+ member limit steps by 10, saved on the click, floo
   });
   expect(setFloor.ok()).toBe(true);
   await page.reload();
-  await page.getByRole('button', { name: 'Invite' }).first().click();
+  await page.getByRole('button', { name: 'Invite', exact: true }).first().click();
   const reopened = page.getByRole('dialog', { name: 'Invite a person' });
   await reopened.getByText('Room access').click();
   await expect(reopened.getByLabel('Member limit', { exact: true })).toHaveText('2');

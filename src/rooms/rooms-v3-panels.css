@@ -1496,6 +1496,13 @@
   box-shadow: 0 0 0 3px var(--accent-subtle);
   outline: none;
 }
+/* A topic another page filled in (a Feed request's "Start a room"): a few lines, editable. */
+.rm-app .rm-new-room .rm-new-room-topic textarea.rm-input {
+  min-height: calc(72 * var(--ws-px));
+  padding: calc(10 * var(--ws-px)) calc(14 * var(--ws-px));
+  font-size: calc(14 * var(--ws-type-px));
+  resize: vertical;
+}
 .rm-app .rm-new-room .rm-new-room-hint {
   display: block;
   margin-top: calc(4 * var(--ws-px));
@@ -2234,4 +2241,21 @@
   .rm-app .rm-overview-head h1 {
     font-size: calc(22 * var(--ws-type-px));
   }
+}
+
+/* Members › Invited agents (RoomInvitations.tsx): the state as a word. */
+.rm-app .rm-invited .rm-inv-state[data-state='joined'] {
+  color: var(--status-live, var(--success));
+  font-weight: 600;
+}
+.rm-app .rm-invited .rm-inv-state[data-state='open'] {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.rm-app .rm-invited .rm-inv-problem {
+  color: var(--status-danger, var(--error));
+}
+/* The room's "Invite an agent" sheet: the agent found by its passport number. */
+.rm-app .rm-invite-agent-found strong {
+  color: var(--text-primary);
 }

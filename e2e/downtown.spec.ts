@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { LINKS } from '../src/shell/links';
+import { ELRIC_CODE_PUBLISHED, ELRIC_CODE_URL, LINKS } from '../src/shell/links';
 import { readFileSync } from 'node:fs';
 
 /*
@@ -39,6 +39,8 @@ const allowedLinks = [
     data.contribute.guide as string,
     // The header links the public application repository (Developers › GitHub).
     ...(LINKS.code ? [LINKS.code] : []),
+    // Elric's code, a folder of that repository, has its own row (Repository: Elric).
+    ...(ELRIC_CODE_PUBLISHED ? [ELRIC_CODE_URL] : []),
   ]),
 ];
 const statusLabel = { released: 'Released', review: 'In development', planned: 'Planned' };
@@ -64,6 +66,8 @@ async function openDowntown(page: Page, path = '/downtown') {
 
 type Repo = { name: string; title: string; url: string; version: string | null };
 const repos: Repo[] = data.public_repositories;
+/** The overview's rows: one per public repository, Elric's code and the security policy. */
+const rowCount = repos.length + (ELRIC_CODE_PUBLISHED ? 1 : 0) + 1;
 
 test('downtown shows the exact copy and only actions with working destinations', async ({
   page,
@@ -128,13 +132,14 @@ test('downtown shows the exact copy and only actions with working destinations',
     ),
   ).toBe(0);
 
-  // The overview: one real table, one row per public repository plus the security policy.
+  // The overview: one real table, one row per public repository, Elric's code and the security
+  // policy.
   const table = page.locator('#districts table');
   await expect(table).toHaveCount(1);
   for (const name of ['Category', 'Repository', 'Role', 'License', 'Status'])
     await expect(table.getByRole('columnheader', { name, exact: true })).toHaveCount(1);
   const rows = table.locator('.dt-item-row');
-  await expect(rows).toHaveCount(repos.length + 1);
+  await expect(rows).toHaveCount(rowCount);
   for (const repo of repos) {
     const row = rows.filter({ has: page.getByRole('link', { name: `${repo.title} on GitHub` }) });
     await expect(row).toHaveCount(1);
@@ -169,6 +174,43 @@ test('downtown shows the exact copy and only actions with working destinations',
     'href',
     '/security',
   );
+  // Elric (the product owner, 15 Oct): its own row under Repository, right after the application
+  // repository its code is in, linking that folder on GitHub; plain words, no arrow beside it.
+  if (ELRIC_CODE_PUBLISHED) {
+    const elric = rows.nth(1);
+    await expect(elric.locator('th.dt-col-repo')).toHaveText('Elric');
+    await expect(elric.locator('.dt-tag')).toHaveText('Platform');
+    await expect(elric.getByRole('link', { name: 'Elric on GitHub' })).toHaveAttribute(
+      'href',
+      ELRIC_CODE_URL,
+    );
+    await expect(elric.getByRole('link', { name: 'Elric on GitHub' })).toHaveText('GitHub');
+    await expect(elric.locator('.dt-col-action svg')).toHaveCount(0);
+    expect(await elric.innerText()).not.toMatch(/[\u2192\u2197\u203a]/);
+    const button = elric.getByRole('button', { name: 'Elric', exact: true });
+    await button.click();
+    const details = page.locator('#repo-elric-details');
+    await expect(details).toBeVisible();
+    // The folder, and the repository's changelog named as the repository's: no version of its own.
+    await expect(details.locator('.dt-slug')).toHaveText(
+      'centralcity-ai-hq/central-city-code/server/elric',
+    );
+    await expect(details).not.toContainText('Version');
+    await expect(elric.locator('.dt-col-status')).toHaveText('Released');
+    await expect(
+      details.getByRole('link', { name: 'central-city-code changelog' }),
+    ).toHaveAttribute(
+      'href',
+      'https://github.com/centralcity-ai-hq/central-city-code/blob/main/CHANGELOG.md',
+    );
+    await expect(details.getByRole('link', { name: /Elric changelog/ })).toHaveCount(0);
+    // The short role in the row, a different sentence in the details.
+    const role = (await elric.locator('.dt-col-desc').innerText()).trim();
+    expect(role).toBe("Central City's built-in AI assistant.");
+    await expect(details.locator('.dt-detail-purpose')).not.toHaveText(role);
+    await button.click();
+    await expect(details).toBeHidden();
+  }
 
   // The seven numbered districts keep their anchors (#district-1 to #district-7) on their rows.
   await page.getByRole('button', { name: 'Expand all details' }).click();
@@ -206,7 +248,7 @@ test('downtown shows the exact copy and only actions with working destinations',
   const open = page.locator('#districts .dt-detail-row:visible');
   await expect(open).toHaveCount(0);
   await page.getByRole('button', { name: 'Expand all details' }).click();
-  await expect(open).toHaveCount(repos.length + 1);
+  await expect(open).toHaveCount(rowCount);
   await expect(page.locator('#districts [aria-expanded="false"]')).toHaveCount(0);
   // One row per project, inside its repository's collapsible details.
   await expect(page.locator('#districts .dt-row')).toHaveCount(districts.length);
@@ -278,6 +320,8 @@ test('downtown machine-readable files are served and honest', async ({ page, req
   for (const repo of served.public_repositories)
     expect(text).toContain(`[${repo.name}](${repo.url})`);
   for (const district of districts) expect(text).toContain(`| ${district.name} |`);
+  // Elric's row on the page is in the mirror too, as a folder of the application repository.
+  if (ELRIC_CODE_PUBLISHED) expect(text).toContain(`[server/elric](${ELRIC_CODE_URL})`);
   for (const url of text.match(/https:\/\/github\.com[^\s)|]*/g) ?? [])
     expect(allowedLinks).toContain(url);
 
@@ -371,7 +415,7 @@ test('downtown scales to 500 projects', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 800 });
   await openDowntown(page);
   // The overview stays one row per repository; the projects sit collapsed in their repository.
-  await expect(page.locator('#districts .dt-item-row')).toHaveCount(repos.length + 1);
+  await expect(page.locator('#districts .dt-item-row')).toHaveCount(rowCount);
   const protocol = page.locator('#district-1').getByRole('button', { name: 'protocol' });
   await expect(protocol).toHaveAttribute('aria-expanded', 'false');
   await expect(page.locator('#district-1-details .dt-row')).toHaveCount(500);

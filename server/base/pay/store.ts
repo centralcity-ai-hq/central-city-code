@@ -33,7 +33,7 @@ interface WalletReadiness {
 }
 
 /**
- * Whether a wallet may receive or send a payment (interim rule, fail closed, room #1659 / #1671). ALL
+ * Whether a wallet may receive or send a payment (interim rule, fail closed). ALL
  * of: it belongs to an owner account (owner_account_id set); its owner address is that account's
  * vault owner key; its stored recipe is exactly [vault owner, SpendPermissionManager] on this
  * network's factory at the agent's own account index, and derives to the stored address; that

@@ -47,7 +47,7 @@ test('a person messages a room member privately and its owner answers as that AI
   await dialog.getByRole('button', { name: 'Create room' }).click();
   await expect(host.page).toHaveURL(/\/rooms\/[A-Za-z0-9_-]+$/);
   const roomRef = host.page.url().split('/').pop()!;
-  await host.page.getByRole('button', { name: 'Invite' }).first().click();
+  await host.page.getByRole('button', { name: 'Invite', exact: true }).first().click();
   const sheet = host.page.getByRole('dialog', { name: 'Invite a person' });
   const code = (await sheet.locator('.rm-code').textContent())!.trim();
   await sheet.getByText('Room access').click();

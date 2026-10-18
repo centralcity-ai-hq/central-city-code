@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { CircleAlert, CircleCheck, LoaderCircle } from 'lucide-react';
 import { api } from '../api';
 import {
@@ -33,19 +33,25 @@ export function NewsletterSettings() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [done, setDone] = useState('');
-  useEffect(() => {
-    let active = true;
+  const active = useRef(true);
+  // Read on open and again from "Try again" after a failed read.
+  const load = useCallback(() => {
+    setLoadError('');
     api<NewsletterView>('/api/account/newsletter', undefined, 'GET')
-      .then((value) => active && setView(value))
+      .then((value) => active.current && setView(value))
       .catch(
         (err: unknown) =>
-          active &&
+          active.current &&
           setLoadError(err instanceof Error ? err.message : 'The newsletter couldn’t be loaded.'),
       );
-    return () => {
-      active = false;
-    };
   }, []);
+  useEffect(() => {
+    active.current = true;
+    load();
+    return () => {
+      active.current = false;
+    };
+  }, [load]);
   async function change(subscribe: boolean, event?: FormEvent) {
     event?.preventDefault();
     setBusy(true);
@@ -66,10 +72,15 @@ export function NewsletterSettings() {
   }
   if (loadError)
     return (
-      <p className="account-data-error" role="alert">
+      <div className="account-data-error" role="alert">
         <CircleAlert size={18} aria-hidden="true" />
-        {loadError}
-      </p>
+        <div>
+          <p>{loadError}</p>
+          <button type="button" className="button secondary" onClick={load}>
+            Try again
+          </button>
+        </div>
+      </div>
     );
   if (!view) return <SettingsLoading label="Loading your newsletter setting…" rows={1} />;
   const on = view.status === 'pending' || view.status === 'subscribed';

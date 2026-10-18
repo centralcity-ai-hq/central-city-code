@@ -5,6 +5,8 @@ import Fastify from 'fastify';
 import type { Database } from '../server/database.js';
 import {
   BASE_IDENTITY_PROVISIONAL_SQL,
+  BASE_IDENTITY_HANDOVER_BACKOFF_SQL,
+  BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL,
   BASE_MIGRATION_SQL,
   BASE_PAYMENTS_MIGRATION_SQL,
   baseShortIdsMigration,
@@ -33,6 +35,8 @@ test('stuck registration: owner retry after 10 minutes registers exactly once', 
     BASE_PAYMENTS_MIGRATION_SQL,
     baseShortIdsMigration.sql,
     BASE_IDENTITY_PROVISIONAL_SQL,
+    BASE_IDENTITY_HANDOVER_BACKOFF_SQL,
+    BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL,
   ])
     await pg.exec(sql);
   const db: Database = {
@@ -84,8 +88,15 @@ test('stuck registration: owner retry after 10 minutes registers exactly once', 
 
   // The panel polls: the first attempt stays submitted.
   for (let i = 0; i < 3; i++) assert.equal((await post({})).json().identity.state, 'submitted');
-  // Too early for a retry: still the first attempt.
-  assert.equal((await post({ retry: true })).json().identity.state, 'submitted');
+  // Too early for a retry: still the first attempt, and Try again is not offered, so a script
+  // posting retry:true is a normal poll and stays under the chain-check throttle.
+  const polled = calls.length;
+  for (let i = 0; i < 3; i++) {
+    const early = (await post({ retry: true })).json().identity;
+    assert.equal(early.state, 'submitted');
+    assert.equal(early.canRetry, false);
+  }
+  assert.ok(calls.length - polled <= 1, `retry:true reached the chain ${calls.length - polled}x`);
   assert.ok(calls.every((key) => key === registerKey(AGENT, 8453)));
 
   // Ten minutes later the owner presses "Try again".

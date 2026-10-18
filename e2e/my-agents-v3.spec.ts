@@ -517,7 +517,7 @@ for (const view of views.filter((item) => item.theme === 'light'))
 
 test('with no room shared, Messages says so and offers Add to a room', async ({ page }) => {
   await fixture(page);
-  await page.route('**/api/messages/conversations?limit=100', (route) =>
+  await page.route(`**/api/messages/conversations?agent_id=${scout.id}&limit=100`, (route) =>
     route.fulfill({ json: { conversations: [] } }),
   );
   await page.route('**/api/messages/recipients*', (route) =>
@@ -554,7 +554,7 @@ test('a full thread page still marks a new arrival read and shows it', async ({ 
     created_at: new Date(Date.parse(at) + n * 1000).toISOString(),
   });
   let newest = 50;
-  await page.route('**/api/messages/conversations?limit=100', (route) =>
+  await page.route(`**/api/messages/conversations?agent_id=${scout.id}&limit=100`, (route) =>
     route.fulfill({
       json: {
         conversations: [
@@ -905,4 +905,39 @@ test('a new template agent opens in its pane in My agents, not in a dialog', asy
       .getByRole('list', { name: 'Agents', exact: true })
       .getByRole('button', { name: /^Template scout, / }),
   ).toHaveAttribute('aria-expanded', 'true');
+});
+
+test('room invitations from the summary: the agent’s line and the sidebar say so', async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.route('**/api/messages/summary', (route) =>
+    route.fulfill({
+      json: {
+        inboxes: [],
+        invitations: { [writer.id]: 2, [scout.id]: 0, unknown: 'x' },
+      },
+    }),
+  );
+  const { region } = await openMyAgents(page);
+  const list = region.getByRole('list', { name: 'Agents', exact: true });
+  const writerRow = list.getByRole('button', { name: /^Draft writer, .*2 invitation requests/ });
+  await expect(writerRow).toBeVisible();
+  // Like unread messages: the row's badge counts the open requests, so it stands out among many.
+  await expect(writerRow.locator('.ma4-badge')).toHaveText('2');
+  await expect(writerRow).toContainText('2 invitation requests');
+  await expect(list.getByRole('button', { name: /^Research scout, / })).not.toContainText(
+    'invitation',
+  );
+  const nav = page.getByRole('navigation', { name: 'Workspace', exact: true });
+  await expect(nav.getByRole('button', { name: 'My agents' })).toHaveAccessibleDescription(
+    /2 room invitations/,
+  );
+});
+
+test('a summary without invitations shows no invitation counts', async ({ page }) => {
+  await fixture(page);
+  await page.route('**/api/messages/summary', (route) => route.fulfill({ json: { inboxes: [] } }));
+  const { region } = await openMyAgents(page);
+  await expect(region.getByText(/invitation request/)).toHaveCount(0);
 });

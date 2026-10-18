@@ -6,6 +6,7 @@ import {
   BASE_MIGRATION_SQL,
   BASE_PAYMENTS_MIGRATION_SQL,
   BASE_SHARED_ADDITIONS_SQL,
+  BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL,
 } from '../server/base/schema.js';
 import type { ChainOpReceipt } from '../shared/base/types.js';
 import { createPaymentIntentStore } from '../server/base/payments/store.js';
@@ -34,6 +35,7 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }) {
   await pg.exec(BASE_MIGRATION_SQL);
   await pg.exec(BASE_PAYMENTS_MIGRATION_SQL);
   await pg.exec(BASE_SHARED_ADDITIONS_SQL);
+  await pg.exec(BASE_SEARCH_CURSOR_REGISTER_BACKOFF_SQL);
   await pg.exec(`INSERT INTO base_wallets (wallet_id,agent_id,operator_id,chain_id,address,
     owner_address,spender_address,spender_key_ref,derivation,state,created_at,updated_at)
     VALUES ('w1','a1','ws',84532,'0x${'1'.repeat(40)}','0x${'2'.repeat(40)}',

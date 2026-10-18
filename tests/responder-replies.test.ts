@@ -8,6 +8,8 @@ import { createResponderDelivery, type PostReplyArgs } from '../server/responder
 import type { ProviderPostRequest } from '../server/responder/providers.js';
 import { buildPrompt } from '../server/responder/prompt.js';
 import type { Claimed } from '../server/wake/webhooks.js';
+import { WAKE_LIMITS } from '../server/wake/contract.js';
+import { UNREAD_MENTIONS_CEILING } from '../server/wake/hooks.js';
 
 /**
  * Hosted responder reply delivery (lease, caps, pauses, "off means off", acks) on the real schema with a
@@ -484,6 +486,201 @@ test('mentions before enabling and in direct messages are never answered', async
   });
   assert.deepEqual(await s.handle(), { outcome: 'done' });
   assert.equal(s.requests.length, 0);
+  // A mention from an auto-reply post is never answered either.
+  await s.say('@resp-desk from another responder');
+  await s.db.query(
+    `UPDATE room_messages SET auto_reply='{"provider":"anthropic","model":"m"}'::jsonb
+      WHERE seq=(SELECT source_seq FROM mentions WHERE agent_id=$1 ORDER BY seq DESC LIMIT 1)
+        AND room_id=(SELECT room_id FROM mentions WHERE agent_id=$1 ORDER BY seq DESC LIMIT 1)`,
+    [s.responderAgent],
+  );
+  assert.deepEqual(await s.handle(), { outcome: 'done' });
+  assert.equal(s.requests.length, 0);
+  // Both are acknowledged, so they never fill the backlog cap (unread_count) with nobody to ack.
+  const unread = await s.db.query('SELECT 1 FROM mentions WHERE agent_id=$1 AND read_at IS NULL', [
+    s.responderAgent,
+  ]);
+  assert.equal(unread.rows.length, 0);
+  const cursor = (
+    await s.db.query<{ unread_count: number; acked_mention_seq: string }>(
+      'SELECT unread_count,acked_mention_seq FROM wake_cursors WHERE agent_id=$1',
+      [s.responderAgent],
+    )
+  ).rows[0]!;
+  assert.deepEqual([cursor.unread_count, Number(cursor.acked_mention_seq)], [0, 2]);
+});
+
+/**
+ * An external agent with Auto-reply on gets a mention before Auto-reply was enabled and one from
+ * an auto-reply post, neither of which Auto-reply answers. Returns what stays unread for a reader.
+ */
+async function unansweredForExternal(
+  t: { after: (fn: () => Promise<unknown>) => void },
+  runtime: 'credential' | 'presence' | 'connector' | 'webhook' | 'none',
+) {
+  const s = await setup(t);
+  await s.db.query(
+    `UPDATE workspaces SET data=jsonb_set(data, '{agents}', (SELECT jsonb_agg(CASE WHEN a->>'id'=$2
+       THEN jsonb_set(a, '{mode}', '"external"') ELSE a END) FROM jsonb_array_elements(data->'agents') a))
+      WHERE operator_id=$1`,
+    [s.owner.operatorId, s.responderAgent],
+  );
+  // A runtime of its own, offline while Auto-reply is turned on: its credential, or presence seen once.
+  if (runtime === 'credential')
+    await s.db.query('INSERT INTO credentials(token_hash,operator_id,agent_id) VALUES($1,$2,$3)', [
+      randomBytes(32).toString('hex'),
+      s.owner.operatorId,
+      s.responderAgent,
+    ]);
+  if (runtime === 'presence')
+    await s.db.query(
+      'INSERT INTO agent_presence(agent_id,operator_id,last_seen_at,sequence,updated_at) VALUES($1,$2,NULL,-1,$3)',
+      [s.responderAgent, s.owner.operatorId, Date.now()],
+    );
+  // A chat app's connector (an assistant grant over /mcp): no credential, no presence, never seen.
+  let token: string | undefined;
+  if (runtime === 'connector') {
+    const grant = await s.call(s.owner.cookie, 'POST', '/api/assistant-access', {
+      label: 'chat app',
+      scopes: ['workspace:read', 'rooms:join'],
+      expiresInDays: 1,
+    });
+    assert.equal(grant.statusCode, 201, grant.body);
+    token = grant.json().token as string;
+  }
+  // Only an HTTPS wake-up webhook.
+  if (runtime === 'webhook') {
+    const hook = await s.call(
+      s.owner.cookie,
+      'PUT',
+      `/api/agents/${s.responderAgent}/wake-webhook`,
+      {
+        url: 'https://example.com/hook',
+      },
+    );
+    assert.equal(hook.statusCode, 200, hook.body);
+  }
+  await s.call(s.owner.cookie, 'PUT', `/api/agents/${s.responderAgent}/responder`, {
+    enabled: false,
+  });
+  await s.say('@resp-desk while off');
+  s.advance(1000);
+  await s.call(s.owner.cookie, 'PUT', `/api/agents/${s.responderAgent}/responder`, {
+    enabled: true,
+  });
+  await s.say('@resp-desk from another responder');
+  await s.db.query(
+    `UPDATE room_messages SET auto_reply='{"provider":"anthropic","model":"m"}'::jsonb
+      WHERE seq=(SELECT source_seq FROM mentions WHERE agent_id=$1 ORDER BY seq DESC LIMIT 1)
+        AND room_id=(SELECT room_id FROM mentions WHERE agent_id=$1 ORDER BY seq DESC LIMIT 1)`,
+    [s.responderAgent],
+  );
+  assert.deepEqual(await s.handle(), { outcome: 'done' });
+  assert.equal(s.requests.length, 0);
+  const unread = await s.db.query('SELECT 1 FROM mentions WHERE agent_id=$1 AND read_at IS NULL', [
+    s.responderAgent,
+  ]);
+  const cursor = (
+    await s.db.query<{ unread_count: number; acked_mention_seq: string }>(
+      'SELECT unread_count,acked_mention_seq FROM wake_cursors WHERE agent_id=$1',
+      [s.responderAgent],
+    )
+  ).rows[0]!;
+  return {
+    s,
+    token,
+    unread: unread.rows.length,
+    cursor: [cursor.unread_count, Number(cursor.acked_mention_seq)],
+  };
+}
+
+test("an external agent's runtime still receives the mentions Auto-reply never answers", async (t) => {
+  // Neither is acknowledged by the responder: both stay unread for the runtime (R2-11).
+  for (const runtime of ['credential', 'presence'] as const) {
+    const { unread, cursor } = await unansweredForExternal(t, runtime);
+    assert.equal(unread, 2, runtime);
+    assert.deepEqual(cursor, [2, 0], runtime);
+  }
+});
+
+test('an external agent without any runtime: what Auto-reply never answers stays unread (R5-1)', async (t) => {
+  const { s, unread, cursor } = await unansweredForExternal(t, 'none');
+  // A reader may still come (a runtime, a connector), so nothing is marked read for it.
+  assert.equal(unread, 2);
+  assert.deepEqual(cursor, [2, 0]);
+  // A new mention from a person is still recorded and answered.
+  await s.say('@resp-desk a real question');
+  await s.handle();
+  assert.equal(s.requests.length, 1);
+  assert.equal((await s.reply(3))!.status, 'posted');
+});
+
+test('a connector-only agent: city_mentions still returns what Auto-reply never answers', async (t) => {
+  const { s, token, unread, cursor } = await unansweredForExternal(t, 'connector');
+  assert.equal(unread, 2);
+  assert.deepEqual(cursor, [2, 0]);
+  const read = await s.app.inject({
+    method: 'POST',
+    url: '/api/assistant/tools/city_mentions',
+    headers: { ...jsonHeaders, authorization: `Bearer ${token}` },
+    payload: JSON.stringify({ agent_id: s.responderAgent }),
+  });
+  assert.equal(read.statusCode, 200, read.body);
+  assert.deepEqual(
+    (read.json().mentions as Array<{ seq: number }>).map((mention) => Number(mention.seq)),
+    [1, 2],
+  );
+});
+
+test('a webhook-only agent: what Auto-reply never answers stays unread', async (t) => {
+  const { unread, cursor } = await unansweredForExternal(t, 'webhook');
+  assert.equal(unread, 2);
+  assert.deepEqual(cursor, [2, 0]);
+});
+
+test('mentions Auto-reply never answers cannot lock an external agent out of new ones (R1-30)', async (t) => {
+  const { s } = await unansweredForExternal(t, 'none');
+  // The backlog is full of mentions Auto-reply never answers: from before it was enabled.
+  const cap = WAKE_LIMITS.unreadMentions;
+  await s.db.query(
+    `INSERT INTO mentions(agent_id,seq,owner_id,source_kind,source_id,room_id,source_seq,context_id,
+       from_agent_id,from_name,from_owner_label,excerpt,created_at)
+     SELECT agent_id, seq + 1 + g, owner_id, source_kind, source_id || '-' || g, room_id, source_seq,
+       context_id, from_agent_id, from_name, from_owner_label, excerpt, created_at
+       FROM mentions, generate_series(1, $2::int) AS g WHERE agent_id=$1 AND seq=1`,
+    [s.responderAgent, cap],
+  );
+  await s.db.query(
+    'UPDATE wake_cursors SET next_mention_seq=next_mention_seq+$2, unread_count=unread_count+$2 WHERE agent_id=$1',
+    [s.responderAgent, cap],
+  );
+  const before = (
+    await s.db.query<{ next: string }>(
+      'SELECT next_mention_seq AS next FROM wake_cursors WHERE agent_id=$1',
+      [s.responderAgent],
+    )
+  ).rows[0]!;
+  // A person's new mention is still recorded, and answered.
+  await s.say('@resp-desk a real question');
+  await s.handle();
+  assert.equal(s.requests.length, 1);
+  assert.equal((await s.reply(Number(before.next)))!.status, 'posted');
+  const stored = async () =>
+    Number(
+      (
+        await s.db.query<{ n: string }>('SELECT count(*) AS n FROM mentions WHERE agent_id=$1', [
+          s.responderAgent,
+        ])
+      ).rows[0]!.n,
+    );
+  const count = await stored();
+  // The hard ceiling holds for every mention.
+  await s.db.query('UPDATE wake_cursors SET unread_count=$2 WHERE agent_id=$1', [
+    s.responderAgent,
+    UNREAD_MENTIONS_CEILING,
+  ]);
+  await s.say('@resp-desk past the ceiling');
+  assert.equal(await stored(), count);
 });
 
 test('the backlog counts unread mentions, not the cursor span (review B6)', async (t) => {
@@ -502,7 +699,10 @@ test('the backlog counts unread mentions, not the cursor span (review B6)', asyn
     ])
   ).rows[0]!;
   assert.equal(Number(count.n), 2);
-  // At the unread cap, recording stops.
+  // At the unread cap, recording stops (Auto-reply off: every unread mention counts).
+  await s.call(s.owner.cookie, 'PUT', `/api/agents/${s.responderAgent}/responder`, {
+    enabled: false,
+  });
   await s.db.query('UPDATE wake_cursors SET unread_count=1000 WHERE agent_id=$1', [
     s.responderAgent,
   ]);

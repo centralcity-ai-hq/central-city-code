@@ -1,0 +1,1060 @@
+/*
+ * Agent permissions v3, "Your agents, your rules" (src/permissions/AgentPermissions.tsx): the
+ * Workspace v3 calm canvas (docs/design/WORKSPACE_V3.md): a floating pill with round chips, one
+ * column of 22px cards, 999px pills and buttons, 14px inputs. A route between two agents is drawn
+ * as a dashed line ending in a dot on the side that does the work, and said in words: no arrows.
+ *
+ * Colours are the v3 theme tokens only (src/rooms/rooms-v2.css on the workspace, the .adv2 values
+ * on this page), so light and dark follow html[data-theme]. Every rule is scoped to .perm3 (the
+ * page) or .perm3-scrim / .perm3-sheet (the New connection sheet), so Research & review and the
+ * Network map do not change (tests/agent-permissions-v3.test.ts). Lengths are workspace pixels
+ * (calc(N * var(--ws-px))): 90% on wider screens, full size with 44px touch targets on phones.
+ */
+
+.perm3 {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: calc(15 * var(--ws-type-px));
+  line-height: 1.5;
+}
+.perm3 ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.perm3 h2,
+.perm3-sheet h2 {
+  margin: 0;
+  color: var(--text-primary);
+  font: 600 calc(18 * var(--ws-type-px)) / 1.3 var(--font-sans);
+  letter-spacing: -0.01em;
+}
+.perm3 h2:focus {
+  outline: none;
+}
+.perm3 h2:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 4px;
+  border-radius: calc(6 * var(--ws-px));
+}
+.perm3 b,
+.perm3-sheet b {
+  font-weight: 600;
+}
+
+/* Page header: the floating pill, the Requests and Invite someone chips, New connection. */
+.perm3-topbar {
+  position: sticky;
+  top: var(--ws-topbar-h, 0px);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: calc(8 * var(--ws-px));
+  margin-top: calc(-6 * var(--ws-px));
+  padding: calc(6 * var(--ws-px)) 0 calc(14 * var(--ws-px));
+  background: linear-gradient(
+    to bottom,
+    var(--bg-page) calc(100% - calc(14 * var(--ws-px))),
+    color-mix(in srgb, var(--bg-page) 0%, transparent)
+  );
+}
+.perm3-pill {
+  display: flex;
+  align-items: center;
+  gap: calc(10 * var(--ws-px));
+  min-width: 0;
+  min-height: calc(44 * var(--ws-px));
+  padding: calc(6 * var(--ws-px)) calc(10 * var(--ws-px)) calc(6 * var(--ws-px))
+    calc(16 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-surface-elevated);
+  box-shadow: var(--shadow-float-sm);
+}
+.perm3-pill > svg {
+  flex: none;
+  color: var(--accent);
+}
+.perm3-pill h1 {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font: 600 calc(17 * var(--ws-type-px)) / 1.3 var(--font-sans);
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.perm3-pill-sub {
+  padding: calc(3 * var(--ws-px)) calc(10 * var(--ws-px));
+  border-radius: 999px;
+  background: var(--bg-inset);
+  color: var(--text-muted);
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  font-weight: 600;
+  white-space: nowrap;
+}
+.perm3-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(7 * var(--ws-px));
+  min-height: calc(44 * var(--ws-px));
+  padding: 0 calc(16 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-surface-elevated);
+  color: var(--text-primary);
+  font-size: calc(14 * var(--ws-type-px));
+  font-weight: 600;
+  white-space: nowrap;
+}
+.perm3-chip-n {
+  display: inline-grid;
+  place-items: center;
+  min-width: calc(20 * var(--ws-px));
+  height: calc(20 * var(--ws-px));
+  padding: 0 calc(6 * var(--ws-px));
+  border-radius: 999px;
+  background: var(--primary);
+  color: var(--accent-contrast);
+  font-size: max(11px, calc(11.5 * var(--ws-type-px)));
+}
+
+/* Buttons: pills; the round ⋯, Refresh and Close are circles. */
+.perm3 .perm3-btn,
+.perm3-sheet .perm3-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(8 * var(--ws-px));
+  min-height: calc(44 * var(--ws-px));
+  padding: 0 calc(18 * var(--ws-px));
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: calc(14 * var(--ws-type-px));
+  font-weight: 600;
+  white-space: nowrap;
+  transition:
+    background-color var(--motion-duration-fast, 150ms) var(--motion-ease-out, ease-out),
+    border-color var(--motion-duration-fast, 150ms) var(--motion-ease-out, ease-out);
+}
+.perm3 .perm3-btn[data-tone='primary'],
+.perm3-sheet .perm3-btn[data-tone='primary'] {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--accent-contrast);
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--primary) 24%, transparent);
+}
+.perm3 .perm3-btn[data-tone='ghost'],
+.perm3-sheet .perm3-btn[data-tone='ghost'] {
+  border-color: var(--border);
+  background: var(--bg-surface-elevated);
+  color: var(--text-primary);
+}
+.perm3 .perm3-btn[data-tone='soft'] {
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+.perm3 .perm3-btn:disabled,
+.perm3-sheet .perm3-btn:disabled {
+  box-shadow: none;
+  opacity: 0.5;
+}
+.perm3 .perm3-round,
+.perm3-sheet .perm3-round {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: calc(44 * var(--ws-px));
+  height: calc(44 * var(--ws-px));
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-surface-elevated);
+  color: var(--text-muted);
+}
+.perm3 .perm3-round[aria-expanded='true'] {
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+.perm3 .perm3-round:disabled,
+.perm3-sheet .perm3-round:disabled {
+  opacity: 0.5;
+}
+@media (hover: hover) {
+  .perm3 .perm3-chip:hover,
+  .perm3 .perm3-round:hover:not(:disabled),
+  .perm3-sheet .perm3-round:hover:not(:disabled),
+  .perm3 .perm3-btn[data-tone='ghost']:hover:not(:disabled),
+  .perm3-sheet .perm3-btn[data-tone='ghost']:hover:not(:disabled) {
+    border-color: var(--accent-border);
+    color: var(--text-primary);
+  }
+  .perm3 .perm3-btn[data-tone='primary']:hover:not(:disabled),
+  .perm3-sheet .perm3-btn[data-tone='primary']:hover:not(:disabled) {
+    border-color: var(--primary-hover);
+    background: var(--primary-hover);
+  }
+}
+
+/* The column of cards is the size container for the narrow layouts below. It holds no dialog:
+   a container is the containing block of fixed descendants, so the confirms sit outside it. */
+.perm3-wrap {
+  container: perm3 / inline-size;
+  display: flex;
+  flex-direction: column;
+  gap: calc(22 * var(--ws-px));
+  width: 100%;
+  max-width: calc(940 * var(--ws-px));
+  margin: 0 auto;
+}
+.perm3-hero {
+  display: flex;
+  flex-direction: column;
+  gap: calc(6 * var(--ws-px));
+  padding-top: calc(4 * var(--ws-px));
+}
+.perm3-headline {
+  color: var(--text-primary);
+  font: 600 calc(30 * var(--ws-type-px)) / 1.2 var(--font-sans);
+  letter-spacing: -0.03em;
+  text-wrap: balance;
+}
+.perm3-lede {
+  max-width: 62ch;
+  color: var(--text-muted);
+}
+.perm3 .perm3-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(8 * var(--ws-px));
+  margin-top: calc(10 * var(--ws-px));
+}
+.perm3-facts li {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(7 * var(--ws-px));
+  padding: calc(5 * var(--ws-px)) calc(12 * var(--ws-px)) calc(5 * var(--ws-px))
+    calc(9 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-surface-elevated);
+  color: var(--text-muted);
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  font-weight: 500;
+}
+.perm3-facts svg {
+  flex: none;
+  color: var(--status-live);
+}
+
+.perm3-card {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  background: var(--bg-surface-elevated);
+  box-shadow: var(--shadow-float-sm);
+  /* The sticky header must not cover a card the chips scroll to. */
+  scroll-margin-top: calc(var(--ws-topbar-h, 0px) + calc(84 * var(--ws-px)));
+}
+.perm3-cardhead {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: calc(12 * var(--ws-px));
+  padding: calc(20 * var(--ws-px)) calc(24 * var(--ws-px)) calc(4 * var(--ws-px));
+}
+.perm3-grow {
+  flex: 1;
+  min-width: 0;
+}
+.perm3-titlerow {
+  display: flex;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+}
+.perm3-cardhead p {
+  margin-top: calc(2 * var(--ws-px));
+  color: var(--text-muted);
+  font-size: calc(13.5 * var(--ws-type-px));
+}
+.perm3-num {
+  padding: calc(2 * var(--ws-px)) calc(9 * var(--ws-px));
+  border-radius: 999px;
+  background: var(--bg-inset);
+  color: var(--text-muted);
+  font-size: max(12px, calc(12.5 * var(--ws-type-px)));
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+/* With other people: the filter tabs, then Refresh, right of the title (under it when narrow). */
+.perm3-cardhead > .perm3-grow {
+  flex: 1 1 calc(240 * var(--ws-px));
+}
+.perm3-cardhead > .perm3-tabs {
+  order: 2;
+}
+.perm3-cardhead > .perm3-round {
+  order: 3;
+}
+.perm3 .perm3-list {
+  padding: calc(8 * var(--ws-px)) calc(12 * var(--ws-px)) calc(12 * var(--ws-px));
+}
+
+/* A route between two of your agents. */
+.perm3-route {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: calc(12 * var(--ws-px));
+  padding: calc(14 * var(--ws-px)) calc(12 * var(--ws-px));
+  border-radius: calc(16 * var(--ws-px));
+}
+.perm3-route + .perm3-route,
+.perm3-hist + .perm3-hist {
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+}
+.perm3-routemain {
+  min-width: 0;
+}
+.perm3-path {
+  display: flex;
+  align-items: center;
+  gap: calc(10 * var(--ws-px));
+  min-width: 0;
+}
+.perm3-agent {
+  display: flex;
+  align-items: center;
+  gap: calc(10 * var(--ws-px));
+  min-width: 0;
+}
+.perm3-agent-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.perm3-agent b {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.perm3-agent small {
+  color: var(--text-muted);
+  font-size: max(12px, calc(12.5 * var(--ws-type-px)));
+  font-weight: 500;
+}
+.perm3-av {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: calc(34 * var(--ws-px));
+  height: calc(34 * var(--ws-px));
+  border-radius: calc(10 * var(--ws-px));
+  font-size: calc(14 * var(--ws-type-px));
+  font-weight: 700;
+  line-height: 1;
+}
+.perm3-av[data-external='true'] {
+  border: 1.5px dashed var(--text-faint);
+  background: var(--bg-inset);
+  color: var(--text-muted);
+}
+.perm3-wire {
+  position: relative;
+  flex: 0 1 calc(92 * var(--ws-px));
+  min-width: calc(40 * var(--ws-px));
+  height: calc(20 * var(--ws-px));
+}
+.perm3-wire::before {
+  position: absolute;
+  top: 50%;
+  right: calc(6 * var(--ws-px));
+  left: 0;
+  border-top: 2px dashed var(--accent-border);
+  content: '';
+}
+.perm3-wire::after {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  width: calc(8 * var(--ws-px));
+  height: calc(8 * var(--ws-px));
+  margin-top: calc(-4 * var(--ws-px));
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-subtle);
+  content: '';
+}
+.perm3-wire i {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: calc(6 * var(--ws-px));
+  height: calc(6 * var(--ws-px));
+  margin-top: calc(-3 * var(--ws-px));
+  border-radius: 50%;
+  background: var(--accent);
+  animation: perm3-travel 2.4s cubic-bezier(0.45, 0, 0.25, 1) infinite;
+}
+@keyframes perm3-travel {
+  0% {
+    left: 0;
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  80% {
+    opacity: 1;
+  }
+  100% {
+    left: calc(100% - calc(6 * var(--ws-px)));
+    opacity: 0;
+  }
+}
+.perm3-oneway {
+  margin-top: calc(3 * var(--ws-px));
+  color: var(--text-muted);
+  font-size: max(12px, calc(12.5 * var(--ws-type-px)));
+}
+.perm3-routeacts {
+  display: flex;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+}
+.perm3-cap {
+  padding: calc(4 * var(--ws-px)) calc(11 * var(--ws-px));
+  border-radius: 999px;
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+  font-size: max(12px, calc(12.5 * var(--ws-type-px)));
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* Requests from other people, waiting for you. */
+.perm3-request {
+  border-color: var(--accent-border);
+  background: linear-gradient(180deg, var(--accent-subtle), var(--bg-surface-elevated) 70%);
+}
+.perm3-reqrow {
+  display: flex;
+  align-items: flex-start;
+  gap: calc(14 * var(--ws-px));
+  padding: calc(14 * var(--ws-px)) calc(24 * var(--ws-px)) calc(20 * var(--ws-px));
+}
+.perm3-reqrow + .perm3-reqrow {
+  border-top: 1px solid var(--border);
+}
+.perm3-reqmain {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: calc(10 * var(--ws-px));
+  min-width: 0;
+}
+.perm3-reqwho small {
+  display: block;
+  color: var(--text-muted);
+  font-size: calc(13.5 * var(--ws-type-px));
+}
+.perm3-tag {
+  display: inline-block;
+  margin-left: calc(6 * var(--ws-px));
+  padding: calc(1 * var(--ws-px)) calc(7 * var(--ws-px));
+  border: 1px solid var(--status-warn-line);
+  border-radius: calc(7 * var(--ws-px));
+  background: var(--status-warn-bg);
+  color: var(--status-warn);
+  font-size: max(11px, calc(11.5 * var(--ws-type-px)));
+  font-weight: 600;
+  line-height: 1.5;
+  vertical-align: 2px;
+}
+.perm3 .perm3-preview,
+.perm3-sheet .perm3-preview {
+  padding: calc(12 * var(--ws-px)) calc(14 * var(--ws-px));
+  border-radius: calc(18 * var(--ws-px));
+  background: var(--bg-inset);
+}
+.perm3-sheet .perm3-preview {
+  justify-content: center;
+  gap: calc(12 * var(--ws-px));
+  padding: calc(18 * var(--ws-px));
+}
+.perm3-say {
+  font-size: calc(14 * var(--ws-type-px));
+}
+.perm3-sheet .perm3-say {
+  text-align: center;
+}
+.perm3-quote {
+  padding: calc(10 * var(--ws-px)) calc(14 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-surface-elevated);
+  font-size: calc(14 * var(--ws-type-px));
+  overflow-wrap: anywhere;
+}
+.perm3-quote small {
+  display: block;
+  margin-bottom: calc(2 * var(--ws-px));
+  color: var(--text-muted);
+  font-size: max(12px, calc(12 * var(--ws-type-px)));
+  font-weight: 600;
+}
+.perm3-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(8 * var(--ws-px));
+}
+
+/* Connections with other people. */
+.perm3-tabs {
+  display: flex;
+  gap: calc(4 * var(--ws-px));
+  max-width: 100%;
+  padding: calc(4 * var(--ws-px));
+  overflow-x: auto;
+  border-radius: 999px;
+  background: var(--bg-inset);
+  scrollbar-width: none;
+}
+.perm3-tabs button {
+  min-height: calc(44 * var(--ws-px));
+  padding: 0 calc(14 * var(--ws-px));
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--text-muted);
+  font-size: max(12px, calc(13 * var(--ws-type-px)));
+  font-weight: 600;
+  white-space: nowrap;
+}
+.perm3-tabs button[aria-pressed='true'] {
+  background: var(--bg-surface-elevated);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-float-sm);
+}
+.perm3-hist {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: calc(12 * var(--ws-px));
+  padding: calc(12 * var(--ws-px));
+}
+.perm3-who {
+  display: flex;
+  align-items: center;
+  gap: calc(10 * var(--ws-px));
+  min-width: 0;
+}
+.perm3-who > div {
+  min-width: 0;
+}
+.perm3-who b {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.perm3-who small {
+  display: block;
+  color: var(--text-muted);
+  font-size: max(12px, calc(12.5 * var(--ws-type-px)));
+}
+.perm3-status {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(7 * var(--ws-px));
+  justify-self: end;
+  padding: calc(3 * var(--ws-px)) calc(11 * var(--ws-px));
+  border-radius: 999px;
+  background: var(--bg-inset);
+  color: var(--text-muted);
+  font-size: max(12px, calc(12.5 * var(--ws-type-px)));
+  font-weight: 600;
+  white-space: nowrap;
+}
+.perm3-status i {
+  width: calc(7 * var(--ws-px));
+  height: calc(7 * var(--ws-px));
+  border-radius: 50%;
+  background: currentColor;
+}
+.perm3-status[data-tone='ok'] {
+  background: var(--status-live-bg);
+  color: var(--status-live);
+}
+.perm3-status[data-tone='wait'] {
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+}
+.perm3-more-gap {
+  width: calc(44 * var(--ws-px));
+}
+
+/* Invite someone, Use an invite: side by side, stacked when narrow. */
+.perm3-duo {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: calc(16 * var(--ws-px));
+}
+.perm3-formcard {
+  display: flex;
+  flex-direction: column;
+  padding-bottom: calc(24 * var(--ws-px));
+}
+.perm3-form {
+  display: flex;
+  flex-direction: column;
+  gap: calc(14 * var(--ws-px));
+  padding: calc(12 * var(--ws-px)) calc(24 * var(--ws-px)) 0;
+}
+.perm3 .perm3-label,
+.perm3-sheet .perm3-label {
+  display: block;
+  margin: 0 0 calc(6 * var(--ws-px));
+  color: var(--text-primary);
+  font: 600 calc(13 * var(--ws-type-px)) / 1.4 var(--font-sans);
+}
+.perm3-optional {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+.perm3 .perm3-field,
+.perm3-sheet .perm3-field {
+  width: 100%;
+  min-height: calc(44 * var(--ws-px));
+  padding: 0 calc(14 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-inset);
+  color: var(--text-primary);
+  font: 400 calc(15 * var(--ws-type-px)) / 1.4 var(--font-sans);
+}
+.perm3 select.perm3-field,
+.perm3-sheet select.perm3-field {
+  appearance: none;
+  padding-right: calc(36 * var(--ws-px));
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--text-muted) 50%),
+    linear-gradient(135deg, var(--text-muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 20px) 50%,
+    calc(100% - 15px) 50%;
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+}
+.perm3 .perm3-field:focus,
+.perm3-sheet .perm3-field:focus {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 0;
+  background-color: var(--bg-surface-elevated);
+}
+.perm3 .perm3-field:disabled,
+.perm3-sheet .perm3-field:disabled {
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+.perm3 .perm3-field::placeholder {
+  color: var(--text-muted);
+}
+.perm3-issued {
+  display: flex;
+  flex-direction: column;
+  gap: calc(8 * var(--ws-px));
+  margin: calc(14 * var(--ws-px)) calc(24 * var(--ws-px)) 0;
+  color: var(--text-muted);
+  font-size: calc(13.5 * var(--ws-type-px));
+}
+.perm3-issued b {
+  color: var(--text-primary);
+}
+.perm3-snippet {
+  display: flex;
+  align-items: center;
+  gap: calc(10 * var(--ws-px));
+  padding: calc(6 * var(--ws-px)) calc(6 * var(--ws-px)) calc(6 * var(--ws-px))
+    calc(14 * var(--ws-px));
+  border-radius: 14px;
+  background: var(--bg-inset);
+}
+.perm3-snippet code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font: 500 calc(13.5 * var(--ws-type-px)) / 1.4 var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.perm3-invites {
+  margin: calc(16 * var(--ws-px)) calc(24 * var(--ws-px)) 0;
+}
+.perm3-group {
+  padding-bottom: calc(4 * var(--ws-px));
+  color: var(--text-muted);
+  font-size: max(11px, calc(12 * var(--ws-type-px)));
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.perm3-invites li {
+  display: flex;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+  padding: calc(4 * var(--ws-px)) 0;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: calc(13.5 * var(--ws-type-px));
+}
+.perm3-invites li b {
+  color: var(--text-primary);
+}
+.perm3-invites small {
+  font-size: inherit;
+}
+.perm3 .perm3-link {
+  min-height: calc(44 * var(--ws-px));
+  padding: 0 calc(8 * var(--ws-px));
+  border: 0;
+  border-radius: calc(10 * var(--ws-px));
+  background: none;
+  color: var(--text-muted);
+  font-size: calc(13 * var(--ws-type-px));
+  font-weight: 600;
+}
+@media (hover: hover) {
+  .perm3 .perm3-link:hover:not(:disabled) {
+    background: var(--status-danger-bg);
+    color: var(--status-danger);
+  }
+}
+.perm3-invites .copy-control .button {
+  min-height: calc(44 * var(--ws-px));
+  border: 0;
+  background: none;
+  color: var(--accent-text);
+  font-size: calc(13 * var(--ws-type-px));
+}
+
+/* States: empty, loading, an action's failure (alert) and its message (status). */
+.perm3-empty {
+  padding: calc(28 * var(--ws-px)) calc(16 * var(--ws-px));
+  color: var(--text-muted);
+  text-align: center;
+}
+.perm3-empty b {
+  display: block;
+  margin-bottom: calc(4 * var(--ws-px));
+  color: var(--text-primary);
+  font-size: calc(16 * var(--ws-type-px));
+}
+.perm3-empty div {
+  margin-top: calc(14 * var(--ws-px));
+}
+.perm3-loading {
+  display: flex;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+  padding: calc(14 * var(--ws-px)) calc(24 * var(--ws-px)) calc(20 * var(--ws-px));
+  color: var(--text-muted);
+}
+.perm3 .perm3-alert,
+.perm3-sheet .perm3-alert {
+  padding: calc(10 * var(--ws-px)) calc(14 * var(--ws-px));
+  border-radius: 12px;
+  background: var(--status-danger-bg);
+  color: var(--status-danger);
+  font-size: calc(13.5 * var(--ws-type-px));
+}
+.perm3-card > .perm3-alert,
+.perm3-card > .perm3-notice {
+  margin: calc(10 * var(--ws-px)) calc(24 * var(--ws-px)) calc(4 * var(--ws-px));
+}
+.perm3-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: calc(8 * var(--ws-px));
+  padding: calc(10 * var(--ws-px)) calc(14 * var(--ws-px));
+  border-radius: 12px;
+  background: var(--status-live-bg);
+  color: var(--text-primary);
+  font-size: calc(13.5 * var(--ws-type-px));
+}
+.perm3-notice svg {
+  flex: none;
+  margin-top: calc(2 * var(--ws-px));
+  color: var(--status-live);
+}
+.perm3-foot {
+  max-width: 64ch;
+  margin: 0 auto;
+  color: var(--text-muted);
+  font-size: max(12px, calc(12.5 * var(--ws-type-px)));
+  text-align: center;
+}
+
+/* The ⋯ menu. */
+.perm3-more {
+  position: relative;
+}
+.perm3-menu {
+  position: absolute;
+  top: calc(100% + calc(6 * var(--ws-px)));
+  right: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  min-width: calc(230 * var(--ws-px));
+  padding: calc(6 * var(--ws-px));
+  border: 1px solid var(--border);
+  border-radius: calc(16 * var(--ws-px));
+  background: var(--bg-surface-elevated);
+  box-shadow: var(--shadow-elevated);
+  animation: perm3-rise 160ms var(--motion-ease-out, ease-out);
+}
+.perm3-menu button {
+  display: flex;
+  align-items: center;
+  min-height: calc(44 * var(--ws-px));
+  padding: 0 calc(12 * var(--ws-px));
+  border: 0;
+  border-radius: calc(10 * var(--ws-px));
+  background: none;
+  color: var(--text-primary);
+  font-size: calc(14 * var(--ws-type-px));
+  font-weight: 500;
+  text-align: left;
+  white-space: nowrap;
+}
+.perm3-menu button:hover,
+.perm3-menu button:focus-visible {
+  background: var(--bg-inset);
+}
+.perm3-menu .perm3-danger {
+  color: var(--status-danger);
+}
+
+/* The New connection sheet (rendered by the console, outside the page). */
+.perm3-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(20 * var(--ws-px));
+  background: var(--backdrop);
+  animation: perm3-fade 180ms var(--motion-ease-out, ease-out);
+}
+.perm3-sheet {
+  width: min(calc(540 * var(--ws-px)), 100%);
+  max-height: calc(100dvh - calc(40 * var(--ws-px)));
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  background: var(--bg-surface-elevated);
+  box-shadow: var(--shadow-elevated);
+  color: var(--text-primary);
+  font-size: calc(15 * var(--ws-type-px));
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  animation: perm3-rise 240ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.perm3-sheet :focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+.perm3-sheethead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(12 * var(--ws-px));
+  padding: calc(18 * var(--ws-px)) calc(18 * var(--ws-px)) 0 calc(24 * var(--ws-px));
+}
+.perm3-sheetbody {
+  display: flex;
+  flex-direction: column;
+  gap: calc(14 * var(--ws-px));
+  padding: calc(14 * var(--ws-px)) calc(24 * var(--ws-px)) calc(22 * var(--ws-px));
+}
+.perm3-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: calc(12 * var(--ws-px));
+}
+.perm3-live {
+  display: flex;
+  flex-direction: column;
+  gap: calc(10 * var(--ws-px));
+}
+.perm3-live:empty {
+  display: none;
+}
+.perm3-warn {
+  display: flex;
+  align-items: center;
+  gap: calc(8 * var(--ws-px));
+  padding: calc(8 * var(--ws-px)) calc(12 * var(--ws-px));
+  border: 1px solid var(--status-warn-line);
+  border-radius: 12px;
+  background: var(--status-warn-bg);
+  color: var(--status-warn);
+  font-size: calc(13 * var(--ws-type-px));
+}
+.perm3-check {
+  display: flex;
+  align-items: center;
+  gap: calc(10 * var(--ws-px));
+  min-height: calc(44 * var(--ws-px));
+  color: var(--text-primary);
+  font: 500 calc(14 * var(--ws-type-px)) / 1.4 var(--font-sans);
+  cursor: pointer;
+}
+.perm3-sheetacts {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: calc(8 * var(--ws-px));
+  padding-top: calc(4 * var(--ws-px));
+}
+@keyframes perm3-fade {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes perm3-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+/* Narrow page: routes stack their actions under the line, the two invite cards stack. */
+@container perm3 (max-width: 700px) {
+  .perm3-duo {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@container perm3 (max-width: 600px) {
+  .perm3-route {
+    grid-template-columns: minmax(0, 1fr);
+    gap: calc(10 * var(--ws-px));
+  }
+  .perm3-routeacts {
+    justify-content: space-between;
+  }
+  .perm3-routeacts .perm3-btn {
+    margin-left: auto;
+  }
+  .perm3-wire {
+    flex-basis: calc(40 * var(--ws-px));
+  }
+  .perm3-route .perm3-agent small,
+  .perm3-reqrow .perm3-agent small {
+    display: none;
+  }
+  .perm3-cardhead,
+  .perm3-form,
+  .perm3-reqrow {
+    padding-right: calc(18 * var(--ws-px));
+    padding-left: calc(18 * var(--ws-px));
+  }
+  .perm3-issued,
+  .perm3-invites,
+  .perm3-card > .perm3-alert,
+  .perm3-card > .perm3-notice {
+    margin-right: calc(18 * var(--ws-px));
+    margin-left: calc(18 * var(--ws-px));
+  }
+  .perm3-reqrow {
+    flex-direction: column;
+  }
+  .perm3-hist {
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: calc(6 * var(--ws-px));
+  }
+  .perm3-hist .perm3-status {
+    grid-column: 1;
+    justify-self: start;
+    margin-left: calc(44 * var(--ws-px));
+  }
+  .perm3-hist .perm3-more,
+  .perm3-hist .perm3-more-gap {
+    grid-row: 1;
+    grid-column: 2;
+  }
+  .perm3-cardhead > .perm3-grow {
+    flex-basis: 0;
+  }
+  .perm3-cardhead > .perm3-round {
+    order: 2;
+    align-self: flex-start;
+  }
+  .perm3-cardhead > .perm3-tabs {
+    order: 3;
+    flex: 1 1 100%;
+  }
+  .perm3-tabs button {
+    flex: 1 1 auto;
+    padding: 0 calc(10 * var(--ws-px));
+  }
+}
+
+/* Phones: the pill and chips start at the left, under the shell's ☰ row (which drops its
+   second title: the pill is the page's h1); the header scrolls with the page. */
+@media (max-width: 899px) {
+  .app-shell[data-workspace='v2']:has(.perm3) .cc-app-header-title p {
+    display: none;
+  }
+  .perm3-topbar {
+    justify-content: flex-start;
+  }
+}
+@media (max-width: 640px) {
+  .perm3-topbar {
+    position: static;
+    margin-top: 0;
+    padding-top: 0;
+    background: none;
+  }
+  .perm3-pill-sub,
+  .perm3 .perm3-hide-phone {
+    display: none;
+  }
+  .perm3-headline {
+    font-size: calc(26 * var(--ws-type-px));
+  }
+  .perm3-pair {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .perm3-sheetacts .perm3-btn {
+    flex: 1 1 auto;
+  }
+}
+
+/* Reduced motion: the travelling dot and every entrance animation stop. */
+@media (prefers-reduced-motion: reduce) {
+  .perm3-wire i {
+    display: none;
+  }
+  .perm3-menu,
+  .perm3-scrim,
+  .perm3-sheet {
+    animation: none;
+  }
+  .perm3 .perm3-btn,
+  .perm3-sheet .perm3-btn {
+    transition: none;
+  }
+}
