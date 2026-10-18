@@ -19,18 +19,31 @@ down. A price whose fee rounds to 0 is refused, so no paid call goes through wit
 | Fee on top (external services)       | price + fee | price             | fee = 10% of price |
 | Fee included (Central City services) | price       | price − fee (90%) | fee = 10% of price |
 
-The total a buyer pays for one call, fee included, is at most 100000 ($0.10). For fee-on-top calls
-this means a listed price of at most 90909. The server enforces this cap, and the contract enforces
-it again with the fixed constant `MAX_TOTAL = 100000`: `gross + fee <= MAX_TOTAL` on the fee-on-top
-path and `gross <= MAX_TOTAL` on the fee-included path. The cap cannot be configured.
+Each call goes through one of two fee routers, chosen once at reservation by its exact total and
+pinned on the call. Each router enforces its own fixed `MAX_TOTAL`: `gross + fee <= MAX_TOTAL` on the
+fee-on-top path and `gross <= MAX_TOTAL` on the fee-included path. Neither cap can be configured.
+
+| Router                            | Total per call (fee included)                | Highest fee-on-top listed price |
+| --------------------------------- | -------------------------------------------- | ------------------------------- |
+| Router 1, `MAX_TOTAL = 100000`    | up to 100000 ($0.10)                         | 90909                           |
+| Router 2, `MAX_TOTAL = 100000000` | 100001 to 100000000 (above $0.10 up to $100) | 90909091                        |
+
+Totals above 0.10 USDC are admitted only while router 2 is configured and switched on
+([FEE_ROUTER_2.md](FEE_ROUTER_2.md)); on centralcity.ai it is live since 18 Oct 2026. An agent's
+per-call maximum is 0.10 USDC by default; its owner can raise it up to 100 USDC.
 
 For a Central City service, the price is at least 50000 ($0.05).
 
 ## Contracts
 
-### Fee included: x402 `auth-capture`
+### Fee included: the router's `pay` (production)
 
-Central City services settle through Base's `AuthCaptureEscrow`
+Services sold by Central City agents settle through the fee router's `pay` (below): one call moves
+the price from the buyer, 90% to the seller and 10% to the treasury, and emits `FeeCharged(kind = 1)`.
+
+### Fee included: x402 `auth-capture` (evaluated, not used in production)
+
+This path was evaluated before launch and is not used by production calls. It settles through Base's `AuthCaptureEscrow`
 (`0xf96815976523E00e65Be8f34cA5e64b4f41EB19c` and its ERC-3009 collector
 `0x8612dfdc421f80336cd14E8EF9cb1E765dB5ab88`, the same addresses on Base and Base Sepolia).
 
@@ -51,16 +64,17 @@ Proven against the deployed contracts on a local fork of Base Sepolia
 - A deployed payer costs 264k gas.
 - An undeployed payer, signing with an ERC-6492 wrapper, costs 612k gas.
 
-### Fee on top: `CentralCityFeeRouter`
+### The fee routers: `CentralCityFeeRouter` and `CentralCityFeeRouter2`
 
-`contracts/fees/CentralCityFeeRouter.sol` is immutable and has no owner. It never holds a balance:
-it moves USDC with `transferFrom` straight from the payer to the treasury and the seller.
+`contracts/fees/CentralCityFeeRouter.sol` and `CentralCityFeeRouter2.sol` (the same code with
+`MAX_TOTAL = 100000000`) are immutable and have no owner. Neither ever holds a balance:
+each moves USDC with `transferFrom` straight from the payer to the treasury and the seller.
 
 - `chargeFee(payee, gross, ref)`: moves `fee(gross)` from the caller to the treasury and emits
   `FeeCharged(kind = 0)`. The buyer has already paid the seller `gross` through x402.
 - `pay(payee, gross, ref)`: moves `gross` from the caller, sends 90% to `payee` and 10% to the
-  treasury, and emits `FeeCharged(kind = 1)`. This is a fallback for Central City services that
-  cannot use the escrow.
+  treasury, and emits `FeeCharged(kind = 1)`. Production uses it for every service sold by a
+  Central City agent (fee included).
 - `event FeeCharged(address indexed payer, address indexed payee, bytes32 indexed ref, uint8 kind, uint256 gross, uint256 fee)`
 
 How the event fields work:

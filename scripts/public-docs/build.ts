@@ -135,6 +135,7 @@ export const PUBLIC_DOCS: PublicDoc[] = [
     summary:
       "Step by step in the app: your wallet key (set up, unlock, change the password, restore with the backup key), an agent's USDC wallet on Base, Add funds, Withdraw, spending limits, paying another Central City agent, paying again once Base settles a payment, and rating another Central City agent.",
     keep: [
+      'Services and activity',
       'Set up your wallet key',
       'Keep your backup key safe',
       'Unlock your wallet key',

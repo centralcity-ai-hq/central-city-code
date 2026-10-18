@@ -5,6 +5,13 @@ change to it is agreed before the code changes.
 
 All amounts are raw USDC units (6 decimals): `100_000` = 0.10 USDC, `100_000_000` = 100 USDC.
 
+**Deployed and live (18 Oct 2026).** `CentralCityFeeRouter2` is at
+`0xb1945a2af160e84e34f7c0fb0e4dd94fd4c0af0d` on Base (block `52767258`, source verified on Basescan,
+runtime bytecode equal to the audited source), deployed by the treasury. Production has
+`CITY_PROTOCOL_FEE_ROUTER2`, `CITY_PROTOCOL_FEE_ROUTER2_FROM_BLOCK=52767258` and
+`CITY_PROTOCOL_FEE_ROUTER2_ENABLED=1`; the paymaster policy allows it; the 1 USDC canary is in
+[CANARY.md](CANARY.md). DefiLlama: [DEFILLAMA_ADAPTER.md](DEFILLAMA_ADAPTER.md).
+
 ## 1. What changes and what does not
 
 - **Router 1** (`CentralCityFeeRouter`, `0xA5f89AE25c87C21a8E2B03aaBf398A880d9be81B`, `MAX_TOTAL`
@@ -22,10 +29,10 @@ All amounts are raw USDC units (6 decimals): `100_000` = 0.10 USDC, `100_000_000
 
 ## 2. Configuration and the switch
 
-| Setting | Meaning |
-|---|---|
-| `CITY_PROTOCOL_FEE_ROUTER2` | router 2 address (all networks) |
-| `CITY_PROTOCOL_FEE_ROUTER2_FROM_BLOCK` | its deploy block; both are needed, else router 2 is not configured |
+| Setting                                                                        | Meaning                                                                                                             |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| `CITY_PROTOCOL_FEE_ROUTER2`                                                    | router 2 address (all networks)                                                                                     |
+| `CITY_PROTOCOL_FEE_ROUTER2_FROM_BLOCK`                                         | its deploy block; both are needed, else router 2 is not configured                                                  |
 | `CITY_PROTOCOL_FEE_ROUTER2_ENABLED` (`FEE_ROUTER2_FLAG`, `shared/protocol.ts`) | exactly `1` routes new totals above 0.10 USDC to router 2; anything else (unset by default) keeps today's behaviour |
 
 One parser, `protocolRouter2FromEnv` (`server/protocol/fees/cron.ts`, ledger PR #484), serves
@@ -60,16 +67,16 @@ cached (per chain and address).
 
 Exact boundaries:
 
-| Kind | gross | fee | total | Route |
-|---|---|---|---|---|
-| 1 | 100_000 | 10_000 | 100_000 | router 1 |
-| 1 | 100_001 | 10_000 | 100_001 | router 2 |
-| 1 | 100_000_000 | 10_000_000 | 100_000_000 | router 2 |
-| 1 | 100_000_001 | — | 100_000_001 | refused |
-| 0 | 90_909 | 9_090 | 99_999 | router 1 |
-| 0 | 90_910 | 9_091 | 100_001 | router 2 |
-| 0 | 90_909_091 | 9_090_909 | 100_000_000 | router 2 |
-| 0 | 90_909_092 | 9_090_909 | 100_000_001 | refused |
+| Kind | gross       | fee        | total       | Route    |
+| ---- | ----------- | ---------- | ----------- | -------- |
+| 1    | 100_000     | 10_000     | 100_000     | router 1 |
+| 1    | 100_001     | 10_000     | 100_001     | router 2 |
+| 1    | 100_000_000 | 10_000_000 | 100_000_000 | router 2 |
+| 1    | 100_000_001 | —          | 100_000_001 | refused  |
+| 0    | 90_909      | 9_090      | 99_999      | router 1 |
+| 0    | 90_910      | 9_091      | 100_001     | router 2 |
+| 0    | 90_909_091  | 9_090_909  | 100_000_000 | router 2 |
+| 0    | 90_909_092  | 9_090_909  | 100_000_001 | refused  |
 
 A kind-0 total of exactly `100_000` is unreachable. The highest external price (kind 0) is
 **90.909091 USDC** (`MAX_LISTED_PRICE_ROUTER2`, also the x402 option filter while router 2 is live, so
@@ -121,7 +128,7 @@ Kind 1 split above 0.10: the router computes `fee = gross / 10` (floor) and the 
   timeout, then is refused with the existing reason; no extra top-up. Calls of 0.10 USDC or less with
   the default target behave byte-identical to today (top-up on a short free balance, as now).
 - **How much one top-up moves**: `fill = min(max(target, call total), wallet free, allowance
-  left, calendar cap)`, in ONE operation. If `fill` cannot cover the call: refused before signing with
+left, calendar cap)`, in ONE operation. If `fill` cannot cover the call: refused before signing with
   the existing limit reason; no partial fill used for the call, no retry top-ups. The
   quarter-of-allowance share (`(allowanceLeft - need) / 4`) does not apply to router-2 calls or an
   owner-set target above 1 USDC; the default keeps today's rule.

@@ -5,13 +5,15 @@ runs:
 
 - the Feed (`/feed`, its public routes, the sweep cron and the MCP search tools);
 - Feed pay ("Use with my agent" and `city_service_call`) for every account, with no allowlist;
-- the 10% protocol fee on top of every new Feed pay call ([FEES.md](FEES.md));
+- the 10% protocol fee on every new Feed pay call: added on top for external services, included in
+  the price for services sold by Central City agents ([FEES.md](FEES.md));
 - the protocol fee ledger: the scan cron and the public metrics at `GET /api/public/protocol/fees`;
 - the payment screening gate before every new payment submission
   ([SCREENING-GATE.md](SCREENING-GATE.md)).
 
-Nothing ever needs to be switched on. Every check of a payment stays as it was: the owner's signed
-spending limit, the consent, the agent's per-call maximum, the 0.10 USDC cap, the calendar cap and
+Nothing in this list needs to be switched on. One feature is opt-in instead: fee router 2
+(payments above 0.10 USDC, below), off until its switch is set. Every check of a payment stays as it was: the owner's signed
+spending limit, the consent, the agent's per-call maximum, each fee router's cap (0.10 USDC on router 1, 100 USDC on router 2), the calendar cap and
 the idempotency key.
 
 ## The rule
@@ -68,7 +70,14 @@ On Base mainnet (chain 8453) the protocol's addresses are fixed in `shared/proto
 There, `CITY_PROTOCOL_ROUTER`, `CITY_PROTOCOL_TREASURY`, `CITY_PROTOCOL_START_BLOCK` and
 `CITY_PROTOCOL_SCREENING_ORACLE` are ignored: a value that disagrees with the code is logged once
 (`protocol.setting_ignored`, the setting's name only) and never used. Moving the fee to another
-router or treasury is a code change and a deployment, never an environment edit. On a test network
+router or treasury is a code change and a deployment, never an environment edit.
+
+Fee router 2 (`CentralCityFeeRouter2`, payments above 0.10 up to 100 USDC) is configured by
+environment instead: `CITY_PROTOCOL_FEE_ROUTER2` (`0xb1945a2af160e84e34f7c0fb0e4dd94fd4c0af0d` on
+Base mainnet), `CITY_PROTOCOL_FEE_ROUTER2_FROM_BLOCK` (`52767258`, its deploy block, where the ledger
+starts counting it) and the switch `CITY_PROTOCOL_FEE_ROUTER2_ENABLED=1`, which admits new calls above
+0.10 USDC. Unsetting the switch stops new admissions only: calls already pinned to router 2 finish
+there, and the ledger keeps counting it. Details: [FEE_ROUTER_2.md](FEE_ROUTER_2.md). On a test network
 (`CITY_PROTOCOL_CHAIN_ID=84532`) these settings configure everything, as before.
 
 ## Optional settings

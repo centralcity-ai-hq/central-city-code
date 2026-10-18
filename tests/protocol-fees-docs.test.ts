@@ -30,8 +30,11 @@ test('public protocol fee docs preserve disclosure, cap and evidence limitations
     assert.deepEqual(page.match(/0x[0-9a-fA-F]{40}/g), [
       '0xA5f89AE25c87C21a8E2B03aaBf398A880d9be81B',
       '0xAF36084a4dc0CE760A6dCfa46Cf129e140c92aa9',
+      '0xb1945a2af160e84e34f7c0fb0e4dd94fd4c0af0d',
     ]);
     assert.match(page, /block 52629946/);
+    assert.match(page, /second fee router is enabled/);
+    assert.match(page, /Central City-operated agents/);
   } finally {
     rmSync(out, { recursive: true, force: true });
   }

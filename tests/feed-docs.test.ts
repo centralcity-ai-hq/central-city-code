@@ -100,19 +100,19 @@ test('/docs/feed says what the Feed is, how a service is used today, how to post
     assert.ok(feedPage.includes(`\n## ${heading}\n`), heading);
   const flat = feedPage.replace(/\s+/g, ' ');
   for (const fact of [
-    // Offered: external x402 Bazaar services, never Central City agents. True with Feed pay on or
-    // off: the agent pays only after a confirm, never Central City's own money.
+    // Offered: both sources are identified; spending requires confirmation.
     'after you confirm what it pays. Central City never pays from its own money. Without it, nothing is paid through the Feed.',
     'Request budgets are information only.',
-    'listed by x402 Bazaar',
-    'External services, not Central City agents.',
-    "Pay can't pay it.",
+    'listed by **x402 Bazaar**',
+    '**External listings are not Central City agents.**',
+    '**Central City agents sell built-in services.**',
+    'agent-to-agent Pay cannot pay them.',
     // Use with my agent where it is on: price first, one confirm, the agent's own wallet.
-    'without paying. You see the amount, the agent and the service, then confirm once.',
+    'You see the amount, the agent and the service, then confirm once.',
     'The agent pays from its own wallet, within its spending limit and its per-call maximum',
     // Central City's fee, where it applies: shown before the confirm, the limits count the total.
     'Before you confirm you see three lines, the price, the Central City fee and the total',
-    'with the Base transaction of the price and of the fee.',
+    'An included payment splits seller proceeds and fee in one transaction; external payments can have separate service and fee transactions.',
     // Without Use with my agent (named, so it never reads as "without the fee"): the caller's own
     // x402 client and Base USDC wallet, outside Central City.
     'Without **Use with my agent**, a service is used outside Central City:',
@@ -245,7 +245,7 @@ test('the /docs/api tool list names every Feed tool with the title and scope the
   assert.match(flat, /within the owner’s spending limit and the agent’s per-call maximum\./);
   assert.match(
     flat,
-    /Where Central City’s fee applies, the agent also pays 10% of the service’s price on top; the spending limit and the per-call maximum count the total, fee included\. Payments can’t be undone\./,
+    /For external services where Central City’s fee applies, the agent also pays 10% of the service’s price on top; the spending limit and the per-call maximum count the total, fee included\. Payments can’t be undone\./,
   );
   assert.doesNotMatch(flat, /plus Central City’s 10% fee/);
 });
@@ -264,10 +264,7 @@ test('every public description of city_service_call names the fee on top and wha
       row,
       /only for an agent whose owner allowed it to pay on its own with services in the Feed included \(a consent to pay Central City agents only is not enough: it is refused with `no_consent` until the owner confirms again to include them\)/,
     );
-    assert.match(
-      row,
-      /Where Central City's fee applies, the agent also pays 10% of the price on top\./,
-    );
+    assert.match(row, /For external services, the agent also pays 10% of the price on top\./);
     assert.match(
       row,
       /`max_price_usdc` bounds the price; the spending limit and the per-call maximum count the total, fee included\./,
@@ -290,7 +287,7 @@ test('every public description of city_service_call names the fee on top and wha
   );
   assert.match(
     lineWith(read('public/llms-full.txt'), '`city_service_search`'),
-    /Where Central City's fee applies, the agent also pays 10% of the price on top, and these limits count the total\./,
+    /For external services, the agent also pays 10% of the price on top, and these limits count the total\./,
   );
 });
 

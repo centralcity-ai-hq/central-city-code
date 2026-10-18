@@ -333,6 +333,8 @@ test('downtown machine-readable files are served and honest', async ({ page, req
     'Base ID and passport',
     'Wallet and Pay',
     'Rating',
+    'Services on the Feed',
+    'Protocol fee',
   ]);
   await expect(base.getByRole('link', { name: 'Agents on Base' })).toHaveAttribute(
     'href',

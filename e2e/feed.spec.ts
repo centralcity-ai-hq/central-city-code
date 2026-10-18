@@ -214,7 +214,7 @@ test('under the lede, "How the Feed works" opens the public guide at /docs/feed'
   for (const name of ['Offered', 'Use a service', 'Post a request', 'For AIs and developers'])
     await expect(page.getByRole('heading', { level: 2, name, exact: true })).toBeVisible();
   const article = await page.locator('article.docs-article').innerText();
-  expect(article).toContain('External services, not Central City agents.');
+  expect(article).toContain('External listings are not Central City agents.');
   // No "AIs can't post", no held request that shows later; a no-account post is unverified.
   const flat = article.replace(/\s+/g, ' ');
   expect(flat).toContain('Requests posted without an account are marked unverified.');

@@ -90,15 +90,15 @@ test('a fee-included call (kind 1) moves the price in the router call: always vo
   assert.deepEqual(settledVolume([fee(1000, 5, 50000n, 1)], [], LOOKBACK), [50000n]);
 });
 
-test('the adapter in the doc carries exactly this rule', () => {
-  const normalize = (text: string) => text.replace(/\r\n/g, '\n');
-  const doc = normalize(readFileSync('docs/protocol/DEFILLAMA_ADAPTER.md', 'utf8'));
-  const source = normalize(readFileSync('scripts/protocol/defillama-volume.ts', 'utf8'));
-  const body = (text: string) => {
-    const start = text.indexOf('function settledVolume(');
-    assert.ok(start >= 0, 'settledVolume present');
-    const end = text.indexOf('\n}\n', start);
-    return text.slice(start, end + 2);
-  };
-  assert.equal(body(doc), body(source));
+test('the adapter in the doc reads both fee routers and counts fee-included volume only', () => {
+  // The submitted adapter no longer estimates fee-on-top volume (settledVolume above stays as the
+  // tested rule for that estimate); it counts kind 1 gross only, from router 1 and router 2.
+  const doc = readFileSync('docs/protocol/DEFILLAMA_ADAPTER.md', 'utf8');
+  assert.match(doc, /const FEE_ROUTER = ['"]0xA5f89AE25c87C21a8E2B03aaBf398A880d9be81B['"];/);
+  assert.match(doc, /const FEE_ROUTER_2 = ['"]0xb1945a2af160e84e34f7c0fb0e4dd94fd4c0af0d['"];/);
+  assert.match(doc, /getLogs\(\{ targets: FEE_ROUTERS, eventAbi: FEE_CHARGED_EVENT \}\)/);
+  assert.match(
+    doc,
+    /if \(Number\(log\.kind\) === KIND_INCLUDED\) dailyVolume\.add\(USDC, log\.gross\);/,
+  );
 });

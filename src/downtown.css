@@ -500,6 +500,8 @@ html:has(.downtown) {
   font: var(--type-meta);
   color: var(--dt-muted);
   font-variant-numeric: tabular-nums;
+  /* Contract addresses are one long word: they wrap inside a phone's width. */
+  overflow-wrap: anywhere;
 }
 .dt-parts {
   list-style: none;

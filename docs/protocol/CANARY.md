@@ -1,5 +1,9 @@
 # Protocol fee canary (Phase 0)
 
+> Historical runbook: the router 1 canary passed on 15 Oct 2026 and the protocol has been live since.
+> It is kept as the record of how launch was proven. The router 2 canary (18 Oct 2026) is under
+> "Deployed" below.
+
 One real paid call proves the fee path end to end on Base mainnet before the public is opened.
 Bounded: one call, a service price of at most $0.02, so a fee of at most $0.002 and at most $0.022
 in all, paid from the agent's existing float.
@@ -35,6 +39,18 @@ is in flight finishes.
   block `52603696`
 - Treasury (fee receiver): `0xAF36084a4dc0CE760A6dCfa46Cf129e140c92aa9`
 - Token: Base USDC `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`
+
+Fee router 2 (payments above 0.10 up to 100 USDC, [FEE_ROUTER_2.md](FEE_ROUTER_2.md)):
+
+- CentralCityFeeRouter2: `0xb1945a2af160e84e34f7c0fb0e4dd94fd4c0af0d` (Base, verified on Basescan),
+  deployed by the treasury
+- Deploy transaction: `0x2e0399b26189d54d905b7d5f43ed4f50479429125a354581601c06d997324676`,
+  block `52767258` (18 Oct 2026)
+- Same treasury and token as router 1; the paymaster policy allows both routers
+- Canary: `0xe2157b3e454633c4089982c1326a5dfa40d761a384b81ad065c6a43810a646e7` (block `52768015`):
+  `FeeCharged` kind 1, gross 1.000000 USDC, fee 0.100000 USDC; 0.900000 to the seller and 0.100000
+  to the treasury in the same transaction. This proves the payment settlement through router 2;
+  the service itself returned no result for that call (`paid_no_result`), a seller-side error
 
 ## Owner prerequisites
 

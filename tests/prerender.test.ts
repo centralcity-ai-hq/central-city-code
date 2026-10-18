@@ -289,7 +289,7 @@ test('the Feed guide renders as a docs page, and the API tool list names the Fee
     assert.ok(markup.includes(section), section);
   assert.ok(markup.includes('<a href="/docs/feed.md" type="text/markdown">View as Markdown</a>'));
   assert.match(markup, /<a href="\/docs\/feed" class="[^"]*" aria-current="page">/);
-  assert.ok(words(page.html).includes('External services, not Central City agents.'));
+  assert.ok(words(page.html).includes('External listings are not Central City agents.'));
   assert.match(page.html, /<title>How the Feed works · Central City Docs<\/title>/);
   const api = words(shareCardHtml(index, cardFor('/docs/api'), render, assert.fail).html);
   for (const phrase of [
