@@ -15,7 +15,7 @@
         "path": "integrations/claude-code/central-city"
       },
       "description": "Every AI. One room. Create, host and join Central City rooms over MCP: read and post, mentions, room tasks and private messages. Join one room without an account from an invite link, or sign in with OAuth for your own workspace. Also plans and creates zero-cost agent teams.",
-      "version": "0.10.0",
+      "version": "0.11.0",
       "author": {
         "name": "Central City contributors"
       },

@@ -1,4 +1,5 @@
 import { test, expect, type Locator, type Page } from '@playwright/test';
+import { signedOutSession } from './landing-html';
 import { gotoMounted } from './mounted';
 
 /** A bounding box, waiting out the moment it is null while the prerendered copy is swapped for the live page. */
@@ -9,13 +10,21 @@ async function box(locator: Locator) {
 }
 
 /*
- * The v8 landing (the approved mockup): hero with
- * the live agent count and the hero video, "Your room never sleeps" with its video, and
- * "Connect your AI in 30 seconds".
+ * The v10 landing (src/Landing.tsx): the hero with its live numbers, "Listed on", the sections
+ * Rooms, Passports and Always on with their videos, and "Connect your AI in 30 seconds."
+ * e2e/home-v10.spec.ts covers the live numbers, "Listed on" and the section order in detail.
  */
 
 const HEADLINE = 'Every AI. One room.';
-const SUBLINE = 'Central City is where the world’s AI agents meet.';
+/** The link previews' description (index.html). */
+const DESCRIPTION = 'Central City is where the world’s AI agents meet.';
+const SUBLINE =
+  'Claude, ChatGPT, Gemini and your own agents work together in shared rooms, carry a passport on Base and pay each other for services in USDC.';
+
+// An installation with an owner, so the hero shows its live numbers (not the setup copy).
+test.beforeEach(async ({ page }) => {
+  await signedOutSession(page);
+});
 
 const hero = (page: Page) => page.getByRole('region', { name: HEADLINE });
 
@@ -26,30 +35,29 @@ test('landing hero: one headline, Sign up and Explore open source, and its calls
   page.on('pageerror', (error) => errors.push(error.message));
   await gotoMounted(page, '/');
   await expect(page).toHaveTitle(`Central City · ${HEADLINE}`);
-  // The approved sub-line leads the hero; link previews carry the same words (index.html).
+  // Link previews carry the page's description (index.html).
   for (const selector of [
     'meta[name="description"]',
     'meta[property="og:description"]',
     'meta[name="twitter:description"]',
   ])
-    await expect(page.locator(selector)).toHaveAttribute('content', SUBLINE);
+    await expect(page.locator(selector)).toHaveAttribute('content', DESCRIPTION);
   for (const selector of ['meta[property="og:title"]', 'meta[name="twitter:title"]'])
     await expect(page.locator(selector)).toHaveAttribute('content', `Central City · ${HEADLINE}`);
 
   await expect(hero(page).getByRole('heading', { level: 1, name: HEADLINE })).toBeVisible();
   await expect(page.getByRole('heading', { level: 1 })).toHaveCount(1);
-  await expect(hero(page).getByText('Open protocol', { exact: true })).toBeVisible();
-  await expect(hero(page).locator('.cc-landing-sub').first()).toHaveText(SUBLINE);
-  await expect(
-    hero(page).getByText('Open protocol and toolkit · Agent count verifiable by anyone', {
-      exact: true,
-    }),
-  ).toBeVisible();
+  await expect(hero(page).getByText('Open protocol for AI agents', { exact: true })).toBeVisible();
+  await expect(hero(page).locator('.cc-landing-sub')).toHaveText(SUBLINE);
 
-  // One filled button in the hero, plus one secondary; the ticker's "Verify here"
-  // is the only other link.
+  // One filled button in the hero, plus one secondary; the live numbers' "Verify on Base" is the
+  // only other link.
   await expect(hero(page).locator('.button.primary')).toHaveCount(1);
-  const actions = hero(page).getByRole('link').filter({ hasNotText: 'Verify here' });
+  await expect(hero(page).getByRole('link', { name: 'Verify on Base' })).toHaveAttribute(
+    'href',
+    '/explorer/calls',
+  );
+  const actions = hero(page).getByRole('link').filter({ hasNotText: 'Verify on Base' });
   await expect(actions).toHaveText(['Sign up', 'Explore open source']);
   await expect(hero(page).getByRole('link', { name: 'Sign up' })).toHaveAttribute(
     'href',
@@ -86,7 +94,7 @@ test('landing hero: one headline, Sign up and Explore open source, and its calls
   expect(errors).toEqual([]);
 });
 
-test('Your room never sleeps: its video on the left, copy and Meet Elric on the right, then Invite your AI', async ({
+test('Your room never sleeps: its video on the left, copy and Meet Elric on the right; Invite your AI opens Connect', async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -95,8 +103,8 @@ test('Your room never sleeps: its video on the left, copy and Meet Elric on the 
   await expect(section).toHaveAttribute('id', 'how');
   await expect(section.getByText(/Time zones don’t matter here\./)).toBeVisible();
   await expect(section.getByRole('link', { name: 'Meet Elric' })).toHaveAttribute('href', '/elric');
-  const media = await box(section.locator('.cc-lp-hero-media'));
-  const copy = await box(section.locator('.cc-lp-feature-copy'));
+  const media = await box(section.locator('.cc-feat-media'));
+  const copy = await box(section.locator('.cc-feat-copy'));
   expect(media.x + media.width).toBeLessThanOrEqual(copy.x + 1);
   const video = section.locator('video');
   await expect(video).toHaveAttribute('preload', 'none');
@@ -106,11 +114,8 @@ test('Your room never sleeps: its video on the left, copy and Meet Elric on the 
   await expect(page.locator('.cc-lp-card')).toHaveCount(0);
   expect(await section.innerText()).not.toContain('→');
 
-  const cta = page.getByRole('region', { name: 'Connect your AI in 30 seconds' });
-  await expect(cta.getByRole('link', { name: 'View documentation' })).toHaveAttribute(
-    'href',
-    '/docs',
-  );
+  const cta = page.getByRole('region', { name: 'Connect your AI in 30 seconds.' });
+  await expect(cta.getByRole('link', { name: 'Read the docs' })).toHaveAttribute('href', '/docs');
   // Invite your AI opens the Connect page while signed out (the product owner, 12 Oct).
   await cta.getByRole('link', { name: 'Invite your AI' }).click();
   await expect(page).toHaveURL(/\/connect$/);
@@ -129,8 +134,8 @@ test('Every agent deserves a passport: copy and Explore agents on Base on the le
     'href',
     '/explorer/base',
   );
-  const copy = await box(section.locator('.cc-lp-feature-copy'));
-  const media = await box(section.locator('.cc-lp-hero-media'));
+  const copy = await box(section.locator('.cc-feat-copy'));
+  const media = await box(section.locator('.cc-feat-media'));
   expect(copy.x + copy.width).toBeLessThanOrEqual(media.x + 1);
   const video = section.locator('video');
   await expect(video).toHaveAttribute('preload', 'none');
@@ -138,77 +143,91 @@ test('Every agent deserves a passport: copy and Explore agents on Base on the le
   await section.scrollIntoViewIfNeeded();
   await expect(video).toHaveAttribute('src', '/brand/hero/central-city-passport.mp4');
   expect(await section.innerText()).not.toContain('→');
-  // After "Your room never sleeps", before "Connect your AI in 30 seconds".
+  // After "Every AI at the same table.", before "Your room never sleeps." and the call to action.
   const order = await page
     .locator('main section[aria-labelledby]')
     .evaluateAll((all) => all.map((el) => el.getAttribute('aria-labelledby')));
-  expect(order.indexOf('passport-title')).toBe(order.indexOf('how-title') + 1);
-  expect(order.indexOf('cta-title')).toBe(order.indexOf('passport-title') + 1);
+  expect(order.indexOf('passport-title')).toBe(order.indexOf('room-title') + 1);
+  expect(order.indexOf('how-title')).toBe(order.indexOf('passport-title') + 1);
+  expect(order.indexOf('cta-title')).toBe(order.indexOf('how-title') + 1);
 });
 
-test('landing fits 360 px with the primary action full width', async ({ page }) => {
+test('landing fits 360 px: the two actions fill the column and are tall enough to tap', async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 360, height: 780 });
   await gotoMounted(page, '/');
-  const primary = hero(page).getByRole('link', { name: 'Sign up' });
-  await expect(primary).toBeVisible();
-  // The box is null for a moment while the prerendered copy is swapped for the live page.
-  await expect
-    .poll(async () => (await primary.boundingBox())?.width ?? 0)
-    .toBeGreaterThanOrEqual(360 - 2 * 16 - 1);
-  expect((await box(primary)).height).toBeGreaterThanOrEqual(44);
+  const actions = hero(page).locator('.hero-actions .button');
+  await expect(actions).toHaveText(['Sign up', 'Explore open source']);
+  const first = await box(actions.first());
+  const last = await box(actions.last());
+  // Inside the 16 px gutters, together spanning the column (one row or one each).
+  expect(first.x).toBeGreaterThanOrEqual(15.5);
+  expect(last.x + last.width).toBeLessThanOrEqual(360 - 15.5);
+  expect(last.x + last.width - first.x).toBeGreaterThanOrEqual(360 - 2 * 20 - 1);
+  for (const action of [first, last]) expect(action.height).toBeGreaterThanOrEqual(44);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
 
-test('hero: copy on the left and the product video on the right, sized like claude.com', async ({
+test('Rooms: the product video loops muted left of its copy, and can be paused', async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await gotoMounted(page, '/');
-  const copy = hero(page).locator('.cc-lp-hero-copy');
-  const frame = hero(page).locator('.cc-lp-hero-frame');
+  // The hero itself has no video in v10.
+  await expect(hero(page).locator('video')).toHaveCount(0);
+  const section = page.getByRole('region', { name: 'Every AI at the same table.' });
+  await expect(section).toHaveAttribute('id', 'room');
+  const frame = section.locator('.cc-lp-hero-frame');
   const video = frame.locator('video');
-  await expect(video).toHaveAttribute('src', '/brand/hero/central-city-hero.mp4');
   await expect(video).toHaveAttribute('preload', 'none');
+  await expect(video).toHaveAttribute('poster', '/brand/hero/central-city-hero-poster.jpg');
+  await section.scrollIntoViewIfNeeded();
+  await expect(video).toHaveAttribute('src', '/brand/hero/central-city-hero.mp4');
   expect(await video.evaluate((v: HTMLVideoElement) => v.muted && v.loop)).toBe(true);
   // Visitors can stop the loop (WCAG 2.2.2).
-  const pause = frame.getByRole('button', { name: 'Pause video' });
-  await pause.click();
+  await frame.getByRole('button', { name: 'Pause video' }).click();
   await expect(frame.getByRole('button', { name: 'Play video' })).toBeVisible();
   expect(await video.evaluate((v: HTMLVideoElement) => v.paused)).toBe(true);
-  const c = await box(copy);
-  const f = await box(frame);
-  // Two columns: the copy sits left of the video.
-  expect(c.x + c.width).toBeLessThanOrEqual(f.x + 1);
-  // claude.com at 1440 x 900: a 605 x 756 frame (1080:1350, fits 100svh - 9rem).
-  expect(Math.round(f.width)).toBeGreaterThanOrEqual(600);
-  expect(Math.round(f.width)).toBeLessThanOrEqual(610);
-  expect(f.height / f.width).toBeCloseTo(1350 / 1080, 2);
+  const media = await box(section.locator('.cc-feat-media'));
+  const copy = await box(section.locator('.cc-feat-copy'));
+  expect(media.x + media.width).toBeLessThanOrEqual(copy.x + 1);
+  await expect(section.getByRole('link', { name: 'Invite your AI' })).toHaveAttribute(
+    'href',
+    '/connect',
+  );
   // No old room picture.
   await expect(page.getByText('Example room')).toHaveCount(0);
-
-  // Below 1024 px the video steps aside, as on claude.com.
-  await page.setViewportSize({ width: 768, height: 1000 });
-  await expect(frame).toBeHidden();
 });
 
-test('hero video: phones download nothing, reduced motion keeps the poster', async ({ page }) => {
+test('section videos: phones download nothing, reduced motion keeps the posters', async ({
+  page,
+}) => {
   const fetched: string[] = [];
   page.on('request', (request) => {
     if (request.url().endsWith('.mp4')) fetched.push(request.url());
   });
+  const videos = page.locator('main video');
+  const scrollThrough = async () => {
+    await expect(videos).toHaveCount(3);
+    for (const video of await videos.all()) await video.scrollIntoViewIfNeeded();
+    await page.waitForTimeout(500);
+  };
   await page.setViewportSize({ width: 390, height: 844 });
   await gotoMounted(page, '/');
-  await expect(hero(page)).toBeVisible();
-  await page.waitForTimeout(500);
+  await scrollThrough();
   expect(fetched).toEqual([]);
-  await expect(hero(page).locator('video')).not.toHaveAttribute('src', /./);
+  for (const video of await videos.all()) {
+    await expect(video).not.toHaveAttribute('src', /./);
+    await expect(video).toHaveAttribute('poster', /\.jpg$/);
+  }
 
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.setViewportSize({ width: 1440, height: 900 });
   await gotoMounted(page, '/');
-  await page.waitForTimeout(500);
+  await scrollThrough();
   expect(fetched).toEqual([]);
-  await expect(hero(page).getByRole('button', { name: /video/ })).toHaveCount(0);
+  await expect(page.locator('main').getByRole('button', { name: /video/ })).toHaveCount(0);
 });
 
 test('landing follows the theme: the device setting by default, then the header toggle', async ({

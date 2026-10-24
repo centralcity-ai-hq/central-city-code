@@ -14,11 +14,16 @@ import { PAID_CALLS_RECENT_MAX } from '../shared/paid-calls';
  *
  * AgentTicker shows the last number this browser saw (localStorage) until the first response
  * arrives. Only the public number and its time are stored; any storage failure (private mode,
- * blocked site data) simply means no stored value.
+ * blocked site data) simply means no stored value. The homepage's other live numbers (value
+ * settled, paid service calls, Base agents) are kept the same way under their own key
+ * (LIVE_NUMBERS_STORAGE_KEY), so a returning visitor sees the last known numbers at once instead
+ * of a dash.
  */
 
 export const AGENT_COUNT_URL = '/api/public/stats';
 export const AGENT_COUNT_STORAGE_KEY = 'cc-agent-count';
+/** The homepage's other live numbers, last seen by this browser (readStoredLiveNumbers). */
+export const LIVE_NUMBERS_STORAGE_KEY = 'cc-live-numbers';
 /** The shared poll, while the tab is visible (the response is fresh 15 s at the edge). */
 export const STATS_POLL_MS = 15_000;
 /**
@@ -27,6 +32,30 @@ export const STATS_POLL_MS = 15_000;
  * from a search result) gets its numbers in about a second, not one full poll later.
  */
 export const STATS_FIRST_RETRY_MS = 1_000;
+/**
+ * An answer that leaves out a number (paid_calls, its value_settled_raw, or base_agents: a cold
+ * server instance, cached at the edge for only a couple of seconds) is read again sooner: after
+ * this, then twice as long, PARTIAL_RETRIES times, then at the normal poll. A known number is never
+ * blanked meanwhile (a missing field keeps it). A full answer resets the count; a server that
+ * leaves a field out for good (switched off) costs only these few extra reads per page view.
+ */
+export const STATS_PARTIAL_RETRY_MS = 2_000;
+export const STATS_PARTIAL_RETRIES = 2;
+
+/** Whether a stats answer leaves out any of the homepage's numbers. */
+export function statsIncomplete(stats: Pick<StatsResponse, 'paid' | 'base'>): boolean {
+  return !stats.paid || stats.paid.valueRaw === null || !stats.base;
+}
+
+/**
+ * The wait before the next load after an answer: sooner while answers come in incomplete
+ * (`partial` incomplete answers in a row, this one included), else the normal poll.
+ */
+export function nextStatsDelay(partial: number, pollMs: number): number {
+  if (partial < 1 || partial > STATS_PARTIAL_RETRIES) return pollMs;
+  return Math.min(pollMs, STATS_PARTIAL_RETRY_MS * 2 ** (partial - 1));
+}
+
 /** A prefetched response older than this is not used (the poller fetches its own). */
 const PREFETCH_MAX_AGE_MS = 10_000;
 
@@ -53,6 +82,8 @@ export interface PaidCalls {
   recentMs: number[];
   /** False when more recent payments may exist than are listed. */
   recentComplete: boolean;
+  /** Total value settled, USDC base units as decimal text (`value_settled_raw`); null if absent. */
+  valueRaw: string | null;
 }
 
 /** The `paid_calls` field of a stats response, or null when it is missing or not readable. */
@@ -65,6 +96,7 @@ export function parsePaidCalls(value: unknown): PaidCalls | null {
     as_of: asOfText,
     recent_ms: recentMs,
     recent_complete: recentComplete,
+    value_settled_raw: valueSettledRaw,
   } = field as Record<string, unknown>;
   const asOf = typeof asOfText === 'string' ? Date.parse(asOfText) : NaN;
   if (!Number.isSafeInteger(total) || (total as number) < 0 || !Number.isFinite(asOf)) return null;
@@ -78,6 +110,10 @@ export function parsePaidCalls(value: unknown): PaidCalls | null {
     asOf,
     recentMs: recent,
     recentComplete: recentComplete !== false,
+    valueRaw:
+      typeof valueSettledRaw === 'string' && /^(0|[1-9][0-9]{0,77})$/.test(valueSettledRaw)
+        ? valueSettledRaw
+        : null,
   };
 }
 
@@ -99,12 +135,43 @@ export function parseBaseAgents(value: unknown): BaseAgents | null {
   return { total: total as number, asOf };
 }
 
+/** Growth per second of the public numbers (`value` in USDC base units). */
+export interface StatsRates {
+  agents?: number;
+  paid?: number;
+  base?: number;
+  valueRaw?: number;
+}
+
+/** The optional `rates` field: only finite, non-negative numbers are kept. */
+export function parseStatsRates(value: unknown): StatsRates {
+  const field =
+    value && typeof value === 'object' ? (value as Record<string, unknown>).rates : null;
+  if (!field || typeof field !== 'object') return {};
+  const read = (key: string) => {
+    const n = (field as Record<string, unknown>)[key];
+    return typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : undefined;
+  };
+  const out: StatsRates = {};
+  const agents = read('ai_agents');
+  const paid = read('paid_calls');
+  const base = read('base_agents');
+  const valueRaw = read('value_settled_raw');
+  if (agents !== undefined) out.agents = agents;
+  if (paid !== undefined) out.paid = paid;
+  if (base !== undefined) out.base = base;
+  if (valueRaw !== undefined) out.valueRaw = valueRaw;
+  return out;
+}
+
 /** One stats response: the counts, the response's Age header and when it arrived. */
 export interface StatsResponse {
   agents: AgentCount | null;
   paid: PaidCalls | null;
   /** The Base agents number (`base_agents`), when the server sent it. */
   base: BaseAgents | null;
+  /** Growth per second of each number, where the server knows it (`rates`); else empty. */
+  rates?: StatsRates;
   /** The edge's Age header in seconds (0 when missing). */
   ageS: number;
   /** Date.now() when the response arrived. */
@@ -125,6 +192,7 @@ export function fetchStats(signal?: AbortSignal): Promise<StatsResponse | null> 
       agents: parseAgentCount(body),
       paid: parsePaidCalls(body),
       base: parseBaseAgents(body),
+      rates: parseStatsRates(body),
       ageS: Number.isFinite(age) && age > 0 ? age : 0,
       arrived: Date.now(),
     };
@@ -199,6 +267,8 @@ function startPoller(pollMs: number): () => void {
   /** No load has succeeded yet: failures retry sooner and a return to view loads at once. */
   let pending = true;
   let retryMs = STATS_FIRST_RETRY_MS;
+  /** Incomplete answers in a row (statsIncomplete): read again sooner, a bounded few times. */
+  let partial = 0;
   const schedule = (delay: number) => {
     clearTimeout(timer);
     if (!stopped && !document.hidden) timer = setTimeout(load, delay);
@@ -225,6 +295,9 @@ function startPoller(pollMs: number): () => void {
         if (pending && !mine.signal.aborted) {
           schedule(Math.min(retryMs, pollMs));
           retryMs *= 2;
+        } else if (stats) {
+          partial = statsIncomplete(stats) ? partial + 1 : 0;
+          schedule(nextStatsDelay(partial, pollMs));
         } else schedule(pollMs);
       }
     }
@@ -310,7 +383,80 @@ export function storeAgentCount(count: AgentCount): void {
   }
 }
 
+/**
+ * The homepage's live numbers other than the agent count, as this browser last saw them. Each
+ * field is kept with the time of the answer that carried it, and a field one answer left out
+ * keeps its stored value (storeLiveNumbers merges). A validated zero is kept like any number: it
+ * was a real answer (a correction), and showing an older, higher number instead would be wrong.
+ */
+export interface StoredLiveNumbers {
+  paid: { total: number; at: number } | null;
+  base: { total: number; at: number } | null;
+  /** Total value settled, USDC base units as decimal text (like PaidCalls.valueRaw). */
+  value: { raw: string; at: number } | null;
+}
+
+const EMPTY_LIVE_NUMBERS: StoredLiveNumbers = { paid: null, base: null, value: null };
+
+function storedCount(value: unknown): { total: number; at: number } | null {
+  if (!value || typeof value !== 'object') return null;
+  const { total, at } = value as { total?: unknown; at?: unknown };
+  if (!Number.isSafeInteger(total) || (total as number) < 0) return null;
+  if (typeof at !== 'number' || !Number.isFinite(at)) return null;
+  return { total: total as number, at };
+}
+
+function storedValue(value: unknown): { raw: string; at: number } | null {
+  if (!value || typeof value !== 'object') return null;
+  const { raw, at } = value as { raw?: unknown; at?: unknown };
+  if (typeof raw !== 'string' || !/^(0|[1-9][0-9]{0,77})$/.test(raw)) return null;
+  if (typeof at !== 'number' || !Number.isFinite(at)) return null;
+  return { raw, at };
+}
+
+/** The stored live numbers; every field null when nothing is stored or storage fails. */
+export function readStoredLiveNumbers(): StoredLiveNumbers {
+  try {
+    const raw = window.localStorage.getItem(LIVE_NUMBERS_STORAGE_KEY);
+    if (!raw) return EMPTY_LIVE_NUMBERS;
+    const value = JSON.parse(raw) as Record<string, unknown> | null;
+    if (!value || typeof value !== 'object') return EMPTY_LIVE_NUMBERS;
+    return {
+      paid: storedCount(value.paid),
+      base: storedCount(value.base),
+      value: storedValue(value.value),
+    };
+  } catch {
+    return EMPTY_LIVE_NUMBERS;
+  }
+}
+
+/**
+ * Keeps the numbers one stats answer carried. A field the answer left out keeps what is stored;
+ * a stored field from a later answer than this one (another tab) is never replaced by it.
+ */
+export function storeLiveNumbers(stats: Pick<StatsResponse, 'paid' | 'base'>): void {
+  const stored = readStoredLiveNumbers();
+  const newer = <T extends { at: number }>(next: T | null, kept: T | null) =>
+    next && (!kept || next.at >= kept.at) ? next : kept;
+  const next: StoredLiveNumbers = {
+    paid: newer(stats.paid ? { total: stats.paid.total, at: stats.paid.asOf } : null, stored.paid),
+    base: newer(stats.base ? { total: stats.base.total, at: stats.base.asOf } : null, stored.base),
+    value: newer(
+      stats.paid?.valueRaw ? { raw: stats.paid.valueRaw, at: stats.paid.asOf } : null,
+      stored.value,
+    ),
+  };
+  if (!next.paid && !next.base && !next.value) return;
+  try {
+    window.localStorage.setItem(LIVE_NUMBERS_STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    // Storage unavailable: the next visit starts from the build's numbers or a dash.
+  }
+}
+
 let fromBuild: AgentCount | null = null;
+let baseFromBuild: BaseAgents | null = null;
 let buildShown = false;
 
 /**
@@ -324,14 +470,33 @@ export function setBuildAgentCount(count: AgentCount | null): void {
 }
 
 /**
+ * The Base agents number the build put into the landing's HTML, like the agent count: set by the
+ * prerender before it renders and in the browser by captureBuildAgentCount. Only a positive
+ * number is baked (a 0 in the HTML would read as broken, and is never shown before an answer).
+ */
+export function setBuildBaseAgents(base: BaseAgents | null): void {
+  baseFromBuild =
+    base && Number.isSafeInteger(base.total) && base.total > 0 && Number.isFinite(base.asOf)
+      ? base
+      : null;
+}
+
+/**
  * Reads the number from the prerendered ticker (`data-build-count`, `data-build-at`), once,
  * before the app mounts (src/main.tsx). A page without one (the build had no count) has none.
+ * The Base agents cell's build number (`data-build-base`, `data-build-base-at`) is read with it.
  */
 export function captureBuildAgentCount(root: ParentNode): void {
   const node = root.querySelector('[data-agent-ticker][data-build-count]');
   const total = Number(node?.getAttribute('data-build-count') || NaN);
   const at = Date.parse(node?.getAttribute('data-build-at') ?? '');
   setBuildAgentCount(Number.isSafeInteger(total) && Number.isFinite(at) ? { total, at } : null);
+  const baseNode = root.querySelector('[data-stat="base"][data-build-base]');
+  const base = Number(baseNode?.getAttribute('data-build-base') || NaN);
+  const baseAt = Date.parse(baseNode?.getAttribute('data-build-base-at') ?? '');
+  setBuildBaseAgents(
+    Number.isSafeInteger(base) && Number.isFinite(baseAt) ? { total: base, asOf: baseAt } : null,
+  );
 }
 
 /**
@@ -341,6 +506,11 @@ export function captureBuildAgentCount(root: ParentNode): void {
  */
 export function prerenderedAgentCount(): AgentCount | null {
   return buildShown ? null : fromBuild;
+}
+
+/** The build's Base agents number while the prerendered markup is the one on screen. */
+export function prerenderedBaseAgents(): BaseAgents | null {
+  return buildShown ? null : baseFromBuild;
 }
 
 /** The first ticker has mounted over the prerendered one. */

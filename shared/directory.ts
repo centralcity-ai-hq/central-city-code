@@ -237,6 +237,12 @@ export interface PassportServicePayments {
   totalFeeUsdc: string;
   /** The time of the Base block that settled the last of those payments, ms; null when none. */
   lastPaidAt: number | null;
+  /**
+   * The agent's first purchase, paid by Central City (the sponsored first purchase), apart from the
+   * totals above (the agent's own wallet paid nothing for it); null when it has none. Optional:
+   * servers from before it leave it out.
+   */
+  sponsoredFirstPurchase?: { priceUsdc: string; paidAt: number } | null;
 }
 
 /**

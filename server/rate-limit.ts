@@ -224,6 +224,9 @@ export const FAIL_CLOSED_PREFIXES: readonly string[] = [
   // agent's money. Never unbounded during an outage.
   'feed-pay-quote',
   'feed-pay-call',
+  // The sponsored first purchase's calls (server/feed/pay/sponsored-routes.ts).
+  'sfp-call',
+  'sfp-credit',
   'feed-pay-agents',
   'feed-pay-mcp',
   // The services:sell tools (server/feed/offers/tools.ts): writes to public listings.

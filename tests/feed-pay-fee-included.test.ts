@@ -1084,6 +1084,53 @@ test('an expiry that comes after the claim changes nothing: the operation is fol
   assert.equal(op?.neverSent, false);
 });
 
+test('a reserved call waiting for another call’s top-up that stays in flight ends after the top-up retry window, nothing signed', async (t) => {
+  const f = await feesOn(t, behind());
+  await f.limit();
+  const { id } = await listOffer(f, { priceRaw: '50000' });
+  const walletBefore = f.base.balanceOf(f.wallet);
+  // Nothing is mined: the first call's top-up is sent and stays in flight.
+  f.base.state.autoLand = false;
+  const first = await payOffer(f, id);
+  assert.equal(first.statusCode, 200, first.body);
+  assert.equal(await topUpInFlight(f.db, f.walletId), true);
+  // A second call of the same wallet waits for it instead of pulling a second top-up.
+  const q = await quoteOf(f, id);
+  assert.equal(q.statusCode, 200, q.body);
+  const body = {
+    agentId: f.agentId,
+    inputs: HELLO,
+    quoteId: q.json().quoteId,
+    maxAmountRaw: q.json().amount.raw,
+    maxTotalRaw: q.json().total.raw,
+    idempotencyKey: randomUUID(),
+  };
+  const second = await f.callService(body, id);
+  assert.equal(second.statusCode, 200, second.body);
+  const secondId = second.json().callId as string;
+  const stateOf = async () =>
+    (
+      await f.sql<{ state: string }>('SELECT state FROM feed_pay_calls WHERE call_id = $1', [
+        secondId,
+      ])
+    )[0]!.state;
+  assert.equal(await stateOf(), 'reserved', 'within the window it waits');
+  // Asked again within the window: still waiting.
+  f.advance(5 * 60_000);
+  await f.callService(body, id);
+  assert.equal(await stateOf(), 'reserved');
+  // Past the window the wait ends: refused, nothing signed or moved, the in-flight top-up untouched.
+  f.advance(6 * 60_000);
+  const late = await f.callService(body, id);
+  assert.equal(late.statusCode, 200, late.body);
+  assert.equal(await stateOf(), 'refused');
+  const call = (await f.status(secondId)).json() as FeedPayCall;
+  assert.equal(call.failure?.code, 'float_topup_failed', JSON.stringify(call));
+  assert.equal(call.moneyMoved, 'no');
+  assert.equal(await topUpInFlight(f.db, f.walletId), true, 'the other top-up is left alone');
+  assert.equal(f.base.balanceOf(f.wallet), walletBefore, 'nothing left the wallet');
+});
+
 test('a top-up stored but never claimed for its send: expired after the grace, its hold released, the call refused', async (t) => {
   const f = await feesOn(t, behind());
   await f.limit();
@@ -1480,3 +1527,254 @@ for (const kind of ['pay', 'top-up', 'sweep'] as const) {
     });
   });
 }
+
+test('floatHeld queuedAfter: reserved calls of one wallet hold the float first come, first paid (no mutual wait)', async (t) => {
+  const f = await feesOn(t);
+  await f.limit();
+  const { id } = await listOffer(f, { priceRaw: '50000' });
+  const ids: string[] = [];
+  for (let i = 0; i < 4; i++) {
+    const res = await payOffer(f, id);
+    assert.equal(res.statusCode, 200, res.body);
+    ids.push((await done(f, res.json().callId)).callId);
+  }
+  // Three calls stacked on one wallet, still only reserved (no payment started), in order; a
+  // fourth, newer one already paying ('calling', payment sent).
+  for (const [i, callId] of ids.slice(0, 3).entries())
+    await f.sql(
+      `UPDATE feed_pay_calls SET state = 'reserved', payment_state = NULL, fee_state = 'pending',
+         settled_block = NULL, fee_block = NULL, created_at = $2 WHERE call_id = $1`,
+      [callId, 1_000 + i],
+    );
+  await f.sql(
+    `UPDATE feed_pay_calls SET state = 'calling', payment_state = 'sent', fee_state = 'sent',
+       settled_block = NULL, fee_block = NULL, created_at = 2000 WHERE call_id = $1`,
+    [ids[3]],
+  );
+  const rows = await f.sql<{ call_id: string; payment_id: string; created_at: string }>(
+    'SELECT call_id, payment_id, created_at::text AS created_at FROM feed_pay_calls WHERE call_id = ANY($1)',
+    [ids],
+  );
+  const of = (callId: string) => rows.find((r) => r.call_id === callId)!;
+  const held = (callId: string, fifo: boolean) =>
+    floatHeld(f.db, {
+      walletId: f.walletId,
+      block: f.base.state.head,
+      excludePaymentId: of(callId).payment_id,
+      ...(fifo ? { queuedAfter: { createdAt: Number(of(callId).created_at), callId } } : {}),
+    });
+  // Each call costs 50000 (fee included). The oldest sees only the paying call ahead of it.
+  assert.equal(await held(ids[0]!, true), 50000n);
+  assert.equal(await held(ids[1]!, true), 100000n);
+  assert.equal(await held(ids[2]!, true), 150000n);
+  // Equal created_at: the tie goes by call id (the smaller id is first).
+  await f.sql('UPDATE feed_pay_calls SET created_at = 1001 WHERE call_id = ANY($1)', [
+    [ids[1], ids[2]],
+  ]);
+  const [lo, hi] = [ids[1]!, ids[2]!].sort();
+  const heldAt = (callId: string) =>
+    floatHeld(f.db, {
+      walletId: f.walletId,
+      block: f.base.state.head,
+      excludePaymentId: of(callId).payment_id,
+      queuedAfter: { createdAt: 1001, callId },
+    });
+  assert.equal(
+    await heldAt(lo!),
+    100000n,
+    'the smaller id waits only for the older call + the paying one',
+  );
+  assert.equal(await heldAt(hi!), 150000n, 'the larger id also waits for the smaller');
+  await f.sql('UPDATE feed_pay_calls SET created_at = 1002 WHERE call_id = $1', [ids[2]]);
+  // Without queuedAfter (sweeps, views) every live call still holds: three others each.
+  assert.equal(await held(ids[0]!, false), 150000n);
+  assert.equal(await held(ids[2]!, false), 150000n);
+});
+
+test('floatHeld staleBefore: a reserved call past its window that never started a top-up or a payment holds nothing, and is refused when asked again', async (t) => {
+  const f = await feesOn(t);
+  await f.limit();
+  const { id } = await listOffer(f, { priceRaw: '50000' });
+  const bodies: Parameters<typeof f.callService>[0][] = [];
+  const ids: string[] = [];
+  for (let i = 0; i < 2; i++) {
+    const q = await quoteOf(f, id);
+    assert.equal(q.statusCode, 200, q.body);
+    const body = {
+      agentId: f.agentId,
+      inputs: HELLO,
+      quoteId: q.json().quoteId,
+      maxAmountRaw: q.json().amount.raw,
+      maxTotalRaw: q.json().total.raw,
+      idempotencyKey: randomUUID(),
+    };
+    const res = await f.callService(body, id);
+    assert.equal(res.statusCode, 200, res.body);
+    bodies.push(body);
+    ids.push((await done(f, res.json().callId)).callId);
+  }
+  // One call reserved long ago (nobody asked it again), one reserved just now; neither started a
+  // top-up or a payment.
+  const at = f.clock();
+  const reserve = (callId: string, createdAt: number) =>
+    f.sql(
+      `UPDATE feed_pay_calls SET state = 'reserved', payment_state = NULL, fee_state = 'pending',
+         settled_block = NULL, fee_block = NULL, topup_move_id = NULL, topup_attempts = 0,
+         pay_attempts = 0, created_at = $2, updated_at = $2 WHERE call_id = $1`,
+      [callId, createdAt],
+    );
+  await reserve(ids[0]!, at - 11 * 60_000);
+  await reserve(ids[1]!, at - 60_000);
+  const held = (staleBefore?: number) =>
+    floatHeld(f.db, {
+      walletId: f.walletId,
+      block: f.base.state.head,
+      ...(staleBefore === undefined ? {} : { staleBefore }),
+    });
+  assert.equal(await held(), 100000n, 'without staleBefore both hold');
+  assert.equal(await held(at - 10 * 60_000), 50000n, 'the stale one holds nothing');
+  // Asked again, the stale call is refused before anything is signed.
+  const again = await f.callService(bodies[0]!, id);
+  assert.equal(again.statusCode, 200, again.body);
+  const call = await done(f, ids[0]!);
+  assert.equal(call.state, 'refused', JSON.stringify(call));
+  assert.equal(call.failure?.code, 'float_topup_failed');
+  assert.equal(call.moneyMoved, 'no');
+});
+
+test('a new call is not refused insufficient_funds for float held only by a stale reserved call', async (t) => {
+  const f = await feesOn(t);
+  await f.limit();
+  const { id } = await listOffer(f, { priceRaw: '50000' });
+  const first = await payOffer(f, id);
+  assert.equal(first.statusCode, 200, first.body);
+  const staleId = (await done(f, first.json().callId)).callId;
+  // That call left reserved long ago and never asked again; the pot holds exactly one price and
+  // the wallet nothing.
+  await f.sql(
+    `UPDATE feed_pay_calls SET state = 'reserved', payment_state = NULL, fee_state = 'pending',
+       settled_block = NULL, fee_block = NULL, topup_move_id = NULL, topup_attempts = 0,
+       pay_attempts = 0, created_at = $2, updated_at = $2 WHERE call_id = $1`,
+    [staleId, f.clock() - 11 * 60_000],
+  );
+  const spender = f.base.spender;
+  f.base.credit(spender, 50_000n - f.base.balanceOf(spender));
+  f.base.credit(f.wallet, -f.base.balanceOf(f.wallet));
+  const next = await payOffer(f, id);
+  assert.equal(next.statusCode, 200, next.body);
+  assert.equal((await done(f, next.json().callId)).state, 'result_saved');
+});
+
+test('reserved calls of one wallet made at the same moment (pot enough for one): the older takes the pot, the younger waits for it, both pay once, the pot never goes negative', async (t) => {
+  const f = await feesOn(t);
+  await f.limit();
+  const { id } = await listOffer(f, { priceRaw: '50000' });
+  // A pot target above the default (scopedPot, the D2 wait) and a pot of 0.07 USDC: enough for one
+  // 0.05 call, not two. Router payments stay sent (unmined) while holdFee is set.
+  await f.sql(
+    `INSERT INTO feed_pay_agent_settings (wallet_id, float_target_raw, changed_by, changed_at, updated_at)
+     VALUES ($1, 2000000, 'test', 1, 1)
+     ON CONFLICT (wallet_id) DO UPDATE SET float_target_raw = 2000000`,
+    [f.walletId],
+  );
+  const spender = f.base.spender;
+  f.base.credit(spender, 70_000n - f.base.balanceOf(spender));
+  f.base.state.holdFee = true;
+  const bodyFor = async () => {
+    const q = await quoteOf(f, id);
+    assert.equal(q.statusCode, 200, q.body);
+    return {
+      agentId: f.agentId,
+      inputs: HELLO,
+      quoteId: q.json().quoteId,
+      maxAmountRaw: q.json().amount.raw,
+      maxTotalRaw: q.json().total.raw,
+      idempotencyKey: randomUUID(),
+    };
+  };
+  const [bodyA, bodyB] = [await bodyFor(), await bodyFor()];
+  // Both reserved at the same moment, both workers stepping together (as the stress runner did).
+  const [resA, resB] = await Promise.all([f.callService(bodyA, id), f.callService(bodyB, id)]);
+  assert.equal(resA.statusCode, 200, resA.body);
+  assert.equal(resB.statusCode, 200, resB.body);
+  const rows = await f.sql<{ call_id: string; state: string; topup_move_id: string | null }>(
+    `SELECT call_id, state, topup_move_id FROM feed_pay_calls WHERE call_id = ANY($1)
+     ORDER BY created_at, call_id`,
+    [[resA.json().callId, resB.json().callId]],
+  );
+  const [older, younger] = rows as [(typeof rows)[number], (typeof rows)[number]];
+  // The older is never behind the younger: it is paying (its own top-up toward the pot target if it
+  // wants one) whatever the younger does, and nobody waits on the other forever.
+  assert.equal(older.state, 'calling', JSON.stringify(rows));
+  assert.ok(['reserved', 'calling'].includes(younger.state), JSON.stringify(rows));
+  // Mined; the younger asked again pays (from a top-up of the wallet: the pot is short now).
+  const charges0 = f.base.state.feeCharges.length;
+  f.base.state.holdFee = false;
+  for (const hash of [...f.base.state.pool.keys()]) f.base.land(hash);
+  const bodyOfYounger = younger.call_id === resA.json().callId ? bodyA : bodyB;
+  const PAID = new Set(['settled', 'result_saved', 'paid_no_result']);
+  const stateOf = async (callId: string) =>
+    (
+      await f.sql<{ state: string }>('SELECT state FROM feed_pay_calls WHERE call_id = $1', [
+        callId,
+      ])
+    )[0]!.state;
+  for (let i = 0; i < 6 && !PAID.has(await stateOf(younger.call_id)); i++) {
+    f.advance(30_000);
+    await f.callService(bodyOfYounger, id);
+    await done(f, younger.call_id).catch(() => null);
+    for (const hash of [...f.base.state.pool.keys()]) f.base.land(hash);
+  }
+  await done(f, older.call_id);
+  await done(f, younger.call_id);
+  assert.ok(PAID.has(await stateOf(older.call_id)), 'the older paid');
+  assert.ok(PAID.has(await stateOf(younger.call_id)), 'the younger paid');
+  assert.ok(f.base.balanceOf(spender) >= 0n, 'the pot never goes below zero');
+  assert.ok(f.base.state.feeCharges.length - charges0 <= 2, 'each paid at most once');
+  // Charged oldest first.
+  const refs = f.base.state.feeCharges.map((c) => c.ref.toLowerCase());
+  const refOf = (callId: string) => keccak256(stringToHex(callId)).toLowerCase();
+  assert.ok(
+    refs.indexOf(refOf(older.call_id)) < refs.indexOf(refOf(younger.call_id)),
+    'oldest first',
+  );
+  assert.equal(
+    new Set(f.base.state.feeCharges.map((c) => c.ref.toLowerCase())).size,
+    f.base.state.feeCharges.length,
+    'no call charged twice',
+  );
+});
+
+test('a delivered call waiting only for finality is left out of the sweep until FEED_PAY_FINALITY_WAIT_MS', async (t) => {
+  const f = await feesOn(t);
+  await f.limit();
+  f.base.state.finalizeOnLand = false;
+  const offer = await listOffer(f);
+  const res = await payOffer(f, offer.id);
+  const call = await done(f, res.json().callId);
+  assert.equal(call.state, 'result_saved', 'delivered at inclusion');
+  const marks = async () =>
+    (
+      await f.sql<{ checked_at: string; pay_final_at: string | null; fee_verified: boolean }>(
+        'SELECT checked_at::text AS checked_at, pay_final_at::text AS pay_final_at, fee_verified FROM feed_pay_calls WHERE call_id = $1',
+        [call.callId],
+      )
+    )[0]!;
+  // The ledger scan has the fee row (it marks it in production; here it is set as it would be).
+  await f.sql('UPDATE feed_pay_calls SET fee_verified = true WHERE call_id = $1', [call.callId]);
+  f.advance(2 * 60_000);
+  await f.cron();
+  const before = await marks();
+  assert.equal(before.pay_final_at, null);
+  // Base finalizes now, but the call settled under FEED_PAY_FINALITY_WAIT_MS ago: not checked.
+  f.base.state.head += 10n;
+  f.advance(2 * 60_000);
+  await f.cron();
+  const waiting = await marks();
+  assert.equal(waiting.checked_at, before.checked_at, 'not taken by the sweep');
+  assert.equal(waiting.pay_final_at, null);
+  // Past the wait: one check records the finality.
+  f.advance(10 * 60_000);
+  await f.cron();
+  assert.ok((await marks()).pay_final_at !== null, 'finality recorded');
+});

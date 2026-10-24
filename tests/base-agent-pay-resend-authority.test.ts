@@ -118,6 +118,8 @@ function fakeBase() {
     sends: [] as Hex[],
     /** The bundler definitively refuses the send (as an HTTP 429 / 5xx would): it keeps nothing. */
     sendRefused: false,
+    /** The bundler proves it never sent it (our own bundler's drain, NeverBroadcastError). */
+    sendNeverBroadcast: false,
     landed: new Map<Hex, { txHash: Hex; blockNumber: bigint; sender: Address; nonce: bigint }>(),
     signatures: 0,
   };
@@ -222,6 +224,10 @@ function fakeBase() {
       state.sends.push(hash);
       // A definite refusal: the bundler did not take the operation and keeps nothing of it.
       if (state.sendRefused) throw new Error('HTTP 429 Too Many Requests: operation not accepted');
+      if (state.sendNeverBroadcast)
+        throw Object.assign(new Error('own bundler: draining; this operation was never sent'), {
+          neverBroadcast: true,
+        });
       if (!state.landed.has(hash)) state.pool.set(hash, op);
       return hash;
     },
@@ -679,4 +685,16 @@ test('cron path: consent withdrawn, grant revoked, limit revoke started and agen
   );
   assert.notEqual(after.reservation, 'consumed', `no USDC spent after the stops: ${evidence}`);
   assert.notEqual(after.op, 'final', `the operation never lands after the stops: ${evidence}`);
+});
+
+test('a first send the bundler proves never broadcast ends failed, not unknown forever', async (t) => {
+  const f = await setup(t);
+  await f.ready();
+  f.base.state.sendNeverBroadcast = true;
+  const res = await f.pay();
+  assert.equal(res.statusCode, 200, res.body);
+  assert.equal(f.base.state.pool.size, 0, 'the bundler holds nothing');
+  const after = await outcome(f);
+  assert.equal(after.op, 'failed');
+  assert.equal(after.opError, 'REFUSED_BEFORE_BROADCAST');
 });

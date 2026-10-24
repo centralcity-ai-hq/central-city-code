@@ -15,6 +15,7 @@ import {
   parseExcludedOperators,
   PUBLIC_STATS_CACHE_CONTROL,
   PUBLIC_STATS_EDGE_CACHE_CONTROL,
+  PUBLIC_STATS_INCOMPLETE_CACHE_CONTROL,
   PUBLIC_STATS_RATE,
   PUBLIC_STATS_TTL_MS,
   registerPublicStatsRoutes,
@@ -28,6 +29,7 @@ import {
 import {
   createPaidCallsReader,
   PAID_CALLS_CACHE_MS,
+  PAID_CALLS_COLD_READ_BUDGET_MS,
   PAID_CALLS_LAST_GOOD_MS,
   PAID_CALLS_READ_BUDGET_MS,
   PAID_CALLS_READ_SQL,
@@ -699,22 +701,35 @@ test('paid_calls is read only after the agent count has been read, never alongsi
   assert.deepEqual(order, ['agents:start', 'agents:end', 'paid:start']);
 });
 
-test('paid_calls never holds up the agent count: a slow read waits at most 250 ms, then the last good row or nothing', async (t) => {
+test('paid_calls never holds up the agent count: a slow read waits at most 250 ms (3 s with no good row yet), then the last good row or nothing', async (t) => {
   assert.equal(PAID_CALLS_READ_BUDGET_MS, 250);
-  assert.equal(PAID_CALLS_LAST_GOOD_MS, 120_000);
+  assert.equal(PAID_CALLS_COLD_READ_BUDGET_MS, 3_000);
+  assert.equal(PAID_CALLS_LAST_GOOD_MS, 60 * 60_000);
   let now = AT;
   let last: PaidCallsSnapshot | null = null;
   const slow: PaidCallsReader = {
-    read: () => new Promise((resolve) => setTimeout(() => resolve(snapshot(9)), 2_000).unref()),
+    read: () => new Promise((resolve) => setTimeout(() => resolve(snapshot(9)), 4_000).unref()),
     lastGood: () => last,
   };
   const { get } = await statsRoute(t, { paidCalls: slow, clock: () => now });
-  // No good row yet: the agent count answers within the budget, without the field.
+  // No good row yet (a cold instance): it waits up to the cold budget, then answers without the
+  // field, and that answer is not kept at the edge.
   let started = Date.now();
   let res = await get();
   let took = Date.now() - started;
-  assert.ok(took < 1_000, `answered in ${took} ms`);
+  assert.ok(took >= PAID_CALLS_COLD_READ_BUDGET_MS - 50 && took < 3_800, `answered in ${took} ms`);
   assert.deepEqual(res.json(), { ai_agents_total: 42, updated_at: new Date(AT).toISOString() });
+  assert.equal(res.headers['cache-control'], PUBLIC_STATS_INCOMPLETE_CACHE_CONTROL);
+  assert.equal(res.headers['vercel-cdn-cache-control'], PUBLIC_STATS_INCOMPLETE_CACHE_CONTROL);
+  // A cold read slower than 250 ms but inside the cold budget is waited for and served.
+  const cold: PaidCallsReader = {
+    read: () => new Promise((resolve) => setTimeout(() => resolve(snapshot(5)), 600).unref()),
+    lastGood: () => null,
+  };
+  const coldRoute = await statsRoute(t, { paidCalls: cold });
+  const coldRes = await coldRoute.get();
+  assert.equal(coldRes.json().paid_calls.total, 5);
+  assert.equal(coldRes.headers['cache-control'], PUBLIC_STATS_CACHE_CONTROL);
   // With a good row from 10 s ago: that row, as of its own read (never newer than it is).
   last = { total: 1284, recent: [AT - 11_000], dbNowMs: AT - 10_000, readAt: AT - 10_000 };
   started = Date.now();
@@ -727,7 +742,7 @@ test('paid_calls never holds up the agent count: a slow read waits at most 250 m
     recent_ms: [1_000],
     recent_complete: true,
   });
-  // A good row older than two minutes is not served.
+  // A good row older than an hour is not served.
   now = AT - 10_000 + PAID_CALLS_LAST_GOOD_MS + 1;
   assert.equal((await get()).json().paid_calls, undefined);
   // A read inside the budget is served as it is.
@@ -808,7 +823,8 @@ test('the paid calls reader: one primary-key read of chain 8453, kept 5 s, one s
   const db = await PGlite.create();
   t.after(() => db.close());
   await db.exec(`CREATE TABLE paid_call_count (chain_id integer PRIMARY KEY, total bigint NOT NULL,
-    recent bigint[] NOT NULL DEFAULT '{}', updated_at bigint NOT NULL)`);
+    recent bigint[] NOT NULL DEFAULT '{}', updated_at bigint NOT NULL,
+    value_raw numeric(78,0) NOT NULL DEFAULT 0)`);
   let now = AT;
   const reads: unknown[][] = [];
   let fail = false;

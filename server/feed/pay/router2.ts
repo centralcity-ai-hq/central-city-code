@@ -7,6 +7,7 @@
 import { FEE_ROUTER2_FLAG } from '../../../shared/protocol.js';
 import { FEE_ROUTER_MAX_TOTAL } from '../../../shared/feed-offers.js';
 import { protocolFeesEnabled, protocolRouter2FromEnv } from '../../protocol/fees/cron.js';
+import { feeRouter3Live } from './router3.js';
 
 export function feeRouter2Live(env: Record<string, string | undefined>): boolean {
   return (
@@ -19,6 +20,6 @@ export function feeRouter2Live(env: Record<string, string | undefined>): boolean
 /** Router 2's cap (100 USDC): the most an offer may cost while router 2 is live. */
 export const OFFER_PRICE_MAX_ROUTER2_RAW = 100_000_000;
 
-/** The highest offer price allowed now: router 1's cap, or router 2's while it is live. */
+/** The highest offer price allowed now: router 1's cap, or 100 USDC while router 2 or 3 is live. */
 export const offerPriceMaxRaw = (env: Record<string, string | undefined>): number =>
-  feeRouter2Live(env) ? OFFER_PRICE_MAX_ROUTER2_RAW : FEE_ROUTER_MAX_TOTAL;
+  feeRouter2Live(env) || feeRouter3Live(env) ? OFFER_PRICE_MAX_ROUTER2_RAW : FEE_ROUTER_MAX_TOTAL;

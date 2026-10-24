@@ -38,6 +38,9 @@ import {
 
 type Queryable = Pick<Database, 'query'>;
 
+/** Candidates the Explorer list reads per step before joining (newestListed). */
+export const LIST_CANDIDATES = 200;
+
 /** The newest-first order key: ERC-8004 ids count up, so a higher id registered later. */
 export const BASE_ID = 'COALESCE(i.erc8004_agent_id, i.provisional_agent_id)';
 
@@ -62,9 +65,11 @@ const MINT_TX = `COALESCE(i.mint_tx_hash,
         OR left(o.idempotency_key, length(i.chain_id::text) + length(i.agent_id) + 20)
           = 'identity:register:' || i.chain_id || ':' || i.agent_id || ':')))`;
 
-/** The rows the explorer may list (see the header). $1 chain id, $2 registry, $3 URI origin. */
-export const LISTED = `i.chain_id = $1 AND lower(i.registry_address) = lower($2)
-  AND i.agent_card_uri = $3 || '/a/' || s.short_id
+/**
+ * LISTED's conditions on base_identities alone (no join): the Explorer list picks its newest
+ * candidates with these through the base id index (migration 255), then joins only those.
+ */
+export const LISTED_IDENTITY = `i.chain_id = $1 AND lower(i.registry_address) = lower($2)
   AND i.mint_seen_at IS NOT NULL
   AND (
     (i.state = 'confirmed' AND i.erc8004_agent_id IS NOT NULL
@@ -77,6 +82,10 @@ export const LISTED = `i.chain_id = $1 AND lower(i.registry_address) = lower($2)
       AND i.handover_id = i.provisional_agent_id AND i.handover_tx_hash IS NOT NULL
       AND i.handover_finality IN ('safe','final'))
   )`;
+
+/** The rows the explorer may list (see the header). $1 chain id, $2 registry, $3 URI origin. */
+export const LISTED = `${LISTED_IDENTITY}
+  AND i.agent_card_uri = $3 || '/a/' || s.short_id`;
 
 export const FROM = `FROM base_identities i
   JOIN base_wallets w ON w.agent_id = i.agent_id AND w.chain_id = i.chain_id
@@ -93,13 +102,15 @@ const COLUMNS = `i.agent_id, ${BASE_ID}::text AS base_id, (i.state = 'confirmed'
  * The agent's current public manifest revision: the agent in its workspace document, not revoked,
  * at its current manifest revision, with visibility 'public' (the card route's rule,
  * server/autonomy/index.ts). The FROM ... LIMIT 1 of a LATERAL joined onto a subquery aliased `l`
- * that has an `agent_id` column.
+ * that has an `agent_id` column. The agent is read with workspace_agent() (one lookup, both storage
+ * modes; migration 254 makes it one pass that stops at the match), never by expanding a fleet
+ * workspace's ~19.5k agents into rows for each listed agent.
  */
 const PUBLIC_REVISION = `FROM workspaces ws
-  CROSS JOIN LATERAL jsonb_array_elements(ws.data->'agents') a
-  JOIN agent_manifests m ON m.agent_id = a->>'id' AND m.revision = (a->>'revision')::int
+  CROSS JOIN LATERAL (SELECT workspace_agent(ws.operator_id, ws.data, l.agent_id) AS a OFFSET 0) x
+  JOIN agent_manifests m ON m.agent_id = l.agent_id AND m.revision = (x.a->>'revision')::int
   WHERE ws.operator_id = (SELECT operator_id FROM agent_manifests WHERE agent_id = l.agent_id LIMIT 1)
-    AND a->>'id' = l.agent_id AND a->>'revokedAt' IS NULL
+    AND x.a->>'revokedAt' IS NULL
     AND m.manifest->'spec'->>'visibility' = 'public'
   LIMIT 1`;
 
@@ -222,6 +233,51 @@ export function createOnBaseStore(db: Queryable, options: OnBaseStoreOptions) {
   const registry = network.contracts.identityRegistry ?? '';
   const origin = options.uriOrigin ?? AGENT_URI_ORIGIN;
 
+  /**
+   * The newest `limit` listed rows older than `before`, in list order: candidates are read from
+   * base_identities alone, LIST_CANDIDATES at a time in base id order, and only those are joined and
+   * checked against the full LISTED; a batch that keeps too few reads the next one.
+   */
+  async function newestListed(before: string | undefined, limit: number): Promise<Row[]> {
+    const found: Row[] = [];
+    let after: { baseId: string; agentId: string } | null = null;
+    for (;;) {
+      const params: unknown[] = [options.chainId, registry];
+      const p = (value: unknown) => {
+        params.push(value);
+        return `$${params.length}`;
+      };
+      const bound: string = after
+        ? `(${BASE_ID}, i.agent_id) < (${p(after.baseId)}::numeric, ${p(after.agentId)}::text)`
+        : before !== undefined
+          ? `${BASE_ID} < ${p(before)}::numeric`
+          : 'TRUE';
+      const candidates: Array<{ agent_id: string; base_id: string }> = (
+        await db.query<{ agent_id: string; base_id: string }>(
+        `SELECT i.agent_id, ${BASE_ID}::text AS base_id FROM base_identities i
+         WHERE ${LISTED_IDENTITY} AND ${bound}
+         ORDER BY ${BASE_ID} DESC, i.agent_id DESC LIMIT ${LIST_CANDIDATES}`,
+          params,
+        )
+      ).rows;
+      if (candidates.length) {
+        const { rows } = await db.query<Row>(
+          `SELECT l.*, p.name FROM (
+             SELECT ${COLUMNS} ${FROM}
+             WHERE ${LISTED} AND i.agent_id = ANY($4::text[])
+             ORDER BY ${BASE_ID} DESC, i.agent_id DESC LIMIT ${limit - found.length}) l
+           ${PUBLIC_NAME}
+           ORDER BY l.base_id::numeric DESC, l.agent_id DESC`,
+          [options.chainId, registry, origin, candidates.map((candidate) => candidate.agent_id)],
+        );
+        found.push(...rows);
+      }
+      if (found.length >= limit || candidates.length < LIST_CANDIDATES) return found.slice(0, limit);
+      const last: { agent_id: string; base_id: string } = candidates[candidates.length - 1]!;
+      after = { baseId: last.base_id, agentId: last.agent_id };
+    }
+  }
+
   /** Newest first, ON_BASE_PAGE_SIZE per page, older than `before` (a base id) when given. */
   async function list(input: { before?: string; q?: string }) {
     const params: unknown[] = [options.chainId, registry, origin];
@@ -248,12 +304,11 @@ export function createOnBaseStore(db: Queryable, options: OnBaseStoreOptions) {
     const limit = ON_BASE_PAGE_SIZE + 1;
     let sql: string;
     if (!query) {
-      // No search: the page first, then names for its rows only.
-      sql = `SELECT l.*, p.name FROM (
-          SELECT ${COLUMNS} ${FROM} WHERE ${where.join(' AND ')}
-          ORDER BY ${BASE_ID} DESC, i.agent_id DESC LIMIT ${limit}) l
-        ${PUBLIC_NAME}
-        ORDER BY l.base_id::numeric DESC, l.agent_id DESC`;
+      // No search: newest candidates from base_identities alone (through the base id index), then
+      // the join and the card check for those only, then names for the page's rows only. Joining
+      // first made every list read join all registrations (862,893 rows, 21 s, 23 Oct 2026).
+      const rows = await newestListed(input.before, limit);
+      return pageOf(rows);
     } else {
       const idHit = hits.length ? `(${hits.join(' OR ')})` : 'FALSE';
       // A name search narrows on any revision's name first (an index probe per agent), then keeps
@@ -271,6 +326,10 @@ export function createOnBaseStore(db: Queryable, options: OnBaseStoreOptions) {
         ORDER BY l.base_id::numeric DESC, l.agent_id DESC LIMIT ${limit}`;
     }
     const { rows } = await db.query<Row>(sql, params);
+    return pageOf(rows);
+  }
+
+  function pageOf(rows: Row[]) {
     const page = rows.slice(0, ON_BASE_PAGE_SIZE);
     return {
       items: page.map((row) => ({
@@ -545,6 +604,7 @@ export function createOnBaseStore(db: Queryable, options: OnBaseStoreOptions) {
     totalRaw: bigint;
     feeRaw: bigint;
     lastPaidAt: number | null;
+    sponsoredFirstPurchase: { priceRaw: bigint; paidAt: number } | null;
   } | null> {
     const { rows } = await db.query<{
       agent_id: string;
@@ -577,7 +637,27 @@ export function createOnBaseStore(db: Queryable, options: OnBaseStoreOptions) {
       totalRaw: BigInt(row.total ?? '0'),
       feeRaw: BigInt(row.fee ?? '0'),
       lastPaidAt: row.last_at === null ? null : Number(row.last_at),
+      sponsoredFirstPurchase: await sponsoredFirstPurchase(row.agent_id),
     };
+  }
+
+  /**
+   * The agent's first purchase paid by Central City (server/feed/pay/sponsored.ts), once paid on
+   * Base; by its agent index. A database without that table (an older schema) answers null.
+   */
+  async function sponsoredFirstPurchase(
+    agentId: string,
+  ): Promise<{ priceRaw: bigint; paidAt: number } | null> {
+    const { rows } = await db
+      .query<{ gross: string; at: string }>(
+        `SELECT gross_raw::text AS gross, updated_at::text AS at FROM feed_pay_sponsored_calls
+         WHERE agent_id = $1 AND state IN ('paid','delivered','paid_no_result')
+         ORDER BY updated_at LIMIT 1`,
+        [agentId],
+      )
+      .catch(() => ({ rows: [] as { gross: string; at: string }[] }));
+    const row = rows[0];
+    return row ? { priceRaw: BigInt(row.gross), paidAt: Number(row.at) } : null;
   }
 
   /**

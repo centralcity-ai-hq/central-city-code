@@ -92,9 +92,11 @@ import {
 import { acquireDataLock } from './data-lock.js';
 import { exportWorkspace } from './export.js';
 import {
+  ASSISTANT_TOOL_SCOPES,
   assistantAgentSchema,
   assistantJobSchema,
   registerAssistantAccess,
+  type GrantIdentity,
 } from './assistant-access.js';
 import { registerRemoteMcp, type RemoteMcpTestOptions } from './remote-mcp/index.js';
 import { registerAutonomy } from './autonomy/index.js';
@@ -182,6 +184,18 @@ import { registerFeedRequestsMigration } from './feed/schema.js';
 import { createFeedRequests, feedCaps } from './feed/requests.js';
 import { registerFeedRoutes } from './feed/routes.js';
 import { feedEventLog, registerFeedReviewRoutes } from './feed/review.js';
+import { registerFacilitatorKeyRoute } from './protocol/x402/facilitator-key-route.js';
+import {
+  registerOwnPaymasterKeysMigration,
+  registerOwnPaymasterKeysRoute,
+  registerPaymasterPublicRoute,
+  provisionPaymasterKeysAtStart,
+} from './base/chain/own-paymaster-keys.js';
+import { registerOwnPaymasterBudgetMigration } from './base/chain/own-paymaster-budget.js';
+import {
+  registerDirectBundlerMigration,
+  registerOwnBundlerMaintainRoute,
+} from './base/chain/direct-bundler.js';
 import { registerFeedCron } from './feed/cron.js';
 import { protocolFeeLedgerMigration } from './protocol/fees/ledger.js';
 import { registerProtocolFeeTimeIndexMigration } from './protocol/fees/time-index-schema.js';
@@ -211,6 +225,30 @@ import { registerFeedOffersMigration } from './feed/offers/schema.js';
 import { registerFeedOfferKindsV2Migration } from './feed/offers/kinds-schema.js';
 import { registerFeedOfferPresetsMigration } from './feed/offers/preset-schema.js';
 import { registerFeedPayRouter2CapsMigration } from './feed/pay/router2-caps-schema.js';
+import { registerX402FacilitatorMigration } from './protocol/x402/facilitator-schema.js';
+import { registerFeedPayMovesCheckedMigration } from './feed/pay/moves-checked-schema.js';
+import { registerPaidCallValueMigration } from './feed/pay/value-schema.js';
+import { registerAgentNamesResetScopedMigration } from './rooms/agent-names-schema.js';
+import { registerWorkspaceAgentPathMigration } from './agent-rows/agent-lookup-schema.js';
+import { registerAgentRowsMigration } from './agent-rows/schema.js';
+import { registerBaseWalletsAddressLowerMigration } from './base/pay/address-index-schema.js';
+import { registerBaseIdentitiesBaseIdMigration } from './base/explorer/base-id-index-schema.js';
+import { registerBaseWalletsSpenderMigration } from './base/wallet/spender-index-schema.js';
+import { registerFeedPaySponsorMigration } from './feed/pay/sponsor-schema.js';
+import { registerSponsorStatsRoute } from './feed/pay/sponsor-routes.js';
+import { createSponsorCredits } from './feed/pay/sponsor.js';
+import {
+  createSponsoredCalls,
+  registerFeedPaySponsoredMigration,
+  type SponsoredDeps,
+} from './feed/pay/sponsored.js';
+import { registerSponsoredRoutes } from './feed/pay/sponsored-routes.js';
+import { registerFeedPaySponsoredExplorerMigration } from './feed/pay/sponsored-explorer-schema.js';
+import { registerPaidCallCountSponsoredMigration } from './feed/pay/sponsored-count-schema.js';
+import {
+  registerFeedPaySponsorKeyMigration,
+  registerSponsorKeyRoute,
+} from './feed/pay/sponsor-key.js';
 import { setOfferKindDeps } from './feed/offers/kinds.js';
 import { offerBaseReaderFromEnv } from './feed/offers/kinds-base.js';
 import {
@@ -429,12 +467,24 @@ export interface AppOptions {
    * (server/feed/pay/engine.ts), and how long POST call and city_service_call wait.
    */
   feedPay?: Partial<
-    Pick<FeedPayEngineDeps, 'chain' | 'http' | 'alert' | 'sleep' | 'pollMs' | 'offerKinds'>
+    Pick<
+      FeedPayEngineDeps,
+      | 'chain'
+      | 'http'
+      | 'alert'
+      | 'sleep'
+      | 'pollMs'
+      | 'offerKinds'
+      | 'facilitator'
+      | 'finalityPerRun'
+    >
   > & {
     answerWaitMs?: number;
     mcpWaitMs?: number;
     /** Tests: the payment screening provider (never the network); null = none configured. */
     screeningProvider?: () => ScreeningProvider | null;
+    /** Tests: the sponsored first purchase's payer (server/feed/pay/sponsored.ts). */
+    sponsorPay?: SponsoredDeps['pay'];
   };
 }
 export interface CityServices {
@@ -451,6 +501,21 @@ declare module 'fastify' {
 }
 type OperatorRow = { id: string; name: string; password_hash: string; salt: string };
 type RuntimeIdentity = PresenceIdentity;
+/** idleJobPoll's one read (the workspace is unlocked): $1 workspace, $2 agent, $3 credential hash. */
+const IDLE_JOB_POLL_SQL = `SELECT (ws.data->'paused') = 'true'::jsonb AS paused,
+  EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(ws.data->'jobs') = 'array'
+            THEN ws.data->'jobs' ELSE '[]'::jsonb END) j
+          WHERE j->>'status' IN ('queued', 'running'))
+  OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(ws.data->'workflows') = 'array'
+            THEN ws.data->'workflows' ELSE '[]'::jsonb END) f
+          WHERE f->>'status' IS NULL OR f->>'status' NOT IN ('accepted', 'failed', 'canceled')) AS busy,
+  workspace_agent(ws.operator_id, ws.data, $2) AS agent,
+  p.agent_id IS NOT NULL AS has_presence, p.last_seen_at::text AS last_seen_at,
+  EXISTS (SELECT 1 FROM credentials c
+          WHERE c.agent_id = $2 AND c.operator_id = $1 AND c.token_hash = $3) AS current
+FROM workspaces ws
+LEFT JOIN agent_presence p ON p.agent_id = $2 AND p.operator_id = ws.operator_id
+WHERE ws.operator_id = $1`;
 class ApiError extends Error {
   constructor(
     public statusCode: number,
@@ -733,7 +798,7 @@ async function createDatabaseApp(
   // screening hold; a new table and two nullable columns, unused while CITY_PROTOCOL_SCREENING=0.
   registerProtocolScreeningMigration();
   // 120: the index the public passport's "Paid for services" totals read through
-  // (server/feed/pay/paid-index-schema.ts); 116, 117 and 119 belong to other open changes.
+  // (server/feed/pay/paid-index-schema.ts); 116 and 117 belong to other open changes.
   registerFeedPayPaidIndexMigration();
   // 125: the paid service calls count (server/feed/pay/count-schema.ts): a small table kept by a
   // deferred trigger on feed_pay_calls that can never block a payment save; read by the public
@@ -763,7 +828,64 @@ async function createDatabaseApp(
   // 233: the 0.10 USDC CHECKs of one Feed payment widened to 100 USDC for fee router 2
   // (server/feed/pay/router2-caps-schema.ts); the code still enforces 0.10 unless router 2 is on.
   registerFeedPayRouter2CapsMigration();
+  // 240: fee router 3's facilitator operations and its nonce lane
+  // (server/protocol/x402/facilitator-schema.ts): two new tables only.
+  registerX402FacilitatorMigration();
+  // 241: pending float moves settled least recently checked first
+  // (server/feed/pay/moves-checked-schema.ts): one column and a partial index.
+  registerFeedPayMovesCheckedMigration();
+  // 243: the total value settled next to the paid calls count (server/feed/pay/value-schema.ts):
+  // one column on paid_call_count and its two trigger functions replaced (no trigger created).
+  registerPaidCallValueMigration();
+  // 244: the workspaces agent-name trigger resets only the renamed, removed or added agents'
+  // memberships (server/rooms/agent-names-schema.ts): one trigger function replaced.
+  registerAgentNamesResetScopedMigration();
+  // 245: one row per agent, schema only (server/agent-rows/schema.ts): new tables, dual-mode read
+  // functions and guards in three trigger functions; nothing switches yet.
+  registerAgentRowsMigration();
+  // 247: the index Base Pay's recipient lookup by wallet reads through
+  // (server/base/pay/address-index-schema.ts): one expression index on base_wallets, no data change.
+  registerBaseWalletsAddressLowerMigration();
+  // 248: the sponsored first purchase's credits (server/feed/pay/sponsor-schema.ts): two new
+  // tables, unused while CITY_SFP_ENABLED is not '1'.
+  registerFeedPaySponsorMigration();
+  // 249: the sponsor account's key record (server/feed/pay/sponsor-key.ts): one new one-row table.
+  registerFeedPaySponsorKeyMigration();
+  // 250: the sponsored first purchase's calls (server/feed/pay/sponsored.ts): one new table.
+  registerFeedPaySponsoredMigration();
+  // 251: the indexes the Explorer's service calls read the paid sponsored calls through
+  // (server/feed/pay/sponsored-explorer-schema.ts): five partial indexes, no data change.
+  registerFeedPaySponsoredExplorerMigration();
+  // 252: sponsored first purchases count in paid_call_count (server/feed/pay/sponsored-count-schema.ts):
+  // one trigger function, two deferred triggers on feed_pay_sponsored_calls, one backfill.
+  registerPaidCallCountSponsoredMigration();
+  // 253: the index the wallet lookups by spender read through
+  // (server/base/wallet/spender-index-schema.ts): one index on base_wallets, no data change.
+  registerBaseWalletsSpenderMigration();
+  // 254: workspace_agent() finds one agent in a document with one JSON path pass
+  // (server/agent-rows/agent-lookup-schema.ts): one function replaced, no table touched.
+  registerWorkspaceAgentPathMigration();
+  // 255: the index the Explorer's newest-first list reads through
+  // (server/base/explorer/base-id-index-schema.ts): one expression index, no data change.
+  registerBaseIdentitiesBaseIdMigration();
+  // 256: Operation Paymaster's key records (server/base/chain/own-paymaster-keys.ts): one new table.
+  registerOwnPaymasterKeysMigration();
+  // 257: Operation Paymaster's spending gate (server/base/chain/own-paymaster-budget.ts): two new tables.
+  registerOwnPaymasterBudgetMigration();
+  registerDirectBundlerMigration();
   await runMigrations(db);
+  // This build reads every workspace's agents from its document. A workspace whose agents were
+  // moved to rows (by a later build) would look empty here, so it never serves such a database.
+  if (
+    (
+      await db.query<{ found: boolean }>(
+        "SELECT EXISTS (SELECT 1 FROM workspace_storage WHERE mode = 'rows') AS found",
+      )
+    ).rows[0]?.found
+  )
+    throw new Error(
+      'A workspace stores its agents as rows; this build reads agents from documents only; refusing to start.',
+    );
   const caps = loadLimits(process.env, options.limits);
   // Number of trusted proxy hops nearest the socket; 0 disables X-Forwarded-For entirely.
   const trustedHops = options.trustProxyHops ?? (options.hosted?.trustProxy ? 1 : 0);
@@ -1781,6 +1903,36 @@ async function createDatabaseApp(
     log: feedLog,
     caps: feedRequests.caps,
   });
+  // Creates fee router 3's facilitator key inside the app (CITY_OPS_SECRET; 409 once configured),
+  // so the production KEK and database never leave the platform (server/protocol/x402).
+  registerFacilitatorKeyRoute(app, { db, env: process.env });
+  // The sponsored first purchase's ops numbers (server/feed/pay/sponsor-routes.ts; CITY_OPS_SECRET).
+  registerSponsorStatsRoute(app, { db, env: process.env, now: clock });
+  // Creates the sponsor account's key inside the app (CITY_OPS_SECRET; 409 once configured).
+  registerSponsorKeyRoute(app, { db, env: process.env, now: clock });
+  registerOwnPaymasterKeysRoute(app, { db, env: process.env, now: clock });
+  // Operation Paymaster prepare mode: the server provisions its own keys (no ops secret needed)
+  // and publishes only their public addresses. Never blocks or fails the start.
+  registerPaymasterPublicRoute(app, {
+    db,
+    env: process.env,
+    chainId: BASE_MAINNET,
+    entryPoint: BASE_NETWORKS[BASE_MAINNET].contracts.entryPointV06,
+    effective: async () => (await baseRuntimes(BASE_MAINNET)).ownBundlerEffective?.(),
+  });
+  // Our own bundler's upkeep (direct-bundler.ts maintain), every minute; 'off' unless
+  // CITY_BASE_BUNDLER=direct is in effect.
+  registerOwnBundlerMaintainRoute(app, {
+    cronSecret: process.env.CRON_SECRET,
+    upkeep: async () => (await baseRuntimes(BASE_MAINNET)).ownBundlerUpkeep,
+  });
+  // Awaited (a frozen serverless instance would drop a background promise), but never longer
+  // than 3 s and never thrown: the site starts whatever happens here.
+  const paymasterKeys = await Promise.race([
+    provisionPaymasterKeysAtStart({ db, env: process.env, now: clock }),
+    new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 3_000).unref()),
+  ]);
+  if (paymasterKeys !== 'off') app.log.info({ event: 'own_paymaster_keys', state: paymasterKeys });
   // Operation Central City Feed (live unless CITY_FEED=0, read per request): the services the Feed
   // lists as Offered, read from the x402 Bazaar (server/feed/services-routes.ts). Public and read-only. The status
   // route (FEED_PATHS.status) is the requests slice's; it takes feedServicesStatus (query.ts).
@@ -2629,10 +2781,17 @@ async function createDatabaseApp(
   // CITY_FEED or CITY_FEED_PAY is '0', read per request. The agent's spender
   // account pays a listed x402 service from the agent's own wallet within the owner's limits; the
   // chain side is the wallet network's runtime (feedPay), without which a call answers unavailable.
+  // The batch lane's grant check from stored ids (assistant-access.ts), bound once the assistant
+  // access below exists; until then (and in apps without it) it refuses, so nothing is batched.
+  let grantCheck:
+    ((input: { operatorId: string; kind: 'grant' | 'key'; id: string }) => Promise<void>) | null =
+    null;
   const feedPay = createFeedPayEngine({
     db,
     env: process.env,
     now: clock,
+    revalidateGrant: (input) =>
+      grantCheck ? grantCheck(input) : Promise.reject(new Error('Grant check not ready.')),
     chain:
       options.feedPay?.chain ??
       (async () => {
@@ -2643,6 +2802,9 @@ async function createDatabaseApp(
     ...(options.feedPay?.http ? { http: options.feedPay.http } : {}),
     ...(options.feedPay?.sleep ? { sleep: options.feedPay.sleep } : {}),
     ...(options.feedPay?.pollMs !== undefined ? { pollMs: options.feedPay.pollMs } : {}),
+    ...(options.feedPay?.finalityPerRun !== undefined
+      ? { finalityPerRun: options.feedPay.finalityPerRun }
+      : {}),
     ...(options.feedPay?.offerKinds ? { offerKinds: options.feedPay.offerKinds } : {}),
     alert:
       options.feedPay?.alert ??
@@ -2654,6 +2816,14 @@ async function createDatabaseApp(
     // One cap on a workspace's calls in flight, the same for every workspace
     // (CITY_LIMIT_FEED_PAY_CALLS_IN_FLIGHT_PER_WORKSPACE).
     callsInFlightMax: caps.feedPayCallsInFlightPerWorkspace,
+    // Fee router 3's facilitator (docs/protocol/FEE_ROUTER_3.md); null unless its key and router 3
+    // are configured, so router 3 stays off.
+    facilitator:
+      options.feedPay?.facilitator ??
+      (async () => {
+        const runtime = await baseRuntimes(WALLET_CHAIN_ID);
+        return runtime.router3Facilitator?.() ?? null;
+      }),
     // Payment screening (docs/protocol/SCREENING-GATE.md), live unless CITY_PROTOCOL_SCREENING is
     // '0'. On Base mainnet the sanctions oracle is the one fixed in code (shared/protocol.ts); on a
     // test network CITY_PROTOCOL_SCREENING_ORACLE names it. Without one, new payments are refused.
@@ -2673,25 +2843,48 @@ async function createDatabaseApp(
           })),
     }),
   });
+  // The person's own account (whichever workspace is selected), with the console's header.
+  const feedPayPerson = async (request: FastifyRequest) => {
+    if (request.headers['x-city-request'] !== '1' || !request.cookies.cc_session) return null;
+    const person = await optionalOperator(request);
+    if (!person) return null;
+    const { rows } = await db.query<{ kind: string }>('SELECT kind FROM operators WHERE id = $1', [
+      person.id,
+    ]);
+    return rows[0]?.kind === 'owner' ? { accountId: person.id } : null;
+  };
   registerFeedPayRoutes(app, {
     engine: feedPay,
     env: process.env,
-    // The person's own account (whichever workspace is selected), with the console's header.
-    person: async (request) => {
-      if (request.headers['x-city-request'] !== '1' || !request.cookies.cc_session) return null;
-      const person = await optionalOperator(request);
-      if (!person) return null;
-      const { rows } = await db.query<{ kind: string }>(
-        'SELECT kind FROM operators WHERE id = $1',
-        [person.id],
-      );
-      return rows[0]?.kind === 'owner' ? { accountId: person.id } : null;
-    },
+    person: feedPayPerson,
     limit,
     cronSecret: process.env.CRON_SECRET,
     ...(options.feedPay?.answerWaitMs !== undefined
       ? { answerWaitMs: options.feedPay.answerWaitMs }
       : {}),
+  });
+  // The sponsored first purchase (server/feed/pay/sponsored.ts; docs/protocol/
+  // SPONSORED_FIRST_PURCHASE.md): its own routes and worker, off unless CITY_SFP_ENABLED is '1'.
+  // Paid by the sponsor's own key and facilitator (runtime sponsorPay); the engine is only read.
+  registerSponsoredRoutes(app, {
+    sponsored: createSponsoredCalls({
+      db,
+      env: process.env,
+      now: clock,
+      chainId: WALLET_CHAIN_ID,
+      credits: createSponsorCredits({ db, env: process.env, now: clock }),
+      hosted: { forSponsor: feedPay.hostedForSponsor, run: feedPay.runHostedOffer },
+      pay:
+        options.feedPay?.sponsorPay ??
+        (async () => (await baseRuntimes(WALLET_CHAIN_ID)).sponsorPay?.() ?? null),
+      // Called per request, after `offers` below exists.
+      serviceIdOf: (offerId) => offers.serviceIdOf(offerId),
+      ...(options.logLine ? { log: options.logLine } : {}),
+    }),
+    env: process.env,
+    person: feedPayPerson,
+    limit,
+    cronSecret: process.env.CRON_SECRET,
   });
   // Feed offers (server/feed/offers): the services:sell tools write through this store. Offers are
   // listed under the configured public origin, never a request's Host. A bad cap setting keeps the
@@ -2744,6 +2937,29 @@ async function createDatabaseApp(
     feedRequests,
     offers,
   });
+  // The batch lane re-checks an MCP purchase's grant or key from its ids: the same row checks as
+  // every tool call (revoked, expired, onboarding) and the city_service_call scope.
+  grantCheck = async ({ operatorId, kind, id }) => {
+    await db.transaction(async (tx) => {
+      const identity: GrantIdentity = { grantId: id, operatorId };
+      if (kind === 'key') {
+        const key = (
+          await tx.query<{ key_hash: string }>(
+            'SELECT key_hash FROM workspace_keys WHERE id = $1 AND operator_id = $2',
+            [id, operatorId],
+          )
+        ).rows[0];
+        if (!key) throw new Error('Workspace key gone.');
+        identity.keyHash = key.key_hash;
+      }
+      const granted = await assistantAccess.authority(identity)(tx as never, clock());
+      if (
+        !granted.includes('workspace:read') ||
+        !granted.includes(ASSISTANT_TOOL_SCOPES.city_service_call!)
+      )
+        throw new Error('Grant does not permit city_service_call.');
+    });
+  };
   const oauthServer = await registerRemoteMcp(app, {
     roomInvites: links.invites,
     db,
@@ -3385,8 +3601,45 @@ async function createDatabaseApp(
     else notify(identity.operatorId);
     return { ok: true, heartbeatSeconds: 30, ttlSeconds: 90 };
   });
+  /**
+   * A job poll with nothing to claim, answered without the workspace lock: the workspace has no
+   * queued or running job and no open workflow, so the locked poll below would change nothing
+   * (recoverLeases and syncWorkflows have nothing to do, no job to claim) and write nothing. One
+   * unlocked read decides with the locked poll's own rules: the exact credential is still current
+   * and the agent external and not revoked (else the locked path answers), a paused workspace has
+   * no job, an agent without a fresh heartbeat gets 409. Anything else (undefined): the locked poll.
+   * Fleet agents poll while their workspace holds ~19.5k agents; each locked poll held the
+   * workspace row and parsed the whole document (22-23 Oct 2026 DB overload).
+   */
+  async function idleJobPoll(identity: RuntimeIdentity): Promise<{ job: null } | undefined> {
+    const row = (
+      await db.query<{
+        paused: boolean | null;
+        busy: boolean;
+        agent: StoredAgent | null;
+        has_presence: boolean;
+        last_seen_at: string | null;
+        current: boolean;
+      }>(IDLE_JOB_POLL_SQL, [identity.operatorId, identity.agentId, identity.credentialHash])
+    ).rows[0];
+    if (!row || row.busy || !row.current) return undefined;
+    const agent = row.agent;
+    if (!agent || agent.revokedAt || agent.mode !== 'external') return undefined;
+    if (row.paused) return { job: null };
+    // Runtime presence is authoritative in agent_presence (applyPresence, server/presence.ts).
+    const lastSeenAt = row.has_presence
+      ? row.last_seen_at === null
+        ? null
+        : iso(Number(row.last_seen_at))
+      : agent.lastSeenAt;
+    if (!reachable({ ...agent, lastSeenAt }, clock()))
+      fail(409, 'Send a heartbeat before claiming work.');
+    return { job: null };
+  }
   app.get('/api/runtime/jobs', async (request) => {
     const identity = await runtime(request);
+    const idle = await idleJobPoll(identity);
+    if (idle) return idle;
     return mutateRuntime(identity, (workspace, agent, time) => {
       if (workspace.paused) return { job: null };
       if (!reachable(agent, time)) fail(409, 'Send a heartbeat before claiming work.');

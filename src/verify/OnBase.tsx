@@ -12,6 +12,7 @@ import {
   finalizingMinutes,
   loadOnBase,
   initial,
+  ON_BASE_LIST_TIMEOUT_MS,
   shortWallet,
   shownName,
   verifyKey,
@@ -19,6 +20,13 @@ import {
   type OnBaseList,
   type OnBaseRow,
 } from './onBaseData';
+import {
+  mergeTotals,
+  onBaseRetryMs,
+  readStoredOnBaseTotals,
+  storeOnBaseTotals,
+  type KnownTotals,
+} from './onBaseTotals';
 import './verify.css';
 import './on-base.css';
 
@@ -27,17 +35,29 @@ import './on-base.css';
  * the product owner 10 Oct 2026): only Central City agents with a Base ID, read from Base by the
  * server, newest first. Verify on a row re-reads that Base ID from Base in this browser. "All
  * agents" (/explorer) stays as it is; only the switch above the search is shared.
+ *
+ * The numbers above the list always show a number once one has been known in this browser
+ * (src/verify/onBaseTotals.ts): the last known ones while the list loads and after a failed load,
+ * marked not live (no live dot, data-fresh="saved") until a fresh answer. A count an answer could
+ * not give keeps the last known one. A failed load, or one with no answer within
+ * ON_BASE_LIST_TIMEOUT_MS, keeps them on screen and reads again after 1 s, doubling up to
+ * REFRESH_MS, so the page never sits loading for ever. The rows have their own loading state
+ * (skeleton rows, "Loading agents…") under the numbers. A number never known yet keeps its
+ * skeleton, never a dash.
  */
 
 /** The server's read lagging its answer by more than this means Base isn't answering it. */
 const STALE_MS = 60_000;
 /** While the tab is visible the list is read again this often, so the block stays live. */
 const REFRESH_MS = 30_000;
+/** Failed background refreshes in a row after which the numbers are shown as saved, not live. */
+const REFRESH_FAILURES_STALE = 2;
 
 type Load =
   | { phase: 'loading' }
   | { phase: 'ready'; data: OnBaseList; query: string; fetchedAt: number }
-  | { phase: 'error' };
+  /** The read of `query` failed; `attempt` failed reads in a row before it (0: the first). */
+  | { phase: 'error'; query: string; attempt: number };
 
 /** A fresh first page over what is shown: new rows first, changed rows updated, older pages kept. */
 function mergeRows(fresh: OnBaseList, shown: OnBaseList): OnBaseList {
@@ -109,6 +129,11 @@ export function OnBase() {
   const [calls, setCalls] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const generation = useRef(0);
+  // Background refreshes that failed in a row: after REFRESH_FAILURES_STALE the numbers are no
+  // longer shown as live (the rows and numbers stay).
+  const [refreshFailures, setRefreshFailures] = useState(0);
+  // The numbers as last known (this browser's last visit, then every answer on this page).
+  const [known, setKnown] = useState<KnownTotals | null>(() => readStoredOnBaseTotals());
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
@@ -124,21 +149,49 @@ export function OnBase() {
       .catch(() => undefined);
   }, []);
 
-  const read = useCallback(async (q: string) => {
+  // `retry`: the failed reads in a row before this one; a retry keeps the failure on screen (and
+  // the last known numbers) until it succeeds, instead of blinking back to loading.
+  const read = useCallback(async (q: string, retry?: number) => {
     const mine = ++generation.current;
-    setLoad({ phase: 'loading' });
-    setOpen(null);
+    if (retry === undefined) {
+      setLoad({ phase: 'loading' });
+      setOpen(null);
+    }
     try {
-      const data = await loadOnBase({ q });
-      if (mine === generation.current)
+      const data = await loadOnBase({ q, timeoutMs: ON_BASE_LIST_TIMEOUT_MS });
+      if (mine === generation.current) {
+        setRefreshFailures(0);
         setLoad({ phase: 'ready', data, query: q, fetchedAt: Date.now() });
+      }
     } catch {
-      if (mine === generation.current) setLoad({ phase: 'error' });
+      if (mine === generation.current)
+        setLoad({ phase: 'error', query: q, attempt: retry === undefined ? 0 : retry + 1 });
     }
   }, []);
   useEffect(() => {
     void read('');
   }, [read]);
+
+  // A failed load reads again by itself: after 1 s, then 2 s, 4 s ... up to REFRESH_MS.
+  useEffect(() => {
+    if (load.phase !== 'error') return;
+    const { query: q, attempt } = load;
+    const timer = window.setTimeout(
+      () => void read(q, attempt),
+      onBaseRetryMs(attempt, REFRESH_MS),
+    );
+    return () => window.clearTimeout(timer);
+  }, [load, read]);
+
+  // Every answer updates the last known numbers, and they are kept for the next visit.
+  useEffect(() => {
+    if (load.phase !== 'ready') return;
+    const { data, fetchedAt } = load;
+    setKnown((previous) => mergeTotals(previous, data.totals, fetchedAt, load.query !== ''));
+  }, [load]);
+  useEffect(() => {
+    if (known) storeOnBaseTotals(known);
+  }, [known]);
 
   // Read again while the tab is visible: the block and the finalizing rows stay live. A newer
   // search wins (generation), and the open Verify and loaded older rows stay as they are.
@@ -149,10 +202,11 @@ export function OnBase() {
       const shown = shownRef.current;
       if (document.visibilityState !== 'visible' || shown.phase !== 'ready') return;
       const mine = generation.current;
-      loadOnBase({ q: shown.query })
+      loadOnBase({ q: shown.query, timeoutMs: ON_BASE_LIST_TIMEOUT_MS })
         .then((fresh) => {
           const current = shownRef.current;
           if (mine !== generation.current || current.phase !== 'ready') return;
+          setRefreshFailures(0);
           setLoad({
             phase: 'ready',
             query: current.query,
@@ -160,7 +214,9 @@ export function OnBase() {
             fetchedAt: Date.now(),
           });
         })
-        .catch(() => undefined);
+        .catch(() => {
+          if (mine === generation.current) setRefreshFailures((n) => n + 1);
+        });
     }, REFRESH_MS);
     return () => window.clearInterval(timer);
   }, []);
@@ -170,7 +226,11 @@ export function OnBase() {
     const mine = generation.current;
     setMore(true);
     try {
-      const page = await loadOnBase({ q: load.query, before: load.data.nextBefore });
+      const page = await loadOnBase({
+        q: load.query,
+        before: load.data.nextBefore,
+        timeoutMs: ON_BASE_LIST_TIMEOUT_MS,
+      });
       if (mine !== generation.current) return;
       setLoad({
         phase: 'ready',
@@ -216,6 +276,12 @@ export function OnBase() {
   const readAt = data?.totals.readAt ?? null;
   const lag = data && readAt !== null ? Math.max(0, data.totals.servedAt - readAt) : 0;
   const stale = lag > STALE_MS;
+  // The numbers shown: this answer's over the last known ones, else the last known ones.
+  const totals = data
+    ? mergeTotals(known, data.totals, fetchedAt, load.phase === 'ready' && load.query !== '')
+    : known;
+  const sk = <span className="ob-sk" />;
+  const live = Boolean(data) && refreshFailures < REFRESH_FAILURES_STALE;
 
   return (
     <div className="public-shell">
@@ -226,12 +292,7 @@ export function OnBase() {
             Downtown · Transparency · <a href="/downtown/verify">Verify the count</a>
           </p>
           <h1>Agent Explorer</h1>
-          <ExplorerSwitch
-            current="base"
-            all={all}
-            onBase={data?.totals.onBase ?? null}
-            calls={calls}
-          />
+          <ExplorerSwitch current="base" all={all} onBase={totals?.onBase ?? null} calls={calls} />
           <p className="vf-lede">
             Every Central City agent with a Base ID. Owners are read from Base, and Verify checks
             any agent again in your own browser, directly on Base.
@@ -243,9 +304,9 @@ export function OnBase() {
             <div>
               <b>Base isn't answering right now</b>
               <p>
-                The list shows the last block we read, {number.format(data.totals.readAtBlock ?? 0)}
-                , {ago(lag + Math.max(0, now - fetchedAt))}. Verify needs Base itself, so try it
-                again in a moment.
+                The list shows the last block we read, {number.format(totals?.read?.block ?? 0)},{' '}
+                {ago(lag + Math.max(0, now - fetchedAt))}. Verify needs Base itself, so try it again
+                in a moment.
               </p>
             </div>
             <button
@@ -289,221 +350,214 @@ export function OnBase() {
           <div className="ob-banner" data-tone="bad" role="alert">
             <div>
               <b>The list couldn't be loaded</b>
-              <p>Nothing on this page changed on Base. Try again in a moment.</p>
+              <p>
+                Nothing on this page changed on Base.{' '}
+                {known
+                  ? 'The numbers are the last ones this browser saw. Trying again…'
+                  : 'Trying again…'}
+              </p>
             </div>
             <button type="button" className="ob-pill" onClick={() => void read(query)}>
               Try again
             </button>
           </div>
-        ) : (
-          <>
-            <dl className="ll-stats" aria-busy={data ? undefined : true}>
-              <div>
-                <dt>
-                  <span className="ll-live" aria-hidden="true" /> On Base now
-                </dt>
-                <dd>{data ? number.format(data.totals.onBase) : <span className="ob-sk" />}</dd>
-                <dd className="ob-stat-sub">registered agents</dd>
-              </div>
-              <div>
-                <dt>New in the last 24 h</dt>
-                <dd>{data ? number.format(data.totals.new24h) : <span className="ob-sk" />}</dd>
-                <dd className="ob-stat-sub">registered agents</dd>
-              </div>
-              <div>
-                <dt>Finalizing now</dt>
-                <dd>
-                  {data ? number.format(data.totals.finalizingNow) : <span className="ob-sk" />}
-                </dd>
-                <dd className="ob-stat-sub">final in 15–30 min</dd>
-              </div>
-              <div>
-                <dt>Rated agents</dt>
-                <dd>
-                  {!data ? (
-                    <span className="ob-sk" />
-                  ) : typeof data.totals.ratedAgents === 'number' ? (
-                    number.format(data.totals.ratedAgents)
-                  ) : (
-                    '—'
-                  )}
-                </dd>
-                <dd className="ob-stat-sub">final on Base</dd>
-              </div>
-              <div>
-                <dt>Read from Base block</dt>
-                <dd>
-                  {!data ? (
-                    <span className="ob-sk" />
-                  ) : data.totals.readAtBlock === null ? (
-                    '—'
-                  ) : (
-                    number.format(data.totals.readAtBlock)
-                  )}
-                </dd>
-                <dd className="ob-stat-sub">
-                  {!data
-                    ? 'reading…'
-                    : readAt === null
-                      ? 'not read yet'
-                      : ago(lag + Math.max(0, now - fetchedAt))}
-                </dd>
-              </div>
-            </dl>
-            <p className="ob-under">
-              <span>
-                Final means Base can no longer change it. Finalizing rows turn final by themselves.
-                Central City registers each agent on Base from that agent's own account.
-              </span>
-              {data ? (
-                <a href={basescanRegistry(data.registry)} target="_blank" rel="noreferrer">
-                  See the registry on Basescan
-                </a>
-              ) : null}
-            </p>
-
-            <div className="ob-head">
-              <h2>Registered on Base</h2>
-              <span>
-                {data
-                  ? load.phase === 'ready' && load.query
-                    ? `${number.format(data.rows.length)} found`
-                    : `${number.format(data.totals.onBase)} registered agents, newest first`
-                  : 'Reading…'}
-              </span>
+        ) : null}
+        <>
+          <dl
+            className="ll-stats"
+            aria-busy={data ? undefined : true}
+            data-fresh={live ? 'live' : 'saved'}
+          >
+            <div>
+              <dt>{live ? <span className="ll-live" aria-hidden="true" /> : null} On Base now</dt>
+              <dd>{totals ? number.format(totals.onBase) : sk}</dd>
+              <dd className="ob-stat-sub">registered agents</dd>
             </div>
+            <div>
+              <dt>New in the last 24 h</dt>
+              <dd>{totals ? number.format(totals.new24h) : sk}</dd>
+              <dd className="ob-stat-sub">registered agents</dd>
+            </div>
+            <div>
+              <dt>Finalizing now</dt>
+              <dd>{totals ? number.format(totals.finalizingNow) : sk}</dd>
+              <dd className="ob-stat-sub">final in 15–30 min</dd>
+            </div>
+            <div>
+              <dt>Rated agents</dt>
+              <dd>{totals?.ratedAgents != null ? number.format(totals.ratedAgents) : sk}</dd>
+              <dd className="ob-stat-sub">final on Base</dd>
+            </div>
+            <div>
+              <dt>Read from Base block</dt>
+              <dd>{totals?.read ? number.format(totals.read.block) : sk}</dd>
+              <dd className="ob-stat-sub">
+                {totals?.read
+                  ? ago(totals.read.lagMs + Math.max(0, now - totals.read.fetchedAt))
+                  : data
+                    ? 'not read yet'
+                    : 'reading…'}
+              </dd>
+            </div>
+          </dl>
+          <p className="ob-under">
+            <span>
+              Final means Base can no longer change it. Finalizing rows turn final by themselves.
+              Central City registers each agent on Base from that agent's own account.
+            </span>
+            {data ? (
+              <a href={basescanRegistry(data.registry)} target="_blank" rel="noreferrer">
+                See the registry on Basescan
+              </a>
+            ) : null}
+          </p>
 
-            <div className="ob-table" role="table" aria-label="Agents registered on Base">
-              <div className="ob-thead" role="row">
-                <span role="columnheader">
-                  <span className="visually-hidden">Verify</span>
-                </span>
-                <span role="columnheader">Base ID</span>
-                <span role="columnheader">Agent</span>
-                <span role="columnheader">Owner wallet</span>
-                <span role="columnheader">Status</span>
-              </div>
-              {!data ? (
-                Array.from({ length: 5 }, (_, index) => (
-                  <div className="ob-item" key={index} aria-hidden="true">
-                    <div className="ob-row">
-                      <span
-                        className="ob-sk"
-                        style={{ width: 64, height: 28, borderRadius: 999 }}
-                      />
-                      <span className="ob-sk" style={{ width: 56 }} />
-                      <span className="ob-sk" style={{ width: 120 }} />
-                      <span className="ob-sk" style={{ width: 110 }} />
-                      <span className="ob-sk" style={{ width: 60 }} />
-                    </div>
+          <div className="ob-head">
+            <h2>Registered on Base</h2>
+            <span>
+              {data
+                ? load.phase === 'ready' && load.query
+                  ? `${number.format(data.rows.length)} found`
+                  : `${number.format(data.totals.onBase)} registered agents, newest first`
+                : load.phase === 'error'
+                  ? 'Trying again…'
+                  : 'Loading agents…'}
+            </span>
+          </div>
+
+          <div
+            className="ob-table"
+            role="table"
+            aria-label="Agents registered on Base"
+            aria-busy={data ? undefined : true}
+            data-rows={data ? 'ready' : 'loading'}
+          >
+            <div className="ob-thead" role="row">
+              <span role="columnheader">
+                <span className="visually-hidden">Verify</span>
+              </span>
+              <span role="columnheader">Base ID</span>
+              <span role="columnheader">Agent</span>
+              <span role="columnheader">Owner wallet</span>
+              <span role="columnheader">Status</span>
+            </div>
+            {!data ? (
+              Array.from({ length: 5 }, (_, index) => (
+                <div className="ob-item" key={index} aria-hidden="true">
+                  <div className="ob-row">
+                    <span className="ob-sk" style={{ width: 64, height: 28, borderRadius: 999 }} />
+                    <span className="ob-sk" style={{ width: 56 }} />
+                    <span className="ob-sk" style={{ width: 120 }} />
+                    <span className="ob-sk" style={{ width: 110 }} />
+                    <span className="ob-sk" style={{ width: 60 }} />
                   </div>
-                ))
-              ) : data.rows.length === 0 ? (
-                <div className="ob-empty">
-                  {load.phase === 'ready' && load.query ? (
-                    <>
-                      <b>No registered agent matches “{load.query}”</b>
-                      <span>
-                        Search by Base ID, owner wallet or agent name. Agents without a Base ID are
-                        under All agents.
-                      </span>
-                      <button
-                        type="button"
-                        className="ob-pill"
-                        onClick={() => {
-                          setQuery('');
-                          void read('');
-                        }}
-                      >
-                        Clear search
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <b>No agents on Base yet</b>
-                      <span>
-                        When an owner makes an agent a Base agent, it shows here as soon as Base
-                        includes it.
-                      </span>
-                    </>
-                  )}
                 </div>
-              ) : (
-                data.rows.map((row) => {
-                  const isOpen = open === row.baseId;
-                  return (
-                    <div className="ob-item" key={row.baseId} data-open={isOpen} role="rowgroup">
-                      <div className="ob-row" role="row">
-                        <span className="ob-c-verify" role="cell">
-                          <button
-                            type="button"
-                            className="ob-pill"
-                            aria-expanded={isOpen}
-                            aria-label={`${isOpen ? 'Hide' : 'Verify'} Base ID ${row.baseId}`}
-                            onClick={() => toggle(row)}
-                          >
-                            {isOpen ? 'Hide' : 'Verify'}
-                          </button>
-                        </span>
-                        <span className="ob-c-id ob-id" role="cell">
-                          {row.baseId}
-                        </span>
-                        <span className="ob-c-agent ob-agent" role="cell">
-                          <i
-                            className="ob-av"
-                            style={{ ['--ob-c' as string]: row.colour }}
-                            aria-hidden="true"
-                          >
-                            {initial(row.name)}
-                          </i>
-                          <span className="ob-agent-text">
-                            <b data-private={row.name.trim() ? undefined : ''}>
-                              {shownName(row.name)}
-                            </b>
-                            {/* Central City's own final ratings (the server's records); the
+              ))
+            ) : data.rows.length === 0 ? (
+              <div className="ob-empty">
+                {load.phase === 'ready' && load.query ? (
+                  <>
+                    <b>No registered agent matches “{load.query}”</b>
+                    <span>
+                      Search by Base ID, owner wallet or agent name. Agents without a Base ID are
+                      under All agents.
+                    </span>
+                    <button
+                      type="button"
+                      className="ob-pill"
+                      onClick={() => {
+                        setQuery('');
+                        void read('');
+                      }}
+                    >
+                      Clear search
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <b>No agents on Base yet</b>
+                    <span>
+                      When an owner makes an agent a Base agent, it shows here as soon as Base
+                      includes it.
+                    </span>
+                  </>
+                )}
+              </div>
+            ) : (
+              data.rows.map((row) => {
+                const isOpen = open === row.baseId;
+                return (
+                  <div className="ob-item" key={row.baseId} data-open={isOpen} role="rowgroup">
+                    <div className="ob-row" role="row">
+                      <span className="ob-c-verify" role="cell">
+                        <button
+                          type="button"
+                          className="ob-pill"
+                          aria-expanded={isOpen}
+                          aria-label={`${isOpen ? 'Hide' : 'Verify'} Base ID ${row.baseId}`}
+                          onClick={() => toggle(row)}
+                        >
+                          {isOpen ? 'Hide' : 'Verify'}
+                        </button>
+                      </span>
+                      <span className="ob-c-id ob-id" role="cell">
+                        {row.baseId}
+                      </span>
+                      <span className="ob-c-agent ob-agent" role="cell">
+                        <i
+                          className="ob-av"
+                          style={{ ['--ob-c' as string]: row.colour }}
+                          aria-hidden="true"
+                        >
+                          {initial(row.name)}
+                        </i>
+                        <span className="ob-agent-text">
+                          <b data-private={row.name.trim() ? undefined : ''}>
+                            {shownName(row.name)}
+                          </b>
+                          {/* Central City's own final ratings (the server's records); the
                                 passport reads the score from Base and Verify checks it there.
                                 No score: nothing is shown. */}
-                            {row.score ? (
-                              <small className="ob-city" data-scored="">
-                                {scoreLine(row.score)}
-                              </small>
-                            ) : null}
-                          </span>
+                          {row.score ? (
+                            <small className="ob-city" data-scored="">
+                              {scoreLine(row.score)}
+                            </small>
+                          ) : null}
                         </span>
-                        <span className="ob-c-wallet ob-wallet" role="cell" title={row.owner}>
-                          {shortWallet(row.owner)}
-                          <CopyWallet address={row.owner} />
-                        </span>
-                        <span className="ob-c-status" role="cell">
-                          <Status row={row} now={now} />
-                        </span>
-                      </div>
-                      {isOpen ? (
-                        <OnBaseVerifyPanel
-                          row={row}
-                          state={checks[verifyKey(row)] ?? { phase: 'checking' }}
-                          onRetry={() => void verify(row)}
-                          basescanHref={basescanToken(data.registry, row.baseId)}
-                        />
-                      ) : null}
+                      </span>
+                      <span className="ob-c-wallet ob-wallet" role="cell" title={row.owner}>
+                        {shortWallet(row.owner)}
+                        <CopyWallet address={row.owner} />
+                      </span>
+                      <span className="ob-c-status" role="cell">
+                        <Status row={row} now={now} />
+                      </span>
                     </div>
-                  );
-                })
-              )}
-            </div>
-            {data?.nextBefore ? (
-              <button
-                type="button"
-                className="ob-pill ob-more"
-                onClick={() => void older()}
-                disabled={more}
-              >
-                {more ? <LoaderCircle className="spin" size={14} aria-hidden="true" /> : null}
-                Show older
-              </button>
-            ) : null}
-          </>
-        )}
+                    {isOpen ? (
+                      <OnBaseVerifyPanel
+                        row={row}
+                        state={checks[verifyKey(row)] ?? { phase: 'checking' }}
+                        onRetry={() => void verify(row)}
+                        basescanHref={basescanToken(data.registry, row.baseId)}
+                      />
+                    ) : null}
+                  </div>
+                );
+              })
+            )}
+          </div>
+          {data?.nextBefore ? (
+            <button
+              type="button"
+              className="ob-pill ob-more"
+              onClick={() => void older()}
+              disabled={more}
+            >
+              {more ? <LoaderCircle className="spin" size={14} aria-hidden="true" /> : null}
+              Show older
+            </button>
+          ) : null}
+        </>
       </main>
     </div>
   );

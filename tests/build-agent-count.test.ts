@@ -169,7 +169,7 @@ test('CC_BUILD_AGENT_COUNT fixes the count without any request', async () => {
   assert.equal(calls.length, 0);
 });
 
-test('paid_calls in the response reserves the paid calls line; no number is carried', async () => {
+test('paid_calls in the response reserves the paid calls line; no paid number is carried', async () => {
   const at = '2026-10-15T12:00:00.000Z';
   const paid = (total: unknown) => ({
     ai_agents_total: 114_251,
@@ -197,8 +197,9 @@ test('paid_calls in the response reserves the paid calls line; no number is carr
     const { fetch } = recorder(async () => json(body));
     const stats = await fetchBuildHomeStats({ env: {}, fetch, warn: quiet().warn });
     assert.equal(stats.paidCalls, reserved, label);
-    // Only whether to reserve the line: the build never holds the paid calls number.
-    assert.deepEqual(Object.keys(stats).sort(), ['count', 'paidCalls'], label);
+    // Only whether to reserve the line: the build never holds the paid calls number (or the
+    // value settled); only the agent count and the Base agents number are carried.
+    assert.deepEqual(Object.keys(stats).sort(), ['base', 'count', 'paidCalls'], label);
     assert.equal(typeof stats.paidCalls, 'boolean', label);
   }
   // The agent count is unchanged by the field, and a failure reserves nothing.
@@ -212,6 +213,7 @@ test('paid_calls in the response reserves the paid calls line; no number is carr
     await fetchBuildHomeStats({ env: {}, fetch: failing.fetch, warn: quiet().warn }),
     {
       count: null,
+      base: null,
       paidCalls: false,
     },
   );
@@ -223,6 +225,7 @@ test('paid_calls in the response reserves the paid calls line; no number is carr
     await fetchBuildHomeStats({ env: {}, fetch: noCount.fetch, warn: quiet().warn }),
     {
       count: null,
+      base: null,
       paidCalls: true,
     },
   );
@@ -239,7 +242,7 @@ test('offline builds: CC_BUILD_PAID_CALLS=1 reserves the line with a fixed count
       fetch,
       now,
     }),
-    { count: { total: 123_456, at: now() }, paidCalls: true },
+    { count: { total: 123_456, at: now() }, base: null, paidCalls: true },
   );
   for (const value of [undefined, '0', 'yes', '2'])
     assert.equal(
@@ -251,6 +254,69 @@ test('offline builds: CC_BUILD_PAID_CALLS=1 reserves the line with a fixed count
         })
       ).paidCalls,
       false,
+      String(value),
+    );
+  assert.equal(calls.length, 0);
+});
+
+test('the Base agents number is carried from 1 up, with its time; a 0 or no field carries none', async () => {
+  const at = '2026-10-15T12:00:00.000Z';
+  const body = (base: unknown) => ({
+    ai_agents_total: 114_251,
+    updated_at: at,
+    ...(base === undefined ? {} : { base_agents: base }),
+  });
+  const cases: Array<[string, unknown, { total: number; asOf: number } | null]> = [
+    ['a number', { total: 31_452, as_of: at }, { total: 31_452, asOf: Date.parse(at) }],
+    ['1', { total: 1, as_of: at }, { total: 1, asOf: Date.parse(at) }],
+    ['0 (never a 0 in the HTML)', { total: 0, as_of: at }, null],
+    ['not a count', { total: '31452', as_of: at }, null],
+    ['no time', { total: 31_452 }, null],
+    ['no field', undefined, null],
+  ];
+  for (const [label, base, expected] of cases) {
+    const { fetch } = recorder(async () => json(body(base)));
+    assert.deepEqual(
+      (await fetchBuildHomeStats({ env: {}, fetch, warn: quiet().warn })).base,
+      expected,
+      label,
+    );
+  }
+  // Without a usable agent count the Base agents number is still carried.
+  const noCount = recorder(async () => json({ base_agents: { total: 9, as_of: at } }));
+  assert.deepEqual(
+    (await fetchBuildHomeStats({ env: {}, fetch: noCount.fetch, warn: quiet().warn })).base,
+    { total: 9, asOf: Date.parse(at) },
+  );
+});
+
+test('offline builds: CC_BUILD_BASE_AGENTS bakes a fixed Base agents number, without any request', async () => {
+  const { calls, fetch } = recorder(async () => {
+    throw new Error('no request expected');
+  });
+  const now = () => Date.parse('2026-10-15T12:00:00.000Z');
+  assert.deepEqual(
+    await fetchBuildHomeStats({
+      env: { CC_BUILD_AGENT_COUNT: '123456', CC_BUILD_BASE_AGENTS: '31452' },
+      fetch,
+      now,
+    }),
+    {
+      count: { total: 123_456, at: now() },
+      base: { total: 31_452, asOf: now() },
+      paidCalls: false,
+    },
+  );
+  for (const value of [undefined, '', '0', 'off', '-3', '1.5'])
+    assert.equal(
+      (
+        await fetchBuildHomeStats({
+          env: { CC_BUILD_AGENT_COUNT: '7', CC_BUILD_BASE_AGENTS: value },
+          fetch,
+          now,
+        })
+      ).base,
+      null,
       String(value),
     );
   assert.equal(calls.length, 0);

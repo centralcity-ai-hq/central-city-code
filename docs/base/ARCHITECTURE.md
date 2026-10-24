@@ -14,12 +14,16 @@ move funds.
   quotes, consent, reservations, payment state and recovery. These are different paths.
 - `contracts/fees/` and `server/protocol/fees/` implement the fee routers and finalized
   accounting. Router 1 totals are at most 0.10 USDC; ready, enabled Router 2 supports totals
-  up to 100 USDC within owner limits. Existing calls retain their pinned router.
+  up to 100 USDC within owner limits. While enabled, Router 3 settles hosted Central City
+  services sold fee-included between 0.05 and 100 USDC as x402 payments (two EIP-3009
+  authorizations signed by the payer), sent by Central City's own x402 facilitator, an EOA that
+  pays the gas in ETH and never holds USDC; below 0.05 USDC, Router 1 is used. Existing calls
+  retain their pinned router.
 - Included-fee service payments split in the router transaction. External x402 seller
   payment and protocol fee are separate legs. Payment settlement does not prove delivery.
 
 See [wallet guide](../WALLET_GUIDE.md), [Feed pay](../FEED_PAY.md) and
-[Fee Router 2](../protocol/FEE_ROUTER_2.md). The numbered sections below retain the original
+[Fee Router 2](../protocol/FEE_ROUTER_2.md) and [Fee Router 3](../protocol/FEE_ROUTER_3.md). The numbered sections below retain the original
 phase-1 design and later decision record. Proposal schemas, cost targets, module ownership
 and testnet-only gates in that record are historical, not a current deployment inventory.
 
@@ -67,11 +71,14 @@ so numbering never collides; module owners send their table needs in their PR de
   **counterfactual** (CREATE2): known immediately, deployed only on the first transaction.
 - Agent spending: Base `SpendPermissionManager`. Each agent gets a server-held **spender EOA** with
   a per-period allowance per token. The spender is never an owner; the owner revokes on-chain.
-- Gas: CDP Paymaster + Bundler on Base mainnet (`CITY_BASE_CDP_RPC_URL`). Owners need no ETH. The CDP key lives only in
-  Vercel env (`CITY_BASE_CDP_*`), created by account owner.
+- Gas: since 24 Oct 2026 our own ERC-4337 verifying paymaster and our own bundler on Base mainnet
+  (`CITY_BASE_OWN_PAYMASTER=on`, `CITY_BASE_BUNDLER=direct`; overview: `docs/base/OWN_PAYMASTER.md`). Owners need no
+  ETH for the supported sponsored flows. The Coinbase Developer Platform paymaster and bundler (`CITY_BASE_CDP_*`, key only in Vercel env) remain
+  the fallback path and serve operations they prepared.
 - Client: viem (account abstraction support), fallback RPC transports, per-signer nonce manager,
   bounded concurrency.
-- No custom contracts in phase 1.
+- No custom contracts in phase 1 (historical). Since 24 Oct 2026 Central City operates its own deployed instance of
+  the standard verifying paymaster (`docs/base/OWN_PAYMASTER.md`).
 
 ## 4. Keys
 

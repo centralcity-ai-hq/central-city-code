@@ -183,12 +183,17 @@
       // The creation-bytecode hash approved in review (PR #353, b937f787). The page refuses to
       // deploy anything else.
       // deploy.html deploys router 1; deploy.html?router=2 deploys router 2 (Operation Fee Contract:
-      // the same contract with a 100 USDC cap, router2.json). Router 2 must use router 1's treasury.
-      const ROUTER2 = new URLSearchParams(location.search).get('router') === '2';
-      const KIT_FILE = ROUTER2 ? 'router2.json' : 'router.json';
-      const APPROVED_BYTECODE_SHA = ROUTER2
-        ? '0xc6e8fe84cc2dddbd3ebec6639f34d8a5a7fcf3d6486c1895a73322de04c4108e'
-        : '0x2450d7344badafdc4398ebae309e01b22782f8775a6a16db0b2f7574e8abd406';
+      // the same contract with a 100 USDC cap, router2.json); deploy.html?router=3 deploys router 3
+      // (Operation x402: settlement from two EIP-3009 authorizations, up to 100 USDC, router3.json).
+      // Routers 2 and 3 must use router 1's treasury.
+      const ROUTER_N = { 2: 2, 3: 3 }[new URLSearchParams(location.search).get('router')] ?? 1;
+      const ROUTER2 = ROUTER_N > 1; // routers 2 and 3: 100 USDC cap, router 1's treasury
+      const KIT_FILE = ROUTER_N === 1 ? 'router.json' : 'router' + ROUTER_N + '.json';
+      const APPROVED_BYTECODE_SHA = {
+        1: '0x2450d7344badafdc4398ebae309e01b22782f8775a6a16db0b2f7574e8abd406',
+        2: '0xc6e8fe84cc2dddbd3ebec6639f34d8a5a7fcf3d6486c1895a73322de04c4108e',
+        3: '0xb6487fd6d04c12fe42b1ba4d1d67fa4577f3c274afc0bc7acdc8c6ad21d97935',
+      }[ROUTER_N];
       const EXPECTED_MAX_TOTAL = ROUTER2 ? 100000000n : 100000n;
       const ROUTER1_TREASURY = '0xAF36084a4dc0CE760A6dCfa46Cf129e140c92aa9';
       const USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
@@ -206,7 +211,8 @@
         kitOk = false;
       // Once a deploy transaction has a hash, this page never sends another (also after a reload).
       // One latch per router: router 1's saved deploy never blocks router 2, and the reverse.
-      const LATCH = ROUTER2 ? 'cc-fee-router-2-deploy-tx' : 'cc-fee-router-deploy-tx';
+      const LATCH =
+        ROUTER_N === 1 ? 'cc-fee-router-deploy-tx' : 'cc-fee-router-' + ROUTER_N + '-deploy-tx';
       let sentHash = null;
       // Set before the first await of a deploy click: while MetaMask is asked, nothing (a reconnect,
       // the treasury checkbox, a second click) can enable or start another deploy.
@@ -234,9 +240,16 @@
         .then((k) => {
           kit = k;
           $('which').textContent = ROUTER2
-            ? 'Router 2 (up to $100 per payment). Connect the treasury account ' +
+            ? 'Router ' +
+              ROUTER_N +
+              (ROUTER_N === 3
+                ? ' (x402 settlement, up to $100 per payment).'
+                : ' (up to $100 per payment).') +
+              ' Connect the treasury account ' +
               ROUTER1_TREASURY +
-              ': router 2 must pay the same treasury as router 1.'
+              ': router ' +
+              ROUTER_N +
+              ' must pay the same treasury as router 1.'
             : 'Router 1 (up to $0.10 per payment).';
           const dl = $('kit');
           dl.textContent = '';

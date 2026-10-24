@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { getAddress } from 'viem';
 import { createApp } from '../server/app.js';
+import { createFeedPayEngine } from '../server/feed/pay/engine.js';
 import { FEED_TOOL_NOTICE } from '../shared/feed.js';
 import {
   CITY_PAY_SERVICE_HINT,
@@ -821,4 +822,82 @@ test('vercel runs the recovery cron every minute', () => {
     config.crons.find((cron) => cron.path === FEED_PAY_PATHS.cron),
     { path: FEED_PAY_PATHS.cron, schedule: '* * * * *' },
   );
+});
+
+test('the cron works through more than one page of stale calls in one run, each once, and still runs moves and sweeps', async (t) => {
+  const f = await setup(t);
+  await f.list();
+  await f.limit();
+  const ids: string[] = [];
+  for (let i = 0; i < 30; i++) ids.push(((await f.pay()).json() as FeedPayCall).callId);
+  // As a process that died: all 30 left reserved, nothing paid, no worker (more than one page of 25).
+  const stale = f.clock() - 5 * 60_000;
+  await f.sql(
+    `UPDATE feed_pay_calls SET state = 'reserved', payment_state = NULL, failure_code = NULL,
+       result_received_at = NULL, lease_until = 0, checked_at = 0, updated_at = $2
+     WHERE call_id = ANY($1)`,
+    [ids, stale],
+  );
+  await f.sql(
+    `UPDATE base_payments SET state = 'created'
+     WHERE payment_id IN (SELECT payment_id FROM feed_pay_calls WHERE call_id = ANY($1))`,
+    [ids],
+  );
+  const res = await f.cron();
+  assert.equal(res.statusCode, 200);
+  const body = res.json() as { checked: number; ended: number; moves: number; swept: number };
+  // One run: every one of the 30 checked exactly once and ended (one page of 25 before the fix).
+  assert.equal(body.checked, 30, JSON.stringify(body));
+  assert.equal(body.ended, 30, JSON.stringify(body));
+  assert.equal(typeof body.moves, 'number');
+  const states = await f.sql<{ state: string }>(
+    'SELECT state FROM feed_pay_calls WHERE call_id = ANY($1)',
+    [ids],
+  );
+  assert.deepEqual([...new Set(states.map((s) => s.state))], ['refused']);
+});
+
+test('under a sustained backlog the calls stop at the soft cutoff and the float moves still settle in the same run', async (t) => {
+  const f = await setup(t);
+  await f.list();
+  await f.limit();
+  const ids: string[] = [];
+  for (let i = 0; i < 30; i++) ids.push(((await f.pay()).json() as FeedPayCall).callId);
+  const stale = f.clock() - 5 * 60_000;
+  await f.sql(
+    `UPDATE feed_pay_calls SET state = 'reserved', payment_state = NULL, failure_code = NULL,
+       result_received_at = NULL, lease_until = 0, checked_at = 0, updated_at = $2
+     WHERE call_id = ANY($1)`,
+    [ids, stale],
+  );
+  await f.sql(
+    `UPDATE base_payments SET state = 'created'
+     WHERE payment_id IN (SELECT payment_id FROM feed_pay_calls WHERE call_id = ANY($1))`,
+    [ids],
+  );
+  // One float move (a top-up whose operation is final) recorded as still pending: settleMoves ends it.
+  const [move] = await f.sql<{ move_id: string }>(
+    `UPDATE feed_pay_float_moves SET state = 'pending'
+     WHERE move_id = (SELECT move_id FROM feed_pay_float_moves WHERE state = 'final' LIMIT 1)
+     RETURNING move_id`,
+  );
+  assert.ok(move, 'a float move to seed');
+  // A clock that moves on with every reading: the run reaches its call cutoff (70% of 1 s) long
+  // before the 30 calls are done.
+  let at = f.clock();
+  const engine = createFeedPayEngine({
+    db: f.db,
+    env: process.env,
+    now: () => (at += 15),
+    chain: async () => f.base.chainFor(() => f.db),
+    sleep: async () => {},
+  });
+  const result = await engine.recover({ budgetMs: 1_000 });
+  assert.ok(result.checked > 0 && result.checked < 30, JSON.stringify(result));
+  assert.equal(result.moves, 1, JSON.stringify(result));
+  const [after] = await f.sql<{ state: string }>(
+    'SELECT state FROM feed_pay_float_moves WHERE move_id = $1',
+    [move!.move_id],
+  );
+  assert.equal(after!.state, 'final');
 });

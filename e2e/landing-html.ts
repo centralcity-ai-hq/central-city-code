@@ -1,59 +1,106 @@
 import type { BrowserContext, Page } from '@playwright/test';
 
 /*
- * The landing's prerendered agent count (scripts/prerender/agent-count.ts) depends on the build:
- * a plain `pnpm build` reads production's number, CC_BUILD_AGENT_COUNT fixes one, and an
- * unreachable endpoint gives none. The specs that drive the client's own fetching serve "/" with
- * a known ticker instead, so they behave the same whatever the build had.
+ * The landing's prerendered agent count and Base agents number (scripts/prerender/agent-count.ts)
+ * depend on the build: a plain `pnpm build` reads production's numbers, CC_BUILD_AGENT_COUNT (and
+ * CC_BUILD_BASE_AGENTS) fixes them, and an unreachable endpoint gives none. They sit in the "AI
+ * agents joined" and "Central City base agents" cells of the live numbers
+ * (src/landing/LiveNumbers.tsx). The specs that drive the client's own fetching serve "/" with
+ * known cells instead, so they behave the same whatever the build had.
  */
 
-/** The ticker's <p> in the prerendered HTML (its children are spans only). */
-export const PRERENDERED_TICKER = /<p class="cc-agent-ticker"[^>]*>[\s\S]*?<\/p>/;
+/** The agents cell in the prerendered HTML (its children are a <dt> and a <dd> only). */
+export const PRERENDERED_AGENTS = /<div class="cc-kc" data-stat="agents"[^>]*>[\s\S]*?<\/div>/;
 
-/**
- * The paid calls line as a build writes it: empty and reserved when the build saw the count
- * (data-paid-calls="1", scripts/prerender/agent-count.ts), never a number. A plain `pnpm build`
- * reads production, so whether it is there depends on production at build time.
- */
-export const PREBUILT_PAID_LINE = /<p class="cc-agent-ticker cc-paid-ticker"[^>]*>(?:<\/p>)?/;
+/** The Base agents cell in the prerendered HTML (a <dt> and a <dd> only). */
+export const PRERENDERED_BASE = /<div class="cc-kc" data-stat="base"[^>]*>[\s\S]*?<\/div>/;
 
-/** The empty, reserved line, as built without a count. */
-export const EMPTY_TICKER =
-  '<p class="cc-agent-ticker" data-agent-ticker="true" data-ready="false" data-source="none">' +
-  '<span class="visually-hidden" aria-live="polite"></span></p>';
+/** The live numbers' sentence for screen readers, as prerendered. */
+export const PRERENDERED_SENTENCE =
+  /<p class="visually-hidden">(?:(?:Live on Central City|Central City, last known): [^<]*|Numbers of Central City\.)<\/p>/;
 
-/** The line as built with `total` (as AgentTicker renders it in the prerender). */
-export function builtTicker(total: number, at: string): string {
-  const n = total.toLocaleString('en-US');
-  const label = total === 1 ? ' AI agent has' : ' AI agents have';
+/** The cell as built without a count: a dash. */
+export const EMPTY_AGENTS =
+  '<div class="cc-kc" data-stat="agents" data-agent-ticker="true">' +
+  '<dt>AI agents joined</dt><dd>–</dd></div>';
+const EMPTY_SENTENCE = '<p class="visually-hidden">Numbers of Central City.</p>';
+
+/** The Base agents cell as built without a number: a dash. */
+export const EMPTY_BASE =
+  '<div class="cc-kc" data-stat="base"><dt>Central City base agents</dt><dd>–</dd></div>';
+
+/** The Base agents cell as built with `total`. */
+export function builtBase(total: number, at: string): string {
   return (
-    `<p class="cc-agent-ticker" data-agent-ticker="true" data-ready="true" data-source="build"` +
-    ` data-build-count="${total}" data-build-at="${at}">` +
-    `<span class="cc-agent-ticker-pill"><span class="cc-agent-ticker-text" aria-hidden="true">` +
-    `<span class="cc-agent-ticker-dot"></span>` +
-    `<span class="cc-agent-ticker-n" data-final="${n}" style="min-width:calc(${n.length}ch + 1px)">${n}</span>` +
-    `<span class="cc-agent-ticker-label">${label}<!-- --> joined Central City</span></span>` +
-    `<span class="visually-hidden">${n}${label} joined Central City</span> ` +
-    `<a class="cc-agent-ticker-verify" href="/downtown/verify">Verify here</a></span>` +
-    `<span class="visually-hidden" aria-live="polite"></span></p>`
+    `<div class="cc-kc" data-stat="base" data-build-base="${total}" data-build-base-at="${at}">` +
+    `<dt>Central City base agents</dt><dd>${total.toLocaleString('en-US')}</dd></div>`
   );
 }
 
+/** The cell as built with `total` (as LiveNumbers renders it in the prerender). */
+export function builtAgents(total: number, at: string): string {
+  return (
+    `<div class="cc-kc" data-stat="agents" data-agent-ticker="true"` +
+    ` data-build-count="${total}" data-build-at="${at}">` +
+    `<dt>AI agents joined</dt><dd>${total.toLocaleString('en-US')}</dd></div>`
+  );
+}
+
+/** The sentence as built with `total` agents (and `base` Base agents, when given). */
+export function builtSentence(total: number | null, base: number | null = null): string {
+  const parts = [
+    base !== null ? `${base.toLocaleString('en-US')} Central City base agents` : null,
+    total !== null ? `${total.toLocaleString('en-US')} AI agents joined` : null,
+  ].filter(Boolean);
+  return parts.length
+    ? `<p class="visually-hidden">Central City, last known: ${parts.join(', ')}.</p>`
+    : EMPTY_SENTENCE;
+}
+
 /**
- * Serves "/" as built, with its ticker replaced by `ticker` (default: the empty line) and no
- * reserved paid calls line, so the specs see the same page whatever production had at build time.
+ * Serves "/" as built, with its agents and Base agents cells replaced: `build` gives the build's
+ * count and `base` its Base agents number, null (default) the dash, so the specs see the same
+ * page whatever production had at build time.
  */
-export async function landingWithTicker(
+export async function landingWithAgents(
   page: Page | BrowserContext,
-  ticker: string = EMPTY_TICKER,
+  build: { total: number; at: string } | null = null,
+  base: { total: number; at: string } | null = null,
 ): Promise<void> {
   await page.route(
     (url) => url.pathname === '/',
     async (route) => {
       const response = await route.fetch();
-      const html = (await response.text()).replace(PREBUILT_PAID_LINE, '');
-      if (!PRERENDERED_TICKER.test(html)) throw new Error('landingWithTicker: no ticker in "/"');
-      await route.fulfill({ response, body: html.replace(PRERENDERED_TICKER, () => ticker) });
+      const html = await response.text();
+      if (
+        !PRERENDERED_AGENTS.test(html) ||
+        !PRERENDERED_BASE.test(html) ||
+        !PRERENDERED_SENTENCE.test(html)
+      )
+        throw new Error('landingWithAgents: no live numbers in "/"');
+      const cell = build ? builtAgents(build.total, build.at) : EMPTY_AGENTS;
+      const baseCell = base ? builtBase(base.total, base.at) : EMPTY_BASE;
+      const sentence = builtSentence(build?.total ?? null, base?.total ?? null);
+      await route.fulfill({
+        response,
+        body: html
+          .replace(PRERENDERED_AGENTS, () => cell)
+          .replace(PRERENDERED_BASE, () => baseCell)
+          .replace(PRERENDERED_SENTENCE, () => sentence),
+      });
     },
+  );
+}
+
+/** GET /api/session as a signed-out visitor of an installation that has an owner. */
+export async function signedOutSession(page: Page | BrowserContext): Promise<void> {
+  await page.route('**/api/session', (route) =>
+    route.request().method() === 'GET'
+      ? route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ operator: null, setupRequired: false }),
+        })
+      : route.fallback(),
   );
 }

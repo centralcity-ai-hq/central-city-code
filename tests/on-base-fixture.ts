@@ -23,6 +23,8 @@ import {
   baseShortIdsMigration,
 } from '../server/base/schema.js';
 import { publicStatsMigration } from '../server/stats/schema.js';
+import { AGENT_ROWS_SQL } from '../server/agent-rows/schema.js';
+import { WORKSPACE_AGENT_PATH_SQL } from '../server/agent-rows/agent-lookup-schema.js';
 import { BASE_NETWORKS } from '../shared/base/chains.js';
 import { AGENT_URI_ORIGIN } from '../shared/base/on-base.js';
 
@@ -76,6 +78,9 @@ export async function setup(t: { after: (fn: () => Promise<unknown>) => void }) 
     BASE_RATINGS_BY_RATED_SQL,
     BASE_RATED_AGENTS_SQL,
     publicStatsMigration.sql,
+    // workspace_agent() (245, then 254), which the public name reads the agent through.
+    AGENT_ROWS_SQL,
+    WORKSPACE_AGENT_PATH_SQL,
   ])
     await pg.exec(sql);
   const db: Database = {

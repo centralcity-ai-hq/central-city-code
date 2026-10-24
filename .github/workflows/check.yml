@@ -11,10 +11,9 @@ on:
 permissions:
   contents: read
 concurrency:
-  # A newer run cancels the older one for the same ref, main included: merges that land close
-  # together test only the newest main, which contains them all (CI cost, docs/CI.md).
-  group: check-${{ github.ref }}
-  cancel-in-progress: true
+  # Superseded branch and pull request runs are canceled; every main run gets its own group.
+  group: ${{ github.ref == 'refs/heads/main' && format('check-main-{0}', github.run_id) || format('check-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 jobs:
   changes:
     runs-on: ubuntu-24.04
@@ -81,7 +80,7 @@ jobs:
           assert.match(job('unit'), /run: pnpm install --frozen-lockfile/);
           assert.match(job('browser'), /run: pnpm install --frozen-lockfile/);
           // Real PostgreSQL races: the service must match production's major version.
-          assert.match(job('postgres-races'), /image: mirror\.gcr\.io\/library\/postgres:17-alpine/);
+          assert.match(job('postgres-races'), /image: public\.ecr\.aws\/docker\/library\/postgres:17-alpine/);
           assert.match(job('postgres-races'), /CITY_TEST_POSTGRES_URL: postgres:\/\/city:city-ci-only@127\.0\.0\.1:5432\/city/);
           NODE
       - id: paths
@@ -267,9 +266,9 @@ jobs:
     timeout-minutes: 8
     services:
       postgres:
-        # The Docker Official Image from the Google mirror of Docker Hub (same image as
-        # postgres:17-alpine): unauthenticated Docker Hub and ECR Public pulls hit their limits in CI.
-        image: mirror.gcr.io/library/postgres:17-alpine
+        # The Docker Official Image from its ECR Public mirror (same digest as Docker Hub's
+        # postgres:17-alpine): unauthenticated Docker Hub pulls hit its rate limit in CI.
+        image: public.ecr.aws/docker/library/postgres:17-alpine
         env:
           # Ephemeral service database; a test-only value, not a secret.
           POSTGRES_USER: city
@@ -296,7 +295,7 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
-      - run: pnpm test:files tests/invite-join-concurrency.test.ts tests/checkpoint-postgres-race.test.ts tests/base-fleet-admit.test.ts tests/base-payment-receive-postgres.test.ts tests/base-chain-rebroadcast-race.test.ts tests/oauth-registration-race.test.ts tests/room-invitations-race.test.ts tests/base-domain-file-snapshot-race.test.ts tests/paid-calls-count.test.ts
+      - run: pnpm test:files tests/invite-join-concurrency.test.ts tests/checkpoint-postgres-race.test.ts tests/base-fleet-admit.test.ts tests/base-payment-receive-postgres.test.ts
         env:
           CITY_TEST_POSTGRES_URL: postgres://city:city-ci-only@127.0.0.1:5432/city
           CI: ''

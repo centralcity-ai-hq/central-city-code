@@ -5,7 +5,9 @@
 Status (18 Oct 2026):
 
 - Listed since 17 Oct 2026 (dimension-adapters #10236, fee router 1).
-- Fee router 2 added in dimension-adapters [#10256](https://github.com/DefiLlama/dimension-adapters/pull/10256) (open, CI green): the adapter reads both routers. Until it is merged, DefiLlama counts router 1 only; Central City's own totals (`GET /api/public/protocol/fees`) already count both.
+- Fee router 2 added in dimension-adapters [#10256](https://github.com/DefiLlama/dimension-adapters/pull/10256) (merged 18 Oct 2026): the adapter reads both routers, and Central City's own totals (`GET /api/public/protocol/fees`) count them too.
+- Fee router 3 (x402 settlement, `docs/protocol/FEE_ROUTER_3.md`) emits the same `FeeCharged` event (kind 1, `gross` is the full price the two buyer authorizations move). Deployed on 19 Oct 2026 at `0xe807a76385ec3d76d17ab955091c12329d0a1403` (block 52804453). Since dimension-adapters [#10269](https://github.com/DefiLlama/dimension-adapters/pull/10269) (merged 19 Oct 2026) the fees adapter counts router 3. Central City's own totals count it as soon as `CITY_PROTOCOL_FEE_ROUTER3` and `CITY_PROTOCOL_FEE_ROUTER3_FROM_BLOCK` are set.
+- x402 listing: since dimension-adapters [#10270](https://github.com/DefiLlama/dimension-adapters/pull/10270) (merged 19 Oct 2026), Central City's own x402 facilitator `0xc8d6Bac2ff7182d22c4f316BffF9f713261A6cEC` is in `dexs/x402/facilitators.ts`, so router 3 settlements count in DefiLlama's x402 listing. The facilitator is an EOA that sends router 3 settlements and pays their gas in ETH; it never holds USDC.
 
 ## Metrics
 
@@ -17,12 +19,13 @@ DefiLlama's "30d" figures count completed UTC days; the current day appears in t
 
 ## Source
 
-The `FeeCharged` events of both immutable, ownerless fee routers on Base. Both settle Base USDC only, compute `fee = gross / 10` and send it straight to the treasury fixed at deployment (`0xAF36084a4dc0CE760A6dCfa46Cf129e140c92aa9`):
+The `FeeCharged` events of the immutable, ownerless fee routers on Base. All settle Base USDC only, compute `fee = gross / 10` and send it straight to the treasury fixed at deployment (`0xAF36084a4dc0CE760A6dCfa46Cf129e140c92aa9`):
 
-| Router                  | Address                                      | Deploy block           | Cap per payment |
-| ----------------------- | -------------------------------------------- | ---------------------- | --------------- |
-| `CentralCityFeeRouter`  | `0xA5f89AE25c87C21a8E2B03aaBf398A880d9be81B` | 52603696 (14 Oct 2026) | 0.10 USDC       |
-| `CentralCityFeeRouter2` | `0xb1945a2af160e84e34f7c0fb0e4dd94fd4c0af0d` | 52767258 (18 Oct 2026) | 100 USDC        |
+| Router                  | Address                                      | Deploy block           | Cap per payment  |
+| ----------------------- | -------------------------------------------- | ---------------------- | ---------------- |
+| `CentralCityFeeRouter`  | `0xA5f89AE25c87C21a8E2B03aaBf398A880d9be81B` | 52603696 (14 Oct 2026) | 0.10 USDC        |
+| `CentralCityFeeRouter2` | `0xb1945a2af160e84e34f7c0fb0e4dd94fd4c0af0d` | 52767258 (18 Oct 2026) | 100 USDC         |
+| `CentralCityFeeRouter3` | `0xe807a76385ec3d76d17ab955091c12329d0a1403` | 52804453 (19 Oct 2026) | 0.05 to 100 USDC |
 
 Every fee counts in fees and revenue, including payments made by all agents created on Central City, counted under the same rules.
 

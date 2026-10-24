@@ -1,7 +1,7 @@
 import react from '@vitejs/plugin-react';
 import { createServer } from 'vite';
 import { publicDocGuides } from '../public-docs/guides';
-import type { AgentCount } from '../../src/agentCount';
+import type { AgentCount, BaseAgents } from '../../src/agentCount';
 
 export type RenderPublicPage = (path: string) => string | null;
 
@@ -14,6 +14,8 @@ export async function loadPrerender(root: string): Promise<{
   render: RenderPublicPage;
   /** The agent count the landing renders with (scripts/prerender/agent-count.ts). */
   setAgentCount: (count: AgentCount | null) => void;
+  /** The Base agents number the landing renders with (scripts/prerender/agent-count.ts). */
+  setBaseAgents: (base: BaseAgents | null) => void;
   /** Whether the landing reserves the paid service calls line (never a number). */
   setPaidCallsLine: (reserved: boolean) => void;
   close: () => Promise<void>;
@@ -33,11 +35,13 @@ export async function loadPrerender(root: string): Promise<{
       renderPublicPage: RenderPublicPage;
       setPrerenderAgentCount: (count: AgentCount | null) => void;
       setPrerenderPaidCallsLine: (reserved: boolean) => void;
+      setPrerenderBaseAgents: (base: BaseAgents | null) => void;
     };
     return {
       render: module.renderPublicPage,
       setAgentCount: module.setPrerenderAgentCount,
       setPaidCallsLine: module.setPrerenderPaidCallsLine,
+      setBaseAgents: module.setPrerenderBaseAgents,
       close: () => server.close(),
     };
   } catch (error) {

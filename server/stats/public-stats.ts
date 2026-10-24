@@ -1,9 +1,11 @@
 import type { FastifyInstance } from 'fastify';
+import { createRateTracker, type RateTracker } from './rates.js';
 import type { Database } from '../database.js';
 import { clientAddressKey } from '../rate-limit.js';
 import { paidCallsTickerOn, type PaidCallsField } from '../../shared/paid-calls.js';
 import {
   PAID_CALLS_LAST_GOOD_MS,
+  PAID_CALLS_COLD_READ_BUDGET_MS,
   PAID_CALLS_READ_BUDGET_MS,
   paidCallsField,
   type PaidCallsReader,
@@ -68,6 +70,11 @@ export const PUBLIC_STATS_CACHE_CONTROL =
  * Cache-Control above, so the ticker's 15 s poll still asks the edge each time.
  */
 export const PUBLIC_STATS_EDGE_CACHE_CONTROL = 'public, max-age=15, stale-while-revalidate=86400';
+/**
+ * An answer without paid_calls or base_agents (neither could be read in time, not even a last
+ * value): kept a moment only, so the edge asks again soon instead of serving it for a day.
+ */
+export const PUBLIC_STATS_INCOMPLETE_CACHE_CONTROL = 'public, max-age=0, s-maxage=2';
 /** Per client address; the homepage polls every 15 s, so this leaves room for a shared NAT. */
 export const PUBLIC_STATS_RATE = { max: 60, windowMs: 60_000 } as const;
 
@@ -204,6 +211,44 @@ export function sqlPublicStatsStore(db: Pick<Database, 'query'>): PublicStatsSto
 /** A public_stats key (the table's own CHECK). */
 const STAT_KEY = /^[a-z_]{1,64}$/;
 
+/**
+ * Values counted together with a shared stat (createSharedStat `count`), each in its own row,
+ * stamped with the stat's claim time `at`. Like store.write, an older stamp never replaces a newer
+ * one; rows are created on first write.
+ */
+export async function writeStatParts(
+  db: Pick<Database, 'query'>,
+  parts: ReadonlyArray<readonly [key: string, value: number]>,
+  at: number,
+): Promise<void> {
+  for (const [key] of parts)
+    if (!STAT_KEY.test(key)) throw new Error(`Not a public_stats key: ${key}`);
+  if (parts.length === 0) return;
+  await db.query(
+    `INSERT INTO public_stats(key, value, refreshed_at)
+     SELECT * FROM unnest($1::text[], $2::bigint[], $3::bigint[])
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, refreshed_at = EXCLUDED.refreshed_at
+       WHERE public_stats.refreshed_at < EXCLUDED.refreshed_at`,
+    [
+      parts.map(([key]) => key),
+      parts.map(([, value]) => Math.max(0, Math.trunc(value))),
+      parts.map(() => at),
+    ],
+  );
+}
+
+/** The stored values of `keys` (writeStatParts); a key never written is absent. */
+export async function readStatParts(
+  db: Pick<Database, 'query'>,
+  keys: readonly string[],
+): Promise<Map<string, number>> {
+  const { rows } = await db.query<{ key: string; value: string | number }>(
+    'SELECT key, value FROM public_stats WHERE key = ANY($1::text[]) AND refreshed_at > 0',
+    [[...keys]],
+  );
+  return new Map(rows.map((row) => [row.key, Number(row.value)]));
+}
+
 /** One shared count: its last value and when it was counted. */
 export interface SharedStat {
   get(): Promise<StoredStat>;
@@ -231,13 +276,17 @@ export class NotCountedYet extends Error {
  *   after PUBLIC_STATS_RETRY_MS; only the lease holder ever counts.
  * - `staleWhileRevalidate`: once any value is known (in memory, or the stored row), get() answers
  *   with it at once and the refresh, and its count, run without the caller waiting.
+ * - `leaseMs` (default PUBLIC_STATS_LEASE_MS): how long a claim keeps other instances from
+ *   counting; longer than the slowest count, or a second count starts while the first still runs.
+ * - `count` is given the claim time its value is stamped with (writeStatParts).
  */
 export function createSharedStat(deps: {
   key: string;
-  count: () => Promise<number>;
+  count: (at: number) => Promise<number>;
   clock: () => number;
   ttlMs: number;
   store: PublicStatsStore;
+  leaseMs?: number;
   failureBackoffMs?: number;
   countWithoutLease?: boolean;
   staleWhileRevalidate?: boolean;
@@ -263,9 +312,9 @@ export function createSharedStat(deps: {
       row = await store.read(key);
       if (row && now - row.refreshedAt < ttl) return remember(row, row.refreshedAt + ttl);
       if (row) known(row);
-      if (await store.claim(key, now, ttl, PUBLIC_STATS_LEASE_MS)) {
+      if (await store.claim(key, now, ttl, deps.leaseMs ?? PUBLIC_STATS_LEASE_MS)) {
         claimed = true;
-        const total = await deps.count();
+        const total = await deps.count(now);
         // The value is stamped with the claim time, not the finish time.
         if (await store.write(key, total, now))
           return remember({ value: total, refreshedAt: now }, now + ttl);
@@ -278,7 +327,7 @@ export function createSharedStat(deps: {
       if (row) return remember(row, now + PUBLIC_STATS_RETRY_MS);
       if (!countWithoutLease) throw new NotCountedYet(key);
       // No value exists yet anywhere (the very first requests): count here, without writing.
-      const total = await deps.count();
+      const total = await deps.count(now);
       return remember({ value: total, refreshedAt: now }, now + PUBLIC_STATS_RETRY_MS);
     } catch (error) {
       const backoff =
@@ -374,6 +423,8 @@ async function paidCalls(deps: {
   env?: Readonly<Record<string, string | undefined>>;
   clock?: () => number;
   paidCallsBudgetMs?: number;
+  /** Told when the field is left out because its read was late or failed (not because none exists). */
+  late?: () => void;
 }): Promise<PaidCallsField | null> {
   const reader = deps.paidCalls;
   if (!reader || !paidCallsTickerOn(deps.env ?? process.env)) return null;
@@ -385,15 +436,50 @@ async function paidCalls(deps: {
       () => null,
     ),
     new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), deps.paidCallsBudgetMs ?? PAID_CALLS_READ_BUDGET_MS);
+      timer = setTimeout(
+        () => resolve(null),
+        deps.paidCallsBudgetMs ??
+          (reader.lastGood?.() ? PAID_CALLS_READ_BUDGET_MS : PAID_CALLS_COLD_READ_BUDGET_MS),
+      );
     }),
   ]);
   clearTimeout(timer);
   const now = clock();
   if (outcome) return outcome.snapshot ? paidCallsField(outcome.snapshot, now) : null;
   const last = reader.lastGood?.() ?? null;
-  if (!last || now - last.readAt > PAID_CALLS_LAST_GOOD_MS) return null;
+  if (!last || now - last.readAt > PAID_CALLS_LAST_GOOD_MS) {
+    deps.late?.();
+    return null;
+  }
   return paidCallsField(last, last.readAt);
+}
+
+/** Growth per second of each number this answer carries, where known (server/stats/rates.ts). */
+function ratesOf(
+  rates: RateTracker,
+  now: number,
+  body: {
+    ai_agents_total: number;
+    updated_at: string;
+    paid_calls?: { total: number; as_of: string; value_settled_raw?: string };
+    base_agents?: { total: number; as_of: string };
+  },
+): Record<string, number> | null {
+  rates.observe('ai_agents', body.ai_agents_total, Date.parse(body.updated_at));
+  if (body.paid_calls) {
+    const at = Date.parse(body.paid_calls.as_of);
+    rates.observe('paid_calls', body.paid_calls.total, at);
+    if (body.paid_calls.value_settled_raw !== undefined)
+      rates.observe('value_settled_raw', Number(body.paid_calls.value_settled_raw), at);
+  }
+  if (body.base_agents)
+    rates.observe('base_agents', body.base_agents.total, Date.parse(body.base_agents.as_of));
+  const out: Record<string, number> = {};
+  for (const key of ['ai_agents', 'paid_calls', 'base_agents', 'value_settled_raw']) {
+    const rate = rates.rate(key, now);
+    if (rate !== null) out[key] = Math.round(rate * 1000) / 1000;
+  }
+  return Object.keys(out).length ? out : null;
 }
 
 export function registerPublicStatsRoutes(
@@ -412,8 +498,12 @@ export function registerPublicStatsRoutes(
     baseAgents?: BaseAgentsReader;
     /** How long the response waits for it (default BASE_AGENTS_READ_BUDGET_MS). */
     baseAgentsBudgetMs?: number;
+    /** Where growth rates are tracked (default: one tracker for this app's routes). */
+    rates?: RateTracker;
   },
 ): void {
+  // This instance's recent readings, for the growth rates the homepage counts with.
+  const tracker = deps.rates ?? createRateTracker();
   app.get('/api/public/stats', async (request, reply) => {
     // Under the degraded 'ip' prefix (server/rate-limit.ts): a public read keeps working at a
     // reduced per-instance budget if the shared limiter is down. The key never collides with the
@@ -425,22 +515,38 @@ export function registerPublicStatsRoutes(
     );
     const stats = await deps.stats.get();
     // Read after the agent count's read has finished, never alongside it (a small pool).
-    const paid = await paidCalls(deps);
+    // Whether a number was left out only because its read was late or failed: such an answer is
+    // never kept at the edge for long (it would be served to everyone, and show a dash).
+    let incomplete = false;
+    const late = () => {
+      incomplete = true;
+    };
+    const paid = await paidCalls({ ...deps, late });
     // Then the Base agents number (one read at a time on the small pool).
     const baseAgents = await baseAgentsForResponse(
       deps.baseAgents,
       deps.clock ?? Date.now,
       deps.baseAgentsBudgetMs,
+      late,
     );
-    // Only the numbers and their times; nothing about agents, owners, payers, services or amounts.
+    // Only the numbers, their times and how fast they grow; nothing about agents, owners, payers,
+    // services or amounts.
+    const body = {
+      ai_agents_total: stats.ai_agents_total,
+      updated_at: stats.updated_at,
+      ...(paid ? { paid_calls: paid } : {}),
+      ...(baseAgents ? { base_agents: baseAgents } : {}),
+    };
+    const rates = ratesOf(tracker, (deps.clock ?? Date.now)(), body);
     return reply
-      .header('Cache-Control', PUBLIC_STATS_CACHE_CONTROL)
-      .header('Vercel-CDN-Cache-Control', PUBLIC_STATS_EDGE_CACHE_CONTROL)
-      .send({
-        ai_agents_total: stats.ai_agents_total,
-        updated_at: stats.updated_at,
-        ...(paid ? { paid_calls: paid } : {}),
-        ...(baseAgents ? { base_agents: baseAgents } : {}),
-      });
+      .header(
+        'Cache-Control',
+        incomplete ? PUBLIC_STATS_INCOMPLETE_CACHE_CONTROL : PUBLIC_STATS_CACHE_CONTROL,
+      )
+      .header(
+        'Vercel-CDN-Cache-Control',
+        incomplete ? PUBLIC_STATS_INCOMPLETE_CACHE_CONTROL : PUBLIC_STATS_EDGE_CACHE_CONTROL,
+      )
+      .send({ ...body, ...(rates ? { rates } : {}) });
   });
 }

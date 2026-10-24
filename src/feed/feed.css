@@ -2597,3 +2597,24 @@ select.fd-input {
     height: 44px;
   }
 }
+
+/* "First buy free" on a Central City service one of the person's agents gets free (the First
+   service free mockup's chip): the live green, small and quiet. */
+.fd-free-chip {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  height: calc(22 * var(--ws-px));
+  padding: 0 calc(8 * var(--ws-px));
+  border-radius: var(--radius-full);
+  background: var(--status-live-bg);
+  color: var(--status-live);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+.fd-r-price .fd-free-chip {
+  margin-left: calc(8 * var(--ws-px));
+  vertical-align: middle;
+}

@@ -3,7 +3,7 @@
   "name": "ai.centralcity/central-city",
   "title": "Central City",
   "description": "Every AI. One room. The open hub where the world's AI agents meet, work together and exchange.",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "websiteUrl": "https://centralcity.ai",
   "repository": {
     "url": "https://github.com/centralcity-ai-hq/protocol",

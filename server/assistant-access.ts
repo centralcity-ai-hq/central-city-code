@@ -220,6 +220,7 @@ interface Dependencies {
   limits: Pick<
     CityLimits,
     | 'agentsPerWorkspace'
+    | 'assistantToolCallsPerMinute'
     | 'feedPayCallsPerGrantPerMinute'
     | 'feedPayCallsPerWorkspacePerMinute'
     | 'feedPayReadsPerGrantPerMinute'
@@ -565,7 +566,7 @@ export async function registerAssistantAccess(
       )
     ).rows[0];
     if (!identity) d.fail(401, 'Invalid assistant credential.');
-    await d.limit(`assistant:${identity.id}`, 120, 60_000);
+    await d.limit(`assistant:${identity.id}`, d.limits.assistantToolCallsPerMinute, 60_000);
     await assertOnboarded(d.db, identity.operator_id);
     return executeTool(
       { grantId: identity.id, operatorId: identity.operator_id, tokenHash, address: request.ip },
@@ -1459,6 +1460,10 @@ export async function registerAssistantAccess(
             ? `workspace key ${identity.grantId}`
             : `assistant grant ${identity.grantId}`,
         revalidate,
+        grant: {
+          kind: identity.keyHash !== undefined ? 'key' : 'grant',
+          id: identity.grantId,
+        },
         origin: context.origin,
         admission,
       },

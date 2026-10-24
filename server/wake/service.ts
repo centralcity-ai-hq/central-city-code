@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { Database, Transaction as Tx } from '../database.js';
-import { iso, type Workspace } from '../model.js';
+import { iso, type StoredAgent, type Workspace } from '../model.js';
 import {
   WAKE_LIMITS,
   ackMentionsToolInput,
@@ -291,9 +291,16 @@ export function createWake(d: WakeDependencies): Wake {
     if (!row) fail(401, 'unauthorized', 'Sign in to continue.');
     return row!.data;
   }
+  /** One agent of the owner's workspace, read by workspace_agent() (never the whole document). */
   async function ownAgent(tx: Tx, operatorId: string, agentId: string, live = false) {
-    const workspace = await workspaceOf(tx, operatorId);
-    const agent = workspace.agents.find((item) => item.id === agentId);
+    const row = (
+      await tx.query<{ agent: StoredAgent | null }>(
+        'SELECT workspace_agent(ws.operator_id, ws.data, $2) AS agent FROM workspaces ws WHERE ws.operator_id=$1',
+        [operatorId, agentId],
+      )
+    ).rows[0];
+    if (!row) fail(401, 'unauthorized', 'Sign in to continue.');
+    const agent = row!.agent;
     if (!agent) fail(404, 'agent_not_found', 'Agent not found in this workspace.');
     if (live && agent!.revokedAt) fail(403, 'agent_revoked', `${agent!.name} is revoked.`);
     return agent!;

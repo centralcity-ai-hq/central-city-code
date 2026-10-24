@@ -91,8 +91,9 @@ export interface FeeLedgerConfig {
   /** CentralCityFeeRouter address, or null before it is deployed. */
   router: Hex | null;
   /**
-   * Fee routers added after the first (router 2, payments above 0.10 USDC): the same FeeCharged
-   * event from another address, read and counted exactly like router 1 from its deploy block.
+   * Fee routers added after the first (router 2, payments above 0.10 USDC; router 3, x402
+   * settlement): the same FeeCharged event from another address, read and counted exactly like
+   * router 1 from its deploy block.
    */
   addedRouters?: readonly { address: Hex; fromBlock: bigint }[];
   /** AuthCaptureEscrow and the operator whose charges are ours, or null when unused. */
@@ -227,6 +228,52 @@ export function feeRowsFromLogs(config: FeeLedgerConfig, logs: readonly ChainLog
   });
 }
 
+/** Smallest range a refused getLogs is split down to; below it the error stands (Base itself down). */
+export const MIN_LOG_RANGE = 8n;
+
+/**
+ * One source's logs over [from, to]. A node refuses an answer with too many logs (22 Oct: ~15,000
+ * router-3 FeeCharged events in one 1,000-block range at peak volume, every scan failed from 12:10
+ * UTC on): the range is then halved and each half read again, down to MIN_LOG_RANGE.
+ */
+async function splitLogs(
+  chain: FeeChain,
+  source: { address: Hex; topics?: (Hex | null)[] },
+  from: bigint,
+  to: bigint,
+  /** Set to the smallest range that had to be split down to (none split: unchanged). */
+  fit: { range: bigint | null },
+): Promise<ChainLog[]> {
+  try {
+    return await chain.getLogs({ ...source, fromBlock: from, toBlock: to });
+  } catch (error) {
+    if (to - from + 1n <= MIN_LOG_RANGE) throw error;
+    const mid = from + (to - from) / 2n;
+    const half = mid - from + 1n;
+    if (fit.range === null || half < fit.range) fit.range = half;
+    return [
+      ...(await splitLogs(chain, source, from, mid, fit)),
+      ...(await splitLogs(chain, source, mid + 1n, to, fit)),
+    ];
+  }
+}
+
+/**
+ * The range the next chunk starts with, learned across chunks and runs of this instance: after a
+ * split the next chunk is read at the size that worked (no refused full-size read first), and it
+ * doubles back towards MAX_LOG_RANGE after GROW_AFTER chunks in a row read whole. Dense hours then cost about one
+ * request per chunk instead of a cascade of refusals (22 Oct: 180 blocks per run while catching up).
+ */
+let learnedRange = MAX_LOG_RANGE;
+/** Chunks read whole in a row since the last split: the range doubles again only after GROW_AFTER. */
+let wholeChunks = 0;
+const GROW_AFTER = 8;
+/** Tests only: forget the learned range. */
+export function resetLearnedLogRange(): void {
+  learnedRange = MAX_LOG_RANGE;
+  wholeChunks = 0;
+}
+
 async function rangeLogs(
   chain: FeeChain,
   config: FeeLedgerConfig,
@@ -247,12 +294,21 @@ async function rangeLogs(
   const logs: ChainLog[] = [];
   // Out of time after a whole chunk: the range read so far is returned and the run stops there.
   let through = from - 1n;
-  for (let start = from; start <= to; start += MAX_LOG_RANGE) {
+  for (let start = from; start <= to;) {
     if (through >= from && pastDeadline()) break;
-    const end = start + MAX_LOG_RANGE - 1n < to ? start + MAX_LOG_RANGE - 1n : to;
-    for (const source of sources)
-      logs.push(...(await chain.getLogs({ ...source, fromBlock: start, toBlock: end })));
+    const step = learnedRange;
+    const end = start + step - 1n < to ? start + step - 1n : to;
+    const fit = { range: null as bigint | null };
+    for (const source of sources) logs.push(...(await splitLogs(chain, source, start, end, fit)));
+    if (fit.range !== null) {
+      learnedRange = fit.range;
+      wholeChunks = 0;
+    } else if (++wholeChunks >= GROW_AFTER) {
+      learnedRange = step * 2n < MAX_LOG_RANGE ? step * 2n : MAX_LOG_RANGE;
+      wholeChunks = 0;
+    }
     through = end;
+    start = end + 1n;
   }
   logs.sort((a, b) =>
     a.blockNumber === b.blockNumber
@@ -548,8 +604,8 @@ export async function scanFees(
 }
 
 /**
- * A router added after the scan already passed its deploy block (router 2 is configured after it is
- * deployed): the first scan that sees it records it in protocol_fee_router_starts (migration 232)
+ * A router added after the scan already passed its deploy block (router 2 or 3 is configured after
+ * it is deployed): the first scan that sees it records it in protocol_fee_router_starts (migration 232)
  * and lowers finalized_through to just before its deploy block, in one transaction. scanFees then
  * re-reads that range once (rows replaced by what the chain says, finality re-verified), so every
  * fee of the new router from its first block is counted. Exactly once per router; a router whose

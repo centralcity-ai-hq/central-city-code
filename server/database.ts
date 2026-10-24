@@ -113,6 +113,24 @@ export function postgresDatabase(pool: Pool): Database {
   };
 }
 
+/** Connections per instance when CITY_DB_POOL_MAX is not set (or not a whole number in bounds). */
+export const DB_POOL_MAX_DEFAULT = 10;
+export const DB_POOL_MAX_MIN = 3;
+export const DB_POOL_MAX_MAX = 50;
+
+/**
+ * The pool size per instance: CITY_DB_POOL_MAX as a whole number from DB_POOL_MAX_MIN to
+ * DB_POOL_MAX_MAX, else DB_POOL_MAX_DEFAULT. Raised under load when every route answers db.busy
+ * code "pool" (21 Oct: Block D, the Base fleets and the joiners queued past the 5 s connect
+ * timeout on 10 connections per instance).
+ */
+export function dbPoolMax(env: Record<string, string | undefined> = process.env): number {
+  const raw = env.CITY_DB_POOL_MAX?.trim();
+  if (!raw || !/^\d{1,3}$/.test(raw)) return DB_POOL_MAX_DEFAULT;
+  const n = Number(raw);
+  return n >= DB_POOL_MAX_MIN && n <= DB_POOL_MAX_MAX ? n : DB_POOL_MAX_DEFAULT;
+}
+
 export async function openPostgres(connectionString: string): Promise<Database> {
   const url = new URL(connectionString);
   // pg connection-string SSL switches can override the explicit TLS object.
@@ -123,7 +141,10 @@ export async function openPostgres(connectionString: string): Promise<Database> 
     new Pool({
       connectionString: url.toString(),
       ssl: { rejectUnauthorized: true },
-      max: 3,
+      // DATABASE_URL is Neon's pooled endpoint (PgBouncer, up to 10,000 clients), so one instance
+      // may hold more than 3 clients: with 3, concurrent requests queued past the 5 s connect
+      // timeout and answered busy (db.busy code "pool") under load.
+      max: dbPoolMax(),
       idleTimeoutMillis: 10_000,
       connectionTimeoutMillis: 5_000,
       statement_timeout: 8_000,

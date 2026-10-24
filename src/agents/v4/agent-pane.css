@@ -590,3 +590,42 @@
     height: 44px;
   }
 }
+
+/* The new agent's first service (the First service free mockup): a label and one quiet card. */
+.ap4-free {
+  display: grid;
+  gap: calc(8 * var(--ws-px));
+  min-width: 0;
+}
+.ap4-label {
+  margin: 0 2px;
+  color: var(--ap4-muted);
+  font-size: calc(12 * var(--ws-type-px));
+  font-weight: 500;
+}
+.ap4-free-card {
+  display: flex;
+  align-items: center;
+  gap: calc(14 * var(--ws-px));
+  padding: calc(14 * var(--ws-px));
+  border-radius: calc(12 * var(--ws-px));
+  background: var(--ap4-surface);
+  box-shadow: var(--ap4-shadow-s);
+}
+.ap4-free-t {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ap4-free-t b {
+  display: block;
+  font-weight: 600;
+}
+.ap4-free-t span {
+  color: var(--ap4-muted);
+  font-size: calc(13 * var(--ws-type-px));
+}
+.ap4-free-card .ap4-btn {
+  flex: none;
+  text-decoration: none;
+}

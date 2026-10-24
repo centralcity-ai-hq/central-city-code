@@ -1,5 +1,5 @@
 // Serves contracts/deploy-kit on http://127.0.0.1:8790 with Node built-ins only (no packages to
-// fetch, nothing unpinned): only deploy.html, keccak.js, router.json and router2.json, never another file.
+// fetch, nothing unpinned): only deploy.html, keccak.js, router.json, router2.json and router3.json, never another file.
 //   node scripts/protocol/serve-deploy-kit.mjs   then open http://localhost:8790/deploy.html
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
@@ -11,6 +11,7 @@ const FILES = {
   '/keccak.js': ['keccak.js', 'text/javascript; charset=utf-8'],
   '/router.json': ['router.json', 'application/json'],
   '/router2.json': ['router2.json', 'application/json'],
+  '/router3.json': ['router3.json', 'application/json'],
 };
 createServer((req, res) => {
   const entry = FILES[new URL(req.url, 'http://localhost').pathname];

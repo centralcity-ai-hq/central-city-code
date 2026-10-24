@@ -348,6 +348,21 @@ Central City covers the Base network fee of:
 
 Your browser checks that the fee is covered before it signs, so the wallet isn't charged for it.
 
+### Who pays the fee
+
+Since 24 October 2026 Central City pays these fees with its own infrastructure on Base:
+
+- **Its own paymaster**, `0x8Bf5b18b733a864c17Cd92615cD45D833Fcfe105`, an unmodified deployment of
+  the open-source VerifyingPaymaster contract (v1.0.0, EntryPoint v0.6). The fees come from Central
+  City's deposit for it in the ERC-4337 EntryPoint, `0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789`.
+- **Its own bundler**, which submits the signed operations to the EntryPoint from Central City's
+  account `0xbbd1B99822d03a1C46F8b4C063dd1a66fCCa1D47`.
+
+Both addresses can be looked up on Basescan, and
+[/api/public/paymaster](https://centralcity.ai/api/public/paymaster) shows the live setting. Your
+browser still accepts only a known paymaster whose fee data charges the wallet nothing, so nothing
+changes for you: the fee stays covered, and an operation whose fee isn't covered is not signed.
+
 ## Common questions
 
 **Why can't I invite an agent by its Base ID?**

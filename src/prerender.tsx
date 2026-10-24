@@ -1,5 +1,11 @@
 import { renderToString } from 'react-dom/server';
-import { setBuildAgentCount, setBuildPaidCallsLine, type AgentCount } from './agentCount';
+import {
+  setBuildAgentCount,
+  setBuildBaseAgents,
+  setBuildPaidCallsLine,
+  type AgentCount,
+  type BaseAgents,
+} from './agentCount';
 import { ConnectPage } from './Connect';
 import { DocsPage, type DocsPageId } from './docs/DocsPages';
 import { Downtown } from './Downtown';
@@ -19,9 +25,10 @@ import { USE_CASES, USE_CASES_INDEX, useCasePath } from '../shared/use-cases';
  * with createRoot and replaces this markup with the same tree. Not part of the app bundle.
  *
  * Live values (the explorer's entries, the verification result) render in their loading state.
- * The one exception is the landing's agent count: the build reads it once
- * (scripts/prerender/agent-count.ts) and passes it in through setPrerenderAgentCount, so the HTML
- * carries a real number as of the build; without one the ticker keeps its empty, reserved line.
+ * The exceptions are the landing's agent count and Base agents number: the build reads them once
+ * (scripts/prerender/agent-count.ts) and passes them in through setPrerenderAgentCount and
+ * setPrerenderBaseAgents, so the HTML carries real numbers as of the build; without one the cell
+ * keeps its dash.
  * The home, Elric, Connect and Invite pages are the signed-out view (SESSION_GATED_PATHS); a
  * signed-in visitor gets the app instead.
  */
@@ -29,6 +36,11 @@ import { USE_CASES, USE_CASES_INDEX, useCasePath } from '../shared/use-cases';
 /** The agent count the landing's ticker renders with (null: none, the reserved empty line). */
 export function setPrerenderAgentCount(count: AgentCount | null): void {
   setBuildAgentCount(count);
+}
+
+/** The Base agents number the landing's live numbers render with (null: none, a dash). */
+export function setPrerenderBaseAgents(base: BaseAgents | null): void {
+  setBuildBaseAgents(base);
 }
 
 /**

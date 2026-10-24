@@ -34,12 +34,32 @@
  *   - the counter row is never waited for longer than COUNTER_READ_BUDGET_MS;
  *   - the edge keeps each answer a few seconds as well (SERVICE_CALLS_LIVE), and the page polls
  *     only its first page, only while visible;
- *   - Total and Per minute come from the paid_call_count row (one primary-key read, the public
- *     stats' own reader and cache), never from a count over the table;
+ *   - Total comes from the paid_call_count row (one primary-key read, the public stats' own
+ *     reader and cache), never from a count over the table; Per minute is an exact count of the
+ *     last minute in the page read (two bounded index ranges, cached with the page);
  *   - Last 24 h and Services used are one bounded aggregate, kept DAY_TTL_MS per server and never
  *     waited for once known (the last value is served while a new one is read).
  *
- * Indexes. No migration here: feed_pay_calls is the payment table, and an index on it needs the
+ * Sponsored first purchases (server/feed/pay/sponsored.ts) are paid calls too: Central City's
+ * sponsor account pays the whole price through fee router 3 (FeeCharged payer = the sponsor, 90% to
+ * pay_to, the 10% fee to the treasury in the same transaction), and they are stored in their own
+ * table, feed_pay_sponsored_calls, never in feed_pay_calls. A row of that table is listed and
+ * counted once Base shows it paid: state 'paid', 'delivered' or 'paid_no_result', with its
+ * transaction (SPONSORED_PAID). It reads like a fee-included call: the price is gross_raw, the
+ * provider got gross_raw - fee_raw, the fee (fee_raw) moved in the same transaction; the payer is
+ * the sponsor address (feed_pay_sponsor_key). A public row looks exactly like every other one: no
+ * field or label tells a sponsored call apart (only what Base shows). Its time is
+ * updated_at: the table has no paid_at, and updated_at is set when the call turns 'paid' and once
+ * more when its answer is stored ('delivered' / 'paid_no_result', seconds later), so a sponsored
+ * row's time is its last state change after payment, not its block time. Both tables are read
+ * apart, each through its own index and LIMITed, and merged (UNION ALL) in one statement: one total
+ * order (time, transaction, md5(call_id)) over both, so cursors page through both without a row
+ * twice or skipped. Total is the paid_call_count row, which counts the paid sponsored calls too
+ * (migration 252, server/feed/pay/sponsored-count-schema.ts), so the homepage and this view read
+ * one number; Per minute and the 24 h numbers include them. Without the sponsored tables
+ * (an older database) or a known sponsor address, everything reads exactly as before.
+ *
+ * Indexes. No migration here for feed_pay_calls: it is the payment table, and an index on it needs the
  * product owner's approval. What the reads use today:
  *   - every query repeats the predicate of feed_pay_calls_paid (migration 120: (wallet_id,
  *     settled_at) WHERE payment_state = 'settled' AND tx_hash IS NOT NULL) and bounds settled_at
@@ -57,13 +77,19 @@
  *     scan, inside their time limit; searches are cached and rate limited per address, the day
  *     counted once a minute. The indexes to add once approved are in
  *     docs/explorer-service-calls-indexes.md.
+ *   - the sponsored calls read through migration 251's partial indexes
+ *     (server/feed/pay/sponsored-explorer-schema.ts): the page and the day by
+ *     updated_at, searches by tx_hash, block_number or (lower(pay_to), updated_at).
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { formatUnits, getAddress } from 'viem';
 import { z } from 'zod';
+import { feeRef } from '../../protocol/fees/fee-call.js';
 import type { Database, Transaction } from '../../database.js';
 import { clientAddressKey } from '../../rate-limit.js';
 import { createPaidCallsReader, type PaidCallsReader } from '../../stats/paid-calls.js';
+import { PAID_CALLS_RECENT_MAX } from '../../../shared/paid-calls.js';
+import { WALLET_CHAIN_ID } from '../../../shared/base/wallet-network.js';
 import {
   PAID_CALLS_CHAIN_ID,
   SERVICE_CALLS_CURSOR,
@@ -111,6 +137,46 @@ export const SERVICE_CALLS_SEARCH_GLOBAL = { max: 30, windowMs: 60_000 } as cons
 export const COUNTER_READ_BUDGET_MS = 250;
 /** "Per minute now": payments whose block is at most this old. */
 export const PER_MINUTE_WINDOW_MS = 60_000;
+/**
+ * The route's "Per minute": the average over this many minutes, not one exact minute. Payments are
+ * recorded in settlement batches, so one minute read 0, 19, 46 and 73 within 40 s while Base
+ * showed a steady ~99 a minute (23 Oct 2026), and the Explorer often showed 0.
+ */
+export const PER_MINUTE_AVERAGE_MINUTES = 5;
+/** Whether the sponsored tables exist and the sponsor's address are looked up at most this often. */
+export const SPONSOR_TTL_MS = 60_000;
+/**
+ * A search's sponsored matches are counted up to this many (a search for the sponsor's own
+ * address matches every sponsored call): past it, `matches` is a lower bound.
+ */
+export const SPONSORED_MATCHES_MAX = 100_000;
+
+/**
+ * Below this span the kept times are never extrapolated: sponsored calls are recorded paid in
+ * batches (up to 50 rows within about a second), and 64 times spanning under a second would read
+ * as thousands a minute.
+ */
+export const PER_MINUTE_MIN_SPAN_MS = 10_000;
+
+/**
+ * Paid calls in the last minute, from the counter row's recent block times (newest first, at
+ * most PAID_CALLS_RECENT_MAX of them). When every kept time is inside the minute the row holds
+ * fewer than really happened, so the count would stop at the cap: then the rate is measured from
+ * how fast those calls came (their count over the time they span), never capped, and only when
+ * they span at least PER_MINUTE_MIN_SPAN_MS (else the count kept). A rough figure: the route's
+ * Per minute is an exact count (paidMinute below); this is only its last-resort estimate.
+ */
+export function perMinuteOf(recent: readonly number[], asOf: number): number {
+  const inWindow = recent.filter((at) => asOf - at <= PER_MINUTE_WINDOW_MS);
+  if (inWindow.length < PAID_CALLS_RECENT_MAX || inWindow.length !== recent.length)
+    return inWindow.length;
+  const span = Math.max(...inWindow) - Math.min(...inWindow);
+  if (span < PER_MINUTE_MIN_SPAN_MS) return inWindow.length;
+  return Math.max(
+    inWindow.length,
+    Math.round(((inWindow.length - 1) * PER_MINUTE_WINDOW_MS) / span),
+  );
+}
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 // Only these keys: any other query string would be a separate edge-cache entry.
@@ -135,6 +201,15 @@ interface CallRow {
   fee_tx_hash: string | null;
   fee_block: string | number | null;
   pay_kind: string;
+  /** Internal only: never in an answer. Its hash orders calls that share a block time and tx. */
+  call_id: string;
+  /** md5(call_id): the opaque tie-breaker in the cursor (calls of one settleBatch share a tx). */
+  row_key: string;
+  /**
+   * Internal only, never in an answer: the row is from feed_pay_sponsored_calls (the page's
+   * bound applies to the feed's rows only). Absent without the sponsored side.
+   */
+  sponsored?: boolean | null;
 }
 
 /**
@@ -144,7 +219,7 @@ interface CallRow {
 const COLUMNS = `c.tx_hash, c.settled_block::text AS settled_block, c.settled_at::text AS settled_at,
   w.spender_address AS payer, c.pay_to, c.service_title, c.amount_raw::text AS amount_raw,
   c.fee_raw::text AS fee_raw, c.fee_state, c.fee_tx_hash, c.fee_block::text AS fee_block,
-  c.pay_kind`;
+  c.pay_kind, c.call_id, md5(c.call_id) AS row_key`;
 
 /**
  * Settled calls on one chain with their transaction: the predicate of feed_pay_calls_paid
@@ -152,6 +227,50 @@ const COLUMNS = `c.tx_hash, c.settled_block::text AS settled_block, c.settled_at
  */
 const SETTLED = `c.chain_id = $1 AND c.payment_state = 'settled' AND c.tx_hash IS NOT NULL
   AND c.settled_at IS NOT NULL`;
+
+/**
+ * A sponsored call Base shows paid, with its transaction: the predicate of migration 251's partial
+ * indexes (server/feed/pay/sponsored-explorer-schema.ts), repeated so the planner reads through
+ * them.
+ */
+const SPONSORED_PAID = `s.state IN ('paid','delivered','paid_no_result') AND s.tx_hash IS NOT NULL`;
+
+/**
+ * The same columns for a sponsored call, as a fee-included one: the price is gross_raw, the
+ * provider's share gross_raw - fee_raw, the fee charged in the payment's own transaction. The
+ * payer is the sponsor address (a parameter); the title is the listed service's, by its primary
+ * key (empty when that table is absent).
+ */
+const sponsoredColumns = (payer: string, titles: boolean) => `s.tx_hash,
+  s.block_number::text AS settled_block, s.updated_at::text AS settled_at, ${payer}::text AS payer,
+  s.pay_to, ${titles ? `coalesce((SELECT v.title FROM feed_services v WHERE v.id = s.service_id), '')` : `''::text`} AS service_title,
+  (s.gross_raw - s.fee_raw)::text AS amount_raw, s.fee_raw::text AS fee_raw,
+  'charged'::text AS fee_state, NULL::text AS fee_tx_hash, NULL::text AS fee_block,
+  'included'::text AS pay_kind, s.call_id, md5(s.call_id) AS row_key, true AS sponsored,
+  s.updated_at AS sort_at`;
+
+/** The sponsored side of the page, when the tables exist and the sponsor is known. */
+interface Sponsor {
+  /** The sponsor account's address, lower case. */
+  address: string;
+  /** feed_services exists (the services' titles). */
+  titles: boolean;
+}
+
+/**
+ * A search as SQL over the sponsored calls `s`, its value at `at` (on the page, $2 as the feed's):
+ * '' when every sponsored call matches (the sponsor's own address is the payer of all of them).
+ */
+function sponsoredSearchSql(search: ServiceCallsSearch, sponsor: Sponsor, at: string): string {
+  switch (search.kind) {
+    case 'tx':
+      return `s.tx_hash = ${at}`;
+    case 'block':
+      return `s.block_number = ${at}`;
+    case 'address':
+      return search.address === sponsor.address ? '' : `lower(s.pay_to) = ${at}`;
+  }
+}
 
 /** A search as SQL over `c`, its value at $2. */
 function searchSql(search: ServiceCallsSearch): { sql: string; value: string | number } {
@@ -211,13 +330,19 @@ export function publicCall(row: CallRow): ServiceCall {
               block: num(row.fee_block),
             }
           : null,
+    // The FeeCharged ref of this payment (keccak256 of its intent id, public on Base for a router
+    // payment): unique per call, so a page can key calls that share one batch transaction.
+    ref: feeRef(row.call_id),
     status: 'settled',
   };
 }
 
-/** The cursor after a row: its time and transaction. */
-export const cursorOf = (call: Pick<ServiceCall, 'time' | 'tx_hash'>) =>
-  `${call.time}_${call.tx_hash}`;
+/**
+ * The cursor after a row: its time, transaction and opaque row key. Calls settled in one batch
+ * share time and transaction (batch lane), so the key keeps pages from skipping or repeating them.
+ */
+export const cursorOf = (row: { time: number; tx_hash: string; row_key: string }) =>
+  `${row.time}_${row.tx_hash}_${row.row_key}`;
 
 export interface ServiceCallsRouteDeps {
   db: Database;
@@ -228,12 +353,16 @@ export interface ServiceCallsRouteDeps {
   limit?: (key: string, max: number, windowMs: number) => Promise<void>;
   /** The paid_call_count reader; by default one of this route's own (5 s cache). */
   counter?: PaidCallsReader;
+  /** The network sponsored first purchases are paid on (WALLET_CHAIN_ID); listed only there. */
+  sponsoredChainId?: number;
 }
 
 interface PageRead {
   items: ServiceCall[];
   nextCursor: string | null;
   matches: number | null;
+  /** Paid service calls in the minute before this read, counted exactly (paidMinute). */
+  perMinute: number;
 }
 
 export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCallsRouteDeps) {
@@ -273,38 +402,135 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
       return run(tx);
     });
 
-  /** One page (PAGE_SIZE + 1 rows tell whether another follows). */
+  /**
+   * The sponsored side, when its tables exist and the sponsor's address is recorded; null keeps
+   * every read as before. Looked up at most every SPONSOR_TTL_MS, inside the read's own
+   * transaction.
+   */
+  const sponsoredChain = chainId === (deps.sponsoredChainId ?? WALLET_CHAIN_ID);
+  let sponsorKnown: { at: number; value: Sponsor | null } | null = null;
+  async function sponsorIn(tx: Transaction): Promise<Sponsor | null> {
+    if (!sponsoredChain) return null;
+    const at = clock();
+    if (sponsorKnown && at - sponsorKnown.at < SPONSOR_TTL_MS) return sponsorKnown.value;
+    const { rows } = await tx.query<{ calls: boolean; key: boolean; titles: boolean }>(
+      `SELECT to_regclass('feed_pay_sponsored_calls') IS NOT NULL AS calls,
+              to_regclass('feed_pay_sponsor_key') IS NOT NULL AS key,
+              to_regclass('feed_services') IS NOT NULL AS titles`,
+    );
+    let value: Sponsor | null = null;
+    if (rows[0]?.calls && rows[0]?.key) {
+      const { rows: keys } = await tx.query<{ address: string }>(
+        `SELECT address FROM feed_pay_sponsor_key WHERE purpose = 'sfp_sponsor'`,
+      );
+      const address = keys[0]?.address;
+      if (address && /^0x[0-9a-fA-F]{40}$/.test(address))
+        value = { address: address.toLowerCase(), titles: !!rows[0]?.titles };
+    }
+    sponsorKnown = { at, value };
+    return value;
+  }
+
+  /**
+   * One page (PAGE_SIZE + 1 rows tell whether another follows). With a sponsor: the newest
+   * PAGE_SIZE + 1 of each table after the cursor, merged in the one order (at most twice that).
+   */
   async function readPage(
     tx: Transaction,
-    options: { cursor: { at: number; tx: string } | null; search: ServiceCallsSearch | null },
+    options: {
+      cursor: { at: number; tx: string; key: string | null } | null;
+      search: ServiceCallsSearch | null;
+    },
     floor: number | null,
+    sponsor: Sponsor | null,
   ): Promise<CallRow[]> {
     const params: unknown[] = [chainId];
     const where = [SETTLED];
+    const sponsoredWhere = [SPONSORED_PAID];
     if (options.search) {
       const { sql, value } = searchSql(options.search);
       params.push(value);
       where.push(sql);
+      const own = sponsor ? sponsoredSearchSql(options.search, sponsor, '$2') : '';
+      if (own) sponsoredWhere.push(own);
     }
-    if (options.cursor) {
+    if (options.cursor?.key) {
+      params.push(options.cursor.at, options.cursor.tx, options.cursor.key);
+      const after = `($${params.length - 2}::bigint, $${params.length - 1}::text, $${params.length}::text)`;
+      where.push(`(c.settled_at, c.tx_hash, md5(c.call_id)) < ${after}`);
+      sponsoredWhere.push(`(s.updated_at, s.tx_hash, md5(s.call_id)) < ${after}`);
+    } else if (options.cursor) {
+      // A cursor from before the row key (time and tx only): as before.
       params.push(options.cursor.at, options.cursor.tx);
-      where.push(
-        `(c.settled_at, c.tx_hash) < ($${params.length - 1}::bigint, $${params.length}::text)`,
-      );
+      const after = `($${params.length - 1}::bigint, $${params.length}::text)`;
+      where.push(`(c.settled_at, c.tx_hash) < ${after}`);
+      sponsoredWhere.push(`(s.updated_at, s.tx_hash) < ${after}`);
     }
+    // The floor comes from the counter row (feed_pay_calls only): never on the sponsored side.
     if (floor !== null) {
       params.push(floor);
       where.push(`c.settled_at >= $${params.length}::bigint`);
     }
-    const { rows } = await tx.query<CallRow>(
-      `SELECT ${COLUMNS}
+    const feed = `SELECT ${COLUMNS}${sponsor ? ', false AS sponsored, c.settled_at AS sort_at' : ''}
        FROM feed_pay_calls c JOIN base_wallets w ON w.wallet_id = c.wallet_id
        WHERE ${where.join(' AND ')}
-       ORDER BY c.settled_at DESC, c.tx_hash DESC
-       LIMIT ${SERVICE_CALLS_PAGE_SIZE + 1}`,
+       ORDER BY c.settled_at DESC, c.tx_hash DESC, md5(c.call_id) DESC
+       LIMIT ${SERVICE_CALLS_PAGE_SIZE + 1}`;
+    if (!sponsor) return (await tx.query<CallRow>(feed, params)).rows;
+    params.push(sponsor.address);
+    const { rows } = await tx.query<CallRow>(
+      `SELECT * FROM (
+         (${feed})
+         UNION ALL
+         (SELECT ${sponsoredColumns(`$${params.length}`, sponsor.titles)}
+          FROM feed_pay_sponsored_calls s
+          WHERE ${sponsoredWhere.join(' AND ')}
+          ORDER BY s.updated_at DESC, s.tx_hash DESC, md5(s.call_id) DESC
+          LIMIT ${SERVICE_CALLS_PAGE_SIZE + 1})
+       ) u ORDER BY u.sort_at DESC, u.tx_hash DESC, u.row_key DESC`,
       params,
     );
     return rows;
+  }
+
+  /** A search's sponsored matches, counted up to SPONSORED_MATCHES_MAX. */
+  async function sponsoredMatches(
+    tx: Transaction,
+    search: ServiceCallsSearch,
+    sponsor: Sponsor,
+  ): Promise<number> {
+    const own = sponsoredSearchSql(search, sponsor, '$1');
+    const { rows } = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM (
+         SELECT 1 FROM feed_pay_sponsored_calls s
+         WHERE ${SPONSORED_PAID}${own ? ` AND ${own}` : ''}
+         LIMIT ${SPONSORED_MATCHES_MAX}) m`,
+      own ? [searchSql(search).value] : [],
+    );
+    return Number(rows[0]?.n ?? 0);
+  }
+
+  /**
+   * Paid service calls a minute, averaged over the last PER_MINUTE_AVERAGE_MINUTES on the
+   * database clock (rounded), each counted exactly:
+   * the settled calls (block time, through feed_pay_calls_paid: the SETTLED predicate and a
+   * settled_at bound) plus, with the sponsored side, the sponsored calls recorded paid in that
+   * minute (updated_at, through migration 251's feed_pay_sponsored_calls_paid_time). One
+   * statement, two bounded index ranges. Not from the counter row's `recent`: its 64 times can be
+   * one batch of sponsored calls recorded within a second.
+   */
+  async function paidMinute(tx: Transaction, sponsor: Sponsor | null): Promise<number> {
+    const since = `(extract(epoch FROM now()) * 1000)::bigint - $2::bigint`;
+    const { rows } = await tx.query<{ n: string }>(
+      `SELECT ((SELECT count(*) FROM feed_pay_calls c WHERE ${SETTLED} AND c.settled_at > ${since})${
+        sponsor
+          ? ` + (SELECT count(*) FROM feed_pay_sponsored_calls s
+                  WHERE ${SPONSORED_PAID} AND s.updated_at > ${since})`
+          : ''
+      })::text AS n`,
+      [chainId, PER_MINUTE_AVERAGE_MINUTES * PER_MINUTE_WINDOW_MS],
+    );
+    return Math.round(Number(rows[0]?.n ?? 0) / PER_MINUTE_AVERAGE_MINUTES);
   }
 
   /**
@@ -318,17 +544,19 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
   }
 
   async function loadPage(
-    cursor: { at: number; tx: string } | null,
+    cursor: { at: number; tx: string; key: string | null } | null,
     search: ServiceCallsSearch | null,
   ): Promise<PageRead> {
     // An older page is bounded the same way by its cursor: at most OLDER_WINDOW_MS older.
     const floor = search ? null : cursor ? cursor.at - OLDER_WINDOW_MS : await newestFloor();
     return readOnly(PAGE_TIMEOUT_MS, async (tx) => {
-      let rows = await readPage(tx, { cursor, search }, floor);
+      const sponsor = await sponsorIn(tx);
+      let rows = await readPage(tx, { cursor, search }, floor, sponsor);
       // The bound found fewer rows than a page (the counter skipped a payment, one left 'settled'
-      // after a reorg, or payments are sparse there): the same page without it.
-      if (floor !== null && rows.length <= SERVICE_CALLS_PAGE_SIZE)
-        rows = await readPage(tx, { cursor, search }, null);
+      // after a reorg, or payments are sparse there): the same page without it. Only the feed's
+      // own rows decide: the bound is never applied to the sponsored side.
+      if (floor !== null && rows.filter((row) => !row.sponsored).length <= SERVICE_CALLS_PAGE_SIZE)
+        rows = await readPage(tx, { cursor, search }, null, sponsor);
       let matches: number | null = null;
       if (search && !cursor) {
         const { sql, value } = searchSql(search);
@@ -337,13 +565,24 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
           [chainId, value],
         );
         matches = Number(counted.rows[0]?.n ?? 0);
+        if (sponsor) matches += await sponsoredMatches(tx, search, sponsor);
       }
-      const items = rows.slice(0, SERVICE_CALLS_PAGE_SIZE).map(publicCall);
-      const last = items.at(-1);
+      const perMinute = await paidMinute(tx, sponsor);
+      const page = rows.slice(0, SERVICE_CALLS_PAGE_SIZE);
+      const items = page.map(publicCall);
+      const last = page.at(-1);
       return {
         items,
-        nextCursor: rows.length > SERVICE_CALLS_PAGE_SIZE && last ? cursorOf(last) : null,
+        nextCursor:
+          rows.length > SERVICE_CALLS_PAGE_SIZE && last
+            ? cursorOf({
+                time: Number(last.settled_at),
+                tx_hash: last.tx_hash,
+                row_key: last.row_key,
+              })
+            : null,
         matches,
+        perMinute,
       };
     });
   }
@@ -355,7 +594,7 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
   const stale = new Map<string, PageRead>();
   function cachedPage(
     key: string,
-    cursor: { at: number; tx: string } | null,
+    cursor: { at: number; tx: string; key: string | null } | null,
     search: ServiceCallsSearch | null,
   ): Promise<PageRead> {
     const now = clock();
@@ -381,7 +620,14 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
   // Last 24 h and Services used: one aggregate over the settled calls of the last day, at most
   // every DAY_TTL_MS per server. Once known, an answer never waits for a newer one longer than
   // DAY_READ_BUDGET_MS; a failed count keeps the last one (or null) until the next try.
-  let day: { calls: number; services: number; valueRaw: string; feeRaw: string } | null = null;
+  let day: {
+    calls: number;
+    services: number;
+    valueRaw: string;
+    feeRaw: string;
+    /** When the count was taken (this server's clock), sent as day_as_of. */
+    at: number;
+  } | null = null;
   let dayTriedAt = -Infinity;
   let dayInflight: Promise<void> | null = null;
   function readDay(): Promise<void> {
@@ -391,24 +637,65 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
     if (!takeSlot()) return Promise.resolve();
     dayTriedAt = clock();
     const since = dayTriedAt - DAY_MS;
-    dayInflight = readOnly(DAY_TIMEOUT_MS, (tx) =>
-      tx.query<{ calls: string; services: string; value_raw: string; fee_raw: string }>(
-        `SELECT count(*)::text AS calls, count(DISTINCT c.service_id)::text AS services,
-                coalesce(sum(c.amount_raw + c.fee_raw), 0)::text AS value_raw,
-                coalesce(sum(c.fee_raw), 0)::text AS fee_raw
-         FROM feed_pay_calls c WHERE ${SETTLED} AND c.settled_at > $2::bigint`,
+    dayInflight = readOnly(DAY_TIMEOUT_MS, async (tx) => {
+      const sponsor = await sponsorIn(tx);
+      if (!sponsor) {
+        const rows = await tx.query<{
+          calls: string;
+          services: string;
+          value_raw: string;
+          fee_raw: string;
+        }>(
+          `SELECT count(*)::text AS calls, count(DISTINCT c.service_id)::text AS services,
+                  coalesce(sum(c.amount_raw + CASE WHEN c.fee_state = 'charged' THEN c.fee_raw ELSE 0 END), 0)::text AS value_raw,
+                  coalesce(sum(c.fee_raw) FILTER (WHERE c.fee_state = 'charged'), 0)::text AS fee_raw
+           FROM feed_pay_calls c WHERE ${SETTLED} AND c.settled_at > $2::bigint`,
+          [chainId, since],
+        );
+        return rows;
+      }
+      // The sponsored calls of the day as well, each table through its own index: the price
+      // (gross_raw, fee included) and the fee charged in the same transaction (fee_raw).
+      const counted = await tx.query<{
+        calls: string;
+        services: string;
+        value_raw: string;
+        fee_raw: string;
+      }>(
+        `SELECT count(*)::text AS calls, count(DISTINCT d.service_id)::text AS services,
+                coalesce(sum(d.value_raw), 0)::text AS value_raw,
+                coalesce(sum(d.fee_raw), 0)::text AS fee_raw
+         FROM (
+           SELECT c.service_id,
+                  c.amount_raw + CASE WHEN c.fee_state = 'charged' THEN c.fee_raw ELSE 0 END AS value_raw,
+                  CASE WHEN c.fee_state = 'charged' THEN c.fee_raw ELSE 0 END AS fee_raw
+           FROM feed_pay_calls c WHERE ${SETTLED} AND c.settled_at > $2::bigint
+           UNION ALL
+           SELECT s.service_id, s.gross_raw, s.fee_raw
+           FROM feed_pay_sponsored_calls s WHERE ${SPONSORED_PAID} AND s.updated_at > $2::bigint
+         ) d`,
         [chainId, since],
-      ),
-    )
+      );
+      return counted;
+    })
       .then(({ rows }) => {
         day = {
           calls: Number(rows[0]?.calls ?? 0),
           services: Number(rows[0]?.services ?? 0),
           valueRaw: rows[0]?.value_raw ?? '0',
           feeRaw: rows[0]?.fee_raw ?? '0',
+          at: since + DAY_MS,
         };
       })
-      .catch(() => undefined)
+      .catch((error: unknown) => {
+        // Kept: the last value (or null) with its own time (day_as_of), until the next try.
+        const code = (error as { code?: unknown } | null)?.code;
+        console.warn(
+          `[explorer-calls] 24 h count failed: ${typeof code === 'string' ? code : 'error'} ${
+            error instanceof Error ? error.message.slice(0, 160) : ''
+          }`.trim(),
+        );
+      })
       .finally(() => {
         releaseSlot();
         dayInflight = null;
@@ -426,16 +713,10 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
     return day;
   }
 
-  /** Total and Per minute from the counter row; nulls when it cannot be read. */
-  async function counted(now: number) {
+  /** Total from the counter row; null when it cannot be read. */
+  async function counted() {
     const snapshot = await counterSnapshot();
-    if (!snapshot) return { total: null, perMinute: null };
-    // The database clock at the read, plus the time the row has been kept here since.
-    const asOf = snapshot.dbNowMs + Math.max(0, now - snapshot.readAt);
-    return {
-      total: snapshot.total,
-      perMinute: snapshot.recent.filter((at) => asOf - at <= PER_MINUTE_WINDOW_MS).length,
-    };
+    return { total: snapshot ? snapshot.total : null };
   }
 
   const badRequest = (reply: FastifyReply, error: string) =>
@@ -463,7 +744,7 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
         'Search by a transaction hash (0x and 64 hex), a block number or an address (0x and 40 hex).',
       );
     const match = parsed.data.cursor ? SERVICE_CALLS_CURSOR.exec(parsed.data.cursor) : null;
-    const cursor = match ? { at: Number(match[1]), tx: match[2]! } : null;
+    const cursor = match ? { at: Number(match[1]), tx: match[2]!, key: match[3] ?? null } : null;
     const key = `${search ? JSON.stringify(search) : ''}|${parsed.data.cursor ?? ''}`;
     // Searches scan the payment table: one budget for all clients and servers together.
     if (search)
@@ -488,15 +769,18 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
         .send({ error: 'Service calls cannot be read right now.', code: 'unavailable' });
     }
     const now = clock();
-    const [numbers, day24] = await Promise.all([counted(now), dayNow()]);
+    const [numbers, day24] = await Promise.all([counted(), dayNow()]);
     // Built field by field: nothing else can reach the answer.
     const body: ServiceCallsPage = {
+      // The counter row: feed_pay_calls and the paid sponsored calls (migration 252).
       total: numbers.total,
       last24h: day24?.calls ?? null,
-      perMinute: numbers.perMinute,
+      // Counted exactly with the page read (paidMinute), kept as long as the page.
+      perMinute: page.perMinute,
       services24h: day24?.services ?? null,
       value24hRaw: day24?.valueRaw ?? null,
       fee24hRaw: day24?.feeRaw ?? null,
+      day_as_of: day24 ? new Date(day24.at).toISOString() : null,
       as_of: new Date(now).toISOString(),
       matches: page.matches,
       items: page.items,

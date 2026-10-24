@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { AGENT_ROWS_SQL } from '../server/agent-rows/schema.js';
+import { WORKSPACE_AGENT_PATH_SQL } from '../server/agent-rows/agent-lookup-schema.js';
 import test from 'node:test';
 import { PGlite } from '@electric-sql/pglite';
 import Fastify from 'fastify';
@@ -66,6 +68,9 @@ async function setup(
     BASE_WALLET_VAULT_SQL,
     BASE_WALLET_WITHDRAWALS_SQL,
     BASE_WALLET_PAYMENTS_SQL,
+    // workspace_agent() (245, then 254), which the public name reads the agent through.
+    AGENT_ROWS_SQL,
+    WORKSPACE_AGENT_PATH_SQL,
   ])
     await pg.exec(sql);
   const db: Database = {

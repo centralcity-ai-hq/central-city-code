@@ -757,3 +757,185 @@ test('a price equal to the per-call maximum is paid', async (t) => {
   assert.equal((await f.pay()).json().state, 'result_saved');
   assert.equal(f.base.balanceOf(PAY_TO), 20_000n);
 });
+
+// A reverted top-up is ended first, never left behind the backlog (22 Oct, Fleet D)
+
+test('recovery: a top-up that reverted on Base is ended before the backlog of moves that only wait', async (t) => {
+  const f = await setup(t);
+  await f.list();
+  await f.limit();
+  assert.equal((await f.pay()).json().state, 'result_saved');
+  const [move] = await f.sql<{ m: Record<string, unknown> }>(
+    "SELECT to_jsonb(m) AS m FROM feed_pay_float_moves m WHERE kind = 'top_up' ORDER BY created_at LIMIT 1",
+  );
+  assert.ok(move, 'the first call topped the float up');
+  const [op] = await f.sql<{ o: Record<string, unknown> }>(
+    'SELECT to_jsonb(o) AS o FROM base_chain_ops o WHERE idempotency_key = $1',
+    [move!.m.op_key],
+  );
+  assert.ok(op, 'its operation is stored');
+  // The reverted top-up: included on Base with an error, checked recently (so last in line).
+  const revertedKey = `feed-pay:top-up:${randomUUID()}`;
+  await f.sql(
+    'INSERT INTO base_chain_ops SELECT * FROM jsonb_populate_record(NULL::base_chain_ops, $1::jsonb)',
+    [
+      JSON.stringify({
+        ...op!.o,
+        op_id: randomUUID(),
+        idempotency_key: revertedKey,
+        status: 'included',
+        error_code: 'USEROP_REVERTED',
+      }),
+    ],
+  );
+  const reverted = randomUUID();
+  await f.sql(
+    'INSERT INTO feed_pay_float_moves SELECT * FROM jsonb_populate_record(NULL::feed_pay_float_moves, $1::jsonb)',
+    [
+      JSON.stringify({
+        ...move!.m,
+        move_id: reverted,
+        op_key: revertedKey,
+        state: 'pending',
+        checked_at: f.clock(),
+      }),
+    ],
+  );
+  // 40 older moves that only wait on Base (more than one page), all checked long ago.
+  for (let i = 0; i < 40; i++)
+    await f.sql(
+      'INSERT INTO feed_pay_float_moves SELECT * FROM jsonb_populate_record(NULL::feed_pay_float_moves, $1::jsonb)',
+      [
+        JSON.stringify({
+          ...move!.m,
+          move_id: randomUUID(),
+          op_key: `feed-pay:top-up:${randomUUID()}`,
+          state: 'pending',
+          checked_at: 0,
+        }),
+      ],
+    );
+  wrapChain(f, (port) => ({
+    ...port,
+    opStatus: async (key: string, walletId: string) =>
+      key === revertedKey
+        ? {
+            key,
+            status: 'final' as const,
+            txHash: null,
+            blockNumber: null,
+            neverSent: false,
+            errorCode: 'USEROP_REVERTED',
+          }
+        : key.startsWith('feed-pay:top-up:') && key !== move!.m.op_key
+          ? {
+              key,
+              status: 'included' as const,
+              txHash: null,
+              blockNumber: null,
+              neverSent: false,
+              errorCode: null,
+            }
+          : port.opStatus(key, walletId),
+  }));
+  f.advance(60_000);
+  await f.cron();
+  const [after] = await f.sql<{ state: string }>(
+    'SELECT state FROM feed_pay_float_moves WHERE move_id = $1',
+    [reverted],
+  );
+  assert.equal(
+    after!.state,
+    'failed',
+    'the reverted top-up ended in the first run, ahead of the 40',
+  );
+});
+
+test('recovery: reverted top-ups not yet final never take every slot from the backlog', async (t) => {
+  const f = await setup(t);
+  await f.list();
+  await f.limit();
+  assert.equal((await f.pay()).json().state, 'result_saved');
+  const [move] = await f.sql<{ m: Record<string, unknown> }>(
+    "SELECT to_jsonb(m) AS m FROM feed_pay_float_moves m WHERE kind = 'top_up' ORDER BY created_at LIMIT 1",
+  );
+  const [op] = await f.sql<{ o: Record<string, unknown> }>(
+    'SELECT to_jsonb(o) AS o FROM base_chain_ops o WHERE idempotency_key = $1',
+    [move!.m.op_key],
+  );
+  const reverted = new Set<string>();
+  // 40 reverted top-ups whose block is not final yet: they stay pending run after run.
+  for (let i = 0; i < 40; i++) {
+    const key = `feed-pay:top-up:${randomUUID()}`;
+    reverted.add(key);
+    await f.sql(
+      'INSERT INTO base_chain_ops SELECT * FROM jsonb_populate_record(NULL::base_chain_ops, $1::jsonb)',
+      [
+        JSON.stringify({
+          ...op!.o,
+          op_id: randomUUID(),
+          idempotency_key: key,
+          status: 'included',
+          error_code: 'USEROP_REVERTED',
+        }),
+      ],
+    );
+    await f.sql(
+      'INSERT INTO feed_pay_float_moves SELECT * FROM jsonb_populate_record(NULL::feed_pay_float_moves, $1::jsonb)',
+      [
+        JSON.stringify({
+          ...move!.m,
+          move_id: randomUUID(),
+          op_key: key,
+          state: 'pending',
+          checked_at: 0,
+        }),
+      ],
+    );
+  }
+  // One backlog move that Base has final now.
+  const finalKey = `feed-pay:top-up:${randomUUID()}`;
+  const backlog = randomUUID();
+  await f.sql(
+    'INSERT INTO feed_pay_float_moves SELECT * FROM jsonb_populate_record(NULL::feed_pay_float_moves, $1::jsonb)',
+    [
+      JSON.stringify({
+        ...move!.m,
+        move_id: backlog,
+        op_key: finalKey,
+        state: 'pending',
+        checked_at: 0,
+      }),
+    ],
+  );
+  wrapChain(f, (port) => ({
+    ...port,
+    opStatus: async (key: string, walletId: string) =>
+      reverted.has(key)
+        ? {
+            key,
+            status: 'included' as const,
+            txHash: null,
+            blockNumber: null,
+            neverSent: false,
+            errorCode: 'USEROP_REVERTED',
+          }
+        : key === finalKey
+          ? {
+              key,
+              status: 'final' as const,
+              txHash: null,
+              blockNumber: null,
+              neverSent: false,
+              errorCode: null,
+            }
+          : port.opStatus(key, walletId),
+  }));
+  f.advance(60_000);
+  await f.cron();
+  const [after] = await f.sql<{ state: string }>(
+    'SELECT state FROM feed_pay_float_moves WHERE move_id = $1',
+    [backlog],
+  );
+  assert.equal(after!.state, 'final', 'the backlog still got its half of the page');
+});

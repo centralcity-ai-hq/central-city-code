@@ -5,6 +5,7 @@
  * reads that file and deploys from the owner's own wallet (MetaMask), so no key ever leaves it.
  *   pnpm tsx scripts/protocol/build-deploy-kit.ts            (router 1, router.json)
  *   ROUTER=2 pnpm tsx scripts/protocol/build-deploy-kit.ts   (router 2, 100 USDC cap, router2.json)
+ *   ROUTER=3 pnpm tsx scripts/protocol/build-deploy-kit.ts   (router 3, x402 settlement, router3.json)
  *   node scripts/protocol/serve-deploy-kit.mjs   (then open http://localhost:8790/deploy.html)
  */
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -15,10 +16,10 @@ const require = createRequire(import.meta.url);
 const solc = require('solc');
 const SETTINGS = { optimizer: { enabled: true, runs: 10_000 }, evmVersion: 'cancun' } as const;
 
-const ROUTER2 = process.env.ROUTER === '2';
-const NAME = ROUTER2 ? 'CentralCityFeeRouter2' : 'CentralCityFeeRouter';
+const N = process.env.ROUTER === '3' ? 3 : process.env.ROUTER === '2' ? 2 : 1;
+const NAME = N === 1 ? 'CentralCityFeeRouter' : `CentralCityFeeRouter${N}`;
 const FILE = `fees/${NAME}.sol`;
-const KIT = ROUTER2 ? 'router2.json' : 'router.json';
+const KIT = N === 1 ? 'router.json' : `router${N}.json`;
 const content = readFileSync(new URL(`../../contracts/${FILE}`, import.meta.url), 'utf8');
 const out = JSON.parse(
   solc.compile(

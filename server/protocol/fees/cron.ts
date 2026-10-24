@@ -140,9 +140,30 @@ export function protocolRouter2FromEnv(
   return [{ address: router2, fromBlock: BigInt(from) }];
 }
 
-/** The config field only when router 2 is set: router 1 alone keeps exactly today's config. */
+/**
+ * Router 3 for the ledger (x402 settlement, docs/protocol/FEE_ROUTER_3.md): the same FeeCharged
+ * event (kind 1, fee included) from another address, configured exactly like router 2 by
+ * CITY_PROTOCOL_FEE_ROUTER3 (address) and CITY_PROTOCOL_FEE_ROUTER3_FROM_BLOCK (its deploy block).
+ * Counted whenever both are valid, independent of CITY_PROTOCOL_FEE_ROUTER3_ENABLED (which only
+ * routes new payments). Empty when unset or invalid.
+ */
+export function protocolRouter3FromEnv(
+  env: Record<string, string | undefined>,
+): { address: Hex; fromBlock: bigint }[] {
+  const router3 = address(env.CITY_PROTOCOL_FEE_ROUTER3);
+  const from = env.CITY_PROTOCOL_FEE_ROUTER3_FROM_BLOCK?.trim() ?? '';
+  if (!router3 || !/^\d{1,12}$/.test(from)) return [];
+  return [{ address: router3, fromBlock: BigInt(from) }];
+}
+
+/**
+ * The config field only when router 2 or router 3 is set: router 1 alone keeps exactly today's
+ * config. One entry per address (the first wins), so a router never read twice.
+ */
 const addedRoutersFromEnv = (env: Record<string, string | undefined>) => {
-  const added = protocolRouter2FromEnv(env);
+  const added: { address: Hex; fromBlock: bigint }[] = [];
+  for (const r of [...protocolRouter2FromEnv(env), ...protocolRouter3FromEnv(env)])
+    if (!added.some((a) => a.address.toLowerCase() === r.address.toLowerCase())) added.push(r);
   return added.length ? { addedRouters: added } : {};
 };
 

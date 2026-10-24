@@ -11,9 +11,9 @@ runs:
 - the payment screening gate before every new payment submission
   ([SCREENING-GATE.md](SCREENING-GATE.md)).
 
-Nothing in this list needs to be switched on. One feature is opt-in instead: fee router 2
-(payments above 0.10 USDC, below), off until its switch is set. Every check of a payment stays as it was: the owner's signed
-spending limit, the consent, the agent's per-call maximum, each fee router's cap (0.10 USDC on router 1, 100 USDC on router 2), the calendar cap and
+Nothing in this list needs to be switched on. Two features are opt-in instead: fee router 2
+(payments above 0.10 USDC, below) and fee router 3 (x402 settlement, below), each off until its switch is set. Every check of a payment stays as it was: the owner's signed
+spending limit, the consent, the agent's per-call maximum, each fee router's cap (0.10 USDC on router 1, 100 USDC on routers 2 and 3), the calendar cap and
 the idempotency key.
 
 ## The rule
@@ -79,6 +79,20 @@ starts counting it) and the switch `CITY_PROTOCOL_FEE_ROUTER2_ENABLED=1`, which 
 0.10 USDC. Unsetting the switch stops new admissions only: calls already pinned to router 2 finish
 there, and the ledger keeps counting it. Details: [FEE_ROUTER_2.md](FEE_ROUTER_2.md). On a test network
 (`CITY_PROTOCOL_CHAIN_ID=84532`) these settings configure everything, as before.
+
+Fee router 3 (`CentralCityFeeRouter3`, x402 settlement, fee included, up to 100 USDC; spec
+`docs/protocol/FEE_ROUTER_3.md`) is configured the same way: `CITY_PROTOCOL_FEE_ROUTER3`
+(`0xe807a76385ec3d76d17ab955091c12329d0a1403` on Base mainnet, deployed 19 Oct 2026),
+`CITY_PROTOCOL_FEE_ROUTER3_FROM_BLOCK` (`52804453`, its deploy block, where the ledger starts
+counting it) and the switch `CITY_PROTOCOL_FEE_ROUTER3_ENABLED=1`, which only routes new payments:
+while it is set, hosted Central City services sold fee-included between 0.05 and 100 USDC settle
+through router 3; other payments keep routers 1 and 2, and below 0.05 USDC router 1 is used. Router 3
+settlements are sent, and their gas paid in ETH, by Central City's own x402 facilitator
+`0xc8d6Bac2ff7182d22c4f316BffF9f713261A6cEC`, an EOA that never holds USDC.
+The ledger and `GET /api/public/protocol/fees` count router 3's `FeeCharged` events (the same event,
+kind 1) whenever its address and deploy block are both set, whatever the switch says, exactly like
+router 2. A router configured after the scan has passed its deploy block is re-read once from that
+block (migration 232).
 
 ## Optional settings
 

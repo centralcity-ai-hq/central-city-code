@@ -31,6 +31,8 @@ test('public protocol fee docs preserve disclosure, cap and evidence limitations
       '0xA5f89AE25c87C21a8E2B03aaBf398A880d9be81B',
       '0xAF36084a4dc0CE760A6dCfa46Cf129e140c92aa9',
       '0xb1945a2af160e84e34f7c0fb0e4dd94fd4c0af0d',
+      '0xe807a76385ec3d76d17ab955091c12329d0a1403',
+      '0xc8d6Bac2ff7182d22c4f316BffF9f713261A6cEC',
     ]);
     assert.match(page, /block 52629946/);
     assert.match(page, /second fee router is enabled/);

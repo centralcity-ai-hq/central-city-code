@@ -202,7 +202,7 @@ const EMAIL_TLDS = new Set([
 const EMAILS = new RegExp(EMAIL.source, 'gu');
 /**
  * An email address with an email ending in its domain ("name@example.com", also
- * "name@example.com.Thanks"; never "icon@2x.png"). Only text with an '@' is scanned.
+ * an address glued to the next word, such as a name, an at sign, example.com and then "Thanks"; never an image name such as icon, an at sign, 2x.png). Only text with an '@' is scanned.
  */
 const knownEmail = (text: string) =>
   text.includes('@') &&
@@ -766,7 +766,7 @@ function looseEmail(text: string): boolean {
 function contactIn(folded: string, where: 'text' | 'reply' = 'text'): 'contact' | 'hold' | null {
   const copy = contactCopy(folded);
   // An address with an email ending is refused, written plainly or with bracketed words; any other
-  // '@' shape is held ("icon@2x.png").
+  // '@' shape is held (an image name such as icon, an at sign, 2x.png).
   const worded = copy.replace(BRACKETED_AT, '@').replace(BRACKETED_DOT, '.');
   const text = worded.replace(BRACKETED_AT_SIGN, '@').replace(BRACKETED_DOT_SIGN, '.');
   if (knownEmail(copy) || (worded !== copy && knownEmail(worded))) return 'contact';

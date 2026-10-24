@@ -3,6 +3,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { createApp } from '../server/app.js';
 import type { Database } from '../server/database.js';
 import { listMigrations, runMigrations } from '../server/migrations.js';
+import { paidCallValueMigration } from '../server/feed/pay/value-schema.js';
 import { paidCallCountMigration } from '../server/feed/pay/count-schema.js';
 import { paidCallCountDropMigration } from '../server/feed/pay/count-drop-schema.js';
 
@@ -34,7 +35,8 @@ export async function migrated(
       ALL.filter(
         (migration) =>
           migration.version !== paidCallCountMigration.version &&
-          migration.version !== paidCallCountDropMigration.version,
+          migration.version !== paidCallCountDropMigration.version &&
+          migration.version !== paidCallValueMigration.version,
       ),
       Date.now,
       true,

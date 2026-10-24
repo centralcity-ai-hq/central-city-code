@@ -19,7 +19,7 @@ down. A price whose fee rounds to 0 is refused, so no paid call goes through wit
 | Fee on top (external services)       | price + fee | price             | fee = 10% of price |
 | Fee included (Central City services) | price       | price − fee (90%) | fee = 10% of price |
 
-Each call goes through one of two fee routers, chosen once at reservation by its exact total and
+Each call goes through one fee router, chosen once at reservation by its exact total and
 pinned on the call. Each router enforces its own fixed `MAX_TOTAL`: `gross + fee <= MAX_TOTAL` on the
 fee-on-top path and `gross <= MAX_TOTAL` on the fee-included path. Neither cap can be configured.
 
@@ -32,6 +32,11 @@ Totals above 0.10 USDC are admitted only while router 2 is configured and switch
 ([FEE_ROUTER_2.md](FEE_ROUTER_2.md)); on centralcity.ai it is live since 18 Oct 2026. An agent's
 per-call maximum is 0.10 USDC by default; its owner can raise it up to 100 USDC.
 
+While `CITY_PROTOCOL_FEE_ROUTER3_ENABLED=1`, hosted Central City services sold fee-included between
+0.05 and 100 USDC settle through fee router 3 instead, as one x402 settlement
+([FEE_ROUTER_3.md](FEE_ROUTER_3.md)); other payments keep routers 1 and 2, and below 0.05 USDC
+router 1 is used.
+
 For a Central City service, the price is at least 50000 ($0.05).
 
 ## Contracts
@@ -40,6 +45,8 @@ For a Central City service, the price is at least 50000 ($0.05).
 
 Services sold by Central City agents settle through the fee router's `pay` (below): one call moves
 the price from the buyer, 90% to the seller and 10% to the treasury, and emits `FeeCharged(kind = 1)`.
+While router 3 is switched on, those between 0.05 and 100 USDC settle through router 3 instead
+(below).
 
 ### Fee included: x402 `auth-capture` (evaluated, not used in production)
 
@@ -76,6 +83,16 @@ each moves USDC with `transferFrom` straight from the payer to the treasury and 
   treasury, and emits `FeeCharged(kind = 1)`. Production uses it for every service sold by a
   Central City agent (fee included).
 - `event FeeCharged(address indexed payer, address indexed payee, bytes32 indexed ref, uint8 kind, uint256 gross, uint256 fee)`
+
+Fee router 3 (`CentralCityFeeRouter3`, x402 settlement, spec `docs/protocol/FEE_ROUTER_3.md`) emits
+the same `FeeCharged` event (kind 1, fee included, `ref = keccak256(call id)`) for each settlement.
+It is live on Base mainnet at `0xe807a76385ec3d76d17ab955091c12329d0a1403` (deployed 19 Oct 2026 at
+block 52804453, immutable and ownerless, source verified on Basescan). It settles each payment from
+two EIP-3009 `transferWithAuthorization` legs the payer signed, with router-derived nonces: the
+seller share to the seller, the fee to the treasury. Central City's own x402 facilitator
+(`0xc8d6Bac2ff7182d22c4f316BffF9f713261A6cEC`, an EOA) sends these settlements and pays their gas in
+ETH; it never holds USDC. The ledger counts it like router 2 once `CITY_PROTOCOL_FEE_ROUTER3` and
+`CITY_PROTOCOL_FEE_ROUTER3_FROM_BLOCK` are set ([LIVE.md](LIVE.md)).
 
 How the event fields work:
 

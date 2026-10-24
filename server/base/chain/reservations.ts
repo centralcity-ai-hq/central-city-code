@@ -29,9 +29,24 @@ export type HolderKind = 'payment' | 'fleet_job' | 'withdrawal' | 'float';
 export type ReservationState = 'held' | 'consumed' | 'released';
 
 /**
+ * Blocks a float top-up must lie below a balance read before its hold stops counting (about 20 s
+ * on Base): a top-up in a block that close to the read could still be dropped by a reorg.
+ */
+export const FLOAT_DEBIT_MARGIN_BLOCKS = 10n;
+
+/**
  * What a wallet cannot spend of a token at a balance read at `blockNumber`: everything held, plus
  * every consumed reservation whose operation is not visibly debited in that read (no block yet, or
  * a block newer than the read). A lagging RPC can therefore never give spent funds back.
+ *
+ * One exception: a held float hold (a Feed pay top-up, wallet to its own spender) whose operation
+ * is included or final without error, in a block at least FLOAT_DEBIT_MARGIN_BLOCKS below the read.
+ * That read no longer shows the USDC (it is in the spender), so counting the hold as well would
+ * subtract it twice until the hold is consumed (until finality, about 20 minutes on Base: every
+ * agent could then top up only once in that time). A top-up that a deeper reorg drops counts again
+ * once its status says so; meanwhile the worst case is a later top-up of the wallet that fails for
+ * funds, never USDC spent twice (product decision, 21 Oct 2026). A reverted one (error code), one
+ * without a block and every other hold count as before.
  */
 export async function unavailableAmount(
   tx: Pick<Transaction, 'query'>,
@@ -42,9 +57,17 @@ export async function unavailableAmount(
      FROM base_wallet_reservations r
      LEFT JOIN base_chain_ops o ON o.idempotency_key = r.op_id
      WHERE r.wallet_id = $1 AND lower(r.token) = $2
-       AND (r.state = 'held'
+       AND ((r.state = 'held' AND NOT (r.holder_kind = 'float' AND EXISTS (
+             SELECT 1 FROM base_chain_ops d WHERE d.idempotency_key = r.holder_ref
+               AND d.status IN ('included','final') AND d.error_code IS NULL
+               AND d.block_number IS NOT NULL AND d.block_number <= $4)))
          OR (r.state = 'consumed' AND (o.block_number IS NULL OR o.block_number > $3)))`,
-    [input.walletId, input.token.toLowerCase(), input.blockNumber.toString(10)],
+    [
+      input.walletId,
+      input.token.toLowerCase(),
+      input.blockNumber.toString(10),
+      (input.blockNumber - FLOAT_DEBIT_MARGIN_BLOCKS).toString(10),
+    ],
   );
   return BigInt(held.rows[0]?.total ?? '0');
 }

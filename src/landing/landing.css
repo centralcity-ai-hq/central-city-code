@@ -623,3 +623,994 @@ html[data-count-in] .cc-agent-ticker[data-source='build'] .cc-agent-ticker-n {
     display: none;
   }
 }
+
+/* ------------------------------------------------------------------------------------------ */
+/* Design v10 (19 Oct 2026): one framed column, Geist, one blue accent (src/Landing.tsx). */
+
+@font-face {
+  font-family: 'Geist';
+  src: url('./fonts/geist-latin-wght-normal.woff2') format('woff2-variations');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('./fonts/geist-mono-latin-wght-normal.woff2') format('woff2-variations');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+.cc-v10 {
+  --v10-sans: 'Geist', var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  --v10-mono: 'Geist Mono', var(--font-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+  --v10-line: var(--lp-border);
+  --v10-blue: var(--lp-fill);
+  --v10-green: var(--lp-live);
+  max-width: 1240px;
+  width: calc(100% - 48px);
+  margin: 0 auto;
+  padding: 0;
+  border-left: 1px solid var(--v10-line);
+  border-right: 1px solid var(--v10-line);
+  font-family: var(--v10-sans);
+  -webkit-font-smoothing: antialiased;
+}
+.cc-v10 .cc-eyebrow,
+.cc-v10 .cc-listed-h {
+  margin: 0;
+  font-family: var(--v10-mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--lp-text-2);
+}
+
+/* Hero: headline left, sentence and actions right, the live numbers under both. */
+.cc-v10 .cc-hero {
+  display: grid;
+  grid-template-columns: 1.35fr 1fr;
+  column-gap: clamp(32px, 5vw, 80px);
+  row-gap: 64px;
+  align-items: end;
+  padding: 96px 56px 0;
+  text-align: left;
+}
+.cc-v10 .cc-kick {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 26px;
+  font-size: 13px;
+  color: var(--lp-text-2);
+}
+.cc-v10 .cc-kdot {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: var(--v10-blue);
+}
+.cc-v10 .cc-hero h1 {
+  margin: 0;
+  font-family: var(--v10-sans);
+  font-size: clamp(2.925rem, 6.48vw, 6.3rem);
+  font-weight: 500;
+  line-height: 0.98;
+  letter-spacing: -0.045em;
+  color: var(--lp-text);
+  text-wrap: balance;
+}
+/* The room: the CC mark's rounded square, with a door on each side. */
+.cc-v10 .cc-room {
+  position: relative;
+  display: inline-block;
+  margin-left: -0.2em;
+  padding: 0.04em 0.2em 0.1em;
+  border: 1px solid currentColor;
+  border-radius: 0.22em;
+  color: var(--v10-blue);
+  line-height: 0.92;
+}
+.cc-v10 .cc-room::before,
+.cc-v10 .cc-room::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  margin-top: -3.5px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  background: var(--lp-page);
+}
+.cc-v10 .cc-room::before {
+  left: -4px;
+}
+.cc-v10 .cc-room::after {
+  right: -4px;
+}
+.cc-v10 .cc-hero .cc-landing-sub {
+  max-width: 34ch;
+  margin: 0 0 32px;
+  font-size: 18px;
+  line-height: 1.55;
+  letter-spacing: -0.01em;
+  color: var(--lp-text-2);
+}
+.cc-v10 .cc-hero .hero-actions {
+  justify-content: flex-start;
+  margin: 0;
+}
+
+/* The live numbers (src/landing/LiveNumbers.tsx): one quiet row, full width of the frame. */
+.cc-v10 .cc-kpis {
+  grid-column: 1 / -1;
+  margin: 0 -56px;
+  border-top: 1px solid var(--v10-line);
+}
+.cc-v10 .cc-khead {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 28px;
+  font-family: var(--v10-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--lp-text-2);
+}
+.cc-v10 .cc-kl {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+}
+.cc-v10 .cc-live {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--v10-green);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--v10-green) 18%, transparent);
+  animation: cc-breathe 2.4s ease-in-out infinite;
+}
+@keyframes cc-breathe {
+  50% {
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--v10-green) 6%, transparent);
+  }
+}
+.cc-v10 .cc-kv {
+  color: var(--lp-accent-text);
+  font-weight: 500;
+  text-decoration: none;
+}
+.cc-v10 .cc-kv:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.cc-v10 .cc-kgrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+  border-top: 1px solid var(--v10-line);
+}
+.cc-v10 .cc-kc {
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 10px;
+  min-width: 0;
+  padding: 22px 28px 26px;
+  border-left: 1px solid var(--v10-line);
+}
+.cc-v10 .cc-kc:first-child {
+  border-left: 0;
+}
+.cc-v10 .cc-kc dt {
+  font-size: 13px;
+  color: var(--lp-text-2);
+}
+.cc-v10 .cc-kc dd {
+  margin: 0;
+  overflow: hidden;
+  font-family: var(--v10-mono);
+  font-size: clamp(24px, 2.5vw, 34px);
+  font-weight: 400;
+  line-height: 1;
+  letter-spacing: -0.045em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--lp-text);
+}
+.cc-v10 .cc-cur,
+.cc-v10 .cc-unit {
+  color: var(--lp-text-2);
+}
+.cc-v10 .cc-unit {
+  margin-left: 8px;
+  font-size: 0.42em;
+  letter-spacing: 0.04em;
+  vertical-align: 0.55em;
+}
+
+/* Listed on (src/landing/ListedOn.tsx): an endless strip. */
+.cc-v10 .cc-listed {
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+  height: 96px;
+  border-top: 1px solid var(--v10-line);
+  border-bottom: 1px solid var(--v10-line);
+}
+.cc-v10 .cc-listed-h {
+  display: flex;
+  align-items: center;
+  padding-left: 28px;
+  border-right: 1px solid var(--v10-line);
+}
+.cc-v10 .cc-mq {
+  position: relative;
+  height: 100%;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 6%, #000 94%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 6%, #000 94%, transparent);
+}
+.cc-v10 .cc-mq-track {
+  display: flex;
+  width: max-content;
+  height: 100%;
+  align-items: center;
+  animation: cc-mq 46s linear infinite;
+}
+.cc-v10 .cc-mq:hover .cc-mq-track,
+.cc-v10 .cc-mq:focus-within .cc-mq-track {
+  animation-play-state: paused;
+}
+@keyframes cc-mq {
+  to {
+    transform: translateX(-50%);
+  }
+}
+.cc-v10 .cc-lo-set {
+  display: flex;
+  align-items: center;
+  gap: 40px;
+  padding-right: 40px;
+}
+.cc-v10 .cc-lo {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  white-space: nowrap;
+  color: var(--lp-text-2);
+  text-decoration: none;
+  transition:
+    color 0.25s,
+    background 0.25s;
+}
+.cc-v10 .cc-lo img {
+  width: 26px;
+  height: 26px;
+  object-fit: contain;
+  border-radius: 6px;
+  filter: saturate(0.75);
+  opacity: 0.85;
+  transition:
+    filter 0.25s,
+    opacity 0.25s;
+}
+.cc-v10 .cc-lo:hover,
+.cc-v10 .cc-lo:focus-visible {
+  color: var(--lp-text);
+  background: var(--lp-surface);
+}
+.cc-v10 .cc-lo:focus-visible {
+  outline: 2px solid var(--v10-blue);
+  outline-offset: 0;
+}
+.cc-v10 .cc-lo-tile {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--v10-line);
+  border-radius: 6px;
+  font-family: var(--v10-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--lp-accent-text);
+  background: var(--lp-surface);
+}
+/* The letters are drawn, not text, so the link's text stays the listing's name. */
+.cc-v10 .cc-lo-tile::before {
+  content: attr(data-tile);
+}
+.cc-v10 .cc-client-ic img {
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+}
+/* One-colour marks are black: inverted in the dark theme so they stay visible. */
+:root[data-theme='dark'] .cc-v10 img.cc-lo-mono,
+:root[data-theme='dark'] .cc-v10 .cc-lo img.cc-lo-mono {
+  filter: invert(1) saturate(0);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .cc-v10 img.cc-lo-mono {
+    filter: invert(1) saturate(0);
+  }
+}
+.cc-v10 .cc-lo:hover img {
+  filter: none;
+  opacity: 1;
+}
+
+/* The dot field (src/landing/DotField.tsx): decoration only. */
+.cc-v10 .cc-field {
+  position: relative;
+  height: 280px;
+  overflow: hidden;
+}
+.cc-v10 .cc-field canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent);
+}
+
+/* Sections: media and copy side by side, alternating. */
+.cc-v10 .cc-feat,
+.cc-v10 .cc-connect {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--v10-line);
+}
+.cc-v10 .cc-feat-media {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 56px;
+}
+.cc-v10 .cc-feat-media .cc-lp-hero-frame {
+  max-width: 440px;
+  margin: 0;
+  border-radius: 20px;
+}
+.cc-v10 .cc-feat-copy,
+.cc-v10 .cc-connect-copy {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 96px 56px;
+  border-left: 1px solid var(--v10-line);
+  text-align: left;
+}
+.cc-v10 .cc-feat-rev .cc-feat-copy {
+  border-left: 0;
+}
+.cc-v10 .cc-feat-rev .cc-feat-media {
+  border-left: 1px solid var(--v10-line);
+}
+.cc-v10 .cc-feat h2,
+.cc-v10 .cc-connect h2 {
+  margin: 16px 0 18px;
+  font-family: var(--v10-sans);
+  font-size: clamp(34px, 3.6vw, 52px);
+  font-weight: 600;
+  line-height: 1.02;
+  letter-spacing: -0.045em;
+  color: var(--lp-text);
+  text-wrap: balance;
+}
+.cc-v10 .cc-feat-copy > p:not(.cc-eyebrow),
+.cc-v10 .cc-connect-copy > p:not(.cc-eyebrow) {
+  max-width: 42ch;
+  margin: 0 0 30px;
+  font-size: 16.5px;
+  line-height: 1.65;
+  color: var(--lp-text-2);
+}
+.cc-v10 .cc-connect-copy {
+  border-left: 0;
+}
+.cc-v10 .cc-connect .cc-lp-actions {
+  justify-content: flex-start;
+}
+.cc-v10 .cc-clients {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-left: 1px solid var(--v10-line);
+}
+.cc-v10 .cc-client {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 26px 28px;
+  border-right: 1px solid var(--v10-line);
+  border-bottom: 1px solid var(--v10-line);
+}
+.cc-v10 .cc-client:nth-child(2n) {
+  border-right: 0;
+}
+.cc-v10 .cc-client:nth-last-child(-n + 2) {
+  border-bottom: 0;
+}
+.cc-v10 .cc-client-ic {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--v10-line);
+  border-radius: 11px;
+  background: var(--lp-surface);
+  font-family: var(--v10-mono);
+  font-size: 15px;
+  font-weight: 600;
+  /* The accent's text colour: the fill colour is below AA as text on the surface in dark. */
+  color: var(--lp-accent-text);
+}
+.cc-v10 .cc-client b {
+  display: block;
+  font-size: 14.5px;
+  font-weight: 500;
+  color: var(--lp-text);
+}
+.cc-v10 .cc-client small {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--lp-text-2);
+}
+
+/* Keyboard focus stops the strip and lets the focused link scroll into view. Only keyboard focus
+   (:focus-visible): a mouse click also focuses the link, and resetting the strip then made it jump
+   under the pointer; a click just pauses it where it is, like hover. */
+.cc-v10 .cc-mq:has(.cc-lo:focus-visible) {
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.cc-v10 .cc-mq:has(.cc-lo:focus-visible) .cc-mq-track {
+  animation: none;
+  transform: none;
+}
+
+/* Phones and narrow tablets. */
+@media (max-width: 820px) {
+  .cc-v10 .cc-hero,
+  .cc-v10 .cc-feat,
+  .cc-v10 .cc-connect {
+    grid-template-columns: 1fr;
+  }
+  .cc-v10 .cc-feat-rev .cc-feat-media {
+    order: -1;
+    border-left: 0;
+  }
+  .cc-v10 .cc-feat-copy,
+  .cc-v10 .cc-connect-copy {
+    padding: 40px 20px 56px;
+    border-left: 0;
+  }
+  .cc-v10 .cc-feat-media {
+    padding: 28px 20px 0;
+  }
+  .cc-v10 .cc-clients {
+    grid-template-columns: 1fr;
+    border-left: 0;
+    border-top: 1px solid var(--v10-line);
+  }
+  .cc-v10 .cc-client {
+    border-right: 0;
+    border-bottom: 1px solid var(--v10-line);
+  }
+  .cc-v10 .cc-listed {
+    grid-template-columns: 1fr;
+    height: auto;
+  }
+  .cc-v10 .cc-listed-h {
+    padding: 14px 20px 0;
+    border-right: 0;
+  }
+  .cc-v10 .cc-mq {
+    height: 64px;
+  }
+  .cc-v10 .cc-lo-set {
+    gap: 24px;
+    padding-right: 24px;
+  }
+  .cc-v10 .cc-lo {
+    font-size: 15px;
+  }
+}
+/* Tablets and phones: the four numbers in two rows of two, so each has room for its value. */
+@media (max-width: 1000px) {
+  .cc-v10 .cc-kgrid {
+    grid-template-columns: 1fr 1fr;
+  }
+  .cc-v10 .cc-kc {
+    border-left: 0;
+    border-bottom: 1px solid var(--v10-line);
+  }
+  .cc-v10 .cc-kc:nth-child(odd) {
+    border-right: 1px solid var(--v10-line);
+  }
+  .cc-v10 .cc-kc:nth-last-child(-n + 2) {
+    border-bottom: 0;
+  }
+}
+@media (max-width: 720px) {
+  .cc-v10 {
+    width: 100%;
+    border-left: 0;
+    border-right: 0;
+  }
+  .cc-v10 .cc-hero {
+    row-gap: 36px;
+    padding: 44px 20px 0;
+  }
+  .cc-v10 .cc-kick {
+    margin-bottom: 18px;
+  }
+  .cc-v10 .cc-hero h1 {
+    font-size: clamp(40px, 9.9vw, 61px);
+  }
+  .cc-v10 .cc-hero .hero-actions .button {
+    flex: 1;
+    min-height: 48px;
+  }
+  .cc-v10 .cc-kpis {
+    margin: 0 -20px;
+  }
+  .cc-v10 .cc-khead {
+    padding: 12px 20px;
+  }
+  .cc-v10 .cc-kc {
+    padding: 18px 20px 20px;
+  }
+  .cc-v10 .cc-kc dd {
+    font-size: clamp(18px, 5.6vw, 24px);
+  }
+  /* Phones: the $ sign carries the unit, so a seven-digit value still fits its half-width cell. */
+  .cc-v10 .cc-unit {
+    display: none;
+  }
+  .cc-v10 .cc-field {
+    height: 200px;
+  }
+}
+.cc-v10 .cc-feat-media .cc-lp-hero-frame {
+  box-shadow:
+    0 0 0 1px var(--v10-line),
+    0 30px 60px -28px rgb(10 15 28 / 28%);
+}
+
+/*
+ * Open layout (20 Oct): no page frame and no lines between the sections. Only the live numbers
+ * and the Listed on strip keep their box. After the phone sizes above, so it wins there too.
+ */
+.cc-v10 {
+  border-left: 0;
+  border-right: 0;
+}
+.cc-v10 .cc-kpis,
+.cc-v10 .cc-listed {
+  border-left: 1px solid var(--v10-line);
+  border-right: 1px solid var(--v10-line);
+}
+.cc-v10 .cc-feat,
+.cc-v10 .cc-connect {
+  border-top: 0;
+}
+.cc-v10 .cc-feat-copy,
+.cc-v10 .cc-connect-copy,
+.cc-v10 .cc-feat-rev .cc-feat-media,
+.cc-v10 .cc-clients,
+.cc-v10 .cc-client {
+  border: 0;
+}
+@media (max-width: 720px) {
+  /* Phones: the boxes run edge to edge, so their side lines would sit on the screen edge. */
+  .cc-v10 .cc-kpis,
+  .cc-v10 .cc-listed {
+    border-left: 0;
+    border-right: 0;
+  }
+}
+
+/* Reduced motion comes last, so it wins over the phone sizes above. */
+@media (prefers-reduced-motion: reduce) {
+  .cc-v10 .cc-mq-track,
+  .cc-v10 .cc-live {
+    animation: none;
+  }
+  /* Still: one set, wrapped, every listing in view; the copy is not drawn. */
+  .cc-v10 .cc-listed {
+    height: auto;
+  }
+  .cc-v10 .cc-mq {
+    height: auto;
+    overflow: visible;
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+  .cc-v10 .cc-mq-track {
+    width: auto;
+  }
+  .cc-v10 .cc-lo-set {
+    flex-wrap: wrap;
+    gap: 4px 24px;
+    padding: 8px 0;
+  }
+  .cc-v10 .cc-lo-set[aria-hidden='true'] {
+    display: none;
+  }
+}
+
+/* Section 04, the Feed (src/landing/FeedReplay.tsx): a replay of recorded payments drawn straight
+   on the page (no card), with the receipt of the payment being replayed under it. */
+.cc-v10 .cc-fr {
+  --fr-blue: var(--v10-blue);
+  --fr-green: var(--lp-live-text);
+  --fr-soft: color-mix(in srgb, var(--v10-blue) 9%, transparent);
+  --fr-ring: color-mix(in srgb, var(--v10-blue) 24%, transparent);
+  --fr-ring-fee: color-mix(in srgb, var(--fr-green) 16%, transparent);
+  --fr-hair: color-mix(in srgb, var(--lp-text) 13%, transparent);
+  position: relative;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: 6px;
+  width: 100%;
+  max-width: 460px;
+  aspect-ratio: 1080 / 1350;
+  margin: 0;
+  padding: 8px 0;
+  container-type: inline-size;
+}
+.cc-v10 .cc-fr > * {
+  min-width: 0;
+}
+.cc-v10 .cc-fr-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.cc-v10 .cc-fr-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.cc-v10 .cc-fr-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-family: var(--v10-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  white-space: nowrap;
+  color: var(--lp-text);
+}
+.cc-v10 .cc-fr-brand img {
+  display: block;
+  width: 18px;
+  height: 18px;
+}
+.cc-v10 .cc-fr-replay {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--v10-line);
+  border-radius: 999px;
+  background: var(--lp-surface);
+  font-family: var(--v10-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  color: var(--lp-text-2);
+}
+.cc-v10 .cc-fr-replay i {
+  width: 6px;
+  height: 6px;
+  border-radius: 2px;
+  background: var(--lp-text-2);
+}
+.cc-v10 .cc-fr-net {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.cc-v10 .cc-fr-net text {
+  font-family: var(--v10-mono);
+}
+.cc-v10 .cc-fr-lbl {
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  fill: var(--lp-text-2);
+}
+.cc-v10 .cc-fr-name {
+  font-family: var(--v10-sans) !important;
+  font-size: 10.5px;
+  fill: var(--lp-text-2);
+  transition: fill 0.4s;
+}
+.cc-v10 .cc-fr-name.on {
+  fill: var(--lp-text);
+}
+.cc-v10 .cc-fr-initial {
+  font-family: var(--v10-sans) !important;
+  font-size: 13px;
+  font-weight: 600;
+  fill: #fff;
+}
+.cc-v10 .cc-fr-base {
+  fill: none;
+  stroke: var(--fr-hair);
+  stroke-width: 1;
+}
+.cc-v10 .cc-fr-act {
+  fill: none;
+  stroke-linecap: round;
+  opacity: 0;
+}
+.cc-v10 .cc-fr-pay {
+  stroke: var(--fr-blue);
+  stroke-width: 2;
+}
+.cc-v10 .cc-fr-fee {
+  stroke: var(--fr-green);
+  stroke-width: 2;
+  stroke-dasharray: 3 4;
+}
+.cc-v10 .cc-fr-dot {
+  fill: var(--fr-blue);
+  opacity: 0;
+}
+.cc-v10 .cc-fr-dot-fee {
+  fill: var(--fr-green);
+}
+.cc-v10 .cc-fr-ring {
+  fill: none;
+  stroke: var(--fr-ring);
+  stroke-width: 6;
+  opacity: 0;
+  transition: opacity 0.5s;
+}
+.cc-v10 .cc-fr-ring-fee {
+  stroke: var(--fr-ring-fee);
+}
+.cc-v10 .cc-fr-ring.on {
+  opacity: 1;
+}
+.cc-v10 .cc-fr-buyer {
+  fill: color-mix(in srgb, var(--lp-text) 6%, var(--lp-surface));
+  stroke: var(--lp-border-strong);
+}
+.cc-v10 .cc-fr-glyph {
+  fill: var(--lp-text-2);
+}
+.cc-v10 .cc-fr-fac {
+  fill: var(--lp-surface);
+  stroke: var(--lp-text);
+  stroke-width: 1.1;
+}
+.cc-v10 .cc-fr-x402 {
+  font-size: 10.5px;
+  font-weight: 600;
+  fill: var(--lp-text);
+}
+.cc-v10 .cc-fr-hub {
+  fill: var(--fr-soft);
+  stroke: var(--fr-blue);
+  stroke-width: 1.2;
+}
+.cc-v10 .cc-fr-tre {
+  fill: var(--fr-ring-fee);
+  stroke: var(--fr-green);
+  stroke-width: 1.2;
+}
+.cc-v10 .cc-fr-tre-lines {
+  stroke: var(--fr-green);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+.cc-v10 .cc-fr-amt {
+  opacity: 0;
+  transition: opacity 0.35s;
+}
+.cc-v10 .cc-fr-amt.on {
+  opacity: 1;
+}
+.cc-v10 .cc-fr-amt rect {
+  fill: var(--lp-surface);
+  stroke: var(--lp-border-strong);
+}
+.cc-v10 .cc-fr-amt text {
+  font-size: 10px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  fill: var(--lp-text);
+}
+.cc-v10 .cc-fr-rc {
+  padding: 14px 16px 12px;
+  border: 1px solid var(--v10-line);
+  border-radius: 16px;
+  background: var(--lp-surface);
+  box-shadow:
+    0 1px 2px rgb(15 23 42 / 4%),
+    0 10px 30px -12px rgb(15 23 42 / 14%);
+  transition:
+    opacity 0.3s,
+    transform 0.3s;
+}
+.cc-v10 .cc-fr-rc.out {
+  opacity: 0;
+  transform: translateY(4px);
+}
+.cc-v10 .cc-fr-r1 {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+}
+.cc-v10 .cc-fr-av {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+}
+.cc-v10 .cc-fr-ti {
+  min-width: 0;
+}
+.cc-v10 .cc-fr-ti b {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  font-size: 13.5px;
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--lp-text);
+}
+.cc-v10 .cc-fr-ti small {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--lp-text-2);
+}
+.cc-v10 .cc-fr-pr {
+  font-family: var(--v10-mono);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  text-align: right;
+}
+.cc-v10 .cc-fr-pr b {
+  display: block;
+  font-size: 20px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  color: var(--lp-text);
+}
+.cc-v10 .cc-fr-pr small {
+  display: block;
+  margin-top: 4px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--lp-text-2);
+}
+.cc-v10 .cc-fr-bar {
+  display: flex;
+  gap: 3px;
+  height: 6px;
+  margin: 14px 0 8px;
+}
+.cc-v10 .cc-fr-bar span {
+  border-radius: 3px;
+}
+.cc-v10 .cc-fr-bar .s {
+  flex: 9;
+  background: var(--fr-blue);
+}
+.cc-v10 .cc-fr-bar .f {
+  flex: 1;
+  background: repeating-linear-gradient(90deg, var(--fr-green) 0 3px, transparent 3px 5px);
+}
+.cc-v10 .cc-fr-sp,
+.cc-v10 .cc-fr-tx {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-family: var(--v10-mono);
+  font-variant-numeric: tabular-nums;
+}
+.cc-v10 .cc-fr-sp {
+  font-size: 11px;
+  color: var(--lp-text-2);
+}
+.cc-v10 .cc-fr-sp b {
+  font-weight: 500;
+  color: var(--lp-text);
+}
+.cc-v10 .cc-fr-fx {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 11px;
+  font-size: 11.5px;
+  color: var(--lp-text-2);
+}
+.cc-v10 .cc-fr-x4 {
+  padding: 2px 5px;
+  border: 1px solid var(--lp-border-strong);
+  border-radius: 5px;
+  font-family: var(--v10-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  color: var(--lp-text);
+}
+.cc-v10 .cc-fr-tx {
+  margin-top: 11px;
+  padding-top: 10px;
+  border-top: 1px solid var(--v10-line);
+  font-size: 10.5px;
+  white-space: nowrap;
+  color: var(--lp-text-2);
+}
+.cc-v10 .cc-fr-tx span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cc-v10 .cc-fr-tx a {
+  color: var(--lp-text-2);
+  text-decoration: none;
+}
+:root[data-theme='dark'] .cc-v10 .cc-fr-rc {
+  box-shadow: 0 10px 30px -12px rgb(0 0 0 / 60%);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .cc-v10 .cc-fr-rc {
+    box-shadow: 0 10px 30px -12px rgb(0 0 0 / 60%);
+  }
+}
+/* On a phone the drawing and the receipt set the height; the 4:5 box is only a minimum. */
+@container (max-width: 380px) {
+  .cc-v10 .cc-fr-brand {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+  }
+  .cc-v10 .cc-fr-replay {
+    padding: 0 8px;
+    font-size: 9.5px;
+  }
+  .cc-v10 .cc-fr-ti b {
+    font-size: 12.5px;
+  }
+  .cc-v10 .cc-fr-pr b {
+    font-size: 17px;
+  }
+  .cc-v10 .cc-fr-fx {
+    font-size: 11px;
+  }
+}

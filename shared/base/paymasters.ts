@@ -25,7 +25,13 @@ import { BASE_MAINNET, type Address } from './chains.js';
 export type SponsorAllowlist = Readonly<Record<number, readonly Address[]>>;
 
 export const SPONSOR_PAYMASTERS: SponsorAllowlist = {
-  [BASE_MAINNET]: ['0x2FAEB0760D4230Ef2aC21496Bb4F0b47D634FD4c'],
+  [BASE_MAINNET]: [
+    '0x2FAEB0760D4230Ef2aC21496Bb4F0b47D634FD4c',
+    // Our own instance (Operation Paymaster, deployed 23 Oct 2026, block 53000665): runtime code
+    // byte-identical to Coinbase's above (8,347 bytes), owner our admin, verifyingSigner our
+    // server-held key, entryPoint v0.6. Same layout and the same token-zero rule apply.
+    '0x8Bf5b18b733a864c17Cd92615cD45D833Fcfe105',
+  ],
 };
 
 /** paymasterAndData of the pinned verifying paymaster: 129 bytes of fields + a 65-byte signature. */

@@ -216,14 +216,48 @@ export function scoreClaim(
     : null;
 }
 
-export async function loadOnBase(query: { q?: string; before?: string | null } = {}) {
+/** The Explorer's list read gives up after this (its caller then retries), never loading forever. */
+export const ON_BASE_LIST_TIMEOUT_MS = 15_000;
+
+/**
+ * One page of the list. With `timeoutMs` the whole exchange (headers and body) must finish in
+ * that time, or the request is aborted and the read fails like an error status.
+ */
+export async function loadOnBase(
+  query: { q?: string; before?: string | null; timeoutMs?: number } = {},
+) {
   const params = new URLSearchParams();
   // The server refuses a longer search (400), and retrying the same text would never clear it.
   const q = query.q?.trim().slice(0, ON_BASE_QUERY_MAX).trim();
   if (q) params.set('q', q);
   if (query.before) params.set('before', query.before);
   const search = params.toString();
-  return json<OnBaseList>(`${ON_BASE_ROUTES.list}${search ? `?${search}` : ''}`);
+  const path = `${ON_BASE_ROUTES.list}${search ? `?${search}` : ''}`;
+  const timeoutMs = query.timeoutMs;
+  if (timeoutMs === undefined) return json<OnBaseList>(path);
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`${path}: no answer within ${timeoutMs} ms`));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([
+      (async () => {
+        const response = await fetch(path, {
+          headers: { accept: 'application/json' },
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`${path} ${response.status}`);
+        return (await response.json()) as OnBaseList;
+      })(),
+      timeout,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** One passport by Base ID (decimal); null when no registered agent has it. */

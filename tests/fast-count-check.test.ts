@@ -16,7 +16,7 @@ import {
   checkPaidCallsAllChains,
   PAID_CALLS_CHECK_LOCK_SQL,
   PAID_CALLS_REPAIR_SQL,
-  PAID_CALLS_CHECK_SQL,
+  PAID_CALLS_CHECK_WITH_SPONSORED_SQL,
   PAID_CALLS_CHECK_TIMEOUT_MS,
 } from '../server/stats/paid-calls.js';
 import { base, call, counts, migrated, settle } from './paid-calls-fixtures.js';
@@ -585,7 +585,7 @@ test('paid calls check: a match logs counts only and changes nothing', async (t)
     },
   ]);
   // One read transaction; both numbers from one statement, each statement under the 3 s limit.
-  assert.equal(seen.filter((sql) => sql === PAID_CALLS_CHECK_SQL).length, 1);
+  assert.equal(seen.filter((sql) => sql === PAID_CALLS_CHECK_WITH_SPONSORED_SQL).length, 1);
   assert.equal(PAID_CALLS_CHECK_TIMEOUT_MS, 3_000);
   for (const sql of seen.filter((item) => item.startsWith('SET LOCAL statement_timeout')))
     assert.ok(Number(/= (\d+)/.exec(sql)![1]) <= 3_000, sql);
@@ -621,6 +621,8 @@ test('paid calls check: repairs a counter that is too low, too high or missing; 
             paid_calls_counter: counter,
             paid_calls_scan: 3,
             paid_calls_drift: (counter ?? 0) - 3,
+            // A missing row also lost its value: three settled calls of 20,000 base units each.
+            paid_calls_value_drift_raw: counter === null ? '-60000' : '0',
             repaired: true,
           },
         ],
@@ -681,11 +683,15 @@ test('paid calls check: overlapping runs add the difference once (read and repai
   assert.deepEqual([a, b].map((result) => result?.drift ?? null).sort(), [-2, 0].sort());
   // The lock, the read and the repair run in one transaction, the lock first.
   const order = seen.filter((sql) =>
-    [PAID_CALLS_CHECK_LOCK_SQL, PAID_CALLS_CHECK_SQL, PAID_CALLS_REPAIR_SQL].includes(sql),
+    [
+      PAID_CALLS_CHECK_LOCK_SQL,
+      PAID_CALLS_CHECK_WITH_SPONSORED_SQL,
+      PAID_CALLS_REPAIR_SQL,
+    ].includes(sql),
   );
   assert.deepEqual(order.slice(0, 3), [
     PAID_CALLS_CHECK_LOCK_SQL,
-    PAID_CALLS_CHECK_SQL,
+    PAID_CALLS_CHECK_WITH_SPONSORED_SQL,
     PAID_CALLS_REPAIR_SQL,
   ]);
   // A run that finds the lock taken does nothing and says so.
@@ -695,7 +701,7 @@ test('paid calls check: overlapping runs add the difference once (read and repai
   await db.query('UPDATE paid_call_count SET total = 1 WHERE chain_id = 8453');
   const { lines, log } = recorder();
   assert.equal(await checkPaidCalls(busy.wrapped, { log }), null);
-  assert.ok(!busy.seen.includes(PAID_CALLS_CHECK_SQL));
+  assert.ok(!busy.seen.includes(PAID_CALLS_CHECK_WITH_SPONSORED_SQL));
   assert.ok(!busy.seen.includes(PAID_CALLS_REPAIR_SQL));
   assert.deepEqual(lines, [{ level: 'info', fields: { event: 'paid_calls_check_skipped' } }]);
   assert.equal(await base(db), 1);
@@ -738,7 +744,7 @@ test('paid calls check: a timeout is logged, not thrown; nothing changes', async
   // The scan hits its statement timeout (57014).
   const { wrapped } = paidSpied(db, {
     query: (sql) => {
-      if (sql === PAID_CALLS_CHECK_SQL) throw sqlError('57014');
+      if (sql === PAID_CALLS_CHECK_WITH_SPONSORED_SQL) throw sqlError('57014');
     },
   });
   const { lines, log } = recorder();
@@ -759,7 +765,7 @@ test('paid calls check: a timeout is logged, not thrown; nothing changes', async
   });
   const broken = paidSpied(db, {
     query: (sql) => {
-      if (sql === PAID_CALLS_CHECK_SQL) throw sqlError('XX000');
+      if (sql === PAID_CALLS_CHECK_WITH_SPONSORED_SQL) throw sqlError('XX000');
     },
   });
   const other = recorder();
@@ -785,7 +791,7 @@ test('cron: the paid calls check runs after the others, and its failure never st
   {
     const { wrapped } = paidSpied(db, {
       query: (sql) => {
-        if (sql === PAID_CALLS_CHECK_SQL) throw sqlError('57014');
+        if (sql === PAID_CALLS_CHECK_WITH_SPONSORED_SQL) throw sqlError('57014');
       },
     });
     const app = Fastify();
@@ -841,6 +847,7 @@ test('cron: the paid calls check runs after the others, and its failure never st
       paid_calls_counter: 1,
       paid_calls_scan: 2,
       paid_calls_drift: -1,
+      paid_calls_value_drift_raw: '0',
       repaired: true,
     });
     assert.equal(await base(db), 2);

@@ -14,6 +14,14 @@ a universal stop for existing calls. Preserve router address/start-block account
 reconcile signed or sent calls rather than rerouting or retrying with a new payment key.
 See [routing and readiness](protocol/FEE_ROUTER_2.md).
 
+Router 3 (`0xe807a76385ec3d76d17ab955091c12329d0a1403` on Base, deployed 19 Oct 2026) settles
+hosted Central City services sold fee-included between 0.05 and 100 USDC while
+`CITY_PROTOCOL_FEE_ROUTER3_ENABLED=1`: one x402 settlement from two EIP-3009
+`transferWithAuthorization` legs signed by the payer (seller share to the seller, fee to the
+treasury), sent by Central City's own x402 facilitator `0xc8d6Bac2ff7182d22c4f316BffF9f713261A6cEC`,
+which pays the gas in ETH and never holds USDC. Other payments keep routers 1 and 2; below
+0.05 USDC, router 1 is used. See [Fee Router 3](protocol/FEE_ROUTER_3.md) and section 18.
+
 ## 1. What a person does
 
 1. Opens a listed service in the Feed. Payable services show **Use with my agent** (it replaces
@@ -63,21 +71,33 @@ every float back to its agent wallet (section 8). Removing the flag turns it bac
 ## 3. Who pays, who signs what
 
 The payer is the agent's **spender smart account** (`base_wallets.spender_address`), never the
-owner's wallet and never Central City. Money comes only from the agent's own wallet, through the
-spend permission the owner signed.
+owner's wallet and never Central City. Service-payment principal comes from the agent's own
+wallet through the spend permission the owner signed; network gas sponsorship is separate.
 
 | Who                                     | Signs                                                                                                                                                                                                                                           |
 | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Owner, in the browser (wallet password) | The spending limit (existing Spending limit screen). For MCP also the existing consent "may pay on its own" (P2b), plus the `services:pay` scope on the AI's grant (section 11).                                                                |
 | Owner, signed in (session only)         | Each Feed payment (the confirm click) and the per-call maximum (PUT agent). No key involved.                                                                                                                                                    |
 | Spender key (server, chain module only) | Float top-up UserOp (`SPM.spend` agent wallet to spender; first time also approve + deploy), EIP-3009 `TransferWithAuthorization` (ERC-1271, `server/base/chain/x402.ts`), `CancelAuthorization`, float sweep UserOp (spender to agent wallet). |
-| The service's facilitator               | Submits our authorization on Base and pays its gas. We never submit it ourselves.                                                                                                                                                               |
-| Pinned sponsor (paymaster)              | Gas of our UserOps. No sponsor, nothing is sent (`unavailable`).                                                                                                                                                                                |
+| The service's facilitator               | Submits the service-payment authorization and pays its gas. For supported router-3 settlements, Central City's own facilitator performs this role; external services use their applicable facilitator.                                                                                                                                                               |
+| Pinned sponsor (paymaster)              | Covers accepted UserOperations under the configured sponsorship policy and budget; unavailable sponsorship does not silently charge owner funds.                                                                                                                                                                                |
 
-Never on the server: the owner's key. Never used: Central City funds. The authorization nonce is the
+Never on the server: the owner's key. Central City does not supply the service-payment principal;
+its sponsorship deposit or facilitator account can pay network gas. The authorization nonce is the
 deterministic one of `authorizationNonce` (`cc.x402.v1`, payment intent = the call's payment id), and
 `issueTransferAuthorization` stores it before it is handed out, so a retry reuses the same signed
 authorization and can never create a second one.
+
+**Sponsorship update (24 October 2026).** The live Base configuration uses Central City's own
+paymaster and direct bundling for supported UserOperations, including relevant float top-ups and
+sweeps. Policy, validity and budget checks still apply. The retained provider path is conditional
+on availability and capacity. Inspect [the public configuration](https://centralcity.ai/api/public/paymaster)
+and the [wallet sponsorship threat model](base/WALLET-THREAT-MODEL.md).
+
+Router-3 settlement is a separate facilitator transaction using the payer's EIP-3009 authorizations,
+not a sponsored UserOperation. See [Fee Router 3](protocol/FEE_ROUTER_3.md). A successful gas-sponsored
+operation is not proof that the service payment settled or that the service delivered its result.
+An uncertain submission must be reconciled; a timeout alone does not authorize a duplicate payment.
 
 ERC-1271 needs the spender account deployed; the first float top-up deploys it, so a top-up always
 precedes the first authorization of an agent.
@@ -305,9 +325,12 @@ often (at most 4 times `pollMs`).
   on Base than the calendar does; the difference is the float (Ready for services).
 - One top-up at a time per wallet, and none while a sweep is on its way: the wallet row is locked
   and the check is made again under it. A top-up that landed but reverted is not funded: the call
-  waits until Base calls it failed, then ends `float_topup_failed`.
+  waits until Base calls it failed, then ends `float_topup_failed`. Another call of the wallet waits
+  for a top-up on its way at most the top-up retry window (10 minutes from its own start), then ends
+  `float_topup_failed` with nothing signed.
 - **Available float** = spender USDC balance minus amounts held by live authorizations (not yet
-  settled, cancelled or expired).
+  settled, cancelled or expired). A reserved call past the top-up retry window that never started a top-up
+  or a payment holds nothing (nobody may be asking it again) and is refused at its next step.
 - **Sweep** (chain op kind `sweep`, spender to agent wallet, everything available) when: Feed
   pay is switched off (reason `switched_off`); the agent is paused or removed (`agent_paused`); the
   wallet's limit is revoked, replaced or revoke pending (`limit_changed`); the limit's own `end`
@@ -723,4 +746,11 @@ service that an owner's agent sells in the Feed. It is paid through the same quo
   to the seller in the same call); the call confirms the ledger has that row (`fee_verified`).
 - **Answers.** The call's `payment.amount` is the price; `protocolFee.included` is true. MCP adds
   `payment.fee_included: true` and `payment.protocol_fee`.
+- **Router 3.** While `CITY_PROTOCOL_FEE_ROUTER3_ENABLED=1`, a hosted Central City service priced
+  from 0.05 to 100 USDC settles through router 3 instead of the `pay` operation above: the payer
+  signs two EIP-3009 `transferWithAuthorization` legs with router-derived nonces, and Central
+  City's own x402 facilitator (`0xc8d6Bac2ff7182d22c4f316BffF9f713261A6cEC`, an EOA that pays the
+  gas in ETH and never holds USDC) sends the settlement. The seller share goes to the seller and the
+  fee to the treasury in that transaction, with one `FeeCharged` kind 1 (`ref = keccak256(call id)`).
+  Spec: [protocol/FEE_ROUTER_3.md](protocol/FEE_ROUTER_3.md).
 - External (x402) listings are unchanged.

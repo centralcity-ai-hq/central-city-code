@@ -248,3 +248,50 @@ export async function signCancelAuthorization(deps: {
     ),
   );
 }
+
+/**
+ * Issues an authorization whose nonce the caller fixes (fee router 3: the router derives both legs'
+ * nonces from the purchase, docs/protocol/FEE_ROUTER_3.md), exactly once per id: stored BEFORE it
+ * is returned; a later call returns the stored one unchanged and refuses any other payer,
+ * recipient, value, window or nonce, so a retry never makes a second spendable authorization.
+ */
+export async function issueBoundAuthorization(
+  deps: Parameters<typeof signTransferAuthorization>[0] & {
+    store: AuthorizationStore;
+    paymentIntentId: string;
+  },
+): Promise<IssuedAuthorization> {
+  const want = deps.authorization;
+  const same = (stored: IssuedAuthorization) =>
+    stored.chainId === deps.network.chainId &&
+    getAddress(stored.token) === getAddress(deps.token) &&
+    getAddress(stored.authorization.from) === getAddress(want.from) &&
+    getAddress(stored.authorization.to) === getAddress(want.to) &&
+    stored.authorization.value === want.value &&
+    stored.authorization.validAfter === want.validAfter &&
+    stored.authorization.validBefore === want.validBefore &&
+    stored.authorization.nonce.toLowerCase() === want.nonce.toLowerCase();
+  const existing = await deps.store.get(deps.paymentIntentId);
+  if (existing) {
+    if (!same(existing))
+      throw new AuthorizationError(
+        'INVALID_AMOUNT',
+        'This payment already has a different authorization.',
+      );
+    return existing;
+  }
+  const signature = await signTransferAuthorization(deps);
+  const stored = await deps.store.insert({
+    paymentIntentId: deps.paymentIntentId,
+    chainId: deps.network.chainId,
+    token: getAddress(deps.token),
+    authorization: { ...want, from: getAddress(want.from), to: getAddress(want.to) },
+    signature,
+  });
+  if (!same(stored))
+    throw new AuthorizationError(
+      'INVALID_AMOUNT',
+      'This payment already has a different authorization.',
+    );
+  return stored;
+}

@@ -12,6 +12,7 @@
  * Accounts are Coinbase Smart Wallet v1 on EntryPoint v0.6. Gas and paymaster data come from the
  * injected bundler (the CDP bundler/paymaster in production; a local handleOps bundler on Anvil).
  */
+import type { SponsorFlow } from './own-paymaster-policy.js';
 import {
   encodeFunctionData,
   getAddress,
@@ -155,13 +156,31 @@ export interface BundlerReceipt {
   actualGasCost: bigint;
 }
 
+/**
+ * What the calling flow intends a sponsored operation to do (Operation Paymaster, A13): its flow
+ * and the exact calls it built from its own records. Our own paymaster (direct-bundler.ts) sponsors
+ * only an operation whose callData is exactly these calls and whose calls the flow's policy allows;
+ * the CDP bundler ignores it.
+ */
+export interface SponsorIntent {
+  flow: SponsorFlow;
+  calls: Call[];
+  /** The account the flow prepared it for, from its own records. */
+  sender: Address;
+  /** The deployment it expects ('0x' when the account exists), from the same records. */
+  initCode: Hex;
+}
+
 export interface Bundler {
   /**
    * Fills gas limits, fee fields and paymasterAndData for an unsigned operation. With
    * `sponsor` set to false no paymaster is asked and the account pays its own gas (paymasterAndData
-   * '0x'); the default asks the bundler's paymaster where it has one.
+   * '0x'); the default asks the bundler's paymaster where it has one, with the caller's intent.
    */
-  prepare(op: UserOperation<'0.6'>, options?: { sponsor?: boolean }): Promise<UserOperation<'0.6'>>;
+  prepare(
+    op: UserOperation<'0.6'>,
+    options?: { sponsor?: boolean; intent?: SponsorIntent },
+  ): Promise<UserOperation<'0.6'>>;
   /** Broadcasts a signed operation; resending an already known operation must not fail. */
   send(op: UserOperation<'0.6'>): Promise<Hex>;
   receipt(userOpHash: Hex): Promise<BundlerReceipt | null>;
@@ -281,6 +300,8 @@ export interface SubmitInput {
    * `pinnedNonce` when those are given; its cost bound must stay within `maxCostWeiCap`.
    */
   prepared?: UserOperation<'0.6'>;
+  /** The flow this operation belongs to, for our own paymaster's policy (SponsorIntent). */
+  sponsorFlow?: SponsorFlow;
 }
 
 export interface PrepareInput {
@@ -298,6 +319,8 @@ export interface PrepareInput {
   feeFloor?: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint };
   /** false: no paymaster; the account prefunds its own gas (and must hold it). */
   sponsor?: boolean;
+  /** The flow this operation belongs to, for our own paymaster's policy (SponsorIntent). */
+  sponsorFlow?: SponsorFlow;
 }
 
 export interface PreparedOperation {
@@ -351,7 +374,12 @@ export async function prepareOperation(
       paymasterAndData: '0x',
       signature: '0x',
     },
-    ...(input.sponsor === undefined ? [] : [{ sponsor: input.sponsor }]),
+    {
+      ...(input.sponsor === undefined ? {} : { sponsor: input.sponsor }),
+      ...(input.sponsorFlow
+        ? { intent: { flow: input.sponsorFlow, calls: input.calls, sender, initCode } }
+        : {}),
+    },
   );
   if (
     getAddress(unsigned.sender) !== sender ||
@@ -768,6 +796,17 @@ export function receiptLookupNotNow(error: unknown): boolean {
  * could not answer right now (receiptLookupNotNow). Any other failure counts as no receipt, as
  * before: the chain itself is asked instead (nonce, then the on-chain search).
  */
+/** Error names a receipt-lookup log may carry verbatim; anything else is logged as 'other'. */
+const LOGGED_ERROR_NAMES = new Set([
+  'BundlerError',
+  'HttpRequestError',
+  'TimeoutError',
+  'RpcRequestError',
+  'AbortError',
+  'TypeError',
+  'Error',
+]);
+
 async function bundlerReceipt(
   deps: SubmitDeps,
   userOpHash: Hex,
@@ -775,7 +814,30 @@ async function bundlerReceipt(
   try {
     return await deps.bundler.receipt(userOpHash);
   } catch (error) {
-    return receiptLookupNotNow(error) ? 'unknown' : null;
+    const unknown = receiptLookupNotNow(error);
+    // Diagnostic: which receipt lookups fail and how (never the message: an endpoint URL in it may
+    // carry a key). 'unknown' leaves the operation unchanged until a later lookup answers.
+    const e = error as {
+      name?: unknown;
+      code?: unknown;
+      httpStatus?: unknown;
+      rpcCode?: unknown;
+    } | null;
+    console.info(
+      JSON.stringify({
+        event: unknown ? 'chain.receipt_unknown' : 'chain.receipt_error',
+        userOpHash,
+        name: typeof e?.name === 'string' && LOGGED_ERROR_NAMES.has(e.name) ? e.name : 'other',
+        code:
+          typeof e?.code === 'number' ||
+          (typeof e?.code === 'string' && /^[A-Z][A-Z0-9_]{1,39}$/.test(e.code))
+            ? e.code
+            : null,
+        httpStatus: typeof e?.httpStatus === 'number' ? e.httpStatus : null,
+        rpcCode: typeof e?.rpcCode === 'number' ? e.rpcCode : null,
+      }),
+    );
+    return unknown ? 'unknown' : null;
   }
 }
 
@@ -904,7 +966,13 @@ async function afterNoReceipt(
     // Still 'submitted': the claim already recorded this send (no second write).
     if (claimed !== row && row.status === 'submitted') return claimed;
     return move(deps, row.idempotencyKey, IN_FLIGHT, { status: 'submitted', errorCode: null });
-  } catch {
+  } catch (error) {
+    // Provably never sent anywhere (see authorizeAndSend): ended as never broadcast.
+    if (neverBroadcast(error))
+      return move(deps, row.idempotencyKey, IN_FLIGHT, {
+        status: 'failed',
+        errorCode: 'REFUSED_BEFORE_BROADCAST',
+      });
     // A resend of an operation the bundler already took: it stays 'submitted', its claim is the
     // window's send, and the next window sends again. Any other failed send is ambiguous.
     if (row.status === 'submitted') return claimed;
@@ -964,6 +1032,7 @@ export async function submitOperation(
       nonceKey: input.nonceKey ?? nonceLaneFor(input.idempotencyKey),
       pinnedNonce: input.pinnedNonce,
       maxCostWeiCap: input.maxCostWeiCap,
+      ...(input.sponsorFlow ? { sponsorFlow: input.sponsorFlow } : {}),
     });
     unsigned = prepared.operation;
     bound = prepared.maxCostWei;
@@ -1041,7 +1110,14 @@ async function authorizeAndSend(
   try {
     await deps.bundler.send(fromJson(row.signedOperation));
     return claimed;
-  } catch {
+  } catch (error) {
+    // The bundler proves it never sent it, and no other bundler can (our own bundler's drain,
+    // direct-bundler.ts NeverBroadcastError): ended as never broadcast, not followed forever.
+    if (neverBroadcast(error))
+      return move(deps, row.idempotencyKey, ['submitted'], {
+        status: 'failed',
+        errorCode: 'REFUSED_BEFORE_BROADCAST',
+      });
     return move(deps, row.idempotencyKey, ['submitted'], {
       status: 'unknown',
       errorCode: 'BROADCAST_AMBIGUOUS',
@@ -1050,6 +1126,10 @@ async function authorizeAndSend(
 }
 
 const sameHex = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+
+/** A bundler error that proves the operation was never broadcast (direct-bundler.ts). */
+const neverBroadcast = (error: unknown) =>
+  (error as { neverBroadcast?: unknown } | null)?.neverBroadcast === true;
 
 /** What the chain itself says about a receipt (see `canonicalOutcome`). */
 export type CanonicalOutcome =

@@ -52,7 +52,9 @@ import {
   type ChainOperationStore,
   type StoredOperation,
 } from './submit.js';
+import { ROUTER3_ABI, router3Nonce } from '../../feed/pay/router3.js';
 import {
+  issueBoundAuthorization,
   issueTransferAuthorization,
   signCancelAuthorization,
   type AuthorizationStore,
@@ -332,6 +334,7 @@ export function createFeedPayChain(deps: FeedPayChainDeps) {
         idempotencyKey: input.key,
         intentHash: input.intentHash,
         kind: input.kind,
+        sponsorFlow: 'feedPay',
         account: {
           address: input.wallet.spender,
           recipe: spenderAccountRecipe(network, signerAddress),
@@ -737,6 +740,104 @@ export function createFeedPayChain(deps: FeedPayChainDeps) {
         },
         now: Math.floor(now() / 1000),
       });
+    },
+
+    /**
+     * The two EIP-3009 authorizations of a fee router 3 payment (docs/protocol/FEE_ROUTER_3.md),
+     * signed by the spender account: `gross - fee` to the payee and `fee` to the router's treasury,
+     * nonces as the router derives them (router3Nonce), one window for both. Stored under
+     * `<key>:seller` and `<key>:fee` before they are returned; a retry gets the stored pair
+     * unchanged (its window is read back from the seller leg, so a crash between the two legs
+     * still yields one matching pair). Never a second pair for the same key.
+     */
+    async router3Legs(input: {
+      key: string;
+      wallet: WalletRef;
+      router: Address;
+      treasury: Address;
+      payee: Address;
+      gross: bigint;
+      fee: bigint;
+      ref: Hex;
+      validitySeconds: number;
+    }): Promise<{ seller: IssuedAuthorization; fee: IssuedAuthorization }> {
+      if (!(await client.getCode({ address: input.wallet.spender })))
+        throw new FeedPayChainError('NOT_DEPLOYED', 'The spender account is not deployed yet.');
+      const payer = getAddress(input.wallet.spender);
+      const sellerId = `${input.key}:seller`;
+      const earlier = await deps.authorizations.get(sellerId);
+      const at = BigInt(Math.floor(now() / 1000));
+      const validAfter = earlier ? earlier.authorization.validAfter : 0n;
+      const validBefore = earlier
+        ? earlier.authorization.validBefore
+        : at + BigInt(input.validitySeconds);
+      const nonce = (leg: 0 | 1) =>
+        router3Nonce({
+          chainId: network.chainId,
+          router: input.router,
+          treasury: input.treasury,
+          payer,
+          payee: input.payee,
+          gross: input.gross,
+          ref: input.ref,
+          validAfter,
+          validBefore,
+          leg,
+        });
+      const issue = (id: string, to: Address, value: bigint, legNonce: Hex) =>
+        issueBoundAuthorization({
+          network,
+          client,
+          keystore: deps.keystore,
+          keyRef: input.wallet.spenderKeyRef,
+          token: usdc,
+          store: deps.authorizations,
+          paymentIntentId: id,
+          authorization: {
+            from: payer,
+            to: getAddress(to),
+            value,
+            validAfter,
+            validBefore,
+            nonce: legNonce,
+          },
+          now: Math.floor(now() / 1000),
+        });
+      const seller = await issue(sellerId, input.payee, input.gross - input.fee, nonce(0));
+      const fee = await issue(`${input.key}:fee`, input.treasury, input.fee, nonce(1));
+      return { seller, fee };
+    },
+
+    /**
+     * Router 3's own nonce for a probe purchase, read on chain: the readiness check compares it with
+     * router3Nonce, so a router whose derivation differs is never used. Reads only.
+     */
+    async router3NonceFor(
+      router: Address,
+      probe: {
+        payer: Address;
+        payee: Address;
+        gross: bigint;
+        ref: Hex;
+        validAfter: bigint;
+        validBefore: bigint;
+        leg: 0 | 1;
+      },
+    ): Promise<Hex> {
+      return (await client.readContract({
+        address: router,
+        abi: ROUTER3_ABI,
+        functionName: 'nonceFor',
+        args: [
+          probe.payer,
+          probe.payee,
+          probe.gross,
+          probe.ref,
+          probe.validAfter,
+          probe.validBefore,
+          probe.leg,
+        ],
+      })) as Hex;
     },
 
     /**

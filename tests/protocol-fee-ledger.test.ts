@@ -13,6 +13,7 @@ import {
   PROTOCOL_FEE_LEDGER_SQL,
   protocolFeeLedgerMigration,
   REORG_DEPTH,
+  resetLearnedLogRange,
   scanFees,
   type ChainLog,
   type FeeChain,
@@ -801,4 +802,71 @@ test('a fee-on-top row replaced by a rescan (another block, a missed run, a rest
   await db.exec('DELETE FROM protocol_fee_events; DELETE FROM protocol_fee_scan_state;');
   await scanFees(db, chain, config);
   assert.deepEqual(await verified(), [ref('v1')]);
+});
+
+test('a node that refuses a dense range: the range is split and every fee is still recorded (22 Oct)', async (t) => {
+  const db = await setup(t);
+  // 400 fees in 400 blocks; the node refuses any answer with more than 50 logs.
+  const state = { latest: 600n, finalized: 600n, logs: feeEveryBlocks(150n, 1n, 400) };
+  const base = fakeChain(state);
+  let refused = 0;
+  const chain: FeeChain = {
+    ...base,
+    getLogs: async (input) => {
+      const logs = await base.getLogs(input);
+      if (logs.length > 50) {
+        refused++;
+        throw new Error('query returned more than 10000 results');
+      }
+      return logs;
+    },
+  };
+  await scanFees(db, chain, config);
+  assert.ok(refused > 0, 'the node refused the dense ranges');
+  const rows = await db.query<{ n: string }>('SELECT count(*)::text AS n FROM protocol_fee_events');
+  assert.equal(rows.rows[0]!.n, '400', 'every fee recorded after splitting');
+});
+
+test('a node that is down still fails the scan (splitting stops at the smallest range)', async (t) => {
+  const db = await setup(t);
+  const state = { latest: 600n, finalized: 600n, logs: feeEveryBlocks(150n, 1n, 10) };
+  const base = fakeChain(state);
+  let calls = 0;
+  const chain: FeeChain = {
+    ...base,
+    getLogs: async () => {
+      calls++;
+      throw new Error('fetch failed');
+    },
+  };
+  await assert.rejects(scanFees(db, chain, config));
+  assert.ok(calls < 400, `bounded retries (${calls})`);
+});
+
+test('after a split the next chunks start at the size that worked (no refused full-size read each time)', async (t) => {
+  resetLearnedLogRange();
+  const db = await setup(t);
+  // 2,000 dense blocks: the node refuses any answer over 50 logs.
+  const state = { latest: 2_200n, finalized: 2_200n, logs: feeEveryBlocks(150n, 1n, 2_000) };
+  const base = fakeChain(state);
+  let refused = 0;
+  let calls = 0;
+  const chain: FeeChain = {
+    ...base,
+    getLogs: async (input) => {
+      calls++;
+      const logs = await base.getLogs(input);
+      if (logs.length > 50) {
+        refused++;
+        throw new Error('query returned more than 10000 results');
+      }
+      return logs;
+    },
+  };
+  await scanFees(db, chain, config, { maxBlocks: 2_100n });
+  const rows = await db.query<{ n: string }>('SELECT count(*)::text AS n FROM protocol_fee_events');
+  assert.equal(rows.rows[0]!.n, '2000', 'every fee recorded');
+  // Without learning the same scan has 122 refused reads (every dense chunk refused at 1,000, 500,
+  // 250 and 125 blocks for each source); with it 66, almost all while the size is first found.
+  assert.ok(refused <= 70, `few refused reads (${refused} of ${calls})`);
 });

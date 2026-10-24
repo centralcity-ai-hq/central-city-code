@@ -39,8 +39,8 @@ export function agoText(ms: number) {
 export const utcTime = (ms: number) => `${new Date(ms).toISOString().slice(11, 19)} UTC`;
 
 /** A row's identity in the table (one call, one transaction; its time keeps rare batches apart). */
-export const callKey = (call: Pick<ServiceCall, 'tx_hash' | 'time'>) =>
-  `${call.time}_${call.tx_hash}`;
+export const callKey = (call: Pick<ServiceCall, 'tx_hash' | 'time' | 'ref'>) =>
+  `${call.time}_${call.tx_hash}_${call.ref}`;
 
 /** The search as sent: trimmed and never longer than the server accepts (it refuses longer). */
 export const searchText = (q: string) => q.trim().slice(0, SERVICE_CALLS_QUERY_MAX).trim();

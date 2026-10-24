@@ -423,7 +423,7 @@ export function PublicHeader({ current }: { current: PublicPage }) {
   useLayoutEffect(() => {
     const targets = Array.from(
       document.querySelectorAll<HTMLElement>(
-        '#hero-invite, .cc-landing-hero .button.primary, .cc-lp-hero .button.primary',
+        '#hero-invite, .cc-landing-hero .button.primary, .cc-lp-hero .button.primary, .cc-v10 .button.primary',
       ),
     );
     if (targets.length === 0) return;

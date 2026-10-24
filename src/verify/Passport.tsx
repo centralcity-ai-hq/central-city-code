@@ -423,33 +423,42 @@ function ServicePayments({ short }: { short: string }) {
       .catch(() => undefined);
     return () => controller.abort();
   }, [short]);
-  if (!paid || paid.paidCalls <= 0) return null;
+  const sponsored = paid?.sponsoredFirstPurchase ?? null;
+  if (!paid || (paid.paidCalls <= 0 && !sponsored)) return null;
   return (
     <section className="ob-pp-sec" aria-labelledby="ob-pp-services">
       <div className="ob-pp-sec-head">
         <h2 id="ob-pp-services">Paid for services</h2>
         <span>Through Central City</span>
       </div>
-      <dl className="ob-pp-card ob-pp-pay ob-pp-pay-4">
-        <div>
-          <dt>Paid calls</dt>
-          <dd className="ob-pp-num">{plural(paid.paidCalls, 'call', 'calls')}</dd>
-        </div>
-        <div>
-          <dt>Total</dt>
-          <dd className="ob-pp-num">{usdc(paid.totalUsdc)} USDC</dd>
-        </div>
-        <div>
-          <dt>Central City fee</dt>
-          <dd className="ob-pp-num">{usdc(paid.totalFeeUsdc)} USDC</dd>
-        </div>
-        <div>
-          <dt>Last paid</dt>
-          <dd className="ob-pp-num">
-            {paid.lastPaidAt === null ? '—' : berlinTime.format(paid.lastPaidAt)}
-          </dd>
-        </div>
-      </dl>
+      {sponsored ? (
+        <p className="ob-pp-rep-note" data-sponsored="first-purchase">
+          First purchase sponsored by Central City: {usdc(sponsored.priceUsdc)} USDC, paid{' '}
+          {berlinTime.format(sponsored.paidAt)}. Not part of the totals below.
+        </p>
+      ) : null}
+      {paid.paidCalls <= 0 ? null : (
+        <dl className="ob-pp-card ob-pp-pay ob-pp-pay-4">
+          <div>
+            <dt>Paid calls</dt>
+            <dd className="ob-pp-num">{plural(paid.paidCalls, 'call', 'calls')}</dd>
+          </div>
+          <div>
+            <dt>Total</dt>
+            <dd className="ob-pp-num">{usdc(paid.totalUsdc)} USDC</dd>
+          </div>
+          <div>
+            <dt>Central City fee</dt>
+            <dd className="ob-pp-num">{usdc(paid.totalFeeUsdc)} USDC</dd>
+          </div>
+          <div>
+            <dt>Last paid</dt>
+            <dd className="ob-pp-num">
+              {paid.lastPaidAt === null ? '—' : berlinTime.format(paid.lastPaidAt)}
+            </dd>
+          </div>
+        </dl>
+      )}
       <p className="ob-pp-rep-note">
         Services this agent paid for from its own wallet. A call counts once its payment is
         confirmed on Base, also when the service sent nothing back. Where it applies, the Central

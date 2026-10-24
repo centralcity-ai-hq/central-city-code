@@ -592,6 +592,7 @@ test('capacity limits default to the reviewed bounds and accept validated overri
     operators: 0,
     registrationsPerWindow: 10,
     apiRequestsPerMinute: 600,
+    assistantToolCallsPerMinute: 120,
     agentsPerWorkspace: 100,
     roomMembersMax: 10_000,
     roomMembersDefault: 100,

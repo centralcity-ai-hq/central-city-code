@@ -104,6 +104,15 @@ export async function setup(
     screeningProvider?: () => ScreeningProvider | null;
     /** The kinds a service sold by a Central City agent runs (the built-in registry by default). */
     offerKinds?: FeedPayEngineDeps['offerKinds'];
+    /**
+     * Wires the fake Base's facilitator (fee router 3) into the engine's `facilitator` dep; its
+     * state.facilitator toggles absent / cannot pay / revert / never sent. Unset: none (as before).
+     */
+    facilitator?: boolean;
+    /** Calls whose finality one recover run records (the engine's default otherwise). */
+    finalityPerRun?: number;
+    /** The sponsored first purchase's payer (server/feed/pay/sponsored.ts); unset: none. */
+    sponsorPay?: import('../../server/feed/pay/sponsored.js').SponsoredDeps['pay'];
   } = {},
 ) {
   withEnv(t, { ...FLAGS, ...options.env });
@@ -123,6 +132,11 @@ export async function setup(
       alert: (alert) => void alerts.push(alert),
       ...(options.screeningProvider ? { screeningProvider: options.screeningProvider } : {}),
       ...(options.offerKinds ? { offerKinds: options.offerKinds } : {}),
+      ...(options.facilitator
+        ? { facilitator: async () => base.facilitatorFor(() => database!) }
+        : { facilitator: async () => null }),
+      ...(options.finalityPerRun !== undefined ? { finalityPerRun: options.finalityPerRun } : {}),
+      sponsorPay: options.sponsorPay ?? (async () => null),
       sleep: async (ms) => {
         clockMs += ms;
         await new Promise((resolve) => setImmediate(resolve));

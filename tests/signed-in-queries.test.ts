@@ -194,7 +194,7 @@ test('expired sessions are found by the expiry index, not a scan of every sessio
   assert.doesNotMatch(plan, /Seq Scan on sessions/);
 });
 
-test('hosted polls: snapshot in 2 reads plus rate limits, Elric status in 2, start-up in 1', async (t) => {
+test('hosted polls: snapshot in 2 reads plus rate limits, Elric status in 2, start-up in 2', async (t) => {
   process.env.CITY_RATE_LIMIT_KEY ??= 'synthetic-signed-in-queries-root-secret';
   const pglite = await PGlite.create('memory://', { extensions: { btree_gin } });
   const { db, counter } = counting(pglite as unknown as Database);
@@ -215,7 +215,11 @@ test('hosted polls: snapshot in 2 reads plus rate limits, Elric status in 2, sta
   const app = await createApp({ ...options, database: db });
   t.after(() => app.close());
   await app.ready();
-  assert.deepEqual(counter.statements, ['SELECT version,name,checksum FROM schema_migrations']);
+  // The schema check, then the agents-as-rows refusal (server/app.ts): one index probe.
+  assert.deepEqual(counter.statements, [
+    'SELECT version,name,checksum FROM schema_migrations',
+    "SELECT EXISTS (SELECT 1 FROM workspace_storage WHERE mode = 'rows') AS found",
+  ]);
 
   const headers = {
     'content-type': 'application/json',

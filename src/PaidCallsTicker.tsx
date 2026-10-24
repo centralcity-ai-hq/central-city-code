@@ -206,6 +206,8 @@ interface BaseCopy {
 function useLiveLine() {
   const [replay, setReplay] = useState<ReplayState | null>(null);
   const [base, setBase] = useState<BaseCopy | null>(null);
+  const baseRef = useRef<BaseCopy | null>(null);
+  baseRef.current = base;
   const [answered, setAnswered] = useState(false);
   const [stale, setStale] = useState(false);
   const [roll, setRoll] = useState<Roll | null>(null);
@@ -227,9 +229,12 @@ function useLiveLine() {
         failures.current = 0;
         setAnswered(true);
         const counted = response.base;
-        const baseShown = Boolean(counted && counted.total >= 1);
-        if (!counted || counted.total < 1) setBase(null);
-        else
+        // A response without the Base number (a cold server instance that had no value within its
+        // read budget) keeps the number already shown: the counter never blinks out between polls.
+        const baseShown = Boolean((counted && counted.total >= 1) || baseRef.current);
+        if (!counted || counted.total < 1) {
+          if (!baseRef.current) setBase(null);
+        } else
           setBase((previous) =>
             // Another edge's older copy: keep the newer number.
             previous && counted.asOf < previous.asOf

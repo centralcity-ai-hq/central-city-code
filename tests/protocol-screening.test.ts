@@ -8,6 +8,7 @@ import {
   type ScreeningRequest,
 } from '../server/protocol/screening/gate.js';
 import {
+  ORACLE_CACHE_MS,
   sanctionsOracleFor,
   sanctionsOracleProvider,
 } from '../server/protocol/screening/sanctions-oracle.js';
@@ -617,9 +618,11 @@ test('sanctions oracle: a failed read is asked again twice, then the error stand
   let calls = 0;
   let failures = 2;
   const waits: number[] = [];
+  let clock = 1_000_000;
   const provider = sanctionsOracleProvider({
     chainId: CHAIN_ID,
     oracle,
+    now: () => clock,
     sleep: async (ms) => {
       waits.push(ms);
     },
@@ -641,6 +644,7 @@ test('sanctions oracle: a failed read is asked again twice, then the error stand
   assert.deepEqual(waits, [250, 750]);
 
   // Always failing: three reads, then the error (the gate turns it into unavailable, not clear).
+  clock += ORACLE_CACHE_MS;
   calls = 0;
   failures = 99;
   await assert.rejects(
@@ -653,6 +657,7 @@ test('sanctions oracle: a failed read is asked again twice, then the error stand
   assert.equal(calls, 3);
 
   // The gate's deadline passed: no further try.
+  clock += ORACLE_CACHE_MS;
   calls = 0;
   failures = 99;
   const aborted = new AbortController();
@@ -661,4 +666,44 @@ test('sanctions oracle: a failed read is asked again twice, then the error stand
     provider.check({ chainId: CHAIN_ID, addresses: [addr], signal: aborted.signal } as never),
   );
   assert.equal(calls, 1);
+});
+
+test('sanctions oracle: an address read within ORACLE_CACHE_MS is not read again, and the answer keeps its read time', async () => {
+  const oracle = '0x40C57923924B5c5c5455c48D93317139ADDaC8fb' as const;
+  const a = '0x1111111111111111111111111111111111111111';
+  const b = '0x2222222222222222222222222222222222222222';
+  const reads: string[] = [];
+  let clock = 1_000_000;
+  const provider = sanctionsOracleProvider({
+    chainId: CHAIN_ID,
+    oracle,
+    now: () => clock,
+    sleep: async () => {},
+    client: async () => ({
+      readContract: (async ({ args }: { args: [string] }) => {
+        reads.push(args[0].toLowerCase());
+        return args[0].toLowerCase() === b;
+      }) as never,
+    }),
+  });
+  const check = (addresses: string[]) =>
+    provider.check({ chainId: CHAIN_ID, addresses, signal: new AbortController().signal } as never);
+
+  const first = await check([a]);
+  assert.deepEqual(reads, [a]);
+  assert.equal(first.observedAt, 1_000_000);
+
+  // 30 s later: a comes from the cache, only b is read; the answer is as old as a's read.
+  clock += 30_000;
+  const second = await check([a, b]);
+  assert.deepEqual(reads, [a, b]);
+  assert.equal(second.listed[a], false);
+  assert.equal(second.listed[b], true);
+  assert.equal(second.observedAt, 1_000_000);
+
+  // Past ORACLE_CACHE_MS since a's read: a is read again (b is still fresh).
+  clock = 1_000_000 + ORACLE_CACHE_MS;
+  const third = await check([a, b]);
+  assert.deepEqual(reads, [a, b, a]);
+  assert.equal(third.observedAt, 1_030_000);
 });

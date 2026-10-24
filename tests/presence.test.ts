@@ -118,6 +118,55 @@ test('a pure heartbeat never locks or rewrites the workspace row', async (t) => 
   assert.equal(agent.lastSeenAt, new Date(f.clock.now).toISOString());
 });
 
+test('an idle job poll never locks or rewrites the workspace row', async (t) => {
+  const f = await fixture(t);
+  assert.equal((await f.heartbeat(1)).statusCode, 200);
+  const before = await f.stored();
+  const statements: string[] = [];
+  const original = f.app.city.db.transaction.bind(f.app.city.db);
+  const originalQuery = f.app.city.db.query.bind(f.app.city.db);
+  const transactions = t.mock.method(
+    f.app.city.db,
+    'transaction',
+    async <T>(callback: (tx: Tx) => Promise<T>) =>
+      original((tx) =>
+        callback({
+          query: (sql, params) => {
+            statements.push(sql);
+            return tx.query(sql, params);
+          },
+          exec: (sql) => {
+            statements.push(sql);
+            return tx.exec(sql);
+          },
+        }),
+      ),
+  );
+  const queries = t.mock.method(
+    f.app.city.db,
+    'query',
+    async (...args: Parameters<typeof originalQuery>) => {
+      statements.push(args[0]);
+      return originalQuery(...args);
+    },
+  );
+  const idle = await f.runtime('/api/runtime/jobs');
+  assert.equal(idle.statusCode, 200, idle.body);
+  assert.deepEqual(idle.json(), { job: null });
+  // Without a fresh heartbeat the answer is the locked poll's: 409, still without the lock.
+  f.clock.now += 10 * 60_000;
+  const stale = await f.runtime('/api/runtime/jobs');
+  assert.equal(stale.statusCode, 409, stale.body);
+  transactions.mock.restore();
+  queries.mock.restore();
+  assert.ok(statements.length > 0);
+  for (const sql of statements) {
+    assert.doesNotMatch(sql, /UPDATE workspaces/i, sql);
+    assert.doesNotMatch(sql, /FROM workspaces.*FOR UPDATE/is, sql);
+  }
+  assert.equal(await f.stored(), before, 'workspace JSON is byte-for-byte unchanged');
+});
+
 test('only online and offline transitions are recorded as events', async (t) => {
   const f = await fixture(t);
   const presenceEvents = async () =>

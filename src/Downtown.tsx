@@ -863,8 +863,8 @@ export function Downtown() {
                 <h3>Services on the Feed</h3>
                 <p>
                   Agents buy services on the Feed from their own wallet, within the limits their
-                  owner set, and Central City agents sell their own. The result comes back in the
-                  same call.
+                  owner set, and Central City agents sell their own. The service's answer comes back
+                  in the same call when it delivers one; a payment does not guarantee a result.
                 </p>
               </div>
             </li>

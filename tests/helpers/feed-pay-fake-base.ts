@@ -51,6 +51,14 @@ import { SPONSOR_DATA_BYTES, SPONSOR_PAYMASTERS } from '../../shared/base/paymas
 import { WALLET_CHAIN_ID } from '../../shared/base/wallet-network.js';
 import { WALLET_NET } from '../wallet-network-fixture.js';
 import type { SettleRequest } from './fake-x402-service.js';
+import type { FeedPayOp } from '../../server/base/chain/feed-pay-chain.js';
+import {
+  LEG_FEE,
+  LEG_SELLER,
+  router3Nonce,
+  type Router3FacilitatorPort,
+  type Router3Settlement,
+} from '../../server/feed/pay/router3.js';
 
 const NETWORK = WALLET_NET;
 const CHAIN_ID = WALLET_CHAIN_ID;
@@ -63,6 +71,9 @@ export const SETTLE = 3n;
 
 const userOperationEvent = parseAbiItem(
   'event UserOperationEvent(bytes32 indexed userOpHash, address indexed sender, address indexed paymaster, uint256 nonce, bool success, uint256 actualGasCost, uint256 actualGasUsed)',
+);
+const usdcTransferEvent = parseAbiItem(
+  'event Transfer(address indexed from, address indexed to, uint256 value)',
 );
 const authorizationUsed = parseAbiItem(
   'event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce)',
@@ -157,6 +168,71 @@ export function feedPayFakeBase(clock: () => number) {
       maxTotal?: bigint;
       feeBps?: bigint;
     },
+    /**
+     * Fee router 3 (docs/protocol/FEE_ROUTER_3.md), read only: its binding, its limits and its
+     * nonceFor (router3Nonce over this chain id and its treasury; 'mismatch' answers another
+     * derivation). Settlements land through the fake facilitator (`facilitator`), never a UserOp.
+     */
+    feeRouter3: null as null | {
+      router: Address;
+      treasury: Address;
+      token?: Address;
+      maxTotal?: bigint;
+      feeBps?: bigint;
+      nonceFor?: 'mismatch';
+      /** The next nonceFor reads that fail (an RPC that does not answer), counted down. */
+      nonceForFailures?: number;
+      /** The next treasury() reads that fail, counted down. */
+      treasuryFailures?: number;
+    },
+    /**
+     * Central City's facilitator for router 3 (fake): `present` false wires none, `canPay` false
+     * is an EOA without gas. `mode` is what a settle does after beforeBroadcast: 'land' (verified
+     * and executed), 'revert' (mined, reverted), 'neverSent' (never left the facilitator) or
+     * 'hold' (sent, not in a block yet). `crashBeforeSubmit` throws before submit stores anything
+     * (a worker that dies between router3Legs and submit).
+     */
+    facilitator: {
+      present: true,
+      canPay: true,
+      /** The next canPay reads that throw (its RPC did not answer), counted down; and all reads. */
+      canPayFailures: 0,
+      canPayCalls: 0,
+      /** The next times the facilitator cannot be built (its key or runtime throws), counted down. */
+      buildFailures: 0,
+      mode: 'land' as 'land' | 'revert' | 'neverSent' | 'hold' | 'queued',
+      ops: new Map<
+        string,
+        {
+          intentHash: Hex;
+          op: FeedPayOp;
+          reads: number;
+          held?: { settlement: Router3Settlement; db: () => Database };
+        }
+      >(),
+      /** Every submit asked (a retry of a stored key included). */
+      submits: [] as { key: string; settlement: Router3Settlement }[],
+      /** Settlements that reached Base (landed or reverted). */
+      broadcasts: 0,
+      crashBeforeSubmit: null as null | ((key: string) => boolean),
+      /** Runs at the start of each submit (a test changes things right before the broadcast). */
+      beforeSubmit: null as null | ((key: string) => Promise<void>),
+    },
+    /**
+     * A router-3 receipt whose fee-leg USDC Transfer is tampered with (a test of the transfer
+     * evidence check): dropped, from another token, to another recipient, or another amount.
+     * null: both Transfers are in the receipt like the real router's.
+     */
+    router3FeeTransfer: null as null | 'drop' | 'wrongToken' | 'wrongRecipient' | 'wrongAmount',
+    /** Receipts of router-3 settlements (their FeeCharged and two AuthorizationUsed logs). */
+    router3Receipts: new Map<
+      Hex,
+      {
+        blockNumber: bigint;
+        status: 'success' | 'reverted';
+        logs: { address: Address; topics: Hex[]; data: Hex }[];
+      }
+    >(),
     allowances: new Map<string, bigint>(),
     feeCharges: [] as {
       payer: Address;
@@ -166,7 +242,7 @@ export function feedPayFakeBase(clock: () => number) {
       fee: bigint;
       /** 0: chargeFee (fee on top); 1: pay (fee included). */
       kind: number;
-      /** The router that charged it (router 1 or router 2). */
+      /** The router that charged it (router 1, 2 or 3). */
       router?: Address;
     }[],
     /** The FeeCharged events of each landed transaction (its receipt carries them). */
@@ -262,6 +338,47 @@ export function feedPayFakeBase(clock: () => number) {
       blockNumber?: bigint;
     }) => {
       guard();
+      const r3 = state.feeRouter3;
+      if (r3 && call.address && lower(call.address) === lower(r3.router)) {
+        if (state.routerReadsDown) throw new Error('the fake router read failed');
+        if (call.functionName === 'treasury' && r3.treasuryFailures) {
+          r3.treasuryFailures--;
+          throw new Error('fetch failed');
+        }
+        if (call.functionName === 'treasury') return r3.treasury;
+        if (call.functionName === 'token') return r3.token ?? USDC;
+        if (call.functionName === 'MAX_TOTAL') return r3.maxTotal ?? 100_000_000n;
+        if (call.functionName === 'FEE_BPS') return r3.feeBps ?? 1_000n;
+        if (call.functionName === 'nonceFor') {
+          const [payer, payee, gross, ref, validAfter, validBefore, leg] = call.args as [
+            Address,
+            Address,
+            bigint,
+            Hex,
+            bigint,
+            bigint,
+            number,
+          ];
+          const nonce = router3Nonce({
+            chainId: CHAIN_ID,
+            router: r3.router,
+            treasury: r3.treasury,
+            payer,
+            payee,
+            gross,
+            ref,
+            validAfter,
+            validBefore,
+            leg: leg as 0 | 1,
+          });
+          if (r3.nonceForFailures) {
+            r3.nonceForFailures--;
+            throw new Error('fetch failed');
+          }
+          return r3.nonceFor === 'mismatch' ? keccak256(concat([nonce, '0x01'])) : nonce;
+        }
+        throw new Error(`no ${call.functionName} on the fake router 3`);
+      }
       // The fee router's immutable binding (CentralCityFeeRouter.treasury() and token()).
       const r2 = state.feeRouter2;
       if (r2 && call.address && lower(call.address) === lower(r2.router)) {
@@ -382,6 +499,15 @@ export function feedPayFakeBase(clock: () => number) {
     },
     getTransactionReceipt: async ({ hash }: { hash: Hex }) => {
       guard();
+      const r3 = state.router3Receipts.get(hash);
+      if (r3)
+        return {
+          transactionHash: hash,
+          blockNumber: r3.blockNumber,
+          blockHash: blockHash(r3.blockNumber),
+          status: r3.status,
+          logs: r3.logs,
+        };
       const op = [...state.landed.entries()].find(([, hit]) => hit.txHash === hash);
       if (op) {
         const [userOpHash, hit] = op;
@@ -535,6 +661,11 @@ export function feedPayFakeBase(clock: () => number) {
         }
       }
     }
+    if (
+      state.feeRouter3 &&
+      callsOf(op).some((c) => getAddress(c.target) === getAddress(state.feeRouter3!.router))
+    )
+      state.effects.push('router3_userop');
     for (const call of callsOf(op)) {
       const routerOf = liveRouters().find((r) => getAddress(call.target) === getAddress(r.router));
       if (!routerOf) continue;
@@ -696,6 +827,247 @@ export function feedPayFakeBase(clock: () => number) {
     return txHash;
   }
 
+  /**
+   * The facilitator's side of router3.settle: verifies the purchase as CentralCityFeeRouter3 does
+   * (both stored legs bound to it by router3Nonce, one window, 90/10, payer not the treasury,
+   * nonces unused, still valid), then moves gross - fee to the payee and fee to the treasury from
+   * the payer and writes the receipt (FeeCharged kind 1 from router 3, two AuthorizationUsed).
+   */
+  async function landRouter3(db: Database, key: string, s: Router3Settlement) {
+    const r3 = state.feeRouter3;
+    assert.ok(r3, 'router 3 is deployed');
+    const store = pgAuthorizationStore(db);
+    const seller = await store.get(`${key}:seller`);
+    const feeLeg = await store.get(`${key}:fee`);
+    assert.ok(seller && feeLeg, 'both legs were stored before the settlement');
+    const fee = (s.gross * 1_000n) / 10_000n;
+    assert.ok(s.gross >= 50_000n && s.gross <= (r3.maxTotal ?? 100_000_000n), 'MIN..MAX_TOTAL');
+    assert.notEqual(lower(s.payer), lower(r3.treasury), 'the payer is not the treasury');
+    for (const [leg, auth, to, value, signature] of [
+      [LEG_SELLER, seller, s.payee, s.gross - fee, s.sellerSignature],
+      [LEG_FEE, feeLeg, r3.treasury, fee, s.feeSignature],
+    ] as const) {
+      const a = auth.authorization;
+      assert.equal(
+        lower(a.nonce),
+        lower(
+          router3Nonce({
+            chainId: CHAIN_ID,
+            router: r3.router,
+            treasury: r3.treasury,
+            payer: s.payer,
+            payee: s.payee,
+            gross: s.gross,
+            ref: s.ref,
+            validAfter: s.validAfter,
+            validBefore: s.validBefore,
+            leg,
+          }),
+        ),
+        `leg ${leg}: the nonce the router derives`,
+      );
+      assert.equal(lower(a.from), lower(s.payer));
+      assert.equal(lower(a.to), lower(to));
+      assert.equal(a.value, value);
+      assert.equal(a.validAfter, s.validAfter);
+      assert.equal(a.validBefore, s.validBefore);
+      assert.equal(lower(auth.signature), lower(signature), `leg ${leg}: the stored signature`);
+      const used = authKey(a.from, a.nonce);
+      assert.ok(!state.used.has(used) && !state.canceled.has(used), 'the nonce is unused');
+    }
+    assert.ok(s.validBefore > BigInt(Math.floor(clock() / 1000)), 'the pair is still valid');
+    assert.ok(balanceOf(s.payer) >= s.gross, 'the payer holds the price');
+    state.head += 1n;
+    const txHash = keccak256(toHex(`feed-pay-router3-${key}`));
+    credit(s.payer, -s.gross);
+    credit(s.payee, s.gross - fee);
+    credit(r3.treasury, fee);
+    for (const auth of [seller, feeLeg])
+      state.used.set(authKey(auth.authorization.from, auth.authorization.nonce), {
+        txHash,
+        blockNumber: state.head,
+      });
+    state.feeCharges.push({
+      payer: getAddress(s.payer),
+      payee: getAddress(s.payee),
+      ref: s.ref,
+      gross: s.gross,
+      fee,
+      kind: 1,
+      router: getAddress(r3.router),
+    });
+    state.router3Receipts.set(txHash, {
+      blockNumber: state.head,
+      status: 'success',
+      logs: [
+        ...[
+          { to: s.payee, value: s.gross - fee, token: USDC },
+          ...(state.router3FeeTransfer === 'drop'
+            ? []
+            : [
+                {
+                  to:
+                    state.router3FeeTransfer === 'wrongRecipient'
+                      ? getAddress(`0x${'77'.repeat(20)}`)
+                      : r3.treasury,
+                  value: state.router3FeeTransfer === 'wrongAmount' ? fee - 1n : fee,
+                  token:
+                    state.router3FeeTransfer === 'wrongToken'
+                      ? getAddress(`0x${'78'.repeat(20)}`)
+                      : USDC,
+                },
+              ]),
+        ].map((t) => ({
+          address: t.token,
+          topics: encodeEventTopics({
+            abi: [usdcTransferEvent],
+            eventName: 'Transfer',
+            args: { from: getAddress(s.payer), to: getAddress(t.to) },
+          }) as Hex[],
+          data: encodeAbiParameters([{ type: 'uint256' }], [t.value]),
+        })),
+        ...[seller, feeLeg].map((auth) => ({
+          address: USDC,
+          topics: encodeEventTopics({
+            abi: [authorizationUsed],
+            eventName: 'AuthorizationUsed',
+            args: {
+              authorizer: getAddress(auth.authorization.from),
+              nonce: auth.authorization.nonce,
+            },
+          }) as Hex[],
+          data: '0x' as Hex,
+        })),
+        // Router 3 emits FeeCharged after both legs (as on Base: AuthorizationUsed, Transfer,
+        // AuthorizationUsed, Transfer, FeeCharged).
+        {
+          address: getAddress(r3.router),
+          topics: encodeEventTopics({
+            abi: [feeChargedEvent],
+            eventName: 'FeeCharged',
+            args: { payer: getAddress(s.payer), payee: getAddress(s.payee), ref: s.ref },
+          }) as Hex[],
+          data: encodeAbiParameters(
+            [{ type: 'uint8' }, { type: 'uint256' }, { type: 'uint256' }],
+            [1, s.gross, fee],
+          ),
+        },
+      ],
+    });
+    state.effects.push('router3_settle');
+    const blockNumber = state.head;
+    if (state.finalizeOnLand) state.head += SETTLE;
+    return { txHash, blockNumber };
+  }
+
+  /**
+   * The fake facilitator (Router3FacilitatorPort) over the app's database: one stored settlement
+   * per key, beforeBroadcast right before it goes out, then what `state.facilitator.mode` says.
+   * Null while `state.facilitator.present` is off.
+   */
+  function facilitatorFor(db: () => Database): Router3FacilitatorPort | null {
+    const f = state.facilitator;
+    if (f.buildFailures > 0) {
+      f.buildFailures--;
+      throw new Error('keystore unavailable');
+    }
+    if (!f.present) return null;
+    const opOf = (key: string, patch: Partial<FeedPayOp>): FeedPayOp => ({
+      key,
+      status: 'queued',
+      txHash: null,
+      blockNumber: null,
+      neverSent: false,
+      errorCode: null,
+      ...patch,
+    });
+    return {
+      async canPay() {
+        f.canPayCalls++;
+        if (f.canPayFailures > 0) {
+          f.canPayFailures--;
+          throw new Error('fetch failed');
+        }
+        return f.canPay;
+      },
+      // The fake keeps its settlements in memory, not in x402_facilitator_ops: nothing to finalize
+      // here. Tests of the engine's bulk finality write that table themselves.
+      async finalizeIncluded() {
+        return 0;
+      },
+      async status(key) {
+        const rec = f.ops.get(key);
+        if (!rec) return null;
+        // Included on the first read, final from then on.
+        if (rec.op.status === 'included' && rec.reads++ > 0)
+          rec.op = { ...rec.op, status: 'final' };
+        return rec.op;
+      },
+      async endUnsent(key, intentHash) {
+        const rec = f.ops.get(key);
+        if (!rec) {
+          f.ops.set(key, {
+            intentHash,
+            op: opOf(key, { status: 'failed', neverSent: true, errorCode: 'NEVER_SENT' }),
+            reads: 0,
+          });
+          return true;
+        }
+        return rec.op.neverSent;
+      },
+      async submit({ key, intentHash, settlement, beforeBroadcast }) {
+        f.submits.push({ key, settlement });
+        if (f.crashBeforeSubmit?.(key)) throw new Error('synthetic crash before submit');
+        await f.beforeSubmit?.(key);
+        const earlier = f.ops.get(key);
+        // A stored settlement whose first send never happened (still queued, no transaction) is
+        // continued by a later submit with the same key, like the real facilitator.
+        const continuing = !!earlier && earlier.op.status === 'queued' && !earlier.op.txHash;
+        if (earlier && !continuing) {
+          assert.equal(earlier.intentHash, intentHash, 'one intent per key');
+          return earlier.op;
+        }
+        if (earlier) assert.equal(earlier.intentHash, intentHash, 'one intent per key');
+        const rec = earlier ?? { intentHash, op: opOf(key, {}), reads: 0 };
+        f.ops.set(key, rec);
+        // 'queued': stored, but the first send could not reach Base (RPC_UNAVAILABLE): nothing sent.
+        if (f.mode === 'queued') {
+          rec.op = opOf(key, { status: 'queued' });
+          return rec.op;
+        }
+        try {
+          await beforeBroadcast();
+        } catch (error) {
+          rec.op = opOf(key, { status: 'failed', neverSent: true, errorCode: 'ABANDONED' });
+          throw error;
+        }
+        if (f.mode === 'neverSent') {
+          rec.op = opOf(key, { status: 'failed', neverSent: true, errorCode: 'SEND_FAILED' });
+          return rec.op;
+        }
+        f.broadcasts++;
+        if (f.mode === 'hold') {
+          rec.op = opOf(key, { status: 'submitted' });
+          (rec as { held?: unknown }).held = { settlement, db };
+          return rec.op;
+        }
+        if (f.mode === 'revert') {
+          state.head += 1n;
+          rec.op = opOf(key, {
+            status: 'failed',
+            txHash: keccak256(toHex(`feed-pay-router3-reverted-${key}`)),
+            blockNumber: state.head,
+            errorCode: 'REVERTED',
+          });
+          return rec.op;
+        }
+        const landed = await landRouter3(db(), key, settlement);
+        rec.op = opOf(key, { status: 'included', ...landed });
+        return rec.op;
+      },
+    };
+  }
+
   /** The operation store, with the crash between store and claim (state.crashBeforeClaim). */
   function operationsFor(db: Database): ChainOperationStore {
     const store = pgChainOperationStore(db);
@@ -746,6 +1118,16 @@ export function feedPayFakeBase(clock: () => number) {
     land,
     settle,
     chainFor,
+    facilitatorFor,
+    /** Lands every settlement the fake facilitator holds ('hold' mode), as Base would mine it. */
+    async landHeld() {
+      for (const [key, rec] of state.facilitator.ops) {
+        if (rec.op.status !== 'submitted' || !rec.held) continue;
+        const landed = await landRouter3(rec.held.db(), key, rec.held.settlement);
+        rec.op = { ...rec.op, status: 'included', ...landed };
+        rec.held = undefined;
+      }
+    },
     spender,
     spenderSigner: SPENDER_KEY.address,
     balanceOf,

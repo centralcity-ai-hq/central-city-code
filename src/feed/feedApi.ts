@@ -258,6 +258,11 @@ export interface OfferedFilters {
   /** '' = the default: Relevance with a search, else Most used. */
   sort: '' | FeedServiceSort;
   host: string;
+  /**
+   * Only the services a free first buy may be (?free=1, src/feed/pay/sponsoredApi.ts): the agent
+   * page's Choose opens it. Left out when off.
+   */
+  free?: true;
 }
 
 export interface RequestFilters {
@@ -294,6 +299,7 @@ export function offeredSearch(filters: OfferedFilters, cursor?: string | null): 
     // The default sort stays out of the address.
     ['sort', sort === (q ? 'relevance' : 'most_used') ? '' : sort],
     ['host', filters.host],
+    ['free', filters.free ? '1' : ''],
     ['cursor', cursor],
   ]);
 }
@@ -317,6 +323,7 @@ export function readOfferedFilters(search: string): OfferedFilters {
     maxPrice: validMaxPrice((query.get('max_price') ?? '').trim()),
     sort: SORTS.has(sort) ? (sort as FeedServiceSort) : '',
     host: validHost(host) ? host : '',
+    ...(query.get('free') === '1' ? { free: true as const } : {}),
   };
 }
 

@@ -20,8 +20,9 @@ import {
   ON_BASE_LIVE_EDGE,
   ON_BASE_NOT_FOUND,
   registerOnBaseRoutes,
+  TOTALS_TTL_MS,
 } from '../server/base/explorer/routes.js';
-import { RATED_AGENTS_SQL, parseQuery } from '../server/base/explorer/store.js';
+import { LIST_CANDIDATES, RATED_AGENTS_SQL, parseQuery } from '../server/base/explorer/store.js';
 import {
   MULTICALL3,
   baseChainReader,
@@ -182,7 +183,9 @@ test('the list shows only registrations Central City sent and saw on Base, newes
   assert.equal(response.headers['vercel-cdn-cache-control'], ON_BASE_LIST_LIVE_EDGE);
   assert.match(ON_BASE_LIST_LIVE, /(^|, )max-age=0(,|$)/);
   assert.ok(staleBound(ON_BASE_LIST_LIVE, 's-maxage') <= 60);
-  assert.ok(staleBound(ON_BASE_LIST_LIVE_EDGE, 'max-age') <= 60);
+  // The edge alone may serve its copy stale for up to a day while one request refreshes it, so
+  // a visitor never waits for a cold read; it stays fresh 10 s.
+  assert.match(ON_BASE_LIST_LIVE_EDGE, /^public, max-age=10, stale-while-revalidate=86400$/);
   assert.ok(staleBound(ON_BASE_LIVE, 's-maxage') <= 15);
   assert.ok(staleBound(ON_BASE_LIVE_EDGE, 'max-age') <= 15);
 });
@@ -234,6 +237,29 @@ test('pages follow ?before= without gaps or repeats', async (t) => {
   assert.deepEqual(
     seen,
     Array.from({ length: total }, (_, index) => String(5000 + total - index)),
+  );
+});
+
+test('the list reads past a full batch of candidates the card check drops', async (t) => {
+  const db = await setup(t);
+  for (let n = 1; n <= 3; n++) await add(db, { n, kind: 'final', id: 100 + n });
+  // Newer registrations that pass every base_identities condition but carry another URI.
+  for (let n = 4; n <= LIST_CANDIDATES + 8; n++) {
+    await add(db, { n, kind: 'final', id: 1000 + n, uri: `https://example.com/a/S${n}` });
+  }
+  const app = routes(t, db);
+  const body = (await app.inject({ url: '/api/public/base/agents' })).json() as OnBaseList;
+  assert.deepEqual(
+    body.rows.map((row) => row.baseId),
+    ['103', '102', '101'],
+  );
+  assert.equal(body.nextBefore, null);
+  const older = (
+    await app.inject({ url: '/api/public/base/agents?before=103' })
+  ).json() as OnBaseList;
+  assert.deepEqual(
+    older.rows.map((row) => row.baseId),
+    ['102', '101'],
   );
 });
 
@@ -757,4 +783,59 @@ test('the app serves the list from its own schema', async () => {
   } finally {
     await app.close();
   }
+});
+
+test('totals: one shared count for every instance, and a new instance never waits for one', async (t) => {
+  const db = await setup(t);
+  await add(db, { n: 1, kind: 'final', id: 120 });
+  await add(db, { n: 2, kind: 'finalizing', id: 130 });
+  let now = NOW;
+  let counts = 0;
+  let gate: (() => void) | null = null;
+  const counted: Database = {
+    ...db,
+    query: (async (sql: string, params?: unknown[]) => {
+      if (/WITH listed AS/.test(sql)) {
+        counts++;
+        if (gate === null) await new Promise<void>((resolve) => (gate = resolve));
+      }
+      return db.query(sql, params as never);
+    }) as Database['query'],
+  };
+  const totalsOf = async (response: { json: () => unknown }) =>
+    (response.json() as OnBaseList).totals;
+  const first = routes(t, counted, { now: () => now });
+  const list = (app: ReturnType<typeof routes>) => app.inject({ url: '/api/public/base/agents' });
+
+  // Nothing known anywhere yet: parallel requests share one count.
+  const answers = Promise.all([list(first), list(first), list(first)]);
+  while (gate === null) await new Promise((resolve) => setTimeout(resolve, 5));
+  (gate as () => void)();
+  for (const response of await answers) {
+    assert.equal(response.statusCode, 200);
+    const totals = await totalsOf(response);
+    assert.equal(totals.onBase, 2);
+    assert.equal(totals.finalizingNow, 1);
+  }
+  assert.equal(counts, 1);
+
+  // A new instance (a fresh serverless function) answers with the stored count, parts included,
+  // without counting.
+  const second = routes(t, counted, { now: () => now });
+  const fresh = await list(second);
+  assert.equal(fresh.statusCode, 200);
+  const stored = await totalsOf(fresh);
+  assert.equal(stored.onBase, 2);
+  assert.equal(stored.finalizingNow, 1);
+  assert.equal(stored.new24h, 2);
+  assert.equal(counts, 1);
+
+  // Stale: both instances answer at once with the known totals while ONE refresh runs (held open).
+  now += TOTALS_TTL_MS + 1;
+  gate = null;
+  const stale = await Promise.all([list(first), list(second), list(second)]);
+  for (const response of stale) assert.equal((await totalsOf(response)).onBase, 2);
+  while (gate === null) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(counts, 2);
+  (gate as () => void)();
 });

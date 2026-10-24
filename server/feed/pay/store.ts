@@ -344,6 +344,17 @@ export const LIVE_CALL_SQL = (c: string) =>
  * pending) whose payment is in a block at or before the read: its price has already left the
  * balance, so it is not held again.
  */
+/** Not a reserved call (no payment started) queued after the asking call ($4 created_at, $5 id). */
+const QUEUED_BEFORE_SQL = (
+  c: string,
+) => `NOT (${c}.state = 'reserved' AND ${c}.payment_state IS NULL
+  AND (${c}.created_at > $4::bigint OR (${c}.created_at = $4::bigint AND ${c}.call_id > $5)))`;
+
+/** A reserved call ($6 = staleBefore, ms) past its window that never started a top-up or a payment. */
+const STALE_RESERVED_SQL = (c: string) => `(${c}.state = 'reserved' AND ${c}.payment_state IS NULL
+  AND ${c}.topup_move_id IS NULL AND ${c}.topup_attempts = 0 AND ${c}.pay_attempts = 0
+  AND ${c}.created_at < $6::bigint)`;
+
 const HELD_PRINCIPAL_SQL = (c: string, block: string) => `(${c}.state IN ('reserved',
   'float_topup','authorized','calling','reconciling','not_settled')
   OR (${c}.state = 'settled' AND (${c}.pay_kind <> 'included' OR ${c}.settled_block IS NULL
@@ -354,25 +365,54 @@ const HELD_PRINCIPAL_SQL = (c: string, block: string) => `(${c}.state IN ('reser
  * What the spender's balance read at `block` still owes: live calls' amounts (except `exclude`),
  * payments Base settled after that read (or whose block is not known), and sweeps not yet visible
  * in it. Available float = balance - this.
+ *
+ * `queuedAfter` (a reserved call asking for its own float): calls of the same wallet still only
+ * reserved (no payment started) that were created after it are not counted, so the float goes to
+ * the calls in the order they came. Without it, several reserved calls of one wallet each counted
+ * all the others and waited for one another until their window ran out (none ever paid).
  */
 export async function floatHeld(
   q: Queryable,
-  input: { walletId: string; block: bigint; excludePaymentId?: string },
+  input: {
+    walletId: string;
+    block: bigint;
+    excludePaymentId?: string;
+    queuedAfter?: { createdAt: number; callId: string };
+    /**
+     * Reserved calls created before this time (ms) that never started a top-up or a payment are
+     * not counted: past the top-up retry window they can no longer pay (stepReserved refuses them
+     * at their next step), so a call nobody asks again does not hold the float for the others.
+     */
+    staleBefore?: number;
+  },
 ): Promise<bigint> {
   const { rows } = await q.query<{ total: string }>(
     `SELECT (
        (SELECT COALESCE(SUM(c.amount_raw), 0) FROM feed_pay_calls c
-        WHERE c.wallet_id = $1 AND c.payment_id <> $2 AND (${HELD_PRINCIPAL_SQL('c', '$3')}
+        WHERE c.wallet_id = $1 AND c.payment_id <> $2 AND ${QUEUED_BEFORE_SQL('c')}
+          AND NOT ${STALE_RESERVED_SQL('c')}
+          AND (${HELD_PRINCIPAL_SQL('c', '$3')}
           OR (c.payment_state = 'settled' AND (c.settled_block IS NULL OR c.settled_block > $3))))
        + (SELECT COALESCE(SUM(c.fee_raw), 0) FROM feed_pay_calls c
-          WHERE c.wallet_id = $1 AND c.payment_id <> $2 AND (c.fee_state IN ('pending','sent')
+          WHERE c.wallet_id = $1 AND c.payment_id <> $2 AND ${QUEUED_BEFORE_SQL('c')}
+          AND NOT ${STALE_RESERVED_SQL('c')}
+          AND (c.fee_state IN ('pending','sent')
             OR (c.fee_state = 'charged' AND (c.fee_block IS NULL OR c.fee_block > $3))))
        + (SELECT COALESCE(SUM(m.amount_raw), 0) FROM feed_pay_float_moves m
           LEFT JOIN base_chain_ops o ON o.idempotency_key = m.op_key
         WHERE m.wallet_id = $1 AND m.kind = 'sweep' AND m.state <> 'failed'
           AND (m.state = 'pending' OR o.block_number IS NULL OR o.block_number > $3))
      )::text AS total`,
-    [input.walletId, input.excludePaymentId ?? '', input.block.toString(10)],
+    [
+      input.walletId,
+      input.excludePaymentId ?? '',
+      input.block.toString(10),
+      // Nothing is "after" a call created at the largest bigint: every reserved call counts.
+      input.queuedAfter ? String(input.queuedAfter.createdAt) : '9223372036854775807',
+      input.queuedAfter?.callId ?? '',
+      // Nothing is stale before time 0: without staleBefore every reserved call still holds.
+      String(input.staleBefore ?? 0),
+    ],
   );
   return BigInt(rows[0]?.total ?? '0');
 }

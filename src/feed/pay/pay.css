@@ -672,3 +672,44 @@
     min-height: var(--target);
   }
 }
+
+/* Free first buys (the First service free mockup): the agent's small "First buy free" / "Used"
+   beside its name, the price as Central City pays it, and Done in the live green. */
+/* The name keeps its room: the small word goes under it when the card is narrow. */
+.fp-a-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 calc(6 * var(--ws-px));
+  min-width: 0;
+}
+.fp-a-name b {
+  min-width: 0;
+}
+.fp-a-free {
+  flex: none;
+  color: var(--status-live);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+.fp-a-free[data-used='true'] {
+  color: var(--text-muted);
+}
+.fp-free-price .fp-line[data-k='total'] .fp-line-v {
+  color: var(--status-live);
+}
+.fp-free-ok {
+  display: grid;
+  gap: 2px;
+  padding: calc(10 * var(--ws-px)) calc(12 * var(--ws-px));
+  border-radius: calc(10 * var(--ws-px));
+  background: var(--status-live-bg);
+  color: var(--status-live);
+  font-size: calc(13 * var(--ws-type-px));
+  overflow-wrap: anywhere;
+}
+.fp-free-ok b {
+  font-weight: 600;
+}

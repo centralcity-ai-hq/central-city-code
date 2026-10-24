@@ -17,14 +17,14 @@ import {
   type FeedPayNotPayableReason,
   type FeedPayQuote,
 } from '../../../shared/feed-pay';
-import type { FeedService } from '../../../shared/feed';
+import { rawToUsdc, type FeedService } from '../../../shared/feed';
 import { newIdempotencyKey } from '../feedApi';
 import { workspaceClick } from '../feedNav';
 import { avatarStyle } from '../../shell/avatarColor';
 import { Avatar, CopyButton } from '../FeedParts';
 import { initialsOf, plain } from '../feedFormat';
 import { askFeedSignInAgain, SIGN_IN_LABEL } from '../feedSignIn';
-import { callService, payFailure, quoteService } from '../payApi';
+import { callService, PayFailure, payFailure, quoteService } from '../payApi';
 import { CallCard, MoneyLines } from './CallCard';
 import {
   answeredPayment,
@@ -79,6 +79,30 @@ import {
   type InputDraft,
 } from './payModel';
 import { loadPayAccess, savePerCallMax, type PayAccess } from './usePayAccess';
+import { FreeCallCard, sponsoredDone } from './FreeCall';
+import {
+  afterFreeFailure,
+  dropFreeKey,
+  freeKey,
+  getOpenFree,
+  loadSponsored,
+  setOpenFree,
+  SponsoredFailure,
+  startSponsoredCall,
+  useFreeBuy,
+  type FreeState,
+  type OpenFree,
+} from './sponsoredApi';
+import {
+  FREE_CHIP,
+  FREE_INTRO,
+  freeCovers,
+  freeLines,
+  sponsoredRefusalText,
+  USE_FREE,
+  USED_CHIP,
+  IN_PROGRESS_CHIP,
+} from './sponsoredModel';
 
 /*
  * "Use with my agent" (docs/FEED_PAY.md section 15), the drawer's step after the details: the
@@ -239,6 +263,7 @@ function AgentCard({
   checked,
   locked,
   whyId,
+  free = null,
   onPick,
 }: {
   agent: FeedPayAgent;
@@ -247,11 +272,16 @@ function AgentCard({
   locked: boolean;
   /** The id of its why-line under the row (an agent that can't pay). */
   whyId: string;
+  /**
+   * On a service a free first buy may be: 'free' (Central City pays, so it can be picked whatever
+   * its wallet holds) or 'used'; null otherwise.
+   */
+  free?: FreeState | null;
   onPick: () => void;
 }) {
   const id = useId();
   const lines = agentLines(agent);
-  const blocked = lines.blocked;
+  const blocked = free === 'free' ? null : lines.blocked;
   const sub = blocked ? 'Can’t pay yet' : lines.usdc;
   // A compact card in a row: the avatar, the name and one muted line on one line (its USDC, or
   // "Can’t pay yet"; the reason in its title). The radio stays (arrow keys move the pick);
@@ -277,7 +307,14 @@ function AgentCard({
           {initialsOf(agent.name)}
         </Avatar>
         <span className="fp-a-text" title={blocked ? blocked.text : sub}>
-          <b id={`${id}-n`}>{plain(agent.name)}</b>
+          <span className="fp-a-name">
+            <b id={`${id}-n`}>{plain(agent.name)}</b>
+            {free ? (
+              <small className="fp-a-free" data-used={free !== 'free' || undefined}>
+                {free === 'free' ? FREE_CHIP : free === 'used' ? USED_CHIP : IN_PROGRESS_CHIP}
+              </small>
+            ) : null}
+          </span>
           <span className="fp-a-sub" aria-hidden="true">
             {sub}
           </span>
@@ -301,13 +338,16 @@ function BlockedLines({
   agents,
   whyId,
   onLeave,
+  free = () => false,
 }: {
   agents: FeedPayAgent[];
   whyId: (agentId: string) => string;
   onLeave: () => void;
+  /** Agents whose first buy is free here: nothing stops them, so no why-line. */
+  free?: (agentId: string) => boolean;
 }) {
   const blocked = agents.flatMap((agent) => {
-    const why = agentLines(agent).blocked;
+    const why = free(agent.agentId) ? null : agentLines(agent).blocked;
     return why ? [{ agent, why }] : [];
   });
   if (!blocked.length) return null;
@@ -477,7 +517,22 @@ export function UseSheet({
 }) {
   const ids = useId();
   const form = useMemo(() => inputForm(service), [service]);
-  const agents = useMemo(() => agentOrder(access.list.agents), [access.list.agents]);
+  // Free first buys (a Central City service, sponsored-credits): which agents get it free here.
+
+  const allIds = useMemo(() => access.list.agents.map((a) => a.agentId), [access.list.agents]);
+  const freeBuy = useFreeBuy(service.id);
+  const isFree = (agentId: string) => freeBuy.state(agentId) === 'free';
+  const freeKeyOfList = allIds.filter(isFree).join(',');
+  // Agents that can pay first; on a free first buy, the agents it is free for before them.
+  const agents = useMemo(() => {
+    const order = agentOrder(access.list.agents);
+    const freeIds = new Set(freeKeyOfList ? freeKeyOfList.split(',') : []);
+    if (!freeIds.size) return order;
+    return [
+      ...order.filter((a) => freeIds.has(a.agentId)),
+      ...order.filter((a) => !freeIds.has(a.agentId)),
+    ];
+  }, [access.list.agents, freeKeyOfList]);
   const open = useOpenPayment(service.id);
   // What the sheet opens with: a payment that may have started, as it was confirmed; else the
   // inputs and agent it had (openPayments.ts).
@@ -492,7 +547,10 @@ export function UseSheet({
       start.open?.body.agentId ??
       (start.kept?.agentId && agents.some((item) => item.agentId === start.kept!.agentId)
         ? start.kept.agentId
-        : firstChoice(agents)),
+        : // A free first buy already known: the first agent it is free for.
+          freeKeyOfList
+          ? freeKeyOfList.split(',')[0]!
+          : firstChoice(agents)),
   );
   const [quote, setQuote] = useState<Quote>(() =>
     start.open && start.open.phase !== 'refused'
@@ -510,6 +568,9 @@ export function UseSheet({
   );
   const [editingMax, setEditingMax] = useState(false);
   const [maxSaved, setMaxSaved] = useState('');
+  /** A free first buy started from this service (kept outside the sheet until seen done). */
+  const [free, setFree] = useState<OpenFree | null>(() => getOpenFree(service.id));
+  const [freeSending, setFreeSending] = useState(false);
   /** The call can't be read any more (call_not_found): the sheet treats it as finished. */
   const [gone, setGone] = useState(false);
   const keys = useRef(new Map<string, string>());
@@ -533,7 +594,17 @@ export function UseSheet({
   const check = quoted && agent ? quoteCheck(quoted.quote, agent) : null;
   const canConfirm = Boolean(quoted && agent && check?.kind === 'ok');
   const lines = quoted ? quoteLines(quoted.quote) : null;
-  const locked = sending || quote.k === 'checking' || Boolean(lost);
+  const locked = sending || quote.k === 'checking' || Boolean(lost) || freeSending;
+  // The free first buy applies: a free agent picked, a service it may be, a price it covers, and
+  // no paid payment of this service open. Then the price reads Central City pays, You pay 0.
+  const freePriceRaw = quoted ? quoteTotalRaw(quoted.quote) : (service.price?.raw ?? null);
+  const freeMode = Boolean(
+    agent &&
+    isFree(agent.agentId) &&
+    freeCovers(freePriceRaw, freeBuy.creditMaxRaw) &&
+    !open &&
+    !lost,
+  );
 
   useEffect(() => {
     mounted.current = true;
@@ -551,6 +622,18 @@ export function UseSheet({
   useEffect(() => {
     if (agentId === null) setAgentId(firstChoice(agents));
   }, [agents, agentId]);
+  // Free first buys read after the sheet opened: unless the person picked an agent (now or the
+  // last time), the first agent it is free for is picked.
+  const personPicked = useRef(Boolean(start.open || start.kept?.agentId));
+  useEffect(() => {
+    if (!freeKeyOfList || personPicked.current || getOpenPayment(service.id)) return;
+    setAgentId(freeKeyOfList.split(',')[0]!);
+  }, [freeKeyOfList, service.id]);
+  // Opening the sheet of a Central City service reads its free first buys again.
+  useEffect(() => {
+    void loadSponsored(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [service.id]);
   // The open payment moved on while another copy of this sheet sent it (it was closed and
   // opened again): its call, or the refusal that came late.
   const lastOpen = useRef(open);
@@ -767,6 +850,60 @@ export function UseSheet({
     void loadPayAccess(true);
   }
 
+  /**
+   * Uses the picked agent's free first buy: the inputs checked here first, then the sponsored
+   * call with this attempt's key (the same agent, service and inputs keep it until the server said
+   * for sure that nothing started), then its card until it is done.
+   */
+  async function takeFree() {
+    if (freeSending || !agent || !freeMode || !freePriceRaw) return;
+    const built = buildInputs(form, draft);
+    setProblems(built.problems);
+    setCallProblem('');
+    setSignIn(false);
+    if (built.problems.length) {
+      window.setTimeout(() => summary.current?.focus(), 0);
+      return;
+    }
+    const picked = agent;
+    const inputs = built.inputs;
+    setFreeSending(true);
+    try {
+      const call = await startSponsoredCall(service.id, {
+        agent_id: picked.agentId,
+        use_credit: true,
+        idempotency_key: freeKey(service.id, picked.agentId, inputs),
+        inputs: inputs as { body?: Record<string, unknown>; query?: Record<string, string> },
+        max_price_usdc: rawToUsdc(freePriceRaw),
+      });
+      const entry = { call, agentName: picked.name, inputs };
+      setOpenFree(service.id, entry);
+      if (mounted.current) setFree(entry);
+    } catch (error) {
+      if (!mounted.current) return;
+      if (error instanceof PayFailure) {
+        // The engine's own checks of the service and its inputs: a 4xx refusal started nothing.
+        // A 5xx may come after the buy began, so its key stays for the next try.
+        if (error.status >= 400 && error.status < 500 && error.code !== 'rate_limited')
+          dropFreeKey(service.id, picked.agentId, inputs);
+        if (error.code === 'invalid_inputs' && error.detail.fields?.length) {
+          setProblems(serverProblems(form, error.detail.fields));
+          window.setTimeout(() => summary.current?.focus(), 0);
+        } else setCallProblem(refusalText(error, { agentName: picked.name }));
+      } else {
+        const failure =
+          error instanceof SponsoredFailure ? error : new SponsoredFailure(0, 'network');
+        afterFreeFailure(service.id, picked.agentId, inputs, failure);
+        setCallProblem(sponsoredRefusalText(failure, picked.name));
+        if (failure.code === 'signed_out') setSignIn(true);
+        // The credit changed under the page (used, paused): the chips follow.
+        if (failure.code === 'credit_unavailable') void loadSponsored(true);
+      }
+    } finally {
+      if (mounted.current) setFreeSending(false);
+    }
+  }
+
   function pay() {
     if (!quoted || !agent || !canConfirm) return;
     void send(
@@ -822,7 +959,15 @@ export function UseSheet({
   // can't pay (above its maximum or its limit) has no confirm: Check price again asks again.
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    if ((confirming && canConfirm) || sending || lost || quote.k === 'checking' || editingMax)
+    if (
+      (confirming && canConfirm) ||
+      sending ||
+      lost ||
+      quote.k === 'checking' ||
+      editingMax ||
+      freeMode ||
+      freeSending
+    )
       return;
     void checkPrice();
   };
@@ -841,6 +986,73 @@ export function UseSheet({
       {SIGN_IN_LABEL.use}
     </button>
   );
+
+  if (free) {
+    const freeDone = sponsoredDone(free.call);
+    const close = () => {
+      if (sponsoredDone(free.call)) setOpenFree(service.id, null);
+    };
+    return (
+      <div className="fp-sheet-wrap" onKeyDown={onKeyDown}>
+        <div className="fd-d-body fp-sheet">
+          <FreeCallCard
+            call={free.call}
+            agentName={free.agentName}
+            seller={service.provider.name}
+            host={service.provider.host}
+            headingId={`${ids}-call`}
+            onUpdate={(next) => {
+              const entry = { ...free, call: next };
+              setOpenFree(service.id, entry);
+              if (sponsoredDone(next)) {
+                // Used now (or free again after a failure): the chips follow.
+                if (next.state === 'failed') dropFreeKey(service.id, next.agentId, free.inputs);
+                void loadSponsored(true);
+              }
+            }}
+          />
+        </div>
+        <footer className="fd-d-foot">
+          {freeDone && free.call.state === 'failed' ? (
+            <button
+              type="button"
+              className="fd-btn primary"
+              onClick={() => {
+                setOpenFree(service.id, null);
+                setFree(null);
+                void loadSponsored(true);
+              }}
+            >
+              Try again
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="fd-btn"
+            onClick={() => {
+              close();
+              onBack();
+            }}
+          >
+            Back to the service
+          </button>
+          <span className="fd-sp" />
+          {onClose ? (
+            <button
+              type="button"
+              className="fd-btn ghost"
+              onClick={() => {
+                close();
+                onClose();
+              }}
+            >
+              Close
+            </button>
+          ) : null}
+        </footer>
+      </div>
+    );
+  }
 
   if (call)
     return (
@@ -892,8 +1104,9 @@ export function UseSheet({
               Use with my agent
             </h3>
             <p className="fd-fine">
-              Your agent pays from its own wallet. You see what it pays, and to whom, before
-              anything is paid.
+              {freeMode
+                ? FREE_INTRO
+                : 'Your agent pays from its own wallet. You see what it pays, and to whom, before anything is paid.'}
             </p>
           </div>
 
@@ -923,7 +1136,9 @@ export function UseSheet({
                     checked={item.agentId === agentId}
                     locked={locked}
                     whyId={whyId(item.agentId)}
+                    free={freeBuy.state(item.agentId)}
                     onPick={() => {
+                      personPicked.current = true;
                       setAgentId(item.agentId);
                       setEditingMax(false);
                       setMaxSaved('');
@@ -946,7 +1161,7 @@ export function UseSheet({
                 </a>
               </p>
             )}
-            <BlockedLines agents={agents} whyId={whyId} onLeave={leave} />
+            <BlockedLines agents={agents} whyId={whyId} onLeave={leave} free={isFree} />
             {agents.length && access.list.more ? <p className="fd-fine">{AGENTS_MORE}</p> : null}
             {agentProblem ? (
               <p className="fd-err" id={`${ids}-ae`}>
@@ -1038,7 +1253,11 @@ export function UseSheet({
           <section className="fp-price-sec" aria-labelledby={`${ids}-pr`}>
             <h4 id={`${ids}-pr`}>Price</h4>
             <div className="fp-quote" ref={quoteBox} tabIndex={-1} aria-live="polite">
-              {quote.k === 'checking' ? (
+              {freeMode && freePriceRaw ? (
+                <div className="fp-box fp-free-price" data-tone="ok">
+                  <MoneyLines lines={freeLines(freePriceRaw)} label="What this call costs" />
+                </div>
+              ) : quote.k === 'checking' ? (
                 <p className="fp-state" data-tone="busy">
                   <LoaderCircle className="spin" size={16} aria-hidden="true" />
                   <span>{quote.note ? `${quote.note} ` : ''}Checking the price…</span>
@@ -1119,7 +1338,9 @@ export function UseSheet({
             </div>
             {/* Before a price: what the picked agent may still spend (with a price, it sits under
                 the price's lines). */}
-            {!quoted && agent && !agentLines(agent).blocked ? <Allowance agent={agent} /> : null}
+            {!quoted && !freeMode && agent && !agentLines(agent).blocked ? (
+              <Allowance agent={agent} />
+            ) : null}
           </section>
         </div>
 
@@ -1150,6 +1371,26 @@ export function UseSheet({
               <button type="button" className="fd-btn fp-main fp-ink" aria-disabled="true">
                 <LoaderCircle className="spin" size={14} aria-hidden="true" />
                 {open.asking ? 'Checking…' : 'Paying…'}
+              </button>
+            </>
+          ) : freeMode && agent ? (
+            <>
+              {callProblem ? (
+                <p className="fp-foot-line" role="alert" data-tone="bad">
+                  {callProblem}
+                </p>
+              ) : null}
+              {signIn ? signInButton : null}
+              <button
+                type="button"
+                className={signIn ? 'fd-btn' : 'fd-btn primary fp-main'}
+                aria-disabled={freeSending || undefined}
+                onClick={() => void takeFree()}
+              >
+                {freeSending ? (
+                  <LoaderCircle className="spin" size={14} aria-hidden="true" />
+                ) : null}
+                {freeSending ? 'Starting…' : USE_FREE}
               </button>
             </>
           ) : confirming && canConfirm && quoted && agent ? (

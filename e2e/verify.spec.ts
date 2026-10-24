@@ -7,7 +7,6 @@ import {
   sha256,
   toHex,
 } from '../shared/count-log/index';
-import { landingWithTicker } from './landing-html';
 
 /*
  * /downtown/verify (verifiable agent count, T2): every check runs in the browser with
@@ -271,48 +270,24 @@ test('before the first checkpoint the page still shows everything useful', async
   ).toHaveCount(0);
 });
 
-test('"Verify here" on the homepage ticker leads to the page; signed out, the owner check asks to sign in', async ({
+test('"Verify" in the homepage footer leads to the page; signed out, the owner check asks to sign in', async ({
   page,
   context,
 }) => {
   await signUpWithAgent(page, 'Ticker Agent');
   await context.clearCookies();
   await page.goto('/');
-  const verify = page.locator('[data-agent-ticker]').getByRole('link', { name: 'Verify here' });
+  // The live numbers' own "Verify on Base" leads to the paid calls (e2e/home-v10.spec.ts).
+  const verify = page
+    .getByRole('contentinfo')
+    .getByRole('link', { name: 'Verify', exact: true })
+    .first();
   await expect(verify).toHaveAttribute('href', '/downtown/verify');
   await verify.click();
   await expect(page).toHaveURL(/\/downtown\/verify$/);
   await expect(
     page.getByRole('region', { name: 'Check my agent' }).getByRole('link', { name: 'Sign in' }),
   ).toBeVisible();
-});
-
-test('at 360 px the ticker with "Verify here" reserves its two lines (no layout shift)', async ({
-  page,
-}) => {
-  await page.setViewportSize({ width: 360, height: 780 });
-  await signUpWithAgent(page, 'Shift Agent');
-  await page.context().clearCookies();
-  // "/" as built without a count (e2e/landing-html.ts), so the client fills the reserved line.
-  await landingWithTicker(page);
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => (release = resolve));
-  await page.route('**/api/public/stats', async (route) => {
-    await gate;
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ ai_agents_total: 1234, updated_at: new Date().toISOString() }),
-    });
-  });
-  await page.goto('/');
-  await expect(page.locator('[data-agent-ticker]')).toHaveAttribute('data-ready', 'false');
-  const before = (await page.locator('#how').boundingBox())!.y;
-  release();
-  await expect(
-    page.locator('[data-agent-ticker]').getByRole('link', { name: 'Verify here' }),
-  ).toBeVisible();
-  expect((await page.locator('#how').boundingBox())!.y).toBe(before);
 });
 
 /** Screenshots for a UX review: VERIFY_SHOTS_DIR=<dir>. */
@@ -340,9 +315,9 @@ for (const [w, h] of [
       if (w !== 768) {
         await page.context().clearCookies();
         await page.goto('/');
-        await expect(page.locator('[data-agent-ticker][data-ready="true"]')).toBeVisible();
-        await page.waitForTimeout(400); // the one-time fade-in
-        await page.screenshot({ path: `${dir}/ticker-verify-${w}-${scheme}.png` });
+        await expect(page.locator('[data-live-numbers] [data-stat="agents"] dd')).toHaveText(/\d/);
+        await page.waitForTimeout(1500); // the one-time count-up
+        await page.screenshot({ path: `${dir}/home-verify-${w}-${scheme}.png` });
       }
     });
 

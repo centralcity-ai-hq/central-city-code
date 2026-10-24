@@ -233,19 +233,22 @@ export function createOwnerRevokePort(deps: OwnerRevokeDeps): OwnerRevokePort {
           ? '0x'
           : (`${input.recipe.factory}${encodeFunctionData(createAccountCall(input.recipe)).slice(2)}` as Hex);
         const callData = await encodeAccountCalls(deps.client, input.calls);
-        const operation = await deps.bundler.prepare({
-          sender,
-          nonce,
-          initCode,
-          callData,
-          callGasLimit: 0n,
-          verificationGasLimit: 0n,
-          preVerificationGas: 0n,
-          maxFeePerGas: 0n,
-          maxPriorityFeePerGas: 0n,
-          paymasterAndData: '0x',
-          signature: '0x',
-        });
+        const operation = await deps.bundler.prepare(
+          {
+            sender,
+            nonce,
+            initCode,
+            callData,
+            callGasLimit: 0n,
+            verificationGasLimit: 0n,
+            preVerificationGas: 0n,
+            maxFeePerGas: 0n,
+            maxPriorityFeePerGas: 0n,
+            paymasterAndData: '0x',
+            signature: '0x',
+          },
+          { intent: { flow: 'exit', calls: input.calls, sender, initCode } },
+        );
         if (
           getAddress(operation.sender) !== sender ||
           operation.nonce !== nonce ||

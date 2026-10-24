@@ -27,7 +27,7 @@ export const SERVICE_CALLS_QUERY_MAX = 66;
  * The page cursor: the last row's Base block time (ms) and its transaction, `<ms>_<0x hash>`. The
  * next page starts strictly after that row in (time, transaction) order, newest first.
  */
-export const SERVICE_CALLS_CURSOR = /^(0|[1-9][0-9]{0,15})_(0x[0-9a-f]{64})$/;
+export const SERVICE_CALLS_CURSOR = /^(0|[1-9][0-9]{0,15})_(0x[0-9a-f]{64})(?:_([0-9a-f]{32}))?$/;
 
 /** What a search can be; anything else is refused (400). */
 export type ServiceCallsSearch =
@@ -88,6 +88,11 @@ export interface ServiceCall {
   /** null: no fee leg on Base for this call. */
   fee: ServiceCallFee | null;
   status: 'settled';
+  /**
+   * The payment's FeeCharged ref (bytes32, public on Base for a router payment): unique per call,
+   * also when several calls were settled in one transaction (batch lane).
+   */
+  ref: string;
 }
 
 /** GET /api/public/explorer/calls?cursor=&q= */
@@ -102,8 +107,10 @@ export interface ServiceCallsPage {
   services24h: number | null;
   /** USDC paid by buyers for the calls of the last 24 hours (price, fee included), in 6-decimal raw units; null while not counted. */
   value24hRaw: string | null;
-  /** The 10% protocol fee of those calls, in 6-decimal raw units; null while not counted. */
+  /** The protocol fee charged on Base for those calls (fee_state 'charged'), in 6-decimal raw units; null while not counted. */
   fee24hRaw: string | null;
+  /** When the four 24 h numbers were counted, ISO 8601; null while not counted. */
+  day_as_of: string | null;
   /** When this answer was built, ISO 8601. */
   as_of: string;
   /** A search's matching calls (first page of a search only); else null. */
@@ -111,4 +118,37 @@ export interface ServiceCallsPage {
   items: ServiceCall[];
   /** The cursor of the next (older) page, or null at the end. */
   next_cursor: string | null;
+}
+
+/** Past this age the 24 h numbers on the page say when they were counted. */
+export const DAY_STALE_AFTER_MS = 3 * 60_000;
+
+/**
+ * A newer answer, with the four 24 h numbers taken from the answer shown before when the newer one
+ * could not count them, together with their own count time (day_as_of), so the page can say how
+ * old they are. Total and Per minute are never carried over: they are the newer answer's, null
+ * included (a rate shown as "now" must be measured now).
+ */
+export function keepKnownDay(
+  before: ServiceCallsPage | null,
+  next: ServiceCallsPage,
+): ServiceCallsPage {
+  if (!before || next.day_as_of !== null || before.day_as_of === null) return next;
+  return {
+    ...next,
+    last24h: before.last24h,
+    services24h: before.services24h,
+    value24hRaw: before.value24hRaw,
+    fee24hRaw: before.fee24hRaw,
+    day_as_of: before.day_as_of,
+  };
+}
+
+/**
+ * True when the 24 h numbers were counted more than DAY_STALE_AFTER_MS before `nowMs` (the
+ * viewer's clock, so the warning keeps ageing while polls fail).
+ */
+export function dayIsStale(page: ServiceCallsPage, nowMs: number): boolean {
+  if (page.day_as_of === null) return false;
+  return nowMs - Date.parse(page.day_as_of) > DAY_STALE_AFTER_MS;
 }

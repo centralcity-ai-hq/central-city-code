@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Search, X } from 'lucide-react';
-import { parseServiceCallsSearch, SERVICE_CALLS_PAGE_SIZE } from '../../shared/explorer-calls';
+import {
+  dayIsStale,
+  keepKnownDay,
+  parseServiceCallsSearch,
+  SERVICE_CALLS_PAGE_SIZE,
+} from '../../shared/explorer-calls';
 import { PublicHeader } from '../shell/PublicHeader';
 import { number } from './countLogClient';
 import { ExplorerSwitch, useOnBaseCount, useStatsCounts } from './ExplorerSwitch';
@@ -243,7 +248,7 @@ export function ServiceCalls() {
           setFresh(new Set(data.items.map(callKey).filter((key) => !before.has(key))));
           setLoad({
             ...current,
-            data,
+            data: keepKnownDay(current.data, data),
             cursors: [null, ...(data.next_cursor ? [data.next_cursor] : [])],
           });
         })
@@ -271,7 +276,7 @@ export function ServiceCalls() {
         page,
         cursors: next,
         // A later page carries no search count; keep the first page's.
-        data: { ...data, matches: data.matches ?? load.data.matches },
+        data: { ...keepKnownDay(load.data, data), matches: data.matches ?? load.data.matches },
       });
     } catch {
       // The page stays as it was; pressing the number again retries.
@@ -397,6 +402,20 @@ export function ServiceCalls() {
             </dl>
             <p className="ob-under">
               <span>Paid in USDC on Base mainnet. New payments appear within seconds.</span>
+              {data && dayIsStale(data, now) && data.day_as_of ? (
+                <span>
+                  {' '}
+                  24 h numbers as of{' '}
+                  {new Date(data.day_as_of).toLocaleString('en-GB', {
+                    day: 'numeric',
+                    month: 'short',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    timeZone: 'UTC',
+                  })}{' '}
+                  UTC, counting again.
+                </span>
+              ) : null}
             </p>
 
             <section className="sc-panel" aria-labelledby="sc-latest">

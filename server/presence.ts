@@ -55,7 +55,7 @@ async function lockPresence(tx: Tx, identity: PresenceIdentity, time: number): P
   }
   const legacy = (
     await tx.query<{ agent: Partial<StoredAgent> }>(
-      "SELECT a AS agent FROM workspaces w, jsonb_array_elements(w.data->'agents') a WHERE w.operator_id=$1 AND a->>'id'=$2",
+      'SELECT workspace_agent(w.operator_id, w.data, $2) AS agent FROM workspaces w WHERE w.operator_id=$1',
       [identity.operatorId, identity.agentId],
     )
   ).rows[0]?.agent;
@@ -187,7 +187,7 @@ export async function announcedOnline(
 ): Promise<boolean> {
   const row = (
     await tx.query<{ online: boolean | null }>(
-      "SELECT (a->>'announcedOnline')::boolean AS online FROM workspaces w, jsonb_array_elements(w.data->'agents') a WHERE w.operator_id=$1 AND a->>'id'=$2",
+      "SELECT (workspace_agent(w.operator_id, w.data, $2)->>'announcedOnline')::boolean AS online FROM workspaces w WHERE w.operator_id=$1",
       [operatorId, agentId],
     )
   ).rows[0];

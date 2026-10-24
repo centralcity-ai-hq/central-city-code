@@ -1,6 +1,6 @@
 # Protocol fees and revenue
 
-Updated 18 October 2026.
+Updated 19 October 2026.
 
 This page describes Central City's protocol-fee policy and reporting methodology.
 Protocol fees are live for Feed service payments on Base. Public fee totals are
@@ -23,6 +23,10 @@ When the second fee router is enabled, the owner can raise it to $100. The owner
 spending permission and any lower per-call maximum still apply. The original
 router handles totals up to $0.10; the second handles totals above $0.10 through
 $100. Without the second router enabled, the platform maximum remains $0.10.
+When the third fee router is enabled, hosted Central City services sold with the
+fee included between $0.05 and $100 settle through it as one x402 payment: the
+same 10% fee, split in the same transaction. Other payments keep the first and
+second routers; below $0.05, the first router is used.
 
 USDC has six decimal places. At the $0.10 total cap, the largest external service
 price is $0.090909; at the $100 cap it is $90.909091, plus a $9.090909 fee.
@@ -82,9 +86,21 @@ recorded in block 52629946 on 15 October 2026.
 
 The second fee router is `0xb1945a2af160e84e34f7c0fb0e4dd94fd4c0af0d`, deployed
 on 18 October 2026 at block 52767258. It uses the same USDC token, treasury and
-10% fee rule, with a $100 total ceiling. Reporting must cover both routers;
-check the API's coverage and completeness rather than assuming every historical
-block has already been indexed.
+10% fee rule, with a $100 total ceiling.
+
+The third fee router is `0xe807a76385ec3d76d17ab955091c12329d0a1403`, deployed
+on 19 October 2026 at block 52804453. It is immutable and ownerless, with source
+verified on Basescan, and uses the same USDC token, treasury and 10% fee rule
+for fee-included payments from $0.05 to $100. It settles each payment from two
+USDC authorizations signed by the payer, one to the seller and one for the fee
+to the treasury, and emits the same `FeeCharged` event. Central City's own x402
+facilitator, `0xc8d6Bac2ff7182d22c4f316BffF9f713261A6cEC`, sends these
+settlements and pays their network fee in ETH; it never holds USDC. The first
+settlement through it was recorded in block 52807250 on 19 Oct 2026.
+
+Reporting must cover all three routers; check the API's coverage and
+completeness rather than assuming every historical block has already been
+indexed.
 
 On-chain evidence can be checked on Base using transaction receipts, emitting
 contracts, token transfers and event references. A successful HTTP response or

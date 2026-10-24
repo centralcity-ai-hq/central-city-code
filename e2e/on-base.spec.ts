@@ -109,7 +109,7 @@ test('On Base: the switch, the five numbers, Basescan and the newest-first list'
   await expect(rows.nth(1)).toContainText('Final');
 });
 
-test('Rated agents rises with the live re-read; without a count it shows a dash', async ({
+test('Rated agents rises with the live re-read; without a count it keeps the last one', async ({
   page,
 }) => {
   await page.clock.install();
@@ -127,13 +127,27 @@ test('Rated agents rises with the live re-read; without a count it shows a dash'
   rated = 413;
   await page.clock.runFor(31_000);
   await expect(card.locator('dd').first()).toHaveText('413');
-  // Not counted (null), or an older server without the number: a dash, never 0 or NaN.
+  // Not counted (null), or an older server without the number: the last known one, never a
+  // dash, 0 or NaN.
   rated = null;
   await page.clock.runFor(31_000);
-  await expect(card.locator('dd').first()).toHaveText('—');
+  await expect(card.locator('dd').first()).toHaveText('413');
   rated = undefined;
   await page.clock.runFor(31_000);
-  await expect(card.locator('dd').first()).toHaveText('—');
+  await expect(card.locator('dd').first()).toHaveText('413');
+  // A browser that never saw a count keeps the skeleton.
+  const fresh = await page.context().browser()!.newPage();
+  await mockList(fresh, () => {
+    const body = list();
+    delete (body.totals as Record<string, unknown>).ratedAgents;
+    return body;
+  });
+  await fresh.goto('/explorer/base');
+  const unknown = fresh.locator('.ll-stats > div').nth(3);
+  await expect(fresh.locator('.ll-stats > div').first().locator('dd').first()).not.toHaveText('');
+  await expect(unknown.locator('.ob-sk')).toHaveCount(1);
+  await expect(unknown).not.toContainText('—');
+  await fresh.close();
 });
 
 test('Verify opens under the row and claims nothing when Base is not reached', async ({ page }) => {
@@ -242,7 +256,9 @@ test('a healthy list stays live: no false outage after minutes, the block keeps 
   await expect(page.locator('.ll-stats')).not.toContainText('52,431,222');
 });
 
-test("an old read says Base isn't answering; a failed load offers Try again", async ({ page }) => {
+test("an old read says Base isn't answering; a failed load keeps the last numbers and tries again", async ({
+  page,
+}) => {
   await mockList(page, () =>
     list({
       totals: {
@@ -259,11 +275,56 @@ test("an old read says Base isn't answering; a failed load offers Try again", as
   await expect(page.getByText("Base isn't answering right now")).toBeVisible();
   await expect(page.getByText('52,431,170')).toHaveCount(2);
 
+  // The same browser (its storage) with the list failing: the last numbers stay, marked not live.
   const other = await page.context().newPage();
-  await mockList(other, () => ({ error: 'unavailable' }), 503);
+  let failed = 0;
+  await mockList(
+    other,
+    () => {
+      failed += 1;
+      return { error: 'unavailable' };
+    },
+    503,
+  );
   await other.goto('/explorer/base');
   await expect(other.getByRole('alert')).toContainText("The list couldn't be loaded");
   await expect(other.getByRole('button', { name: 'Try again' })).toBeVisible();
+  const stats = other.locator('.ll-stats');
+  await expect(stats).toHaveAttribute('data-fresh', 'saved');
+  await expect(stats.locator('> div').nth(0).locator('dd').first()).toHaveText('1,284');
+  await expect(stats.locator('> div').nth(1).locator('dd').first()).toHaveText('37');
+  await expect(stats.locator('> div').nth(4).locator('dd').first()).toHaveText('52,431,170');
+  await expect(stats).not.toContainText('—');
+  // It reads again by itself (1 s, then 2 s ...).
+  await expect.poll(() => failed, { timeout: 8_000 }).toBeGreaterThanOrEqual(3);
+});
+
+test('a list read that never answers gives up after 15 s and tries again; the rows say loading', async ({
+  page,
+}) => {
+  await page.clock.install({ time: now });
+  let reads = 0;
+  let answer = false;
+  await mockList(page, () => list());
+  await page.route('**/api/public/base/agents*', async (route) => {
+    reads += 1;
+    if (answer) return route.fallback();
+    // Never answers (a cold, stuck read).
+    await new Promise(() => undefined);
+  });
+  await page.goto('/explorer/base');
+  await expect.poll(() => reads).toBe(1);
+  await expect(page.locator('.ob-table')).toHaveAttribute('data-rows', 'loading');
+  await expect(page.locator('.ob-head')).toContainText('Loading agents…');
+  await page.clock.runFor(15_000);
+  await expect(page.getByRole('alert')).toContainText("The list couldn't be loaded");
+  // Read again after 1 s; this time it answers.
+  answer = true;
+  await page.clock.runFor(1_100);
+  await expect.poll(() => reads).toBe(2);
+  await expect(page.locator('.ob-table')).toHaveAttribute('data-rows', 'ready');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.locator('.ll-stats')).toHaveAttribute('data-fresh', 'live');
 });
 
 test('before the server has read Base, the block says so and nothing claims an outage', async ({
@@ -284,7 +345,9 @@ test('before the server has read Base, the block says so and nothing claims an o
   );
   await page.goto('/explorer/base');
   const block = page.locator('.ll-stats > div').filter({ hasText: 'Read from Base block' });
-  await expect(block).toContainText('—');
+  // No block known yet: the skeleton stays, never a dash.
+  await expect(block.locator('.ob-sk')).toHaveCount(1);
+  await expect(block).not.toContainText('—');
   await expect(block).toContainText('not read yet');
   await expect(page.getByText("Base isn't answering right now")).toHaveCount(0);
 });

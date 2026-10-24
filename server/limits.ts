@@ -16,6 +16,8 @@ export interface CityLimits {
    * server raises it (every spec shares one address); deployments keep the default.
    */
   apiRequestsPerMinute: number;
+  /** Tool calls per assistant credential (grant) per minute, every tool together (HTTP tool route). */
+  assistantToolCallsPerMinute: number;
   agentsPerWorkspace: number;
   /**
    * Largest member cap a room may have, people and AIs together (at most 10,000). Ordinary hosts
@@ -155,6 +157,7 @@ export const DEFAULT_LIMITS: Readonly<CityLimits> = Object.freeze({
   operators: 0,
   registrationsPerWindow: 10,
   apiRequestsPerMinute: 600,
+  assistantToolCallsPerMinute: 120,
   agentsPerWorkspace: 100,
   roomMembersMax: 10_000,
   roomMembersDefault: 100,
@@ -229,6 +232,7 @@ export const LIMIT_ENV: Readonly<Record<keyof CityLimits, string>> = Object.free
   operators: 'CITY_LIMIT_OPERATORS',
   registrationsPerWindow: 'CITY_LIMIT_REGISTRATIONS_PER_WINDOW',
   apiRequestsPerMinute: 'CITY_LIMIT_API_REQUESTS_PER_MINUTE',
+  assistantToolCallsPerMinute: 'CITY_LIMIT_ASSISTANT_TOOL_CALLS_PER_MINUTE',
   agentsPerWorkspace: 'CITY_LIMIT_AGENTS_PER_WORKSPACE',
   roomMembersMax: 'CITY_LIMIT_ROOM_MEMBERS_MAX',
   roomMembersDefault: 'CITY_LIMIT_ROOM_MEMBERS_DEFAULT',

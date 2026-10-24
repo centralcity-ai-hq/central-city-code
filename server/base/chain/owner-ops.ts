@@ -25,6 +25,7 @@
  *
  * The bundler URL carries a key: no error from here repeats an RPC or bundler message.
  */
+import type { SponsorFlow } from './own-paymaster-policy.js';
 import {
   decodeFunctionResult,
   encodeFunctionData,
@@ -142,6 +143,11 @@ export interface OwnerOperationsPort {
     ownerFunded?: true;
     /** Fixed signing deadline in milliseconds; never recomputed for retries. */
     sponsorshipDeadline?: number;
+    /**
+     * The flow (our own paymaster's policy, SponsorIntent): 'exit' for a withdrawal, cancel or
+     * revoke (it may use the protected budget), 'ownerPay' for a payment, 'rate' for a rating.
+     */
+    sponsorFlow?: SponsorFlow;
   }): Promise<PreparedOwnerOperation>;
   /** Whether an address has code (null when the chain cannot tell right now). */
   isContract(address: Address): Promise<boolean | null>;
@@ -283,6 +289,7 @@ export function createOwnerOperationsPort(deps: OwnerOperationsDeps): OwnerOpera
           maxCostWeiCap: deps.maxCostWeiCap,
           feeFloor: input.feeFloor,
           sponsor,
+          ...(input.sponsorFlow ? { sponsorFlow: input.sponsorFlow } : {}),
         });
       const sponsored = input.ownerFunded !== true;
       let prepared;

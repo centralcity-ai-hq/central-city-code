@@ -29,6 +29,9 @@
  * (edge fresh 10 s + 5 s stale, browsers revalidate every time), so the page's "Base isn't
  * answering" banner (readAt more than 60 s behind) only shows when Base really did not answer.
  *
+ * The other totals (on Base, finalizing, new in 24 h) are shared the same way: one count per
+ * TOTALS_TTL_MS globally under a TOTALS_LEASE_MS lease, stored in the TOTALS_KEYS row and its parts.
+ *
  * totals.ratedAgents (the "Rated agents" number, store.ts RATED_AGENTS_SQL) is one count shared by
  * every instance through a public_stats row (server/stats/public-stats.ts createSharedStat): about
  * one count per RATED_TTL_MS globally, each instance reading the row at most that often, and the
@@ -62,7 +65,12 @@ import {
   type PassportEarnings,
   type PassportServicePayments,
 } from '../../../shared/directory.js';
-import { createSharedStat, sqlPublicStatsStore } from '../../stats/public-stats.js';
+import {
+  createSharedStat,
+  readStatParts,
+  sqlPublicStatsStore,
+  writeStatParts,
+} from '../../stats/public-stats.js';
 import type { FeedbackRead, OnBaseChainReader } from './head.js';
 import { createOnBaseStore, type RecordedOwner } from './store.js';
 
@@ -74,13 +82,19 @@ export const ON_BASE_LIVE_EDGE = 'public, max-age=10, stale-while-revalidate=5';
  * The list (the Explorer's On Base view and its count): fresh 10 s like ON_BASE_LIVE, then the
  * edge may serve its copy for up to 50 s more while one background request refreshes it, so a
  * visitor within that window does not wait for the full read (about 3 s). This bounds the HTTP
- * copy's age only: the totals and ratings inside it have their own caches and can be older. A
- * visitor after a longer quiet moment still waits for a fresh read. The page names the block it
+ * copy's age only: the totals and ratings inside it have their own caches and can be older. The
+ * edge keeps serving longer (ON_BASE_LIST_LIVE_EDGE). The page names the block it
  * was read at. A passport keeps ON_BASE_LIVE: someone who just registered sees it within 15 s.
  */
 export const ON_BASE_LIST_LIVE = 'public, max-age=0, s-maxage=10, stale-while-revalidate=50';
-/** Vercel's edge only (never forwarded to browsers): the same 60 s HTTP allowance. */
-export const ON_BASE_LIST_LIVE_EDGE = 'public, max-age=10, stale-while-revalidate=50';
+/**
+ * Vercel's edge only (never forwarded to browsers): fresh 10 s, then its copy is served for up to a
+ * day while one background request refreshes it, like the homepage stats
+ * (PUBLIC_STATS_EDGE_CACHE_CONTROL). Under load the full read took 12-28 s (23 Oct 2026), and a
+ * visitor after a quiet minute waited for it or timed out; now only a first visitor ever does. The
+ * page still names the block and time its answer was read at.
+ */
+export const ON_BASE_LIST_LIVE_EDGE = 'public, max-age=10, stale-while-revalidate=86400';
 /** Not listed (yet): the row may appear within seconds. */
 export const ON_BASE_NOT_FOUND = 'public, max-age=0, s-maxage=10';
 /** Per client address, under the degraded 'ip' prefix like /api/public/stats. */
@@ -88,8 +102,24 @@ export const ON_BASE_RATE = { max: 60, windowMs: 60_000 } as const;
 /** The server reads the chain head at most this often, and gives one read this long. */
 export const HEAD_TTL_MS = 5_000;
 export const READ_TIMEOUT_MS = 3_000;
-/** Totals are counted at most this often per instance. */
-export const TOTALS_TTL_MS = 5_000;
+/**
+ * Totals are counted about this often globally (one shared public_stats row and its parts); after
+ * a failed count an instance waits as long before it asks the database again.
+ */
+export const TOTALS_TTL_MS = 30_000;
+/**
+ * How long one count keeps the others from starting: longer than the count itself (15-21 s on
+ * 23 Oct 2026, a full join of every registration), so two never run at once.
+ */
+export const TOTALS_LEASE_MS = 60_000;
+/** The public_stats row of each network's totals; its parts are `<key>_<part>` (TOTALS_PARTS). */
+export const TOTALS_KEYS: Readonly<Record<BaseChainId, string>> = {
+  [BASE_MAINNET]: 'base_explorer_totals_mainnet',
+  [BASE_SEPOLIA]: 'base_explorer_totals_sepolia',
+  [ANVIL]: 'base_explorer_totals_local',
+};
+/** The totals stored beside the on-Base count; 0 for a block or time means none recorded. */
+export const TOTALS_PARTS = ['finalizing', 'new_day', 'block', 'at'] as const;
 /**
  * Rated agents are counted about this often globally (one shared public_stats row); after a
  * failed count an instance waits as long before it asks the database again.
@@ -299,12 +329,60 @@ export function registerOnBaseRoutes(app: FastifyInstance, deps: OnBaseRouteDeps
       () => null,
     );
 
-  let totalsCache: { until: number; value: Awaited<ReturnType<typeof store.totals>> } | null = null;
-  async function totals(now: number) {
-    if (totalsCache && now < totalsCache.until) return totalsCache.value;
-    const value = await store.totals(now);
-    totalsCache = { until: now + TOTALS_TTL_MS, value };
-    return value;
+  // Totals: one shared count (TOTALS_KEYS) for every instance, never one per instance. A new
+  // instance answers with the stored totals at once instead of counting first (23 Oct 2026: a
+  // count is a full join, 15-21 s, and each new instance's first list waited for its own). Only
+  // the lease holder counts, and the list never waits once any value is known; a failed count
+  // keeps the last one.
+  type Totals = Awaited<ReturnType<typeof store.totals>>;
+  const totalsKey = TOTALS_KEYS[chainId];
+  const partKeys = TOTALS_PARTS.map((part) => `${totalsKey}_${part}`);
+  let counted: { at: number; value: Totals } | null = null;
+  const totalsStat = createSharedStat({
+    key: totalsKey,
+    count: async (at) => {
+      const value = await store.totals(at);
+      // The parts first: a stored count always has its parts beside it.
+      await writeStatParts(
+        deps.db,
+        [
+          value.finalizingNow,
+          value.new24h,
+          value.recorded?.block ?? 0,
+          value.recorded?.at ?? 0,
+        ].map((part, index) => [partKeys[index]!, part] as const),
+        at,
+      );
+      counted = { at, value };
+      return value.onBase;
+    },
+    clock,
+    ttlMs: TOTALS_TTL_MS,
+    leaseMs: TOTALS_LEASE_MS,
+    store: sqlPublicStatsStore(deps.db),
+    failureBackoffMs: TOTALS_TTL_MS,
+    staleWhileRevalidate: true,
+  });
+  /** The parts of the stored count this instance last read, by that count's time. */
+  let read: { at: number; value: Totals } | null = null;
+  async function totals(): Promise<Totals> {
+    const stat = await totalsStat.get();
+    if (counted?.at === stat.refreshedAt) return counted.value;
+    if (read?.at !== stat.refreshedAt) {
+      // A newer count may have written its parts already: they are at most one count newer.
+      const parts = await readStatParts(deps.db, partKeys);
+      const part = (index: number) => parts.get(partKeys[index]!) ?? 0;
+      read = {
+        at: stat.refreshedAt,
+        value: {
+          onBase: stat.value,
+          finalizingNow: part(0),
+          new24h: part(1),
+          recorded: part(2) && part(3) ? { block: part(2), at: part(3) } : null,
+        },
+      };
+    }
+    return read.value;
   }
 
   app.get(ON_BASE_PATHS.list, async (request, reply) => {
@@ -314,7 +392,7 @@ export function registerOnBaseRoutes(app: FastifyInstance, deps: OnBaseRouteDeps
     const q = parsed.data.q?.trim() || undefined;
     const [page, counted] = await Promise.all([
       store.list({ before: parsed.data.before, q }),
-      totals(clock()),
+      totals(),
     ]);
     // Scores: Central City's own final ratings, from the records (the passport verifies on Base).
     // Rated agents here, not beside the page and totals: at most two pooled connections at once.
@@ -418,6 +496,15 @@ export function registerOnBaseRoutes(app: FastifyInstance, deps: OnBaseRouteDeps
       totalUsdc: formatUnits(found.totalRaw, 6),
       totalFeeUsdc: formatUnits(found.feeRaw, 6),
       lastPaidAt: found.lastPaidAt,
+      // Only for an agent whose first purchase Central City paid; everyone else's answer is unchanged.
+      ...(found.sponsoredFirstPurchase
+        ? {
+            sponsoredFirstPurchase: {
+              priceUsdc: formatUnits(found.sponsoredFirstPurchase.priceRaw, 6),
+              paidAt: found.sponsoredFirstPurchase.paidAt,
+            },
+          }
+        : {}),
     };
     return live(reply).send(body);
   });

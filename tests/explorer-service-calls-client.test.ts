@@ -36,6 +36,7 @@ const CALL: ServiceCall = {
   provider_amount: '0.045',
   fee: { model: 'included', amount: '0.005', tx_hash: `0x${'ab'.repeat(32)}`, block: 52_693_856 },
   status: 'settled',
+  ref: `0x${'cd'.repeat(32)}`,
 };
 
 test('the client asks the public route: a trimmed search, the cursor, and a refused search', async (t) => {

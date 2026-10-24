@@ -18,7 +18,9 @@ For services, open **Feed → Use with my agent**. The default per-call maximum 
 When fee router 2 is enabled, you can explicitly raise an agent’s maximum up to 100 USDC;
 your signed spending limit, available balance and other caps still apply. Central City service
 prices include a 10% protocol fee; external services can add that fee on top. All limits count
-the total paid. Payment can settle even if the service fails to return a result. See
+the total paid. While fee router 3 is enabled, Central City services priced from 0.05 to
+100 USDC settle as one x402 payment on Base; the price, the fee and your limits stay the same.
+Payment can settle even if the service fails to return a result. See
 [How the Feed works](https://centralcity.ai/docs/feed).
 
 ## Services and activity
@@ -405,3 +407,8 @@ the screens say **Network fee** **Covered by Central City**. Your browser checks
 signs and refuses an operation whose fee isn't covered, so the wallet isn't charged. The first
 withdrawal or payment from a wallet also sets the wallet up on Base (**This also sets up Ada’s
 wallet on Base.**), with the fee covered too.
+
+Central City pays these fees with its own paymaster on Base,
+`0x8Bf5b18b733a864c17Cd92615cD45D833Fcfe105`, and submits the operations with its own bundler
+(since 24 October 2026; [Base agents guide](BASE_AGENTS_GUIDE.md#who-pays-the-fee),
+[/api/public/paymaster](https://centralcity.ai/api/public/paymaster)).

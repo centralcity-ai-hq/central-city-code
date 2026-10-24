@@ -181,3 +181,139 @@ test('runtimes are built once per network; a configuration error is not cached',
   const first = await runtime(BASE_MAINNET);
   assert.equal(await runtime(BASE_MAINNET), first);
 });
+
+test('our bundler wiring per configuration (today: drain, new work on CDP)', async () => {
+  const PAYMASTER = '0x8Bf5b18b733a864c17Cd92615cD45D833Fcfe105';
+  // Nothing of ours configured: no upkeep at all.
+  assert.equal(
+    createChainRuntime({ db, env: mainnetEnv, chainId: BASE_MAINNET }).ownBundlerUpkeep,
+    undefined,
+  );
+  // Production today: prepare + address, CITY_BASE_BUNDLER unset -> a DRAIN with nothing open.
+  // Building it touches no keys and no keystore (the db stub answers every query with no rows).
+  const today = createChainRuntime({
+    db,
+    env: {
+      ...mainnetEnv,
+      CITY_BASE_OWN_PAYMASTER: 'prepare',
+      CITY_BASE_PAYMASTER_ADDRESS: PAYMASTER,
+    },
+    chainId: BASE_MAINNET,
+  });
+  assert.equal(today.ownBundlerUpkeep?.mode, 'drain');
+  assert.equal(await today.ownBundlerUpkeep?.open(), 0);
+  assert.equal(await today.ownBundlerUpkeep?.maintain(), 0);
+  assert.equal(typeof today.identityPort.register, 'function');
+  // Switched on: direct.
+  const on = createChainRuntime({
+    db,
+    env: {
+      ...mainnetEnv,
+      CITY_BASE_OWN_PAYMASTER: 'on',
+      CITY_BASE_PAYMASTER_ADDRESS: PAYMASTER,
+      CITY_BASE_BUNDLER: 'direct',
+    },
+    chainId: BASE_MAINNET,
+  });
+  assert.equal(on.ownBundlerUpkeep?.mode, 'direct');
+  // Direct asked without 'on': CDP for new work, ours drains (never an outage).
+  const invalid = createChainRuntime({
+    db,
+    env: {
+      ...mainnetEnv,
+      CITY_BASE_OWN_PAYMASTER: 'prepare',
+      CITY_BASE_PAYMASTER_ADDRESS: PAYMASTER,
+      CITY_BASE_BUNDLER: 'direct',
+    },
+    chainId: BASE_MAINNET,
+  });
+  assert.equal(invalid.ownBundlerUpkeep?.mode, 'drain');
+});
+
+test('production config today - a real owner operation is prepared through CDP end to end', async (t) => {
+  const { BASE_NETWORKS } = await import('../shared/base/chains.js');
+  const { deriveAddressLocal, spenderAccountRecipe } =
+    await import('../server/base/chain/derive.js');
+  const network = BASE_NETWORKS[BASE_MAINNET];
+  const sponsor = `0x2FAEB0760D4230Ef2aC21496Bb4F0b47D634FD4c${'0'.repeat(174 * 2)}`;
+  const asked: string[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: unknown, init?: { body?: string }) => {
+    const body = JSON.parse(init?.body ?? '{}') as
+      { id: number; method: string } | { id: number; method: string }[];
+    const one = (call: { id: number; method: string }) => {
+      asked.push(call.method);
+      const result =
+        call.method === 'eth_chainId'
+          ? '0x2105'
+          : call.method === 'eth_getCode'
+            ? '0x'
+            : call.method === 'eth_call'
+              ? `0x${'0'.repeat(64)}`
+              : call.method === 'eth_getBlockByNumber'
+                ? {
+                    number: '0x64',
+                    hash: `0x${'1'.repeat(64)}`,
+                    baseFeePerGas: '0x1',
+                    timestamp: '0x1',
+                    transactions: [],
+                  }
+                : call.method === 'eth_maxPriorityFeePerGas'
+                  ? '0x1'
+                  : call.method === 'pm_getPaymasterStubData' ||
+                      call.method === 'pm_getPaymasterData'
+                    ? { paymasterAndData: sponsor }
+                    : call.method === 'eth_estimateUserOperationGas'
+                      ? {
+                          callGasLimit: '0x1',
+                          verificationGasLimit: '0x1',
+                          preVerificationGas: '0x1',
+                        }
+                      : null;
+      return { jsonrpc: '2.0', id: call.id, result };
+    };
+    const answer = Array.isArray(body) ? body.map(one) : one(body);
+    return new Response(JSON.stringify(answer), {
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = realFetch;
+  });
+  const queries: string[] = [];
+  const watchedDb = {
+    query: async (sql: string) => (queries.push(sql), { rows: [] }),
+  } as unknown as Database;
+  const runtime = createChainRuntime({
+    db: watchedDb,
+    env: {
+      ...mainnetEnv,
+      CITY_BASE_OWN_PAYMASTER: 'prepare',
+      CITY_BASE_PAYMASTER_ADDRESS: '0x8Bf5b18b733a864c17Cd92615cD45D833Fcfe105',
+    },
+    chainId: BASE_MAINNET,
+  });
+  assert.equal(runtime.ownBundlerUpkeep?.mode, 'drain');
+  const recipe = spenderAccountRecipe(network, '0x1111111111111111111111111111111111111111');
+  const prepared = await runtime.ownerOperations!.prepare({
+    wallet: deriveAddressLocal(recipe),
+    recipe,
+    calls: [{ target: '0x2222222222222222222222222222222222222222', value: 1n, data: '0x' }],
+    sponsorFlow: 'exit',
+  });
+  // CDP's paymaster and gas estimate were asked; the prepared op carries CDP's sponsorship.
+  for (const method of [
+    'pm_getPaymasterStubData',
+    'eth_estimateUserOperationGas',
+    'pm_getPaymasterData',
+  ])
+    assert.ok(asked.includes(method), `${method} asked of CDP`);
+  assert.ok(
+    prepared.operation.paymasterAndData?.startsWith('0x2FAEB0760D4230Ef2aC21496Bb4F0b47D634FD4c'),
+  );
+  // Ours was never built for it: no keys, no own tables, nothing of ours prepared or signed.
+  assert.ok(
+    queries.every((sql) => !/own_paymaster/.test(sql)),
+    'no own_paymaster query while preparing with CDP',
+  );
+});

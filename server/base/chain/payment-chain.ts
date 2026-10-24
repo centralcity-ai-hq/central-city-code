@@ -590,6 +590,7 @@ export function createPaymentChain(deps: PaymentChainDeps) {
           idempotencyKey: intent.operationKey,
           intentHash: intent.intentHash,
           kind: 'transfer',
+          sponsorFlow: 'agentPay',
           account: { address: spender, recipe: spenderAccountRecipe(deps.network, signerAddress) },
           calls,
           maxCostWeiCap: deps.maxCostWeiCap,

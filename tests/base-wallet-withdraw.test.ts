@@ -2276,6 +2276,18 @@ test('shared: owner calls decode strictly; operations round-trip; signatures wra
 test('sponsors: the pinned mainnet paymaster with no token, exact layout; Sepolia and anything else fail closed', () => {
   const pinned = SPONSOR_PAYMASTERS[BASE_MAINNET][0];
   assert.equal(pinned, '0x2FAEB0760D4230Ef2aC21496Bb4F0b47D634FD4c');
+  // Operation Paymaster: our own instance, the same contract, is the only other one pinned.
+  assert.deepEqual(SPONSOR_PAYMASTERS[BASE_MAINNET], [
+    '0x2FAEB0760D4230Ef2aC21496Bb4F0b47D634FD4c',
+    '0x8Bf5b18b733a864c17Cd92615cD45D833Fcfe105',
+  ]);
+  assert.equal(
+    sponsoredWithoutCharge(
+      BASE_MAINNET,
+      `0x8Bf5b18b733a864c17Cd92615cD45D833Fcfe105${sponsorData('pinned', 7).slice(42)}`,
+    ),
+    true,
+  );
   assert.equal(SPONSOR_PAYMASTERS[BASE_SEPOLIA], undefined, 'nothing pinned on Sepolia');
   const onMainnet = (data: Hex) => `${pinned}${data.slice(42)}`;
   const covered = onMainnet(sponsorData('pinned', 7));

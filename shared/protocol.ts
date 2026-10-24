@@ -46,6 +46,14 @@ export const PROTOCOL_OFF_FLAGS = Object.freeze({
  */
 export const FEE_ROUTER2_FLAG = 'CITY_PROTOCOL_FEE_ROUTER2_ENABLED';
 
+/**
+ * The switch for fee router 3 (docs/protocol/FEE_ROUTER_3.md, x402 settlement): new payments go to
+ * router 3 only while this is exactly '1'. Off by default. The ledger counts router 3's fees
+ * whenever CITY_PROTOCOL_FEE_ROUTER3 and CITY_PROTOCOL_FEE_ROUTER3_FROM_BLOCK are set, whatever
+ * this says.
+ */
+export const FEE_ROUTER3_FLAG = 'CITY_PROTOCOL_FEE_ROUTER3_ENABLED';
+
 /** The chain Operation Protocol runs on. */
 export const PROTOCOL_CHAIN_ID = BASE_MAINNET;
 

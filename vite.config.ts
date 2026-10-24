@@ -166,7 +166,8 @@ function shareCards(): Plugin {
       const warn = (message: string) => this.warn(message);
       // The landing's agent count, read once for this build (never per request) and never failing
       // it: without a count the landing is built as before (scripts/prerender/agent-count.ts). The
-      // same response says whether to reserve the paid service calls line (never a number).
+      // same response gives the Base agents number and says whether to reserve the paid service
+      // calls line (never a number).
       const homeStats = fetchBuildHomeStats({ warn });
       let prerender: Awaited<ReturnType<typeof loadPrerender>> | null = null;
       try {
@@ -193,6 +194,7 @@ function shareCards(): Plugin {
         if (prerender) {
           const stats = await homeStats;
           prerender.setAgentCount(stats.count);
+          prerender.setBaseAgents(stats.base);
           prerender.setPaidCallsLine(stats.paidCalls);
           const home = homeHtml(html, prerender.render, warn);
           index.source = home.prerendered

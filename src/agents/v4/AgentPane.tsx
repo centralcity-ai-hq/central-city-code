@@ -39,6 +39,7 @@ import {
 import { useWalletRow } from '../../base/wallet/useWalletRow';
 import './agent-pane.css';
 import { useOpenInvitations } from './InvitationsScreen';
+import { FirstServiceCard } from './FirstServiceCard';
 
 export interface AgentPaneHandle {
   focus: () => void;
@@ -325,6 +326,7 @@ export const AgentPane = forwardRef<AgentPaneHandle, AgentPaneProps>(function Ag
         ) : paused ? (
           <p className="ap4-note ap4-wraps">{agent.name} is paused. It answers after you resume.</p>
         ) : null}
+        <FirstServiceCard agentId={removed ? null : agent.id} name={agent.name} />
         <div className="ap4-group">
           {wallet ? (
             <Row label="Wallet" k="row-wallet" value={wallet} onClick={() => open('wallet')} />

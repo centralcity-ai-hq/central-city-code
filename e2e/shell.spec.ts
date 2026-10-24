@@ -169,7 +169,9 @@ test('tokens follow the spec in light and dark, and the theme attribute wins', a
   expect((await tokens(page)).dur3).toBe(0);
 });
 
-test('one font file: Inter latin, hashed, preloaded, and no Space Grotesk', async ({ page }) => {
+test('fonts: Inter latin preloaded everywhere, Geist and Geist Mono on the landing only, all hashed, no Space Grotesk', async ({
+  page,
+}) => {
   const fonts: string[] = [];
   page.on('request', (request) => {
     if (request.resourceType() === 'font') fonts.push(new URL(request.url()).pathname);
@@ -179,31 +181,53 @@ test('one font file: Inter latin, hashed, preloaded, and no Space Grotesk', asyn
   await page.evaluate(() => document.fonts.ready);
   const preload = page.locator('link[rel="preload"][as="font"]');
   await expect(preload).toHaveCount(1);
-  // A content-hashed build URL, so it can be cached as immutable (DESIGN_SYSTEM §1.2).
+  // Content-hashed build URLs, so they can be cached as immutable (DESIGN_SYSTEM §1.2).
   const href = (await preload.getAttribute('href'))!;
   expect(href).toMatch(/^\/assets\/inter-latin-wght-normal-[A-Za-z0-9_-]{6,}\.woff2$/);
   await expect(preload).toHaveAttribute('crossorigin', '');
-  // The preloaded URL is the one the stylesheet uses: exactly one font request.
-  expect([...new Set(fonts)]).toEqual([href]);
+  // Exactly three font files: the preloaded Inter and the landing's two self-hosted Geist files
+  // (src/landing/landing.css; the CSP allows only 'self' fonts).
+  const files = [...new Set(fonts)];
+  expect(files).toHaveLength(3);
+  expect(files).toContain(href);
+  const geist = files.filter((file) => file !== href).sort();
+  expect(geist[0]).toMatch(/^\/assets\/geist-latin-wght-normal-[A-Za-z0-9_-]{6,}\.woff2$/);
+  expect(geist[1]).toMatch(/^\/assets\/geist-mono-latin-wght-normal-[A-Za-z0-9_-]{6,}\.woff2$/);
   expect(
-    await page.evaluate(() => document.fonts.check('600 48px "Inter Variable"', 'Central')),
-  ).toBe(true);
+    await page.evaluate(() => [
+      document.fonts.check('600 16px "Inter Variable"', 'Central'),
+      document.fonts.check('500 48px "Geist"', 'Central'),
+      document.fonts.check('400 24px "Geist Mono"', '1,284'),
+    ]),
+  ).toEqual([true, true, true]);
+  // The landing's own text is set in Geist (its buttons keep the shared .button style, in Inter);
+  // the header and footer stay in Inter.
   const families = await page.evaluate(() =>
-    [...document.querySelectorAll('h1, p, a, button')].map(
-      (element) => getComputedStyle(element).fontFamily,
-    ),
+    [...document.querySelectorAll('h1, p, a, button')].map((element) => ({
+      landing: Boolean(element.closest('main.cc-v10')),
+      button: element.classList.contains('button'),
+      family: getComputedStyle(element).fontFamily,
+    })),
   );
-  expect(families.every((family) => family.startsWith('"Inter Variable"'))).toBe(true);
+  expect(
+    families.filter((entry) => entry.button && !/^"?(Geist|Inter Variable)/.test(entry.family)),
+  ).toEqual([]);
+  const inMain = families.filter((entry) => entry.landing && !entry.button);
+  const outside = families.filter((entry) => !entry.landing && !entry.button);
+  expect(inMain.length).toBeGreaterThan(10);
+  expect(outside.length).toBeGreaterThan(10);
+  expect(inMain.filter((entry) => !/^"?Geist/.test(entry.family))).toEqual([]);
+  expect(outside.filter((entry) => !entry.family.startsWith('"Inter Variable"'))).toEqual([]);
   const css = await page.evaluate(() =>
     [...document.styleSheets]
       .flatMap((sheet) => [...sheet.cssRules].map((rule) => rule.cssText))
       .join('\n'),
   );
   expect(css).not.toMatch(/Space Grotesk/i);
-  // The sign-in and connect pages use the same single file.
+  // The sign-in and connect pages use Inter only: no further font file.
   await page.goto('/#connect');
   await page.evaluate(() => document.fonts.ready);
-  expect([...new Set(fonts)]).toEqual([href]);
+  expect([...new Set(fonts)].sort()).toEqual([...files].sort());
 });
 
 const GROUP_LABELS = NAV_GROUPS.map((group) => group.label);
@@ -851,26 +875,47 @@ test('footer bottom row has 44 px targets; the font licence lives on the open so
   expect((await page.request.get('/licenses/inter-OFL.txt')).status()).toBe(200);
 });
 
-test('landing hero at 1440 px: centred on the page, copy centred in the left half, video right', async ({
+test('landing hero at 1440 px: centred, headline left, sentence and actions right, the live numbers full width under both', async ({
   page,
 }) => {
+  await page.route('**/api/session', (route) =>
+    route.request().method() === 'GET'
+      ? route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ operator: null, setupRequired: false }),
+        })
+      : route.fallback(),
+  );
   await gotoMounted(page, '/');
   const hero = page.getByRole('region', { name: 'Every AI. One room.' });
   const box = (await hero.boundingBox())!;
   expect(Math.abs(box.x + box.width / 2 - 1440 / 2)).toBeLessThanOrEqual(2);
-  // Two equal columns (claude.com's hero): the copy fills the left one, the video the right.
-  const copy = (await hero.locator('.cc-lp-hero-copy').boundingBox())!;
-  const media = (await hero.locator('.cc-lp-hero-media').boundingBox())!;
-  expect(Math.abs(copy.width - media.width)).toBeLessThanOrEqual(2);
-  expect(copy.x + copy.width).toBeLessThanOrEqual(media.x);
-  // The actions row is centred in the copy column: equal space left and right of its buttons.
-  const first = (await hero.locator('.hero-actions > *').first().boundingBox())!;
-  const last = (await hero.locator('.hero-actions > *').last().boundingBox())!;
-  const left = first.x - copy.x;
-  const right = copy.x + copy.width - (last.x + last.width);
-  expect(left).toBeGreaterThan(24);
-  expect(Math.abs(left - right)).toBeLessThanOrEqual(2);
-  await expect(hero.locator('.cc-lp-hero-copy')).toHaveCSS('text-align', 'center');
+  await expect(hero.locator('video')).toHaveCount(0);
+  await page.evaluate(() => document.fonts.ready);
+  const left = (await hero.locator('.cc-hero-l').boundingBox())!;
+  const right = (await hero.locator('.cc-hero-r').boundingBox())!;
+  const numbers = (await hero.locator('[data-live-numbers]').boundingBox())!;
+  // Two columns: the headline (wider) on the left, the sentence and actions on the right.
+  await expect(hero.locator('.cc-hero-l h1')).toHaveText('Every AI. One room.');
+  await expect(hero.locator('.cc-hero-r .cc-landing-sub')).toBeVisible();
+  await expect(hero.locator('.cc-hero-r .hero-actions .button')).toHaveCount(2);
+  expect(left.x + left.width).toBeLessThanOrEqual(right.x);
+  expect(left.width).toBeGreaterThan(right.width);
+  // Left-aligned, the actions starting under the sentence.
+  await expect(hero.locator('.cc-hero-l')).toHaveCSS('text-align', 'left');
+  const sub = (await hero.locator('.cc-landing-sub').boundingBox())!;
+  const firstAction = (await hero.locator('.hero-actions > *').first().boundingBox())!;
+  expect(Math.abs(firstAction.x - sub.x)).toBeLessThanOrEqual(1);
+  // The numbers: one row of four under both columns, across the hero's whole width.
+  expect(numbers.y).toBeGreaterThanOrEqual(Math.max(left.y + left.height, right.y + right.height));
+  expect(Math.abs(numbers.x - box.x)).toBeLessThanOrEqual(1);
+  expect(Math.abs(numbers.x + numbers.width - (box.x + box.width))).toBeLessThanOrEqual(1);
+  const cells = await hero
+    .locator('[data-live-numbers] .cc-kc')
+    .evaluateAll((all) => all.map((element) => element.getBoundingClientRect().y));
+  expect(cells).toHaveLength(4);
+  expect(new Set(cells.map(Math.round)).size).toBe(1);
 });
 
 test('unknown paths show the 404 page in the public shell', async ({ page }) => {
@@ -999,13 +1044,28 @@ test('a chunk a deploy removed reloads the page once, keeping the query and hash
   await expect(page.getByRole('alert')).toHaveCount(0);
 });
 
-test('on the landing page the header button steps back while the hero button is visible', async ({
+test('on the landing page the header button steps back while #hero-invite is visible', async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 600 });
   await gotoMounted(page, '/');
   const header = page.getByRole('banner').getByRole('link', { name: 'Invite your AI' });
+  const heroInvite = page.locator('#hero-invite');
+  await expect(heroInvite).toHaveText('Invite your AI');
+  /** Filled buttons whose box is on screen. */
+  const filledInView = () =>
+    page.locator('.button.primary').evaluateAll(
+      (all) =>
+        all.filter((element) => {
+          const box = element.getBoundingClientRect();
+          return box.width > 0 && box.bottom > 0 && box.top < innerHeight;
+        }).length,
+    );
+  await heroInvite.scrollIntoViewIfNeeded();
+  await expect(heroInvite).toBeInViewport();
   await expect(header).toHaveClass(/\bsecondary\b/);
+  // One filled button in view: the page's own.
+  expect(await filledInView()).toBe(1);
   // It swaps in one step: a fading background under an instantly switched text colour showed dark
   // text on blue for a moment (below AA).
   expect(
@@ -1015,13 +1075,9 @@ test('on the landing page the header button steps back while the hero button is 
         .every((d) => parseFloat(d) === 0),
     ),
   ).toBe(true);
-  // v8 intentionally has a filled hero 'Sign up' and a filled CTA 'Invite your AI' (the v8 landing).
-  // Allow up to two filled primary buttons on the landing page while the header button steps back.
-  const filledButtons = await page.locator('.button.primary:visible').count();
-  expect(filledButtons).toBeGreaterThanOrEqual(1);
-  expect(filledButtons).toBeLessThanOrEqual(2);
-  await page.locator('#how').scrollIntoViewIfNeeded();
-  await page.mouse.wheel(0, 2000);
+  // Away from it the header's button is filled again.
+  await page.locator('#passport').scrollIntoViewIfNeeded();
+  await expect(heroInvite).not.toBeInViewport();
   await expect(header).toHaveClass(/\bprimary\b/);
   // Other pages have no hero button, so the header's is primary.
   await page.goto('/#connect');

@@ -67,6 +67,11 @@ export async function onboardingOf(q: Q, operatorId: string) {
 /**
  * Throws OnboardingRequiredError when `operatorId` (or, for an AI-owned workspace, any of its
  * human co-owners) has not finished onboarding. One query.
+ *
+ * The ids are gathered first (ARRAY(...), evaluated once) and looked up with = ANY, so the
+ * operators primary key is used. Written as `o.id=$1 OR o.id IN (...)` the planner scanned all of
+ * operators (1.8M rows) on every call (prod plan, 22 Oct 05:52 UTC: 44 sessions in that scan at
+ * once). Same rows either way.
  */
 export async function assertOnboarded(q: Q, operatorId: string): Promise<void> {
   const rows = (
@@ -76,10 +81,11 @@ export async function assertOnboarded(q: Q, operatorId: string): Promise<void> {
                 AS google_linked
          FROM operators o
          LEFT JOIN account_terms_acceptances a ON a.operator_id=o.id
-        WHERE o.id=$1
-           OR o.id IN (SELECT l.human_operator_id FROM operator_links l
-                        JOIN operators ai ON ai.id=l.ai_operator_id AND ai.kind='ai'
-                       WHERE l.ai_operator_id=$1)`,
+        WHERE o.id = ANY(ARRAY(SELECT $1::text
+                                UNION ALL
+                                SELECT l.human_operator_id FROM operator_links l
+                                  JOIN operators ai ON ai.id=l.ai_operator_id AND ai.kind='ai'
+                                 WHERE l.ai_operator_id=$1))`,
       [operatorId],
     )
   ).rows;

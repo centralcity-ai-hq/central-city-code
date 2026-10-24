@@ -7,6 +7,7 @@ import { runMigrations } from '../server/migrations.js';
 import { PGlite } from '@electric-sql/pglite';
 import { readFileSync } from 'node:fs';
 import { PAID_CALL_COUNT_SQL, paidCallCountMigration } from '../server/feed/pay/count-schema.js';
+import { PAID_CALL_VALUE_SQL } from '../server/feed/pay/value-schema.js';
 
 const PAID_CALLS_SCHEMA_DOC = readFileSync(
   new URL('../server/feed/pay/count-schema.ts', import.meta.url),
@@ -346,6 +347,17 @@ test('recent holds Base block times, newest first, at most 64', async (t) => {
  * CITY_TEST_POSTGRES_URL (a role that may create databases, as the other race suites; CI's
  * postgres-races job runs this file); skipped without it.
  */
+/** The settled value of a chain's row (migration 243), in USDC base units. */
+async function value(db: Pick<Database, 'query'>, chainId = 8453): Promise<bigint> {
+  const row = (
+    await db.query<{ v: string }>(
+      'SELECT value_raw::text AS v FROM paid_call_count WHERE chain_id = $1',
+      [chainId],
+    )
+  ).rows[0];
+  return BigInt(row?.v ?? '0');
+}
+
 const REAL_PG = { skip: !process.env.CITY_TEST_POSTGRES_URL, timeout: 60_000 };
 
 /** A fresh database with every migration and `connections` single-connection pools. */
@@ -466,13 +478,15 @@ test(
     assert.ok(took >= 200, `the settle waited for the lock limit (${took} ms)`);
     await hold.release();
     assert.deepEqual(await paymentStates(payer, [id]), ['settled']);
-    // The racing insert counted 1 of its own, this +1 was skipped: the check puts it right.
+    // The racing insert counted 1 of its own with no value (migration 243), this +1 was skipped:
+    // the count is right by chance, the value is not, and the check puts the value right.
     assert.deepEqual(await checkPaidCalls(holder, { log: quiet }), {
       counter: 1,
       scan: 1,
       drift: 0,
-      repaired: false,
+      repaired: true,
     });
+    assert.equal(await value(holder), 20_000n);
   },
 );
 
@@ -613,3 +627,104 @@ test('migration 128: never below zero, and a broken counter does not block the d
   assert.equal(saved?.payment_state, 'cancelled', 'the payment save commits');
   await db.exec('ALTER TABLE paid_call_count_moved RENAME TO paid_call_count');
 });
+
+test('migration 243: the settled value moves exactly with the count (+ on settle, - on drop, never below 0)', async (t) => {
+  const db = await migrated(t);
+  const a = await call(db);
+  const b = await call(db);
+  assert.equal(await value(db), 0n);
+  await settle(db, a, { at: 10 });
+  assert.equal(await value(db), 20_000n);
+  await settle(db, b, { at: 20, noResult: true });
+  assert.equal(await base(db), 2);
+  assert.equal(await value(db), 40_000n);
+  // A rollback takes nothing, like the +1.
+  const c = await call(db);
+  await assert.rejects(
+    db.transaction(async (tx) => {
+      await tx.query(
+        `UPDATE feed_pay_calls SET payment_state = 'settled', settled_at = 30 WHERE call_id = $1`,
+        [c],
+      );
+      throw new Error('roll back');
+    }),
+    /roll back/,
+  );
+  assert.equal(await value(db), 40_000n);
+  // A reorg drop takes its value back; settled again, it counts once again.
+  await drop(db, b);
+  assert.equal(await base(db), 1);
+  assert.equal(await value(db), 20_000n);
+  await settle(db, b, { at: 40 });
+  assert.equal(await value(db), 40_000n);
+  // Never below zero.
+  await db.query('UPDATE paid_call_count SET value_raw = 5 WHERE chain_id = 8453');
+  await drop(db, a);
+  assert.equal(await value(db), 0n);
+});
+
+test('migration 243: the daily check repairs the value, even when the count is right', async (t) => {
+  const db = await migrated(t);
+  const a = await call(db);
+  const b = await call(db);
+  await settle(db, a);
+  await settle(db, b);
+  await db.query('UPDATE paid_call_count SET value_raw = 7 WHERE chain_id = 8453');
+  const result = await checkPaidCalls(db, { log: quiet });
+  assert.equal(result?.repaired, true);
+  assert.equal(result?.drift, 0);
+  assert.equal(await base(db), 2);
+  assert.equal(await value(db), 40_000n);
+  // In step afterwards: nothing more to repair.
+  assert.equal((await checkPaidCalls(db, { log: quiet }))?.repaired, false);
+});
+
+test('migration 243: the backfill sums the settled calls per chain; it takes no lock on feed_pay_calls', async (t) => {
+  const db = await migrated(t, {
+    before120: async (raw) => {
+      for (let i = 0; i < 3; i++)
+        await call(raw, { state: 'result_saved', paymentState: 'settled', settledAt: 5 });
+      await call(raw, { chainId: 84532, state: 'result_saved', paymentState: 'settled' });
+      await call(raw, { state: 'calling', paymentState: 'sent' });
+    },
+  });
+  assert.equal(await value(db), 60_000n);
+  assert.equal(await value(db, 84532), 20_000n);
+  assert.doesNotMatch(PAID_CALL_VALUE_SQL, /CREATE\s+(CONSTRAINT\s+)?TRIGGER/i);
+});
+
+for (const kind of ['settle', 'drop'] as const)
+  test(
+    `real PG: migration 243 holding paid_call_count (ACCESS EXCLUSIVE) does not fail a ${kind}; the check repairs it`,
+    REAL_PG,
+    async (t) => {
+      const [holder, payer] = (await realPg(t, 2)) as [Database, Database];
+      const kept = await call(payer);
+      const other = await call(payer);
+      await settle(payer, kept);
+      if (kind === 'drop') await settle(payer, other);
+      const before = { count: await base(holder), value: await value(holder) };
+      // What 243's ALTER TABLE takes until its migration batch commits.
+      const hold = await holdCounterRow(
+        holder,
+        'LOCK TABLE paid_call_count IN ACCESS EXCLUSIVE MODE',
+      );
+      const started = Date.now();
+      if (kind === 'settle') assert.equal(await settle(payer, other), true);
+      else await drop(payer, other);
+      const took = Date.now() - started;
+      assert.ok(took < 3_000, `the ${kind} took ${took} ms`);
+      await hold.release();
+      // The save committed; its counter update was skipped (bounded wait, then lock_not_available).
+      assert.deepEqual(await paymentStates(payer, [other]), [
+        kind === 'settle' ? 'settled' : 'cancelled',
+      ]);
+      assert.deepEqual({ count: await base(holder), value: await value(holder) }, before);
+      // The daily check puts count and value right.
+      const result = await checkPaidCalls(holder, { log: quiet });
+      assert.equal(result?.repaired, true);
+      const expected = kind === 'settle' ? 2 : 1;
+      assert.equal(await base(holder), expected);
+      assert.equal(await value(holder), BigInt(expected * 20_000));
+    },
+  );

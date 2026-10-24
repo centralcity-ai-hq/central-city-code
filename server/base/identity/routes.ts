@@ -57,6 +57,20 @@ export interface ChainRuntime {
    * pinned sponsor as agent payments.
    */
   feedPay?: () => FeedPayChainPort;
+  /** Fee router 3's facilitator (server/protocol/x402/facilitator.ts); null when not configured. */
+  router3Facilitator?: () => import('../../feed/pay/router3.js').Router3FacilitatorPort | null;
+  /**
+   * The sponsored first purchase's payer (server/feed/pay/sponsored.ts): the sponsor's signer and
+   * its own facilitator over its own key; null unless CITY_SFP_SPONSOR_KEY_REF and router 3 are set.
+   */
+  sponsorPay?: () => Promise<import('../../feed/pay/sponsored.js').SponsorPay | null>;
+  /**
+   * Our own bundler's upkeep (direct-bundler.ts maintain: rebroadcast, replace, cancel, receipts,
+   * settlement), for its cron; only while CITY_BASE_BUNDLER=direct is in effect.
+   */
+  ownBundlerUpkeep?: import('../chain/direct-bundler.js').OwnBundlerUpkeep;
+  /** Whether our bundler is in effect or the CDP fallback is (public route). */
+  ownBundlerEffective?: () => 'direct' | 'cdp_fallback' | 'unknown';
   /** The network's public read client, for read-only contract calls (payment screening). */
   readClient?: import('viem').PublicClient;
   /**
@@ -93,9 +107,17 @@ export interface RegisterRouteDeps {
 }
 
 export const IDENTITY_FINALIZE_PATH = '/api/cron/base-identity-finalize';
-/** Rows claimed per cron run, advanced at most this many at a time, within this deadline. */
-export const FINALIZE_BATCH = 25;
-export const FINALIZE_CONCURRENCY = 5;
+/** Rows already registered or in flight claimed per cron run, advanced at most this many at a time, within this deadline. */
+export const FINALIZE_BATCH = 100;
+/**
+ * Rows not yet registered on chain (no mint operation, no id) one run may take on top of the
+ * batch, so a run claims at most FINALIZE_BATCH + this many rows: new registrations at most this
+ * many per run (a per-run bound; with the one-minute cron about 1,200 per hour while the 23 Oct backlog clears). Rows already minted
+ * (hand-over, finalizing) are advanced first, then registrations in flight, then these, so a
+ * backlog of unregistered rows never starves the hand-overs of identities already minted.
+ */
+export const FINALIZE_REGISTER_PER_RUN = 20;
+export const FINALIZE_CONCURRENCY = 20;
 export const FINALIZE_DEADLINE_MS = 45_000;
 /** A row claimed by a run is not claimed again for this long. */
 export const FINALIZE_RECLAIM_MS = 50_000;
@@ -550,20 +572,38 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
         return reply.code(404).send({ error: 'Not found.' });
       const clock = deps.now ?? Date.now;
       const started = clock();
-      const { rows } = await deps.db.query<{ agent_id: string; chain_id: number }>(
-        `UPDATE base_identities SET swept_at = $1::bigint
-         WHERE (agent_id, chain_id) IN (
-           SELECT agent_id, chain_id FROM base_identities
-           WHERE state IN ('pending','submitted') AND op_id IS NOT NULL
+      const due = `state IN ('pending','submitted') AND op_id IS NOT NULL
              AND (swept_at IS NULL OR swept_at <= $2::bigint)
              AND updated_at <= $3::bigint
              AND (handover_retry_at IS NULL OR handover_retry_at <= $1::bigint)
-             AND (register_retry_at IS NULL OR register_retry_at <= $1::bigint)
-           ORDER BY swept_at NULLS FIRST, updated_at LIMIT ${FINALIZE_BATCH}
-           FOR UPDATE SKIP LOCKED)
-         RETURNING agent_id, chain_id`,
+             AND (register_retry_at IS NULL OR register_retry_at <= $1::bigint)`;
+      const unregistered =
+        'mint_op_id IS NULL AND erc8004_agent_id IS NULL AND provisional_agent_id IS NULL';
+      const { rows: claimed } = await deps.db.query<{
+        agent_id: string;
+        chain_id: number;
+        tier: number;
+      }>(
+        `WITH started AS (
+           SELECT agent_id, chain_id FROM base_identities
+           WHERE ${due} AND NOT (${unregistered})
+           ORDER BY (erc8004_agent_id IS NULL AND provisional_agent_id IS NULL),
+                    swept_at NULLS FIRST, updated_at
+           LIMIT ${FINALIZE_BATCH} FOR UPDATE SKIP LOCKED),
+         fresh AS (
+           SELECT agent_id, chain_id FROM base_identities
+           WHERE ${due} AND ${unregistered}
+           ORDER BY swept_at NULLS FIRST, updated_at
+           LIMIT ${FINALIZE_REGISTER_PER_RUN} FOR UPDATE SKIP LOCKED)
+         UPDATE base_identities SET swept_at = $1::bigint
+         WHERE (agent_id, chain_id) IN (SELECT * FROM started UNION ALL SELECT * FROM fresh)
+         RETURNING agent_id, chain_id,
+           CASE WHEN erc8004_agent_id IS NOT NULL OR provisional_agent_id IS NOT NULL THEN 0
+                WHEN mint_op_id IS NOT NULL THEN 1 ELSE 2 END AS tier`,
         [started, started - FINALIZE_RECLAIM_MS, started - FINALIZE_FRESH_MS],
       );
+      // RETURNING has no order: the workers take minted rows first, then in flight, then new ones.
+      const rows = [...claimed].sort((a, b) => Number(a.tier) - Number(b.tier));
       const services = new Map<number, Promise<ReturnType<typeof createIdentityService>>>();
       const serviceFor = (chainId: number) => {
         let service = services.get(chainId);

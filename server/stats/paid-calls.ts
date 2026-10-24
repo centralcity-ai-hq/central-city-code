@@ -5,6 +5,7 @@ import {
   PAID_CALLS_RECENT_WINDOW_MS,
   type PaidCallsField,
 } from '../../shared/paid-calls.js';
+import { WALLET_CHAIN_ID } from '../../shared/base/wallet-network.js';
 
 export { PAID_CALLS_CHAIN_ID };
 
@@ -25,16 +26,23 @@ export const PAID_CALLS_CACHE_MS = 5_000;
  * database never holds up the agent count. The read itself carries on and fills the cache.
  */
 export const PAID_CALLS_READ_BUDGET_MS = 250;
+/**
+ * With no last good row yet (a cold instance), the response waits up to this long instead: the edge
+ * serves visitors its stored copy meanwhile, and an answer without the field would be cached for
+ * everyone and show a dash (23 Oct 2026).
+ */
+export const PAID_CALLS_COLD_READ_BUDGET_MS = 3_000;
 
 /**
  * After a slow or failed read, the last good row is served while it is at most this old (its
- * `as_of` stays at its own read, so it never looks newer than it is); after that the field is left
- * out. Same as the client's old copy limit (shared/paid-calls.ts PAID_CALLS_OLD_COPY_MS).
+ * `as_of` stays at its own read, so it never looks newer than it is, and the client greys its live
+ * dot past shared/paid-calls.ts PAID_CALLS_OLD_COPY_MS); after that the field is left out. Same as
+ * the Base agents number (BASE_AGENTS_LAST_GOOD_MS): an old number beats a dash.
  */
-export const PAID_CALLS_LAST_GOOD_MS = 120_000;
+export const PAID_CALLS_LAST_GOOD_MS = 60 * 60_000;
 
 /** One primary-key read, with the database clock so ages are measured on one clock. */
-export const PAID_CALLS_READ_SQL = `SELECT total, recent,
+export const PAID_CALLS_READ_SQL = `SELECT total, recent, value_raw::text AS value_raw,
   (extract(epoch FROM clock_timestamp()) * 1000)::bigint AS now_ms
   FROM paid_call_count WHERE chain_id = $1`;
 
@@ -42,6 +50,8 @@ export interface PaidCallsSnapshot {
   total: number;
   /** Base block times (epoch ms) of the latest payments, newest first, at most 64. */
   recent: number[];
+  /** The USDC (base units, decimal text) paid for all of them (migration 243); null if unread. */
+  valueRaw?: string | null;
   /** The database clock when the row was read (epoch ms). */
   dbNowMs: number;
   /** This server's clock when the row arrived (epoch ms). */
@@ -88,15 +98,21 @@ export function createPaidCallsReader(deps: {
     const started = deps.clock();
     try {
       const row = (
-        await deps.db.query<{ total: unknown; recent: unknown; now_ms: unknown }>(
-          PAID_CALLS_READ_SQL,
-          [chainId],
-        )
+        await deps.db.query<{
+          total: unknown;
+          recent: unknown;
+          value_raw: unknown;
+          now_ms: unknown;
+        }>(PAID_CALLS_READ_SQL, [chainId])
       ).rows[0];
       const value = row
         ? {
             total: Number(row.total),
             recent: toNumbers(row.recent),
+            valueRaw:
+              typeof row.value_raw === 'string' && /^(0|[1-9][0-9]{0,77})$/.test(row.value_raw)
+                ? row.value_raw
+                : null,
             dbNowMs: Number(row.now_ms),
             readAt: deps.clock(),
           }
@@ -147,6 +163,7 @@ export function paidCallsField(snapshot: PaidCallsSnapshot, now: number): PaidCa
     recent_complete: !(
       snapshot.recent.length >= PAID_CALLS_RECENT_MAX && inWindow.length === snapshot.recent.length
     ),
+    ...(snapshot.valueRaw ? { value_settled_raw: snapshot.valueRaw } : {}),
   };
 }
 
@@ -159,7 +176,28 @@ export const PAID_CALLS_CHECK_TIMEOUT_MS = 3_000;
 /** One statement, so both numbers come from the same moment. */
 export const PAID_CALLS_CHECK_SQL = `SELECT
   (SELECT total FROM paid_call_count WHERE chain_id = $1) AS counter,
-  (SELECT count(*) FROM feed_pay_calls WHERE chain_id = $1 AND payment_state = 'settled') AS scan`;
+  (SELECT value_raw::text FROM paid_call_count WHERE chain_id = $1) AS counter_value,
+  s.scan, s.scan_value::text AS scan_value
+  FROM (SELECT count(*) AS scan, COALESCE(sum(amount_raw + fee_raw), 0) AS scan_value
+          FROM feed_pay_calls WHERE chain_id = $1 AND payment_state = 'settled') s`;
+
+/** The network sponsored first purchases are paid on (migration 252 counts them in its row). */
+export const PAID_CALLS_SPONSORED_CHAIN_ID = WALLET_CHAIN_ID;
+
+/**
+ * The same check for the sponsored chain's row: the settled calls plus the counted sponsored
+ * first purchases (migration 252, server/feed/pay/sponsored-count-schema.ts: state 'paid',
+ * 'delivered' or 'paid_no_result' with a transaction; value gross_raw, fee included).
+ */
+export const PAID_CALLS_CHECK_WITH_SPONSORED_SQL = `SELECT
+  (SELECT total FROM paid_call_count WHERE chain_id = $1) AS counter,
+  (SELECT value_raw::text FROM paid_call_count WHERE chain_id = $1) AS counter_value,
+  s.scan + p.scan AS scan, (s.scan_value + p.scan_value)::text AS scan_value
+  FROM (SELECT count(*) AS scan, COALESCE(sum(amount_raw + fee_raw), 0) AS scan_value
+          FROM feed_pay_calls WHERE chain_id = $1 AND payment_state = 'settled') s,
+       (SELECT count(*) AS scan, COALESCE(sum(gross_raw), 0) AS scan_value
+          FROM feed_pay_sponsored_calls
+         WHERE state IN ('paid','delivered','paid_no_result') AND tx_hash IS NOT NULL) p`;
 
 /**
  * Adds the difference found (scan minus the counter as read), so payments that settle meanwhile
@@ -167,10 +205,11 @@ export const PAID_CALLS_CHECK_SQL = `SELECT
  * transaction as the read and under the check's own lock (PAID_CALLS_CHECK_LOCK_SQL), so two runs
  * never both add the same difference.
  */
-export const PAID_CALLS_REPAIR_SQL = `INSERT INTO paid_call_count AS c (chain_id, total, recent, updated_at)
-  VALUES ($1, $2::bigint, '{}', (extract(epoch FROM clock_timestamp()) * 1000)::bigint)
+export const PAID_CALLS_REPAIR_SQL = `INSERT INTO paid_call_count AS c (chain_id, total, recent, updated_at, value_raw)
+  VALUES ($1, $2::bigint, '{}', (extract(epoch FROM clock_timestamp()) * 1000)::bigint, $4::numeric)
   ON CONFLICT (chain_id) DO UPDATE SET
     total = GREATEST(0, c.total + ($2::bigint - $3::bigint)),
+    value_raw = GREATEST(0, c.value_raw + ($4::numeric - $5::numeric)),
     updated_at = EXCLUDED.updated_at`;
 
 /**
@@ -208,9 +247,10 @@ function errorCode(error: unknown): string {
 }
 
 /**
- * Compares the counter with a scan of the settled calls of one chain (Base mainnet by default)
- * and, when they differ, adds the difference. The read and the repair are one transaction under
- * the check's own advisory lock, so overlapping runs never both add the same difference: a run
+ * Compares the counter with a scan of the settled calls of one chain (Base mainnet by default),
+ * plus the counted sponsored first purchases on their chain (migration 252), and, when they
+ * differ, adds the difference. The read and the repair are one transaction under the check's own
+ * advisory lock, so overlapping runs never both add the same difference: a run
  * that finds the lock taken returns null and logs `paid_calls_check_skipped`. Never throws: a
  * timeout or any other failure is logged (counts and a code only) and returns null, so the other
  * daily checks still run. Before migration 125 (or in a database without Feed pay) there is
@@ -235,33 +275,54 @@ export async function checkPaidCalls(
     const outcome = await db.transaction(async (tx) => {
       const bounded = boundedBy(deadline, now);
       const present = (
-        await bounded<{ ok: boolean }>(
+        await bounded<{ ok: boolean; sponsored: boolean }>(
           tx,
-          "SELECT to_regclass('paid_call_count') IS NOT NULL AND to_regclass('feed_pay_calls') IS NOT NULL AS ok",
+          `SELECT to_regclass('paid_call_count') IS NOT NULL AND to_regclass('feed_pay_calls') IS NOT NULL AS ok,
+                  to_regclass('feed_pay_sponsored_calls') IS NOT NULL AS sponsored`,
         )
-      ).rows[0]?.ok;
-      if (!present) return null;
+      ).rows[0];
+      if (!present?.ok) return null;
+      // Sponsored first purchases count in their chain's row (migration 252).
+      const checkSql =
+        present.sponsored && chainId === PAID_CALLS_SPONSORED_CHAIN_ID
+          ? PAID_CALLS_CHECK_WITH_SPONSORED_SQL
+          : PAID_CALLS_CHECK_SQL;
       const locked = (await bounded<{ ok: boolean }>(tx, PAID_CALLS_CHECK_LOCK_SQL, [chainId]))
         .rows[0]?.ok;
       if (!locked) return 'busy' as const;
       const row = (
-        await bounded<{ counter: unknown; scan: unknown }>(tx, PAID_CALLS_CHECK_SQL, [chainId])
+        await bounded<{
+          counter: unknown;
+          counter_value: unknown;
+          scan: unknown;
+          scan_value: unknown;
+        }>(tx, checkSql, [chainId])
       ).rows[0];
       const counter =
         row?.counter === null || row?.counter === undefined ? null : Number(row.counter);
       const scan = Number(row?.scan ?? 0);
       const drift = (counter ?? 0) - scan;
+      const counterValue = BigInt(String(row?.counter_value ?? '0'));
+      const scanValue = BigInt(String(row?.scan_value ?? '0'));
+      const valueDrift = counterValue - scanValue;
       // In step, or nothing settled yet and no row: nothing to add.
-      const repair = !(drift === 0 && (counter !== null || scan === 0));
-      if (repair) await bounded(tx, PAID_CALLS_REPAIR_SQL, [chainId, scan, counter ?? 0]);
-      return { counter, scan, drift, repaired: repair };
+      const repair = !(drift === 0 && valueDrift === 0n && (counter !== null || scan === 0));
+      if (repair)
+        await bounded(tx, PAID_CALLS_REPAIR_SQL, [
+          chainId,
+          scan,
+          counter ?? 0,
+          scanValue.toString(10),
+          counterValue.toString(10),
+        ]);
+      return { counter, scan, drift, valueDrift: valueDrift.toString(10), repaired: repair };
     });
     if (outcome === null) return null;
     if (outcome === 'busy') {
       log('info', { event: 'paid_calls_check_skipped', ...chain });
       return null;
     }
-    const { counter, scan, drift, repaired } = outcome;
+    const { counter, scan, drift, valueDrift, repaired } = outcome;
     if (!repaired) {
       log('info', {
         event: 'paid_calls_check',
@@ -278,6 +339,7 @@ export async function checkPaidCalls(
       paid_calls_counter: counter,
       paid_calls_scan: scan,
       paid_calls_drift: drift,
+      paid_calls_value_drift_raw: valueDrift,
       repaired: true,
     });
     return { counter, scan, drift, repaired: true, ...chain };

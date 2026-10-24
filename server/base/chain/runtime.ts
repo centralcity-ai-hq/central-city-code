@@ -37,9 +37,28 @@
  * recent; see `identityClient` below). Payments and owner operations, their fee quotes included,
  * read CDP first.
  */
-import { createPublicClient, type Hex } from 'viem';
+import { createPublicClient, parseAbi, type Hex } from 'viem';
+import { batchWorkspacesFromEnv, router3AddressFromEnv } from '../../feed/pay/router3.js';
+import { createSponsorSigner } from '../../feed/pay/sponsor-signer.js';
+import { SFP_SPONSOR_KEY_REF_SETTING } from '../../feed/pay/sponsor-key.js';
+import {
+  SPONSORED_KEY_PREFIX,
+  sponsoredSenderMinEthWei,
+  sponsoredSendsViaFacilitator,
+  type SponsorPay,
+} from '../../feed/pay/sponsored.js';
+import {
+  createRouter3Facilitator,
+  type FacilitatorBatchConfig,
+  type FacilitatorBatchGroup,
+} from '../../protocol/x402/facilitator.js';
 import type { Database } from '../../database.js';
-import { BASE_MAINNET, baseNetwork, type BaseChainId } from '../../../shared/base/chains.js';
+import {
+  BASE_MAINNET,
+  baseNetwork,
+  type Address,
+  type BaseChainId,
+} from '../../../shared/base/chains.js';
 import type { ChainRuntime } from '../identity/routes.js';
 import { baseBalanceReader, reservationBalanceOf } from './balances.js';
 import { createIdentityChainPort } from './identity-port.js';
@@ -51,6 +70,9 @@ import { WALLET_CHAIN_ID } from '../../../shared/base/wallet-network.js';
 import { walletSignature } from './permissions.js';
 import { createWalletChainPort } from './port.js';
 import { BUNDLER_429_WAITS_MS, rpcBundler } from './rpc-bundler.js';
+import { bundlerChoice, createDirectBundler, lazyBundler } from './direct-bundler.js';
+import { ownPaymasterAddress, ownPaymasterMode } from './own-paymaster-keys.js';
+import type { Bundler } from './submit.js';
 import { blockTagCache, CDP_RETRY, withLiveReads } from './rpc-budget.js';
 import { baseReadTransport, baseReadUrls } from './read-transport.js';
 import { pgAuthorizationStore, pgChainOperationStore, pgSpenderKeyStore } from './stores.js';
@@ -70,6 +92,12 @@ export const HINT_TTL_MS = 10_000;
 
 /** The setting that bounds every owner wallet operation (required on mainnet). */
 export const WALLET_FEE_CAP_SETTING = 'CITY_BASE_WALLET_FEE_CAP_WEI';
+
+/** A whole number from env within [min, max], else the fallback. */
+function boundedInt(raw: string | undefined, fallback: number, min: number, max: number): number {
+  const n = Number(raw?.trim());
+  return Number.isInteger(n) && n >= min && n <= max ? n : fallback;
+}
 
 function required(env: Record<string, string | undefined>, name: string): string {
   const value = env[name]?.trim();
@@ -186,6 +214,46 @@ export function feedPayEndpoint(input: {
   };
 }
 
+/**
+ * The sponsored first purchase's batch settings (CITY_SFP_BATCH_*): at most 50 per settleBatch, a
+ * 1.5 s window. Sponsored members carry no MCP grant to revalidate (grant null), and wait for the
+ * next submit or the worker cron's flush: the 10 s default refused them as too old (canary 22 Oct,
+ * REFUSED_BEFORE_BROADCAST). 2 min, well inside the legs' 600 s window; authorize() still checks
+ * each member right before signing.
+ */
+export function sponsoredBatchFromEnv(env: Record<string, string | undefined>) {
+  return {
+    maxItems: boundedInt(env.CITY_SFP_BATCH_MAX, 50, 2, 200),
+    windowMs: boundedInt(env.CITY_SFP_BATCH_WINDOW_MS, 1_500, 200, 30_000),
+    maxMemberAgeMs: boundedInt(env.CITY_SFP_BATCH_MEMBER_AGE_MS, 120_000, 10_000, 300_000),
+  };
+}
+
+/**
+ * The router-3 facilitator's batch config. The engine's batch lane only while an allowlist is set
+ * (CITY_PAY_BATCH_WORKSPACES; room Stress Test #200), its size and window from env, defaults 50 and
+ * 1.5 s, its member age the facilitator's default. With CITY_SFP_SEND_VIA_FACILITATOR the sponsored
+ * settlements are their own batch group ('sfp:' keys, sponsoredBatchFromEnv), and without an engine
+ * allowlist ONLY that group batches (groupsOnly): every engine settlement is then sent alone,
+ * exactly as without a batch config. Neither: no batch config, as before.
+ */
+export function router3BatchFromEnv(
+  env: Record<string, string | undefined>,
+): FacilitatorBatchConfig | undefined {
+  const engine = batchWorkspacesFromEnv(env).size > 0;
+  const sponsored = sponsoredSendsViaFacilitator(env);
+  if (!engine && !sponsored) return undefined;
+  const group: FacilitatorBatchGroup = {
+    keyPrefix: SPONSORED_KEY_PREFIX,
+    ...sponsoredBatchFromEnv(env),
+  };
+  return {
+    maxItems: boundedInt(env.CITY_PAY_BATCH_MAX, 50, 2, 200),
+    windowMs: boundedInt(env.CITY_PAY_BATCH_WINDOW_MS, 1_500, 200, 30_000),
+    ...(sponsored ? { groups: [group], ...(engine ? {} : { groupsOnly: true }) } : {}),
+  };
+}
+
 export function createChainRuntime(deps: {
   db: Database;
   env: Record<string, string | undefined>;
@@ -274,8 +342,55 @@ export function createChainRuntime(deps: {
       maxFeePerGasCap,
       stubSignature: estimationStub(),
     });
-  const bundler = bundlerOn(identityClient);
-  const walletBundler = identityClient === client ? bundler : bundlerOn(client);
+  // Operation Paymaster: CITY_BASE_BUNDLER=direct sends every user operation (registrations,
+  // payments, feed pay, owner operations) through our own submitter and, with
+  // CITY_BASE_OWN_PAYMASTER=on, our own paymaster (direct-bundler.ts). Unset: CDP, exactly as before.
+  // The CDP bundler still answers receipts of operations it sent before the switch. Asked for
+  // without what sponsoring needs (CITY_BASE_OWN_PAYMASTER=on, CITY_BASE_PAYMASTER_ADDRESS), the
+  // server keeps CDP and says so once: a wrong setting never stops registrations or the site.
+  const choice = bundlerChoice(env);
+  if (choice === 'invalid')
+    console.error(
+      'own bundler: CITY_BASE_BUNDLER=direct needs CITY_BASE_OWN_PAYMASTER=on and CITY_BASE_PAYMASTER_ADDRESS; CDP kept',
+    );
+  // Ours exists whenever our paymaster is configured: with CITY_BASE_BUNDLER=direct it takes new
+  // work; otherwise it DRAINS: new work goes to CDP at once, while operations that
+  // are ours still finish on our lane (never resubmitted through CDP), until none is left open.
+  const ownConfigured =
+    choice === 'direct' || (ownPaymasterMode(env) !== 'off' && ownPaymasterAddress(env) !== null);
+  const own = ownConfigured
+    ? lazyBundler({
+        newWork: choice === 'direct' ? 'direct' : 'cdp',
+        make: () =>
+          createDirectBundler({
+            db,
+            env,
+            client,
+            chainId: network.chainId,
+            network,
+            keystore,
+            fallback: bundlerOn(client),
+            log: (line) => console.log(line),
+          }),
+        // Ours cannot be built (keys, registry): new operations use CDP, logged, never an outage
+        //; operations that are ours are never forwarded.
+        fallback: bundlerOn(client),
+        log: (line) => console.error(line),
+        route: {
+          db,
+          chainId: network.chainId,
+          entryPoint: network.contracts.entryPointV06,
+          paymaster: ownPaymasterAddress(env),
+        },
+      })
+    : null;
+  const direct = choice === 'direct' ? own : null;
+  /** A CDP bundler whose operations that are ours (a drain) still go to ours. */
+  const cdpRouted = (cdp: Bundler) => (own ? own.routes(cdp) : cdp);
+  const identityCdp = cdpRouted(bundlerOn(identityClient));
+  const bundler = direct ?? identityCdp;
+  const walletBundler =
+    direct ?? (identityClient === client ? identityCdp : cdpRouted(bundlerOn(client)));
   const signerOf = async (ref: string) => {
     const key = await keyStore.get(parseKeyRef(ref).keyId);
     if (!key) throw new Error('Spender key not found.');
@@ -300,15 +415,56 @@ export function createChainRuntime(deps: {
         maxFeePerGasCap,
       })
     : null;
+  const sponsoredBatch = sponsoredBatchFromEnv(env);
+  const router3Batch = () => router3BatchFromEnv(env);
+  /**
+   * Fee router 3's facilitator: Central City's own EOA (CITY_X402_FACILITATOR_KEY_REF) sends
+   * router3.settle and pays its gas in ETH; null unless its key and router 3 are configured. Every
+   * instance shares the EOA's one nonce lane and lane row in Postgres (facilitator.ts).
+   */
+  const buildRouter3Facilitator = () => {
+    const keyRef = env.CITY_X402_FACILITATOR_KEY_REF?.trim();
+    const router = router3AddressFromEnv(env);
+    if (!keyRef || !router) return null;
+    const batch = router3Batch();
+    return createRouter3Facilitator({
+      db,
+      client: feedPayParts().client,
+      keystore,
+      keyRef,
+      router,
+      chainId: network.chainId,
+      ...(batch ? { batch } : {}),
+      // Beside the sponsored settlements only while the setting is on; unset, exactly as before.
+      ...(sponsoredSendsViaFacilitator(env) ? { foreignReadOnly: true } : {}),
+    });
+  };
   /** Feed pay's parts; refused (the setting name only) when its endpoint setting is not https. */
+  let sponsorPay: ReturnType<NonNullable<ChainRuntime['sponsorPay']>> | null = null;
   const feedPayParts = () => {
     if (!feedPaySetting) throw new ChainRuntimeError(FEED_PAY_CDP_SETTING);
-    return feedPayOwn ?? { client, bundler, balances, ledger };
+    if (feedPayOwn)
+      return direct
+        ? { ...feedPayOwn, bundler: direct }
+        : own
+          ? { ...feedPayOwn, bundler: cdpRouted(feedPayOwn.bundler) }
+          : feedPayOwn;
+    return { client, bundler, balances, ledger };
   };
 
   return {
     walletPort: createWalletChainPort({ keystore, env }),
     readClient: client,
+    ...(own
+      ? {
+          ownBundlerUpkeep: {
+            mode: direct ? ('direct' as const) : ('drain' as const),
+            maintain: (limit?: number) => own.maintain(limit),
+            open: () => own.open(),
+          },
+          ownBundlerEffective: () => own.effective(),
+        }
+      : {}),
     feedPayReadClient: () => feedPayParts().client,
     ...(walletCap
       ? {
@@ -355,6 +511,136 @@ export function createChainRuntime(deps: {
               sponsors: SPONSOR_PAYMASTERS,
             });
           },
+          // Fee router 3's facilitator (server/protocol/x402/facilitator.ts, buildRouter3Facilitator
+          // above). Only when its key (CITY_X402_FACILITATOR_KEY_REF) and router 3 are configured;
+          // else null and nothing is ever pinned to router 3. Over Feed pay's own read client.
+          router3Facilitator: buildRouter3Facilitator,
+          // The sponsored first purchase's payer (server/feed/pay/sponsored.ts): Central City's
+          // sponsor EOA (CITY_SFP_SPONSOR_KEY_REF) signs both router-3 legs (it is the payer). Who
+          // SENDS them: with CITY_SFP_SEND_VIA_FACILITATOR=1 the router-3 facilitator (its EOA, its
+          // nonce lane, its ETH; the sponsored batch group), else the sponsor's OWN facilitator
+          // (its own nonce lane, never the router-3 facilitator's), always batched. Either way the
+          // other one stays a previous lane: what it already holds is followed and finished there.
+          // Built once; null while the key or router 3 is not configured, and, with the setting,
+          // while the router-3 facilitator is not.
+          sponsorPay: () =>
+            (sponsorPay ??= (async () => {
+              const keyRef = env[SFP_SPONSOR_KEY_REF_SETTING]?.trim();
+              const router = router3AddressFromEnv(env);
+              if (!keyRef || !router) return null;
+              const client = feedPayParts().client;
+              const sponsor = await keystore.withSigner(keyRef, async (a) => a.address);
+              const usdc = network.tokens.USDC?.address;
+              if (!usdc) return null;
+              // Never the router-3 facilitator's own key, nor any agent's wallet or spender (review
+              // S8): the payer's key signs legs only and never sends, and with or without
+              // CITY_SFP_SEND_VIA_FACILITATOR the payer is never the sender (tx_from) of its own
+              // payments, nor an account whose live paid calls it could interleave with.
+              const facilitatorRef = env.CITY_X402_FACILITATOR_KEY_REF?.trim();
+              if (facilitatorRef) {
+                if (facilitatorRef === keyRef) return null;
+                const live = await keystore.withSigner(facilitatorRef, async (a) => a.address);
+                if (live.toLowerCase() === sponsor.toLowerCase()) return null;
+              }
+              const { rows: agentAccounts } = await db.query(
+                `SELECT 1 FROM base_wallets
+                 WHERE lower(address) = lower($1) OR spender_address = $1 OR spender_address = lower($1)
+                 LIMIT 1`,
+                [sponsor],
+              );
+              if (agentAccounts.length) return null;
+              // The sponsor's own facilitator: its own EOA and nonce lane, its whole batch lane
+              // sponsored (no groups), as before the setting existed.
+              const own = createRouter3Facilitator({
+                db,
+                client,
+                keystore,
+                keyRef,
+                router,
+                chainId: network.chainId,
+                batch: sponsoredBatch,
+                foreignReadOnly: true,
+              });
+              const shared = buildRouter3Facilitator();
+              let lanes: Pick<SponsorPay, 'facilitator' | 'batch' | 'previous' | 'minSenderEthWei'>;
+              if (sponsoredSendsViaFacilitator(env)) {
+                // New settlements go to the router-3 facilitator, batched in the 'sfp:' group only
+                // (its batch config has that group whenever the setting is on); what the sponsor's
+                // own lane already holds is finished there, still batched under its own config.
+                if (!shared) return null;
+                lanes = {
+                  facilitator: shared,
+                  batch: { group: SPONSORED_KEY_PREFIX },
+                  // Its gas is the engine's: first buys pause well above its floor (review S2).
+                  minSenderEthWei: sponsoredSenderMinEthWei(env),
+                  previous: [{ facilitator: own, batch: {} }],
+                };
+              } else {
+                // As before; anything the router-3 facilitator holds from while the setting was on
+                // is followed and finished there, never batched (its batch lane is the engine's).
+                lanes = {
+                  facilitator: own,
+                  batch: {},
+                  previous: shared ? [{ facilitator: shared }] : [],
+                };
+              }
+              const usdcAbi = parseAbi([
+                'function balanceOf(address) view returns (uint256)',
+                'function authorizationState(address, bytes32) view returns (bool)',
+              ]);
+              return {
+                signer: createSponsorSigner({
+                  network,
+                  keystore,
+                  keyRef,
+                  sponsor,
+                  token: usdc,
+                  store: pgAuthorizationStore(db),
+                  now: Date.now,
+                  router,
+                  treasuryOf: async () =>
+                    (await client.readContract({
+                      address: router,
+                      abi: parseAbi(['function treasury() view returns (address)']),
+                      functionName: 'treasury',
+                    })) as Address,
+                }),
+                usdcBalance: async () =>
+                  (await client.readContract({
+                    address: usdc,
+                    abi: usdcAbi,
+                    functionName: 'balanceOf',
+                    args: [sponsor],
+                  })) as bigint,
+                // As feed-pay-chain's outcome(): past validBefore by the wall clock AND at a safe
+                // block whose timestamp is at or past it (EIP-3009 accepts block.timestamp <
+                // validBefore), every nonce unused at that very block.
+                expiredUnused: async (nonces: Hex[], validBefore: number) => {
+                  try {
+                    if (Math.floor(Date.now() / 1000) <= validBefore) return false;
+                    const safe = await client.getBlock({ blockTag: 'safe' });
+                    if (safe.number === null || Number(safe.timestamp) < validBefore) return false;
+                    for (const nonce of nonces) {
+                      const used = await client.readContract({
+                        address: usdc,
+                        abi: usdcAbi,
+                        functionName: 'authorizationState',
+                        args: [sponsor, nonce],
+                        blockNumber: safe.number,
+                      });
+                      if (used !== false) return false;
+                    }
+                    return true;
+                  } catch {
+                    return false;
+                  }
+                },
+                ...lanes,
+              };
+            })().catch(() => {
+              sponsorPay = null;
+              return null;
+            })),
         }
       : {}),
     identityPort: createIdentityChainPort({

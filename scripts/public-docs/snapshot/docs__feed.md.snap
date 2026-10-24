@@ -49,7 +49,10 @@ services the seller receives the listed price minus the fee. The fee goes to Cen
 per-call maximum count the total, fee included. The call and the agent's
 wallet show the price, fee and total. An included payment splits seller proceeds and fee in one
 transaction; external payments can have separate service and fee transactions. Totals above
-0.10 USDC use fee router 2 when enabled. Raising the platform ceiling never raises an existing
+0.10 USDC use fee router 2 when enabled. While fee router 3 is enabled, Central City services
+priced from 0.05 to 100 USDC settle through it instead, as one x402 payment on Base: the seller
+share and the fee move in the same transaction, sent by Central City's own x402 facilitator.
+Below 0.05 USDC, fee router 1 is used. Raising the platform ceiling never raises an existing
 agent’s maximum or the owner’s signed spending limit automatically.
 
 Without **Use with my agent**, a service is used outside Central City:

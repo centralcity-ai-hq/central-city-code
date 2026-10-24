@@ -328,6 +328,8 @@ export interface FeedPayToolCaller {
   workspaceId: string;
   actor: string;
   revalidate(): Promise<void>;
+  /** The grant or key of this call (ids only), re-checked later by the batch lane. */
+  grant?: { kind: 'grant' | 'key'; id: string };
   /** The origin the call arrived on (detail_url). */
   origin: string;
   /**
@@ -371,6 +373,7 @@ export async function runFeedPayTool(
         workspaceId: caller.workspaceId,
         actor: caller.actor,
         revalidate: caller.revalidate,
+        ...(caller.grant ? { grant: caller.grant } : {}),
       },
       {
         serviceId,

@@ -3,9 +3,68 @@
 The threat model behind agent wallets on Base (Operation Base Wallet W0–W3) and agent-to-agent
 payments (Base Pay P1). It lists what each piece must defend against, the evidence a release needs,
 and what is still open. It describes requirements and reviewed decisions; it is not an approval to
-switch wallets on. Status as of 11 October 2026.
+switch wallets on. Sponsorship update: 24 October 2026. The original wallet release decisions
+below are retained as historical context, not a current production-status report.
 
-## Scope and authority
+## Current sponsorship boundary (24 October 2026)
+
+Central City now operates its own paymaster and direct transaction-submission path on Base
+(chain 8453). The public [paymaster configuration](https://centralcity.ai/api/public/paymaster)
+reports the selected mode, EntryPoint, paymaster and bundler; configuration is not evidence that
+an individual operation completed. See [Base architecture](ARCHITECTURE.md) and the
+[live configuration reference](../protocol/LIVE.md) for integration and operational settings. This update does not change wallet permissions or
+authorize new spending.
+
+- **Wallet fees:** `shared/base/paymasters.ts` pins the accepted paymasters and exact data layout,
+  requires a zero charging-token field, and bounds sponsorship validity. The own instance and the
+  retained provider instance do not grant arbitrary sponsorship or authority over owner funds.
+- **Policy and replay:** `server/base/chain/own-paymaster-policy.ts` checks the expected sender,
+  factory, decoded inner calls, permitted targets/selectors, native value and gas ceilings for the
+  requested flow. Existing owner authorization, spend permissions and account nonces still apply;
+  a paymaster signature does not replace them.
+- **Signer separation:** sponsorship, submission and contract administration are distinct roles.
+  The server-held sponsorship signer is not an owner recovery key. Compromise of sponsorship or
+  submission infrastructure can still threaten availability and the gas deposit; do not describe
+  the system as trustless or immune to operator compromise.
+- **Budget and deposit drain:** `server/base/chain/own-paymaster-budget.ts` reserves worst-case
+  costs under a shared database lock before sponsorship is issued. Ordinary activity is checked
+  against its rolling-hour and total ceiling and must preserve the protected exit reserve.
+  Only the `exit` policy flow may use that reserve: permitted withdrawals, revocations and
+  cancellations. Funding and increasing a limit are separate operator decisions, not automatic
+  top-ups. Current limits live in the code/configuration, not in this document as permanent terms.
+- **Uncertain outcomes:** `server/base/chain/direct-bundler.ts` and `submit.ts` track submission
+  and receipt state. A timeout is not proof of failure or permission to create another operation.
+  Sent reservations do not expire merely with elapsed time; releasing a never-sent reservation
+  requires the applicable expiry and safety conditions. Reconcile actual costs and chain evidence
+  before treating an operation as settled. These controls are not an exactly-once guarantee.
+- **Availability and fallback:** keeping the provider integration does not guarantee usable
+  fallback capacity. Provider limits, RPC failures, depleted deposits, hosting failures and Base
+  availability remain dependencies. Switching the route for new work must preserve reconciliation
+  of existing submissions. Do not silently charge owner funds when sponsorship is unavailable.
+- **Separate settlement paths:** router-3 x402 service settlement uses its facilitator rather than
+  an ERC-4337 UserOperation. The own-paymaster rollout does not mean every service payment uses
+  this paymaster; see [router 3](../protocol/FEE_ROUTER_3.md).
+
+### Sponsorship acceptance evidence
+
+For a changed release, record the exact reviewed revision and distinguish source inspection,
+executed tests, teammate reports and production receipts. Relevant suites include
+`tests/own-paymaster-policy.test.ts`, `tests/own-paymaster-budget.test.ts`,
+`tests/postgres/own-paymaster-budget.test.ts`, `tests/own-paymaster-direct.test.ts`,
+`tests/own-paymaster-drain-fork.test.ts` and `tests/base-paymaster-validity.test.ts`.
+Their presence is not a claim that they ran or passed for a particular deployment.
+
+Verify malformed or unauthorized calls are refused, concurrent requests cannot reuse budget
+headroom, ordinary flows cannot consume the exit reserve, and restart/timeout recovery preserves
+pending submissions. A fork rehearsal does not prove production availability. Internal review is
+not an independent third-party security audit.
+
+Measure completed handovers and successful operations separately from attempted submissions,
+wallet nonces and outer transaction receipts. Explorer listing additionally depends on its
+handover/finality predicates: a public 404 is not proof that no mint exists. Likewise, a successful
+payment receipt does not prove service delivery or independent customer demand.
+
+## Historical scope and authority (11 October 2026)
 
 - Wallets and payments are merged **disabled**: every wallet route answers 404 unless
   `CITY_BASE_WALLET=1`. In production they answered 404 when checked on 11 October 2026; other
@@ -66,7 +125,7 @@ account-specific authenticated data as implemented.
 | Recovery depends on Central City                   | Keep enough non-secret metadata to recover the smart account without us: network, factory, account index, owner order, implementation and wallet address; document an independent signing and recovery path.                                                                                                                                                                                                                         | A recovery and withdrawal rehearsal with the Central City API unavailable, using synthetic keys and test funds.                                                                                        |
 | Address substitution / blind signing               | The browser derives the expected wallet itself, pins contracts, decodes destination, token, amount and chain, and shows the exact terms before local confirmation. Server-prepared calldata is untrusted: extra calls, approvals, upgrades and owner changes are refused. A deploying operation must be the pinned factory's `createAccount` with exactly the expected ordered owners at the agent's index.                          | Tampering with each signed field, or adding a hidden batch call, is refused. Zero, self, token-contract and QR network-mismatch destinations are tested.                                               |
 | Replay / duplicate withdrawal                      | Chain- and account-bound signatures, nonce and exact calldata; server idempotency plus on-chain nonce checks. Pending is not confirmed.                                                                                                                                                                                                                                                                                              | Replays across chain or account, simultaneous submissions, timeouts and retries produce at most one withdrawal. EIP-712 alone is not replay prevention.                                                |
-| Sponsor drains the balance / sponsor outage        | Fees are covered or nothing happens: only a pinned paymaster in its exact data layout with no token to charge (`shared/base/paymasters.ts`, checked at prepare and before submit, nothing pinned on the test network); no fee transfer, token-paymaster deduction or silent owner-funded fallback (an owner-funded fallback exists only behind its own setting, default off, and never for payments).                                | An empty or unknown sponsor, a bundler failure or a charging fee quote is an honest failure that reduces no funds; the recipient receives exactly the requested amount.                                |
+| Sponsor drains the balance / sponsor outage | Validate pinned paymaster, exact layout, zero charging token and bounded validity at prepare and submit. Apply own-paymaster policy and atomic reservations; preserve the protected exit reserve. No silent owner-funded fallback. See the current sponsorship boundary above. | Reject unknown, malformed or charging sponsorship; exercise budget exhaustion, concurrent reservations, RPC uncertainty and restart recovery. A submitted operation remains pending until reconciled; failed sponsored execution can still consume sponsor gas. |
 | Limit bypass                                       | The on-chain spend permission (token, allowance, spender, period, start and end) is the only security bound; no agent owner role, arbitrary execution, token approvals, native-token permission or upgrade power. UI and server limits are defense in depth only.                                                                                                                                                                    | A compromised spender calling contracts directly cannot exceed the allowance, move ETH, change an owner or bypass limits by batching.                                                                  |
 | Multiple permissions / renewal                     | Track every live permission, not just the latest settings: one active limit per token, and a new one only after Base shows the old one revoked. Explain period-boundary behaviour.                                                                                                                                                                                                                                                   | Two grants, parallel spend, boundary timestamps, expiry, replacement and stale signatures cannot exceed the advertised total authority.                                                                |
 | Revocation race / crash                            | The owner signs the revocation; it shows pending until a read of Base at a settled block shows it revoked; transactions already ordered before it count. The signed revoke is stored before it is sent, so a stop in between resumes the same operation. An API toggle is not an on-chain revocation.                                                                                                                                | Pending spend versus revoke, retries, a stop before and after the chain store, and stale grant replay; an honest remaining and used display.                                                           |

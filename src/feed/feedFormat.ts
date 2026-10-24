@@ -748,7 +748,7 @@ const EMAIL_ENDINGS = new Set([
   'gov',
 ]);
 
-/** An email address with one of those endings in its domain ("name@example.com"; never "icon@2x.png"). */
+/** An email address with one of those endings in its domain (a name, an at sign, then example.com; never an image name such as icon, an at sign, 2x.png). */
 function emailIn(text: string): boolean {
   if (!text.includes('@')) return false;
   for (const [address] of text.matchAll(

@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { AGENT_ROWS_SQL } from '../server/agent-rows/schema.js';
+import { WORKSPACE_AGENT_PATH_SQL } from '../server/agent-rows/agent-lookup-schema.js';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { randomUUID } from 'node:crypto';
@@ -60,6 +62,7 @@ import {
   payStateOf,
 } from '../server/base/pay/service.js';
 import { createPayStore } from '../server/base/pay/store.js';
+import { BASE_WALLETS_ADDRESS_LOWER_SQL } from '../server/base/pay/address-index-schema.js';
 import { createIncomingFeed } from '../src/base/wallet/pay.js';
 import { registerBaseWalletRoutes } from '../server/base/wallet/routes.js';
 import { accountIndexFor } from '../server/base/wallet/service.js';
@@ -558,6 +561,9 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }, options
     BASE_WALLET_WITHDRAWALS_SAFE_SQL,
     // The sponsor's exposure in flight (97; independent of 96).
     BASE_SPONSOR_EXPOSURE_SQL,
+    // workspace_agent() (245, then 254), which the public name reads the agent through.
+    AGENT_ROWS_SQL,
+    WORKSPACE_AGENT_PATH_SQL,
   ])
     await pg.exec(sql);
   const db: Database = {
@@ -3183,4 +3189,52 @@ test("contract: the Pay screens' browser checks take the real lookup, payment an
   const intent = clientCheckedIntent(request, wallet);
   assert.equal(intent.to, WALLET_B);
   assert.equal(intent.amount, 2_500_000n);
+});
+
+// Migration 247 (server/base/pay/address-index-schema.ts): the real recipients() query by wallet,
+// with its joins, ORDER BY and LIMIT, over a large base_wallets, before and after the index.
+test('recipients() by wallet plans through base_wallets_address_lower, case-insensitive, hit and miss', async (t) => {
+  const f = await setup(t);
+  await juno(f);
+  // 20k wallets without an identity (no recipient), so the planner sees a large base_wallets.
+  await f.db.query(
+    `INSERT INTO base_wallets (wallet_id, agent_id, operator_id, chain_id, address, owner_address,
+       spender_address, spender_key_ref, derivation, state, created_at, updated_at)
+     SELECT 'filler-' || g, 'filler-' || g, 'person-2', $1, '0x' || lpad(to_hex(g), 40, '0'),
+       '0x' || repeat('2e', 20), '0x' || repeat('3f', 20), 'v1:x', '{}', 'derived', 1, 1
+     FROM generate_series(1, 20000) g`,
+    [CHAIN_ID],
+  );
+  const store = createPayStore({ chainId: CHAIN_ID, registry: REGISTRY, network: NETWORK });
+  const plans: string[] = [];
+  const explaining = {
+    async query(sql: string, params?: unknown[]) {
+      const plan = await f.db.query<{ 'QUERY PLAN': string }>(`EXPLAIN ${sql}`, params);
+      plans.push(plan.rows.map((r) => r['QUERY PLAN']).join('\n'));
+      return f.db.query(sql, params);
+    },
+  } as unknown as typeof f.db;
+  const byWallet = (w: string) => store.recipients(explaining, { wallet: w });
+  const juno501 = [[AGENT_B, '501', WALLET_B]];
+  const shape = (rows: Awaited<ReturnType<typeof byWallet>>) =>
+    rows.map((r) => [r.agentId, r.baseId, r.wallet]);
+
+  await f.db.query('ANALYZE base_wallets');
+  assert.deepEqual(shape(await byWallet(WALLET_B)), juno501);
+  const before = plans.pop()!;
+  assert.doesNotMatch(before, /base_wallets_address_lower/);
+
+  await f.db.query(BASE_WALLETS_ADDRESS_LOWER_SQL);
+  await f.db.query('ANALYZE base_wallets');
+  for (const w of [WALLET_B, WALLET_B.toLowerCase(), `0x${WALLET_B.slice(2).toUpperCase()}`]) {
+    assert.deepEqual(shape(await byWallet(w)), juno501, w);
+    assert.match(plans.pop()!, /base_wallets_address_lower/, w);
+  }
+  // Misses: an unknown address, and a wallet with no identity (not a recipient).
+  assert.deepEqual(await byWallet(`0x${'ab'.repeat(20)}`), []);
+  assert.match(plans.pop()!, /base_wallets_address_lower/);
+  assert.deepEqual(await byWallet(`0x${'0'.repeat(38)}64`), []);
+  const after = plans.pop()!;
+  assert.match(after, /base_wallets_address_lower/);
+  if (process.env.PRINT_PLANS) console.log(`BEFORE\n${before}\nAFTER\n${after}`);
 });

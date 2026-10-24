@@ -23,6 +23,7 @@ import { PROTOCOL_BASE_MAINNET } from '../shared/protocol.js';
 import { AGENT_URI_ORIGIN } from '../shared/base/on-base.js';
 import { MIN, NOW, add, agentId, setup as baseSetup, shortOf } from './on-base-fixture.js';
 import { setup as appSetup } from './helpers/feed-pay-app.js';
+import { FEED_PAY_SPONSORED_SQL } from '../server/feed/pay/sponsored.js';
 
 /*
  * The passport's "Paid for services": the totals of the agent's paid service calls (Feed pay), by
@@ -504,5 +505,29 @@ test('a real paid call through the engine shows on the passport, fee included on
     totalUsdc: '0.04',
     totalFeeUsdc: '0.004',
     lastPaidAt: Number(rows.at(-1)!.settled_at),
+  });
+});
+
+test('a first purchase paid by Central City shows apart from the totals, only once paid', async (t) => {
+  const db = await setup(t);
+  await db.exec(FEED_PAY_SPONSORED_SQL);
+  await add(db, { n: 1, kind: 'final', id: 121, name: 'Harbor' });
+  const app = routes(t, db);
+  const sponsored = (state: string, at: number) =>
+    db.query(
+      `INSERT INTO feed_pay_sponsored_calls (call_id, owner_account_id, idempotency_key,
+         request_hash, operator_id, agent_id, service_id, offer_id, offer_kind, offer_version,
+         pay_to, gross_raw, fee_raw, input, state, op_key, created_at, updated_at)
+       VALUES ('sp_aaaaaaaaaaaaaaaaaaaa', 'o', 'k', 'h', 'ws', $1, 's', 'of_1', 'echo', 1,
+         $2, 1500000, 150000, '{}', $3, 'sfp:x', $4, $4)
+       ON CONFLICT (call_id) DO UPDATE SET state = $3, updated_at = $4`,
+      [agentId(1), `0x${'5'.repeat(40)}`, state, at],
+    );
+  await sponsored('sent', NOW - 2 * MIN);
+  assert.deepEqual(await read(app, shortOf(1)), ZERO, 'not paid yet: nothing shows');
+  await sponsored('delivered', NOW - MIN);
+  assert.deepEqual(await read(app, shortOf(1)), {
+    ...ZERO,
+    sponsoredFirstPurchase: { priceUsdc: '1.5', paidAt: NOW - MIN },
   });
 });

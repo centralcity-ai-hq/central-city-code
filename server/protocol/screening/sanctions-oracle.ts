@@ -26,6 +26,10 @@ export type OracleReader = Pick<PublicClient, 'readContract'>;
 
 /** The waits before reading the oracle again after a failed read: two more tries in ~1 s. */
 export const ORACLE_READ_WAITS_MS = [250, 750] as const;
+/** How long one address's oracle answer is reused (well inside SCREENING_MAX_AGE_MS). */
+export const ORACLE_CACHE_MS = 60_000;
+/** At most this many addresses are remembered; past it the cache starts over. */
+export const ORACLE_CACHE_MAX = 10_000;
 
 /**
  * One oracle read, asked again after a short wait when the node did not answer (a throttled or
@@ -60,33 +64,57 @@ export function sanctionsOracleProvider(input: {
   const now = input.now ?? Date.now;
   const wait = input.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const oracle = getAddress(input.oracle);
+  // The oracle's answer per address, reused for ORACLE_CACHE_MS. The same wallets, floats and
+  // sellers are screened on every payment; at Block D's volume one read per party per payment
+  // flooded the RPC (screening_unavailable). The answer still carries the time of its oldest read,
+  // so the gate's SCREENING_MAX_AGE_MS applies unchanged.
+  const cache = new Map<string, { listed: unknown; at: number }>();
   return {
     ref: `sanctions-oracle:${input.chainId}:${oracle.toLowerCase()}`,
     supports: (chainId) => chainId === input.chainId,
     async check({ chainId, addresses, signal }): Promise<ScreeningProviderAnswer> {
       if (chainId !== input.chainId) throw new Error('unsupported chain');
-      const client = await input.client();
-      const results = await Promise.all(
-        addresses.map((address) =>
-          readWithRetry(
-            () =>
-              client.readContract({
-                address: oracle,
-                abi: sanctionsOracleAbi,
-                functionName: 'isSanctioned',
-                args: [getAddress(address)],
-              }),
-            signal,
-            wait,
+      // Taken once per check, so a cache that starts over below cannot drop an answer in use.
+      const answers = new Map<string, { listed: unknown; at: number }>();
+      for (const address of addresses) {
+        const hit = cache.get(address.toLowerCase());
+        if (hit && now() - hit.at < ORACLE_CACHE_MS) answers.set(address, hit);
+      }
+      const missing = addresses.filter((address) => !answers.has(address));
+      if (missing.length) {
+        const client = await input.client();
+        const at = now();
+        const results = await Promise.all(
+          missing.map((address) =>
+            readWithRetry(
+              () =>
+                client.readContract({
+                  address: oracle,
+                  abi: sanctionsOracleAbi,
+                  functionName: 'isSanctioned',
+                  args: [getAddress(address)],
+                }),
+              signal,
+              wait,
+            ),
           ),
-        ),
-      );
-      if (signal.aborted) throw new Error('aborted');
+        );
+        if (signal.aborted) throw new Error('aborted');
+        if (cache.size + missing.length > ORACLE_CACHE_MAX) cache.clear();
+        missing.forEach((address, index) => {
+          const answer = { listed: results[index], at };
+          cache.set(address.toLowerCase(), answer);
+          answers.set(address, answer);
+        });
+      }
       const listed: Record<string, unknown> = {};
-      addresses.forEach((address, index) => {
-        listed[address] = results[index];
-      });
-      return { listed, observedAt: now() };
+      let observedAt = now();
+      for (const address of addresses) {
+        const hit = answers.get(address)!;
+        listed[address] = hit.listed;
+        observedAt = Math.min(observedAt, hit.at);
+      }
+      return { listed, observedAt };
     },
   };
 }

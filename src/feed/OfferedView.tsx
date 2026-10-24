@@ -7,6 +7,7 @@ import { usePageTitle } from '../shell/usePageTitle';
 import {
   feedErrorCopy,
   FeedFailure,
+  getService,
   getServices,
   offeredSearch,
   sortOf,
@@ -47,6 +48,8 @@ import {
   ServiceRow,
 } from './ServiceItem';
 import { usePayAccess } from './pay/usePayAccess';
+import { freeService, freeServiceIds, useSponsored } from './pay/sponsoredApi';
+import { freeCovers, FREE_CHIP } from './pay/sponsoredModel';
 
 /*
  * Offered: services any Base agent can call, listed by x402 Bazaar, as calm cards (or a dense
@@ -77,7 +80,39 @@ function merge(shown: FeedServicePage, next: FeedServicePage): FeedServicePage {
 }
 
 const filtered = (filters: OfferedFilters) =>
-  Boolean(filters.q.trim() || filters.maxPrice || filters.host);
+  Boolean(filters.q.trim() || filters.maxPrice || filters.host || filters.free);
+
+/**
+ * The free filter's list (?free=1): the services a free first buy may be, each read on its own
+ * (a short list), with the search words and the price limit applied here.
+ */
+async function freeServicesPage(
+  ids: string[],
+  filters: OfferedFilters,
+  signal: AbortSignal,
+): Promise<FeedServicePage> {
+  const read = await Promise.all(ids.map((id) => getService(id, { signal }).catch(() => null)));
+  if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+  const words = filters.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const max = filters.maxPrice ? usdcToRaw(filters.maxPrice) : null;
+  const services = read.flatMap((detail) => {
+    if (!detail) return [];
+    const service = detail.service;
+    const text = `${service.title} ${service.description}`.toLowerCase();
+    if (!words.every((word) => text.includes(word))) return [];
+    if (max !== null && (!service.price || BigInt(service.price.raw) > BigInt(max))) return [];
+    return [service];
+  });
+  const first = read.find(Boolean);
+  return {
+    services,
+    next: null,
+    total: services.length,
+    snapshotAt: first?.snapshotAt ?? null,
+    degraded: false,
+    sources: first?.sources ?? [],
+  };
+}
 
 /** "32,061 services · showing 24", or with filters "3 services match". */
 export function offeredCount(filters: OfferedFilters, page: FeedServicePage, shown: number) {
@@ -143,16 +178,34 @@ export function OfferedView({
     setReload(reloads.current);
   };
 
+  const signedInNow = useSignedIn();
+  const access = usePayAccess(signedInNow);
+  // Free first buys: the chip on Central City's services while one of the person's agents has
+  // one, and the free filter's list (the agent page's Choose).
+  const sponsored = useSponsored(signedInNow);
+  const anyFree = [...sponsored.agents.values()].includes('free');
+  const freeFor = (service: FeedService) =>
+    anyFree &&
+    freeService(sponsored, service.id) &&
+    freeCovers(service.price?.raw, sponsored.creditMaxRaw);
+  const freeIds = filters.free ? freeServiceIds(sponsored).join(',') : '';
+  // Signed out there is nothing to read: the free list is simply empty.
+  const freeWait = Boolean(filters.free && signedInNow && !sponsored.known);
+
   useEffect(() => {
     const controller = new AbortController();
     moreAbort.current?.abort();
     setMore('idle');
     setLoad({ phase: 'loading' });
+    if (freeWait) return () => controller.abort();
     const noStore = fresh.current?.key === key && fresh.current.reload === reload;
-    getServices(filters, null, {
-      signal: controller.signal,
-      ...(noStore ? { cache: 'no-store' as const } : {}),
-    })
+    (filters.free
+      ? freeServicesPage(freeIds ? freeIds.split(',') : [], filters, controller.signal)
+      : getServices(filters, null, {
+          signal: controller.signal,
+          ...(noStore ? { cache: 'no-store' as const } : {}),
+        })
+    )
       .then((page) => setLoad({ phase: 'ready', key, page }))
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
@@ -163,7 +216,7 @@ export function OfferedView({
     return () => controller.abort();
     // `filters` is read through `key`, which changes whenever they do.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, reload]);
+  }, [key, reload, freeIds, freeWait]);
   useEffect(() => () => moreAbort.current?.abort(), []);
   useEffect(() => {
     if (load.phase === 'loading' || !headNext.current) return;
@@ -220,10 +273,10 @@ export function OfferedView({
   const retry = readAgain;
   const open = openId ? (services.find((service) => service.id === openId) ?? null) : null;
   const ready = load.phase !== 'loading';
-  const signedIn = useSignedIn();
+  const signedIn = signedInNow;
   // Whether the strip may say "Nothing is paid through the Feed.": not while Feed pay is on for
   // the person, and not before that is known (docs/FEED_PAY.md section 12).
-  const payAccess = usePayAccess(signedIn).phase;
+  const payAccess = access.phase;
   const payWords = !signedIn
     ? 'off'
     : payAccess === 'on'
@@ -243,6 +296,7 @@ export function OfferedView({
     filters.q.trim() ? `“${filters.q.trim()}”` : '',
     filters.maxPrice ? `up to $${filters.maxPrice} a call` : '',
     filters.host ? `from ${filters.host}` : '',
+    filters.free ? FREE_CHIP : '',
   ].filter(Boolean);
 
   return (
@@ -370,6 +424,7 @@ export function OfferedView({
                 <ServiceRow
                   key={service.id}
                   service={service}
+                  freeBuy={freeFor(service)}
                   title={titleOf(service)}
                   colour={colourOf(service)}
                   onOpen={() => openOverList(feedHref.service(service.id))}
@@ -383,6 +438,7 @@ export function OfferedView({
               <ServiceCard
                 key={service.id}
                 service={service}
+                freeBuy={freeFor(service)}
                 title={titleOf(service)}
                 colour={colourOf(service)}
                 onOpen={() => openOverList(feedHref.service(service.id))}

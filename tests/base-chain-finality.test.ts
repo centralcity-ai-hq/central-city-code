@@ -20,6 +20,7 @@ import {
   type StoredOperation,
 } from '../server/base/chain/submit.js';
 import { MAX_LOG_RANGE_BLOCKS } from '../server/base/chain/rpc-budget.js';
+import { BundlerError } from '../server/base/chain/rpc-bundler.js';
 
 const network = baseNetwork(BASE_SEPOLIA)!;
 
@@ -554,4 +555,62 @@ test('a tombstone fences the key: a later operation for it is refused, nothing i
     )?.status,
     'failed',
   );
+});
+
+test('a receipt lookup the bundler cannot answer now is logged (hash and code, never the message) and changes nothing', async (t) => {
+  const lines: string[] = [];
+  t.mock.method(console, 'info', (line: string) => lines.push(line));
+  const unavailable: Bundler = {
+    ...noReceipts,
+    receipt: async () => {
+      throw new BundlerError(
+        'RPC_UNAVAILABLE',
+        'https://endpoint.example/v1/SECRET-KEY not reachable',
+      );
+    },
+  };
+  const row = await refreshFinality(
+    deps(
+      chain({ head: 2000n, nonceLatest: 6n, nonceAt: () => 6n, tx: { blockNumber: 1500n } }),
+      deepIncluded(),
+      unavailable,
+    ),
+    'op:1',
+  );
+  assert.equal(row?.status, 'included');
+  const logged = lines
+    .map((line) => JSON.parse(line))
+    .find((e) => e.event === 'chain.receipt_unknown');
+  assert.equal(logged?.userOpHash, OP_HASH);
+  assert.equal(logged?.code, 'RPC_UNAVAILABLE');
+  assert.ok(!lines.join('\n').includes('SECRET-KEY'), 'the error message is never logged');
+});
+
+test('a receipt-lookup log never copies an unknown error name or a free-form code', async (t) => {
+  const lines: string[] = [];
+  t.mock.method(console, 'info', (line: string) => lines.push(line));
+  const odd: Bundler = {
+    ...noReceipts,
+    receipt: async () => {
+      throw Object.assign(new Error('x'), {
+        name: 'https://endpoint.example/SECRET-NAME',
+        code: 'key=SECRET-CODE',
+      });
+    },
+  };
+  await refreshFinality(
+    deps(
+      chain({ head: 2000n, nonceLatest: 6n, nonceAt: () => 6n, tx: { blockNumber: 1500n } }),
+      deepIncluded(),
+      odd,
+    ),
+    'op:1',
+  );
+  const all = lines.join('\n');
+  assert.ok(!all.includes('SECRET'), 'neither name nor code is copied');
+  const logged = lines
+    .map((line) => JSON.parse(line))
+    .find((e) => String(e.event).startsWith('chain.receipt_'));
+  assert.equal(logged?.name, 'other');
+  assert.equal(logged?.code, null);
 });

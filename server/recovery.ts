@@ -24,11 +24,16 @@ import { FEED_SERVICE_TABLES } from './feed/services-schema.js';
 import { FEED_OFFER_TABLES } from './feed/offers/schema.js';
 import { FEED_RESPOND_TABLES } from './feed/respond-schema.js';
 import { FEED_PAY_TABLES } from './feed/pay/schema.js';
+import { FEED_PAY_SPONSOR_TABLES } from './feed/pay/sponsor-schema.js';
 import { PAID_CALL_COUNT_TABLE } from './feed/pay/count-schema.js';
 import { PROTOCOL_FEE_TABLES } from './protocol/fees/ledger.js';
 import { PROTOCOL_SCREENING_TABLES } from './protocol/screening/schema.js';
+import { X402_FACILITATOR_TABLES } from './protocol/x402/facilitator-schema.js';
+import { OWN_PAYMASTER_TABLES } from './base/chain/own-paymaster-budget.js';
+import { DIRECT_BUNDLER_TABLES } from './base/chain/direct-bundler.js';
 import { ROOM_INVITATION_TABLES } from './rooms/invitations-schema.js';
 import { ELRIC_ERASE_TABLES } from './elric/erase.js';
+import { AGENT_ROWS_TABLES } from './agent-rows/schema.js';
 import { ELRIC_DRAFT_TABLES } from './elric/draft.js';
 import { ELRIC_TITLE_TABLES } from './elric/titles.js';
 import { ELRIC_CATCH_UP_TABLES } from './elric/catch-up-schema.js';
@@ -650,7 +655,16 @@ export async function backupDatabase(dataPath: string, backupPath: string) {
         (messageCounts.length !== messageCountTables.length || !tables.includes('room_members'))
       )
         throw new Error('Unsupported database schema; no backup was written.');
+      // Migration 245 (agents as rows): all four tables or none. A workspace in rows mode is
+      // exported with its agents in its document (workspace_document), the same snapshot format;
+      // the tables themselves are never exported and a restore starts every workspace in
+      // document mode.
+      const agentRows = AGENT_ROWS_TABLES.filter((name) => tables.includes(name));
+      if (agentRows.length && agentRows.length !== AGENT_ROWS_TABLES.length)
+        throw new Error('Unsupported database schema; no backup was written.');
+      const documentOf = agentRows.length ? 'workspace_document(operator_id, data)' : 'data';
       const optional: readonly string[] = [
+        ...AGENT_ROWS_TABLES,
         ...RESPONDER_TABLES,
         ...RESPONDER_EXECUTION_TABLES,
         ...COUNT_LOG_TABLES,
@@ -674,6 +688,11 @@ export async function backupDatabase(dataPath: string, backupPath: string) {
         // Migration 112 (Feed pay): calls, quotes, per-agent settings and float moves, recognized
         // and never exported, like the Base payments they point at.
         ...FEED_PAY_TABLES,
+        // Migrations 248-250 (the sponsored first purchase): credits, the sponsor's day budget,
+        // refusals, the sponsor key record and the sponsored calls, recognized and never exported,
+        // like Feed pay: Base is the record of every sponsored payment, and the key record points
+        // into base_spender_keys, which is not exported either.
+        ...FEED_PAY_SPONSOR_TABLES,
         ...ROOM_INVITATION_TABLES,
         // Migration 103 (Feed requests): public and short-lived, keyed by hashed client addresses,
         // so never exported; a restore starts the Feed's requests empty.
@@ -691,6 +710,16 @@ export async function backupDatabase(dataPath: string, backupPath: string) {
         // Migration 232 (fee router 2's ledger start): recognized, never exported. After a restore
         // the scan state is empty and the scans re-read every router from the start block anyway.
         'protocol_fee_router_starts',
+        // Migration 240 (fee router 3's x402 facilitator): nonce lanes, settlements and the provisioned
+        // key record, recognized and never exported, like the Base wallets: Base is the record of every
+        // settlement, and the key record points into base_spender_keys, which is not exported either.
+        ...X402_FACILITATOR_TABLES,
+        // Migrations 256-258 (Operation Paymaster): the key records, the spending gate's lock row,
+        // its reservations and the submitter's lane and stored sends, recognized and never exported,
+        // like the facilitator: Base is the record of every sponsored operation, and the key
+        // records point into base_spender_keys.
+        ...OWN_PAYMASTER_TABLES,
+        ...DIRECT_BUNDLER_TABLES,
         // Migration 115 (payment screening): short-lived decisions (minutes), recognized and never
         // exported; after a restore every new payment is screened again.
         ...PROTOCOL_SCREENING_TABLES,
@@ -749,7 +778,7 @@ export async function backupDatabase(dataPath: string, backupPath: string) {
         throw new Error('Unsupported database schema; no backup was written.');
       const size = (
         await tx.query<{ bytes: string }>(
-          `SELECT COALESCE(sum(octet_length(data::text)),0)::text AS bytes FROM workspaces${tables.includes('claim_tokens') ? " WHERE operator_id IN (SELECT id FROM operators WHERE kind='owner')" : ''}`,
+          `SELECT COALESCE(sum(octet_length(${documentOf}::text)),0)::text AS bytes FROM workspaces${tables.includes('claim_tokens') ? " WHERE operator_id IN (SELECT id FROM operators WHERE kind='owner')" : ''}`,
         )
       ).rows[0]!;
       const owners = tables.includes('claim_tokens') ? " WHERE kind='owner'" : '';
@@ -785,7 +814,7 @@ export async function backupDatabase(dataPath: string, backupPath: string) {
         ).rows,
         workspaces: (
           await tx.query<{ operator_id: string; data: { agents: unknown[]; jobs: unknown[] } }>(
-            `SELECT operator_id,data FROM workspaces WHERE operator_id IN (SELECT id FROM operators${owners}) ORDER BY operator_id LIMIT 1001`,
+            `SELECT operator_id,${documentOf} AS data FROM workspaces WHERE operator_id IN (SELECT id FROM operators${owners}) ORDER BY operator_id LIMIT 1001`,
           )
         ).rows.map(withoutCrossWorkspaceJobs(pairs)),
         ...(crossRows.length

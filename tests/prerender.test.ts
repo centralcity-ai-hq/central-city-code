@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { loadPrerender, type RenderPublicPage } from '../scripts/prerender/load.js';
+import { LISTINGS } from '../src/landing/ListedOn.js';
 import {
   homeHtml,
   SESSION_GATED_PATHS,
@@ -101,11 +102,39 @@ test('the home, Elric, Connect, Invite, Verify and Explorer pages carry their co
   const home = homeHtml(index, render, assert.fail);
   assert.equal(home.prerendered, true);
   const homeRoot = rootOf(home.html);
-  assert.match(homeRoot, /<h1 id="landing-title">Every AI\. One room\.<\/h1>/);
-  assert.ok(words(home.html).includes('Central City is where the world’s AI agents meet'));
-  assert.ok(words(home.html).includes('Your room never sleeps.'));
-  for (const href of ['/#create', '/downtown', '/downtown/verify', '/docs'])
+  const h1 = /<h1 id="landing-title">([\s\S]*?)<\/h1>/.exec(homeRoot)?.[1] ?? '';
+  assert.equal(text(h1), 'Every AI. One room.');
+  assert.match(h1, /<span class="cc-room">One room\.<\/span>/);
+  for (const line of [
+    'Open protocol for AI agents',
+    'Claude, ChatGPT, Gemini and your own agents work together in shared rooms, carry a passport on Base and pay each other for services in USDC.',
+    'Central City',
+    'Every AI at the same table.',
+    'Every agent deserves a passport.',
+    'Your room never sleeps.',
+    'Connect your AI in 30 seconds.',
+  ])
+    assert.ok(words(home.html).includes(line), line);
+  for (const href of [
+    '/#create',
+    '/downtown',
+    '/downtown/verify',
+    '/docs',
+    '/explorer/calls',
+    '/explorer/base',
+    '/elric',
+    '/connect',
+  ])
     assert.ok(homeRoot.includes(`href="${href}"`), href);
+  // "Listed on": each listing twice (the endless strip's copy is aria-hidden).
+  for (const listing of LISTINGS)
+    assert.equal(
+      homeRoot.split(`href="${listing.href.replace(/&/g, '&amp;')}"`).length - 1,
+      2,
+      listing.name,
+    );
+  assert.match(homeRoot, /<div class="cc-lo-set" aria-hidden="true">/);
+  assert.match(homeRoot, /<div class="cc-field" aria-hidden="true">/);
   // The head is the home page's own; the "needs JavaScript" notice is gone.
   assert.match(home.html, /<title>Central City · Every AI\. One room\.<\/title>/);
   assert.match(home.html, /<link rel="canonical" href="https:\/\/centralcity\.ai\/"/);
@@ -164,12 +193,26 @@ test('the home, Elric, Connect, Invite, Verify and Explorer pages carry their co
   }
 });
 
+/** The live numbers' four cells in the home page's markup, by data-stat. */
+const cells = (home: string) =>
+  Object.fromEntries(
+    [...home.matchAll(/<div class="cc-kc" data-stat="(\w+)"([^>]*)>([\s\S]*?)<\/div>/g)].map(
+      (match) => [match[1]!, { attributes: match[2]!, text: text(match[3]!) }],
+    ),
+  );
+
 test('live numbers are not baked into the HTML: they render in their loading state', () => {
-  // The agent count, when the build has none: the ticker's empty, reserved line, never a 0.
+  // The agent count, when the build has none: a dash like the others, never a 0.
   loaded.setAgentCount(null);
   const home = rootOf(homeHtml(index, render, assert.fail).html);
-  assert.doesNotMatch(text(home), /\d[\d,]* AI agents? (?:have|has) joined/);
-  assert.match(home, /<p [^>]*data-agent-ticker[^>]*data-ready="false"[^>]*>/);
+  assert.deepEqual(cells(home), {
+    value: { attributes: '', text: 'Total value settled (x402)$–USDC' },
+    paid: { attributes: '', text: 'Paid service calls–' },
+    base: { attributes: '', text: 'Central City base agents–' },
+    agents: { attributes: ' data-agent-ticker="true"', text: 'AI agents joined–' },
+  });
+  assert.match(home, /<dl class="cc-kgrid" aria-hidden="true">/);
+  assert.match(home, /<p class="visually-hidden">Numbers of Central City\.<\/p>/);
   assert.doesNotMatch(home, /data-build-count/);
   assert.match(
     text(rootOf(shareCardHtml(index, cardFor('/explorer'), render).html)),
@@ -186,22 +229,35 @@ test("the build's agent count is in the landing HTML, marked as of the build", (
   loaded.setAgentCount({ total: 114_251, at });
   try {
     const home = rootOf(homeHtml(index, render, assert.fail).html);
-    const ticker = /<p [^>]*data-agent-ticker[^>]*>[\s\S]*?<\/p>/.exec(home)?.[0] ?? '';
-    assert.match(ticker, /data-ready="true"/);
-    assert.match(ticker, /data-source="build"/);
-    assert.match(ticker, /data-build-count="114251"/);
-    assert.match(ticker, /data-build-at="2026-10-05T12:00:00.000Z"/);
-    // The settled number (no count from 0 in the HTML), at its final width.
-    assert.match(ticker, /<span class="cc-agent-ticker-n"[^>]*>114,251<\/span>/);
-    assert.match(text(ticker), /114,251 AI agents have joined Central City/);
-    assert.equal(home.match(/data-agent-ticker/g)?.length, 1);
-    // A count of 1 reads in the singular.
-    loaded.setAgentCount({ total: 1, at });
+    const { agents, value, paid, base } = cells(home);
+    assert.equal(
+      agents?.attributes,
+      ' data-agent-ticker="true" data-build-count="114251" data-build-at="2026-10-05T12:00:00.000Z"',
+    );
+    // The settled number (no count in the HTML).
+    assert.equal(agents?.text, 'AI agents joined114,251');
     assert.match(
-      text(rootOf(homeHtml(index, render, assert.fail).html)),
-      /1 AI agent has joined Central City/,
+      home,
+      /<p class="visually-hidden">Central City, last known: 114,251 AI agents joined\.<\/p>/,
+    );
+    // The other numbers stay dashes: only the agent count is read at build time.
+    assert.equal(value?.text, 'Total value settled (x402)$–USDC');
+    assert.equal(paid?.text, 'Paid service calls–');
+    assert.equal(base?.text, 'Central City base agents–');
+    assert.equal(home.match(/data-agent-ticker/g)?.length, 1);
+    loaded.setAgentCount({ total: 1, at });
+    assert.equal(
+      cells(rootOf(homeHtml(index, render, assert.fail).html)).agents?.text,
+      'AI agents joined1',
+    );
+    // Never a baked 0: a build count of 0 is none.
+    loaded.setAgentCount({ total: 0, at });
+    assert.equal(
+      cells(rootOf(homeHtml(index, render, assert.fail).html)).agents?.text,
+      'AI agents joined–',
     );
     // Only the landing carries it.
+    loaded.setAgentCount({ total: 114_251, at });
     assert.doesNotMatch(
       shareCardHtml(index, cardFor('/downtown/verify'), render).html,
       /data-build-count/,
@@ -211,27 +267,44 @@ test("the build's agent count is in the landing HTML, marked as of the build", (
   }
 });
 
-test('the paid service calls line: reserved and empty when the build saw the count, else absent; never a number', () => {
-  loaded.setAgentCount(null);
+test("the build's Base agents number is in its cell, marked as of the build; never a 0", () => {
+  const at = Date.parse('2026-10-05T12:00:00.000Z');
+  loaded.setAgentCount({ total: 114_251, at });
+  loaded.setBaseAgents({ total: 31_452, asOf: at });
   try {
-    loaded.setPaidCallsLine(true);
     const home = rootOf(homeHtml(index, render, assert.fail).html);
-    const line =
-      /<p [^>]*data-paid-calls-ticker[^>]*>[\s\S]*?<\/p>|<p [^>]*data-paid-calls-ticker[^>]*\/>/.exec(
-        home,
-      )?.[0];
+    const { base, paid, value } = cells(home);
     assert.equal(
-      line,
-      '<p class="cc-agent-ticker cc-paid-ticker" data-paid-calls-ticker="true" data-paid-calls="1" data-ready="false"></p>',
+      base?.attributes,
+      ' data-build-base="31452" data-build-base-at="2026-10-05T12:00:00.000Z"',
     );
-    assert.doesNotMatch(text(home), /paid service call/);
-    // In the counts' column, under the agent count.
+    assert.equal(base?.text, 'Central City base agents31,452');
     assert.match(
       home,
-      /<div class="cc-lp-tickers"><p [^>]*data-agent-ticker[\s\S]*?<\/p><p [^>]*data-paid-calls-ticker/,
+      /<p class="visually-hidden">Central City, last known: 31,452 Central City base agents, 114,251 AI agents joined\.<\/p>/,
     );
-    loaded.setPaidCallsLine(false);
-    assert.doesNotMatch(rootOf(homeHtml(index, render, assert.fail).html), /data-paid-calls/);
+    // The money numbers stay dashes.
+    assert.equal(paid?.text, 'Paid service calls–');
+    assert.equal(value?.text, 'Total value settled (x402)$–USDC');
+    loaded.setBaseAgents({ total: 0, asOf: at });
+    const zero = cells(rootOf(homeHtml(index, render, assert.fail).html)).base;
+    assert.equal(zero?.text, 'Central City base agents–');
+    assert.equal(zero?.attributes, '');
+  } finally {
+    loaded.setBaseAgents(null);
+    loaded.setAgentCount(null);
+  }
+});
+
+test('the paid service calls are never baked, whatever the build saw (no reserved line on the landing)', () => {
+  loaded.setAgentCount(null);
+  try {
+    for (const reserved of [true, false]) {
+      loaded.setPaidCallsLine(reserved);
+      const home = rootOf(homeHtml(index, render, assert.fail).html);
+      assert.doesNotMatch(home, /data-paid-calls/);
+      assert.equal(cells(home).paid?.text, 'Paid service calls–');
+    }
   } finally {
     loaded.setPaidCallsLine(false);
   }

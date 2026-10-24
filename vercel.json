@@ -54,6 +54,14 @@
     {
       "path": "/api/cron/feed-pay-recover",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/sfp-work",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/own-paymaster-maintain",
+      "schedule": "* * * * *"
     }
   ],
   "redirects": [
@@ -379,6 +387,19 @@
     }
   ],
   "headers": [
+    {
+      "source": "/papers/(.*)",
+      "headers": [
+        {
+          "key": "X-Robots-Tag",
+          "value": "noindex, nofollow"
+        },
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=300"
+        }
+      ]
+    },
     {
       "source": "/a/(.*)",
       "headers": [

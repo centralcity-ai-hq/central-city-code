@@ -2310,6 +2310,8 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
           wallet: walletAddress,
           recipe: recipeOf(wallet),
           calls: [withdrawalCall(body.token, body.to, value)],
+          // Our own paymaster: a payment is ordinary work; a withdrawal may use the protected budget.
+          sponsorFlow: payment ? ('ownerPay' as const) : ('exit' as const),
           // Its own lane, first sequence: a lane Base has seen used is refused (NONCE_MOVED).
           ...(lane === null
             ? {}
@@ -2593,6 +2595,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
           wallet: walletAddress,
           recipe: recipeOf(wallet),
           calls: [rateCall(target.baseId, target.stars)],
+          sponsorFlow: 'rate' as const,
           // Its own lane, first sequence: a lane Base has seen used is refused (NONCE_MOVED).
           ...(lane === null
             ? {}
@@ -3004,6 +3007,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
           wallet: walletAddress,
           recipe: recipeOf(wallet),
           calls: [noopCall(walletAddress)],
+          sponsorFlow: 'exit' as const,
           // Exactly the original's full nonce, in its lane: only one of the two can ever land.
           pinnedNonce: BigInt(row.nonce),
           ...laneInput(row),
@@ -3050,6 +3054,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
             wallet: walletAddress,
             recipe: recipeOf(wallet),
             calls: [noopCall(walletAddress)],
+            sponsorFlow: 'exit' as const,
             pinnedNonce: BigInt(row.nonce),
             ...laneInput(row),
             feeFloor: {

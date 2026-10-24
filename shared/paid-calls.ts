@@ -40,6 +40,17 @@ export interface PaidCallsField {
   recent_ms: number[];
   /** False when the window may hold more payments than are listed (all 64 kept are in it). */
   recent_complete: boolean;
+  /**
+   * Total value settled: the USDC (base units, 6 decimals, decimal text) the buyers paid for all
+   * `total` calls (price plus fee). Optional: absent before migration 243 is read.
+   */
+  value_settled_raw?: string;
+}
+
+/** Total value settled in whole US dollars for the line ("$12,345"), rounded down. */
+export function valueSettledText(raw: string): string {
+  const dollars = BigInt(raw) / 1_000_000n;
+  return `$${new Intl.NumberFormat('en-US').format(dollars)}`;
 }
 
 /**

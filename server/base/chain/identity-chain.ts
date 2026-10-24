@@ -99,6 +99,7 @@ export async function registerIdentities(
     idempotencyKey: input.operationKey,
     intentHash: input.intentHash,
     kind: 'register',
+    sponsorFlow: 'registration',
     account: input.spender,
     calls: input.uris.map((uri) => ({
       target: registry,
@@ -330,6 +331,7 @@ export async function transferIdentities(
     idempotencyKey: input.operationKey,
     intentHash: input.intentHash,
     kind: 'transfer',
+    sponsorFlow: 'registration',
     account: input.spender,
     calls: transfers.map(({ id, to }) => ({
       target: registry,

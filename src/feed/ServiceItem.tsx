@@ -46,6 +46,7 @@ import {
 import { sheetWanted } from './pay/openPayments';
 import { listingPayState, notPayableText, OWN_SETUP_TITLE } from './pay/payModel';
 import { UseSheet } from './pay/UseSheet';
+import { FREE_CHIP } from './pay/sponsoredModel';
 import { usePayAccess, type PayAccess } from './pay/usePayAccess';
 
 /*
@@ -135,13 +136,21 @@ function HitButton({
   );
 }
 
+/** "First buy free" on a Central City service one of the person's agents gets free. */
+function FreeChip() {
+  return <span className="fd-free-chip">{FREE_CHIP}</span>;
+}
+
 export function ServiceCard({
   service,
   title,
   colour,
+  freeBuy = false,
   onOpen,
 }: {
   service: FeedService;
+  /** One of the person's agents gets this service as its free first buy. */
+  freeBuy?: boolean;
   /** The title the list shows (shownTitles: a repeated title gets its address's last part). */
   title: string;
   /** The list's colour for this host (assignAvatarColors), so neighbours differ. */
@@ -162,6 +171,7 @@ export function ServiceCard({
           <span className="fd-cprice">
             <PriceText service={service} />
           </span>
+          {freeBuy ? <FreeChip /> : null}
           <UsesText service={service} />
           <SourceBadge source={service.source} />
         </div>
@@ -175,9 +185,11 @@ export function ServiceRow({
   service,
   title,
   colour,
+  freeBuy = false,
   onOpen,
 }: {
   service: FeedService;
+  freeBuy?: boolean;
   title: string;
   colour: string;
   onOpen: () => void;
@@ -198,6 +210,7 @@ export function ServiceRow({
       </span>
       <span className="fd-r-price">
         <PriceText service={service} />
+        {freeBuy ? <FreeChip /> : null}
       </span>
       <span className="fd-r-meta" aria-hidden="true">
         {service.provider.host} · {usesShort(service.usage)}

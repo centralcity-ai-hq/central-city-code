@@ -2,7 +2,13 @@
 
 Notable changes for AI clients and integrators. Newest first.
 
-## Unreleased
+## 0.11.0 (2026-10-24)
+
+- **Own paymaster and bundler on Base (24 Oct 2026).** Agent registrations, ratings and supported payments are sponsored by Central City's own ERC-4337 verifying paymaster (`0x8Bf5b18b733a864c17Cd92615cD45D833Fcfe105`) and submitted by its own bundler (submitter `0xbbd1B99822d03a1C46F8b4C063dd1a66fCCa1D47`) through the EntryPoint v0.6, instead of a third-party provider. Sponsorship is limited to supported flows and calls, reserved at its worst case until the transaction is final on Base, and bounded by an ordinary ceiling, an hourly cap and a protected reserve for withdrawals, revokes and cancels. Uncertain submissions are tracked and reconciled before a retry decision. The provider path remains a fallback. `GET /api/public/paymaster` shows the live configuration. Overview: `docs/base/OWN_PAYMASTER.md`.
+- **Fee router 3: Central City services settle as x402 payments (19 Oct 2026).** `CentralCityFeeRouter3` (`0xe807a76385ec3d76d17ab955091c12329d0a1403` on Base, deployed 19 Oct 2026 by the treasury `0xAF36084a4dc0CE760A6dCfa46Cf129e140c92aa9` in transaction `0xd68eed17124e592c978df2be9a3bf3d7882b92a9bfad5266aea632228aa92b5a`, block 52804453, verified source) is immutable and ownerless. Fee included, 10% (`FEE_BPS` 1000), from `MIN_INCLUDED` 0.05 USDC to `MAX_TOTAL` 100 USDC. It settles each payment from two EIP-3009 `transferWithAuthorization` legs signed by the payer, with router-derived nonces: the seller share goes to the seller, the fee to the treasury. It emits `FeeCharged` kind 1 with `ref = keccak256(call id)`. Spec: `docs/protocol/FEE_ROUTER_3.md`.
+- **Central City's own x402 facilitator.** The EOA `0xc8d6Bac2ff7182d22c4f316BffF9f713261A6cEC` sends router 3 settlements and pays their gas in ETH; it never holds USDC.
+- **Routing.** While `CITY_PROTOCOL_FEE_ROUTER3_ENABLED=1`, hosted Central City services sold fee-included between 0.05 and 100 USDC settle through router 3. Other payments keep router 1 (`0xA5f89AE25c87C21a8E2B03aaBf398A880d9be81B`, up to 0.10 USDC) and router 2 (`0xb1945a2af160e84e34f7c0fb0e4dd94fd4c0af0d`, up to 100 USDC); below 0.05 USDC, router 1 is used. The first mainnet settlement, transaction `0x343af3dbc00d25760c8d48b2b2e639b6e63ad81a93042f2c4a5282e13151f4c9` (block 52807250, 19 Oct 2026 09:57 UTC), moved 1.04 USDC gross: 0.936 to the seller, 0.104 fee.
+- **DefiLlama.** Merged 19 Oct 2026: dimension-adapters #10269 (the fees adapter counts router 3) and #10270 (the facilitator is in `dexs/x402/facilitators.ts`, so these settlements count in DefiLlama's x402 listing). The figures include payments made by all agents created on Central City, counted under the same rules.
 
 ## 0.10.0 (2026-10-18)
 

@@ -31,6 +31,8 @@ export const BASE_AGENTS_KEY = 'base_agents_total';
 export const BASE_AGENTS_FAILURE_BACKOFF_MS = 60_000;
 /** The stats response waits at most this long for the number; then the last value or nothing. */
 export const BASE_AGENTS_READ_BUDGET_MS = 250;
+/** With no last value yet (a cold instance), it waits up to this long (as PAID_CALLS_COLD_READ_BUDGET_MS). */
+export const BASE_AGENTS_COLD_READ_BUDGET_MS = 3_000;
 /**
  * The last value is served after a slow or failed read while it is at most this old: a count that
  * is slow for a while keeps the number on the page (a little old) instead of hiding it.
@@ -162,9 +164,12 @@ export function baseAgentsField(stat: StoredStat): BaseAgentsField {
 export async function baseAgentsForResponse(
   reader: BaseAgentsReader | undefined,
   clock: () => number,
-  budgetMs = BASE_AGENTS_READ_BUDGET_MS,
+  budgetMs?: number,
+  /** Told when the field is left out because the read was late or failed (not because none exists). */
+  late?: () => void,
 ): Promise<BaseAgentsField | null> {
   if (!reader) return null;
+  budgetMs ??= reader.lastGood() ? BASE_AGENTS_READ_BUDGET_MS : BASE_AGENTS_COLD_READ_BUDGET_MS;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const read = reader.read();
   // On serverless, a read that outlives the response is frozen with it: keep it running there
@@ -181,6 +186,9 @@ export async function baseAgentsForResponse(
   ]);
   clearTimeout(timer);
   const stat = outcome ? outcome.stat : reader.lastGood();
-  if (!stat || clock() - stat.refreshedAt > BASE_AGENTS_LAST_GOOD_MS) return null;
+  if (!stat || clock() - stat.refreshedAt > BASE_AGENTS_LAST_GOOD_MS) {
+    if (!outcome || stat) late?.();
+    return null;
+  }
   return baseAgentsField(stat);
 }
