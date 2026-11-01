@@ -338,7 +338,7 @@ const releasedLive = (at: string) =>
  * one holds nothing at once; without, it holds what an open one does until validUntil + margin.
  * Either way a never-sent one holds nothing once its signature can no longer execute.
  */
-function windows(bound: boolean, at = '$3') {
+export function windows(bound: boolean, at = '$3') {
   const RELEASED_LIVE = releasedLive(at);
   return {
     /** Still able to execute: counted against the deposit and the ordinary ceiling. */
@@ -354,8 +354,8 @@ function windows(bound: boolean, at = '$3') {
   };
 }
 
-async function sums(
-  tx: Transaction,
+export async function sums(
+  tx: Pick<Transaction, 'query'>,
   w: ReturnType<typeof windows>,
   now: number,
   afterBlock: bigint,
@@ -392,6 +392,80 @@ async function sums(
     allOpen: BigInt(r.allOpen),
     settledAfter: BigInt(r.settledAfter),
     selfPaidOpen: BigInt(r.selfPaidOpen),
+  };
+}
+
+/** The two sums that read a whole chain's history or day: never under the lock with historyMaxAgeMs. */
+export interface HistorySums {
+  ordinaryDone: bigint;
+  dayExit: bigint;
+}
+
+export async function historySums(
+  db: Pick<Database, 'query'>,
+  now: number,
+  chainId: number,
+): Promise<HistorySums> {
+  const w = windows(true);
+  const { rows } = await db.query<{ ordinaryDone: string; dayExit: string }>(
+    `SELECT
+       COALESCE(SUM(actual_cost_wei) FILTER (WHERE NOT protected AND status = 'settled' AND ${SPONSORED}), 0)::text AS "ordinaryDone",
+       COALESCE(SUM(${COST}) FILTER (WHERE protected AND created_at > $1 AND ${RESERVATION} AND ${w.shared}), 0)::text AS "dayExit"
+     FROM own_paymaster_reservations
+     WHERE chain_id = $2`,
+    [now - DAY_MS, chainId],
+  );
+  return { ordinaryDone: BigInt(rows[0]!.ordinaryDone), dayExit: BigInt(rows[0]!.dayExit) };
+}
+
+/**
+ * sums() for a submitter-bound budget without its two history sums: each other sum reads its own
+ * index (open by status, the hour by created_at, settled by settled_block), so the time under the
+ * lock follows what is open and recent, not every reservation the chain ever made.
+ */
+export async function recentSums(
+  tx: Pick<Transaction, 'query'>,
+  now: number,
+  afterBlock: bigint,
+  chainId: number,
+  history: HistorySums,
+): Promise<Sums> {
+  const w = windows(true);
+  const { rows } = await tx.query<Record<string, string | null>>(
+    `SELECT
+       (SELECT overhead_wei FROM own_paymaster_budget WHERE chain_id = $1)::text AS "overhead",
+       open.*, hour.*, done.*
+     FROM (SELECT
+         COALESCE(SUM(max_cost_wei) FILTER (WHERE NOT protected AND ${SPONSORED}), 0)::text AS "ordinaryOpen",
+         COALESCE(SUM(max_cost_wei) FILTER (WHERE NOT protected AND ${w.handout}), 0)::text AS "handoutOrdinary",
+         COALESCE(SUM(max_cost_wei) FILTER (WHERE protected AND ${w.handout}), 0)::text AS "handoutExit",
+         COALESCE(SUM(max_cost_wei) FILTER (WHERE ${SPONSORED}), 0)::text AS "allOpen",
+         COALESCE(SUM(max_cost_wei) FILTER (WHERE flow = '${SELF_PAID}' AND status = 'sent'), 0)::text AS "selfPaidOpen"
+       FROM own_paymaster_reservations
+       WHERE chain_id = $1 AND status IN ('reserved','sent')) open,
+     (SELECT
+         COALESCE(SUM(${COST}) FILTER (WHERE NOT protected AND ${SPONSORED} AND ${w.shared}), 0)::text AS "hourOrdinary",
+         COALESCE(SUM(${COST}) FILTER (WHERE protected AND ${w.shared}), 0)::text AS "hourExit"
+       FROM own_paymaster_reservations
+       WHERE chain_id = $1 AND created_at > $2) hour,
+     (SELECT COALESCE(SUM(actual_cost_wei) FILTER (WHERE ${SPONSORED}), 0)::text AS "settledAfter"
+       FROM own_paymaster_reservations
+       WHERE chain_id = $1 AND status = 'settled' AND settled_block > $3) done`,
+    [chainId, now - HOUR_MS, afterBlock.toString()],
+  );
+  const r = rows[0]!;
+  return {
+    overhead: BigInt(r.overhead ?? '0'),
+    ordinaryDone: history.ordinaryDone,
+    ordinaryOpen: BigInt(r.ordinaryOpen!),
+    hourOrdinary: BigInt(r.hourOrdinary!),
+    hourExit: BigInt(r.hourExit!),
+    dayExit: history.dayExit,
+    handoutOrdinary: BigInt(r.handoutOrdinary!),
+    handoutExit: BigInt(r.handoutExit!),
+    allOpen: BigInt(r.allOpen!),
+    settledAfter: BigInt(r.settledAfter!),
+    selfPaidOpen: BigInt(r.selfPaidOpen!),
   };
 }
 
@@ -459,6 +533,22 @@ async function sponseeSums(
 }
 
 const ADDRESS = /^0x[0-9a-f]{40}$/;
+/** How long a transaction that holds these locks may sit idle before the server ends it. */
+export const LOCK_HOLDER_IDLE_MS = 15_000;
+/**
+ * Limits for this transaction only, set inside it: the pool's own lock and idle timeouts did not
+ * bind through PgBouncer (1 Nov: 155 connections waited up to 241 s on send rows, while a holder of
+ * the budget lock sat idle for 260 s, and the whole site answered busy).
+ */
+export const boundWaits = (tx: Pick<Transaction, 'query'>, lockTimeoutMs: number) =>
+  tx.query(
+    `SELECT set_config('lock_timeout', $1, true),
+            set_config('idle_in_transaction_session_timeout', $2, true)`,
+    [`${Math.floor(lockTimeoutMs)}ms`, `${LOCK_HOLDER_IDLE_MS}ms`],
+  );
+/** A budget lock wait this long is logged, at most this often per instance. */
+const LOCK_WAIT_NOTICE_MS = 500;
+const LOCK_WAIT_NOTICE_EVERY_MS = 10_000;
 
 /** An exit admitted past the deployment's exit day (first of its account's day): the day's sum with it. */
 interface PastExitDay {
@@ -484,6 +574,24 @@ export function ownPaymasterBudget(deps: {
   chainId?: number;
   /** A FRESH read of the deposit at a known block (no cache): it is taken while holding the lock. */
   deposit: () => Promise<DepositReading>;
+  /**
+   * An admission may decide on a reading up to this old (ms), which freshenDeposit takes before the
+   * lock. As safe as a fresh one, since `free` is coherent with the reading's block: what executed
+   * after it is still open or settled after it, so it is subtracted. What moves the deposit outside
+   * our sends (an owner's withdrawal) is seen this much later. Default 0: fresh, inside the lock.
+   * Keep half of it above lockTimeoutMs: a reading that ages out in the queue is read under the lock,
+   * which lengthens the queue for everyone behind it.
+   */
+  depositMaxAgeMs?: number;
+  /** The longest a transaction waits for the budget lock, in ms. Default: no limit of its own. */
+  lockTimeoutMs?: number;
+  /**
+   * An admission may use a settled-total and exit-day figure up to this old (ms), read before the
+   * lock, with a submitterBound budget. Those two scan a whole chain's reservations. So the ceiling
+   * and the exit day figure can be passed by what was spent in this time; the deposit, the hours
+   * and everything open are still exact. Default 0: all counted under the lock.
+   */
+  historyMaxAgeMs?: number;
   /** Read at every admission; a limit left out is BUDGET_LIMITS'. */
   limits?: Partial<BudgetLimits>;
   /**
@@ -508,9 +616,88 @@ export function ownPaymasterBudget(deps: {
   const operators = deps.operatorAccounts ?? (() => new Set<string>());
   const now = deps.now ?? Date.now;
   const chainId = deps.chainId ?? BASE_MAINNET;
+  const depositMaxAgeMs = deps.depositMaxAgeMs ?? 0;
+  let lockWaitNoticeAt = -Infinity;
+  const lockTimeoutSet = new WeakSet<Transaction>();
+  /** The last reading and when it was asked for; a failed read is never kept. */
+  let lastDeposit: { reading: DepositReading; at: number } | null = null;
+  let depositRead: Promise<DepositReading> | null = null;
+  const readDeposit = (): Promise<DepositReading> => {
+    if (depositRead) return depositRead;
+    const at = now();
+    depositRead = deps
+      .deposit()
+      .then((reading) => {
+        lastDeposit = { reading, at };
+        return reading;
+      })
+      .finally(() => {
+        depositRead = null;
+      });
+    return depositRead;
+  };
+  /** The last history sums; a failed read is never kept. Only a submitter-bound budget uses them. */
+  const historyMaxAgeMs = deps.submitterBound === true ? (deps.historyMaxAgeMs ?? 0) : 0;
+  let lastHistory: { sums: HistorySums; at: number } | null = null;
+  let historyRead: Promise<void> | null = null;
+  const readHistory = (): Promise<void> => {
+    if (historyRead) return historyRead;
+    const at = now();
+    historyRead = historySums(deps.db, at, chainId)
+      .then((read) => {
+        lastHistory = { sums: read, at };
+      })
+      .finally(() => {
+        historyRead = null;
+      });
+    return historyRead;
+  };
+  /** Null past the age: the admission then counts everything itself, as without one. */
+  const historyForAdmission = (): HistorySums | null =>
+    historyMaxAgeMs > 0 && lastHistory && now() - lastHistory.at < historyMaxAgeMs
+      ? lastHistory.sums
+      : null;
+  const depositForAdmission = async (): Promise<DepositReading> => {
+    if (depositMaxAgeMs <= 0) return deps.deposit();
+    if (lastDeposit && now() - lastDeposit.at < depositMaxAgeMs) return lastDeposit.reading;
+    return readDeposit();
+  };
+  /**
+   * Called before a transaction that takes the lock: renews a reading past half its age, so the
+   * admission inside the lock rarely reads. A failure is left to that admission to meet.
+   */
+  const freshenDeposit = async (): Promise<void> => {
+    const history =
+      historyMaxAgeMs > 0 && (!lastHistory || now() - lastHistory.at >= historyMaxAgeMs / 2)
+        ? readHistory().catch(() => {})
+        : null;
+    const deposit =
+      depositMaxAgeMs > 0 && (!lastDeposit || now() - lastDeposit.at >= depositMaxAgeMs / 2)
+        ? readDeposit().catch(() => {})
+        : null;
+    await Promise.all([history, deposit]);
+  };
   /** One admission at a time on this chain; another chain's budget is not held up. */
-  const lockBudget = (tx: Transaction) =>
-    tx.query('SELECT id FROM own_paymaster_budget WHERE chain_id = $1 FOR UPDATE', [chainId]);
+  const lockBudget = async (tx: Transaction) => {
+    // Inside the transaction, because the pool's lock_timeout did not bind here: 96 s waits were
+    // logged on 1 Nov. Past it the transaction fails as busy (55P03) and gives its connection back.
+    if (deps.lockTimeoutMs && !lockTimeoutSet.has(tx)) {
+      lockTimeoutSet.add(tx);
+      await boundWaits(tx, deps.lockTimeoutMs);
+    }
+    const asked = Date.now();
+    const result = await tx.query(
+      'SELECT id FROM own_paymaster_budget WHERE chain_id = $1 FOR UPDATE',
+      [chainId],
+    );
+    // Waiters each hold a pooled connection: a long queue here starves every route.
+    const waitedMs = Date.now() - asked;
+    if (waitedMs >= LOCK_WAIT_NOTICE_MS && asked - lockWaitNoticeAt >= LOCK_WAIT_NOTICE_EVERY_MS) {
+      lockWaitNoticeAt = asked;
+      log(`own paymaster: budget lock waited ${waitedMs} ms on chain ${chainId}`);
+    }
+    return result;
+  };
   const bound = deps.submitterBound === true;
   const w = windows(bound);
   /** The handout share of a shared hourly cap. */
@@ -577,8 +764,8 @@ export function ownPaymasterBudget(deps: {
     | { kind: 'selfPaid'; floatWei?: bigint };
 
   /**
-   * The admission rules for `cost` more, under the lock, against a deposit read inside it: no
-   * settlement can land between this reading and the decision. Throws BudgetError.
+   * The admission rules for `cost` more, under the lock, against a deposit read inside it (or a
+   * reading up to depositMaxAgeMs old, see there). Throws BudgetError.
    */
   async function admit(
     tx: Transaction,
@@ -600,14 +787,18 @@ export function ownPaymasterBudget(deps: {
       if (BigInt(open) + cost > admission.floatWei) throw new BudgetError('submitter_float');
       return null;
     }
-    const deposit = await deps.deposit();
-    const s = await sums(tx, w, at, deposit.block, chainId);
+    const deposit = await depositForAdmission();
+    const history = historyForAdmission();
+    const s = history
+      ? await recentSums(tx, at, deposit.block, chainId, history)
+      : await sums(tx, w, at, deposit.block, chainId);
     const free = deposit.wei - s.allOpen - s.settledAfter - cost;
     if (free < 0n) throw new BudgetError('deposit');
     if (admission.kind === 'exposure') return null;
     const operator = who.accountId !== null && operators().has(who.accountId);
+    // An operator's ordinary work meets no cap of its own, and a fleet's own rows are very many.
     const own =
-      who.accountId === null && who.sender === null
+      (who.accountId === null && who.sender === null) || (operator && !isProtected)
         ? null
         : await sponseeSums(tx, bound, at, isProtected, who, chainId);
     let pastDay: PastExitDay | null = null;
@@ -772,6 +963,8 @@ export function ownPaymasterBudget(deps: {
   }
 
   return {
+    freshenDeposit,
+
     /**
      * Reserves the worst case of one sponsorship, or throws BudgetError. Call it BEFORE the
      * signature leaves the server. Idempotent per userOpHash (the same op asked again keeps its one
@@ -798,6 +991,7 @@ export function ownPaymasterBudget(deps: {
       if (input.maxCostWei <= 0n) throw new Error('A reservation costs more than 0.');
       const isProtected = PROTECTED_FLOWS.has(input.flow);
       const admitted: { pastDay: PastExitDay | null } = { pastDay: null };
+      await freshenDeposit();
       await deps.db.transaction(async (tx) => {
         const at = now();
         await lockBudget(tx);

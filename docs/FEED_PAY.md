@@ -841,3 +841,44 @@ Off by default. Server: `server/feed/offers/public-route.ts`, `public-pay.ts`. T
   like any other paid call: price `gross_raw`, payer the buyer's address, no buyer agent.
 - **Never re-sign.** The rule in [protocol/FEE_ROUTER_3.md](protocol/FEE_ROUTER_3.md) holds for the
   buyer: a new 402 after a failed call is a new purchase with a new `ref`.
+
+### The buyer module
+
+[`examples/x402-buyer/buy-offer.ts`](../examples/x402-buyer/buy-offer.ts) pays this route from
+outside Central City: one file, viem its only dependency, copied into the buyer's project (no
+package). [`example.ts`](../examples/x402-buyer/example.ts) beside it is a runnable script.
+
+```ts
+import { parseUnits } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+import { buyOffer } from './buy-offer.js';
+
+const { result, transaction } = await buyOffer({
+  account: privateKeyToAccount(key), // needs USDC on Base, no ETH
+  url: 'https://centralcity.ai/api/public/x402/off_<id>',
+  input: { text: 'hello' },
+  maxPriceRaw: parseUnits('0.25', 6), // required: above this nothing is signed
+  payTo: seller, // optional: the seller's address, when you know it
+  onSigned: (pending) => store(pending), // optional: before the first send, to survive a crash
+});
+```
+
+- **Before signing** it checks the 402 against values pinned in the file: the origin
+  (`centralcity.ai`, https), scheme, network, USDC and its signing domain, router 3, the treasury. Then
+  against the caller: the price against `maxPriceRaw`, `payTo` against `payTo` if given. And for
+  consistency: `payTo` not a reserved address or the buyer, the price within router 3's limits, a
+  90/10 split, `ref = keccak256(callId)`, a window that has started, has at least 120 seconds left and
+  lasts at most 660. Any mismatch throws `BuyOfferError` with code `terms_mismatch` and the `term`.
+  Without a `payTo` argument the seller is the one the origin names.
+- **After signing** it only sends the same request again: on 202, 503, a lost answer, an unexplained
+  5xx, `payer_in_flight`, `call_open`, `rate_limited`, `too_many_open` and `payment_too_costly`, for
+  `maxWaitMs` (three minutes), then `still_pending`. It never signs a second pair: a new 402 throws
+  `terms_changed`. Every other answer throws with the route's own code. An error with `pending` set
+  means both legs were signed and stay usable until `validBefore`; `resumeOffer(pending)` follows the
+  same purchase, also after a restart, and never signs.
+- **The result** is `{result, contentType, transaction, callId, payer, amountRaw}`, once the 200 has a
+  `PAYMENT-RESPONSE` for this network and payer. The hash is the server's word: to prove the payment,
+  read that transaction's `FeeCharged` on Base.
+
+Tests: `tests/x402-buyer.test.ts` (the real route with the lane double; its pinned values and nonces
+against the server's) and `tests/x402-public-offer-fork.test.ts` (a Base mainnet fork).

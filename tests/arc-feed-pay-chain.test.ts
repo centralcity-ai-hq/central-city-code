@@ -1288,3 +1288,40 @@ test("a listing names the chain it is paid on: an Arc seller's says Arc and its 
   assert.equal(shown[1]!.asset.address, '0xbase');
   assert.equal(shown[2]!.network, 'eip155:8453');
 });
+
+test('an Arc seller sees its sale on Arc: what it received, its Arc transaction, nothing of the buyer', async (t) => {
+  const f = await fixture(t);
+  const [buyer, seller] = [await newPayer(f), await newPayer(f)];
+  await onArc(f, buyer);
+  await onArc(f, seller, 0n);
+  const id = await listOffer(f, seller);
+  const { res } = await buy(f, buyer, id);
+  assert.equal(res.statusCode, 200, res.body);
+  const call = await finished(f, buyer.owner.cookie, res.json().callId);
+  assert.equal(f.arcBase!.balanceOf(seller.wallet), 90_000n);
+
+  const read = (agentId: string, cookie: string) =>
+    f.app.inject({
+      url: `${FEED_PAY_PATHS.history.replace(':agentId', agentId)}?sales=1`,
+      headers: { ...json, cookie },
+    });
+  const history = (await read(seller.agentId, seller.owner.cookie)).json();
+  assert.deepEqual(history.calls, [], 'the seller paid for nothing');
+  assert.equal(history.sales.length, 1);
+  const [sale] = history.sales;
+  assert.equal(sale.saleId, call.callId);
+  assert.equal(sale.service.title, 'Text hash');
+  assert.equal(sale.received.raw, '90000');
+  assert.equal(sale.price.raw, '100000');
+  assert.equal(sale.txHash, call.payment!.txHash);
+  assert.match(sale.explorerUrl, /arc/i);
+  assert.equal(sale.state, 'final');
+  // A sale says nothing of who bought or what they asked.
+  const text = JSON.stringify(sale).toLowerCase();
+  assert.ok(!text.includes(buyer.wallet.toLowerCase()));
+  assert.ok(!text.includes(buyer.agentId));
+  assert.ok(!text.includes('hello'));
+  // The buyer has no sale; anyone else still gets 404.
+  assert.deepEqual((await read(buyer.agentId, buyer.owner.cookie)).json().sales, []);
+  assert.equal((await read(seller.agentId, buyer.owner.cookie)).statusCode, 404);
+});

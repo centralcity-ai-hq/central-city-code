@@ -13,6 +13,7 @@ import {
   type FeedPayHistoryItem,
   type FeedPayInputProblem,
   type FeedPayInputs,
+  type FeedPaySale,
   type FeedPayJson,
   type FeedPayNotPayableReason,
   type FeedPayQuote,
@@ -1237,6 +1238,15 @@ export function historyLine(item: FeedPayHistoryItem): string {
     return `Paying ${host}`;
   if (item.state === 'result_saved') return `Called ${host}, no money moved`;
   return `Call to ${host} didn’t go through`;
+}
+
+/** A sale in the seller's wallet: the price, and what reached the wallet. */
+export function saleLine(sale: FeedPaySale): string {
+  const price = usdcText(sale.price.raw);
+  const received = usdcText(sale.received.raw);
+  return sale.state === 'final'
+    ? `Sold for ${price} USDC. You received ${received} USDC.`
+    : `Sold for ${price} USDC. ${received} USDC is confirming on the network.`;
 }
 
 export function moveLine(move: FeedPayFloatMove): string {

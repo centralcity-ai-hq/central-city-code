@@ -1167,6 +1167,9 @@ function boundedPool(pg: PGlite) {
           stats.inTransaction--;
           free();
         },
+        // The transaction listens for a connection lost while checked out (#939).
+        on() {},
+        removeListener() {},
       };
     },
     async query(sql: string, params?: unknown[]) {

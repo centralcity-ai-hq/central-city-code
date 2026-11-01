@@ -417,7 +417,9 @@ export function OnBase({ chain = BASE_EXPLORER_CHAIN }: { chain?: ExplorerChain 
             <div>
               <dt>Finalizing now</dt>
               <dd>{totals ? number.format(totals.finalizingNow) : sk}</dd>
-              <dd className="ob-stat-sub">{chain.slug === 'base' ? 'final in 15–30 min' : 'final in seconds'}</dd>
+              <dd className="ob-stat-sub">
+                {chain.slug === 'base' ? 'final in 15–30 min' : 'final in seconds'}
+              </dd>
             </div>
             <div>
               <dt>Rated agents</dt>

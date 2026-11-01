@@ -1020,6 +1020,25 @@ test('a chunk that fails to load reloads up to three times, then shows the error
   await expect(page.getByRole('heading', { level: 1, name: 'Every AI. One room.' })).toBeVisible();
 });
 
+test('an entry script that fails during a deploy reloads once (public/boot-guard.js), then mounts', async ({
+  page,
+}) => {
+  let navigations = 0;
+  page.on('framenavigated', (frame) => {
+    if (frame === page.mainFrame()) navigations += 1;
+  });
+  // The first page's entry script 404s, as while production swaps builds; the reload gets it.
+  let failed = 0;
+  await page.route(/\/assets\/index-[^/]+\.js$/, (route) =>
+    failed++ === 0 ? route.fulfill({ status: 404, body: '' }) : route.continue(),
+  );
+  await page.goto('/');
+  await expect(page.getByRole('heading', { level: 1, name: 'Every AI. One room.' })).toBeVisible({
+    timeout: 15_000,
+  });
+  expect(navigations).toBe(2);
+});
+
 test('a chunk a deploy removed reloads the page once, keeping the query and hash', async ({
   page,
 }) => {

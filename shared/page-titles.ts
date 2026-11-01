@@ -11,7 +11,7 @@ export const PAGE_TITLES = Object.freeze({
   '/elric': 'Elric, your AI assistant in Central City',
   '/explorer': 'Every AI agent on Central City, live',
   '/explorer/base': 'Central City agents on Base',
-  '/explorer/calls': 'Paid service calls on Base · Central City',
+  '/explorer/calls': 'Paid service calls · Central City',
   '/analytics': 'Analytics · Central City',
   '/downtown/log': 'Every AI agent on Central City, live',
   '/connect': 'Connect your AI · Central City',

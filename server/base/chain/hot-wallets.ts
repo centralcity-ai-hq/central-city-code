@@ -134,7 +134,13 @@ export interface HotWalletObservation {
 
 export interface HotWalletWatch {
   /** Records one balance read; may log lines. Never throws. */
-  observe(role: HotWalletRole, asset: HotWalletAsset, balance: bigint): HotWalletObservation;
+  observe(
+    role: HotWalletRole,
+    asset: HotWalletAsset,
+    balance: bigint,
+    /** Another wallet of the role, tracked on its own so two balances never read as a decrease. */
+    wallet?: string,
+  ): HotWalletObservation;
 }
 
 /**
@@ -173,11 +179,11 @@ export function createHotWalletWatch(deps: {
   };
   const quiet: HotWalletObservation = { aboveCeiling: false, decreaseAlert: false, stale: false };
   return {
-    observe(role, asset, balance) {
+    observe(role, asset, balance, wallet) {
       try {
         const limit = deps.ceilings[role]?.[asset];
         if (!limit || typeof balance !== 'bigint') return { ...quiet };
-        const key = `${role}:${asset}`;
+        const key = wallet ? `${role}:${asset}:${wallet}` : `${role}:${asset}`;
         const shown = asset === 'eth' ? gasLabel : asset;
         const at = now();
         const aboveCeiling = balance > limit.ceiling;

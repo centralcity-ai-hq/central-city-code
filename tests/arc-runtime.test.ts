@@ -33,7 +33,9 @@ test('testnet: the contracts replayed there, at their Base addresses', () => {
 });
 
 test('mainnet: off while Arc is off; on, the code names its SpendPermissionManager, never a setting', () => {
-  const setting = { CITY_ARC_SPEND_PERMISSION_MANAGER: '0x00000000000000000000000000000000000000f2' };
+  const setting = {
+    CITY_ARC_SPEND_PERMISSION_MANAGER: '0x00000000000000000000000000000000000000f2',
+  };
   assert.equal(chainNetwork(ARC_MAINNET, {}), null);
   assert.equal(chainNetwork(ARC_MAINNET, setting), null);
   const arc = chainNetwork(ARC_MAINNET, { CITY_ARC: '1', ...setting })!;

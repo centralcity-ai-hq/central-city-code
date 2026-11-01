@@ -157,7 +157,15 @@ export interface ChainView {
   explorerUrl: string;
   finality: 'instant' | 'finalized-tag';
   gasAsset: GasAsset;
+  /** The chain's mark colour in the Explorer (its dot): Base blue, Arc black. */
+  mark: string;
 }
+
+/** Each family's mark colour (src/verify/on-base.css .ob-chain-*). */
+export const CHAIN_MARKS: Readonly<Record<ChainFamily, string>> = {
+  base: '#0052ff',
+  arc: '#0b0b0f',
+};
 
 const BASE_EXPLORERS: Readonly<Record<number, string>> = {
   [BASE_MAINNET]: 'https://basescan.org',
@@ -175,6 +183,7 @@ export function chainView(chainId: number): ChainView | null {
       explorerUrl: arc.explorerUrl,
       finality: 'instant',
       gasAsset: arc.gasAsset,
+      mark: CHAIN_MARKS.arc,
     };
   const base = (BASE_NETWORKS as Record<number, (typeof BASE_NETWORKS)[BaseChainId] | undefined>)[
     chainId
@@ -187,7 +196,20 @@ export function chainView(chainId: number): ChainView | null {
     explorerUrl: BASE_EXPLORERS[chainId] ?? '',
     finality: 'finalized-tag',
     gasAsset: { symbol: 'ETH', decimals: 18 },
+    mark: CHAIN_MARKS.base,
   };
+}
+
+/**
+ * The real-money chains this deployment has on, Base mainnet first: what a page listing every
+ * chain's payments reads. Arc while CITY_ARC=1 (on the network CITY_ARC_CHAIN_ID names, mainnet
+ * unless set). A new chain is added here once, and every such page lists it.
+ */
+export function liveChainIds(env: Record<string, string | undefined> = {}): number[] {
+  const ids: number[] = [BASE_MAINNET];
+  const arc = arcNetwork(Number(env.CITY_ARC_CHAIN_ID?.trim() || ARC_MAINNET), env);
+  if (arc) ids.push(arc.chainId);
+  return ids;
 }
 
 export interface ChainUsdc {

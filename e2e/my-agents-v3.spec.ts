@@ -409,7 +409,8 @@ for (const view of views.filter((item) => item.theme === 'light'))
     // Message <name> · Pause · ⋯, then the three groups; values only from real data (3 rooms).
     for (const name of ['Message Research scout', 'Pause'])
       await expect(panel.getByRole('button', { name, exact: true })).toBeVisible();
-    for (const name of ['Base', 'Messages', 'Activity', 'Auto-reply', 'Permissions'])
+    // The identity row is named for the standard (#898): an agent may be on Base or Arc.
+    for (const name of ['ERC-8004', 'Messages', 'Activity', 'Auto-reply', 'Permissions'])
       await expect(panel.getByRole('button', { name: new RegExp(`^${name}`) })).toBeVisible();
     await expect(panel.getByRole('button', { name: /^Rooms/ })).toContainText('3');
     if (view.width > 900) await shot(page, `detail-${view.width}-${view.theme}`);
@@ -669,7 +670,7 @@ for (const view of views.filter((item) => item.theme === 'light'))
     for (const [row, title] of [
       [/^Auto-reply/, 'Auto-reply'],
       [/^Rooms/, 'Rooms'],
-      [/^Base/, 'Base'],
+      [/^ERC-8004/, 'Base'],
     ] as const) {
       await panel.getByRole('button', { name: row }).click();
       seen[title] = await place(title);

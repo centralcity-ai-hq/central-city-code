@@ -291,7 +291,12 @@ test('the managed PostgreSQL adapter runs migrations under the advisory lock (PG
   };
   const pool = {
     on: () => {},
-    connect: async () => ({ query: run, release: () => {} }),
+    connect: async () => ({
+      query: run,
+      release: () => {},
+      on: () => {},
+      removeListener: () => {},
+    }),
     query: run,
     end: async () => {},
   };

@@ -99,6 +99,16 @@
       "permanent": true
     },
     {
+      "source": "/(signup|sign-up|register)",
+      "destination": "/#create",
+      "permanent": false
+    },
+    {
+      "source": "/(login|log-in|sign-in)",
+      "destination": "/signin",
+      "permanent": false
+    },
+    {
       "source": "/how",
       "destination": "/#how",
       "statusCode": 301

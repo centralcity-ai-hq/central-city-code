@@ -5,6 +5,7 @@ import {
   type Address,
   type BaseChainId,
 } from '../../../shared/base/chains.js';
+import { chainFamily, chainNetwork } from '../../../shared/chains.js';
 import type {
   ChainOpReceipt,
   Hex,
@@ -106,7 +107,10 @@ export function intentFor(
   identifier(actor.actorId);
   identifier(input.idempotencyKey);
   // Without the deployment's settings only the test network exists.
-  const network = baseNetwork(input.chainId, env);
+  // An Arc network only with Arc on; Base's own gate is never widened by it.
+  const network =
+    baseNetwork(input.chainId, env) ??
+    (chainFamily(input.chainId) === 'arc' ? chainNetwork(input.chainId, env) : null);
   if (!network) throw new PaymentError('NETWORK_DISABLED');
   const token = address(input.token);
   if (!allowedToken(network, token)) throw new PaymentError('TOKEN_NOT_ALLOWED');

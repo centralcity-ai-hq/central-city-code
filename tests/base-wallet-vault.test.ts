@@ -844,11 +844,11 @@ test('the wallet is pinned to the wallet network and owned by the vault key, nev
     201,
   );
 
-  // Any setting in the body is refused: no chain id, no owner address.
+  // The body takes a chain only (70d02332); an owner address, or anything else, is refused.
   for (const payload of [
-    { chainId: OTHER_EXPECTED.chainId },
-    { chainId: WALLET_EXPECTED.chainId },
     { ownerAddress: `0x${'4'.repeat(40)}` },
+    { chainId: WALLET_EXPECTED.chainId, ownerAddress: `0x${'4'.repeat(40)}` },
+    { chainId: '8453' },
   ]) {
     const res = await post(payload);
     assert.equal(res.statusCode, 400, JSON.stringify(payload));
@@ -885,6 +885,13 @@ test('the wallet is pinned to the wallet network and owned by the vault key, nev
   ]);
   // Repeating is idempotent.
   assert.equal((await post()).statusCode, 200);
+  assert.equal(calls.derive.length, 1);
+  // A chain that is not a registration chain here cannot move the wallet: the agent's own stays.
+  const elsewhere = await post({ chainId: OTHER_EXPECTED.chainId });
+  assert.equal(elsewhere.statusCode, 200, elsewhere.body);
+  assert.equal(elsewhere.json().chainId, WALLET_EXPECTED.chainId);
+  assert.equal(elsewhere.json().ownerAddress, signer.address);
+  assert.ok(calls.runtime.every((chainId) => chainId === WALLET_EXPECTED.chainId));
   assert.equal(calls.derive.length, 1);
 
   // Until the backup is confirmed the address stays hidden and funding locked.

@@ -491,7 +491,8 @@ a.v4b-row:hover {
   appearance: none;
   height: auto;
   margin: 0;
-  padding: calc(2 * var(--ws-px)) calc(18 * var(--ws-px)) calc(2 * var(--ws-px)) calc(4 * var(--ws-px));
+  padding: calc(2 * var(--ws-px)) calc(18 * var(--ws-px)) calc(2 * var(--ws-px))
+    calc(4 * var(--ws-px));
   border: 0;
   border-radius: calc(6 * var(--ws-px));
   background: transparent

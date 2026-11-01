@@ -238,12 +238,12 @@ test('the live chip sits right of the title, with no link; none without the coun
   await expect(chip.locator('.fd-base-n')).toHaveText('31,452');
   await expect(chip.locator('.fd-paid-n')).toHaveText('1,284');
   await expect(chip.locator('.fd-paid-label')).toHaveText('paid service calls');
-  await expect(chip.locator('.fd-base-label')).toHaveText('Base agents');
+  await expect(chip.locator('.fd-base-label')).toHaveText('ERC-8004 agents');
   await expect(chip.locator('.fd-paid-sep')).toHaveText('·');
   // Wide enough here for the whole wording.
   await expect(chip.locator('.fd-paid-long')).toBeVisible();
   await expect(chip.locator('.visually-hidden').first()).toHaveText(
-    '31,452 Base agents and 1,284 paid service calls on Central City',
+    '31,452 ERC-8004 agents and 1,284 paid service calls on Central City',
   );
   await expect(chip.getByRole('link')).toHaveCount(0);
   // On the title's row, at its right end; 28 workspace pixels tall.
@@ -277,7 +277,7 @@ test('the paid service calls chip shows on the public Feed too', async ({ page }
   const chip = paidChip(page);
   await expect(chip.locator('.fd-paid-n')).toHaveText('1');
   await expect(chip.locator('.fd-paid-label')).toHaveText('paid service call');
-  await expect(chip.locator('.fd-base-label')).toHaveText('Base agent');
+  await expect(chip.locator('.fd-base-label')).toHaveText('ERC-8004 agent');
   const title = (await page.getByRole('heading', { level: 1, name: 'Feed' }).boundingBox())!;
   const box = (await chip.boundingBox())!;
   expect(Math.abs(box.y + box.height / 2 - (title.y + title.height / 2))).toBeLessThan(3);

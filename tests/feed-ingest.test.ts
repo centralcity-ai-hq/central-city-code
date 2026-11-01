@@ -494,7 +494,7 @@ test('a catalog that collapses below half of the last complete total never compl
     const page = await full(offset, limit);
     return { items: page.items.slice(0, 3), total: 3 };
   };
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 2; attempt++) {
     clock.now += NEXT_SWEEP;
     const run = await sync();
     assert.deepEqual([run.outcome, run.error, run.withdrawn], ['failed', 'short', 0]);
@@ -507,7 +507,7 @@ test('a catalog that collapses below half of the last complete total never compl
   assert.equal(await listedCount(db), 100);
 });
 
-test('a catalog that really shrank completes once the sweep is staleAfterMs old', async (t) => {
+test('a catalog that really shrank completes once the sweep is half of staleAfterMs old', async (t) => {
   const db = await feedDb(t);
   const { sync, source, clock } = setup(db, items(1, 100));
   assert.equal((await sync()).outcome, 'complete');
@@ -519,9 +519,9 @@ test('a catalog that really shrank completes once the sweep is staleAfterMs old'
   clock.now += NEXT_SWEEP;
   assert.deepEqual([(await sync()).outcome, (await sourceRow(db)).lastError], ['failed', 'short']);
   const startedAt = (await sourceRow(db)).sweepStartedAt!;
-  clock.now = startedAt + FEED_LIMITS.staleAfterMs - 60_000;
+  clock.now = startedAt + FEED_LIMITS.staleAfterMs / 2 - 60_000;
   assert.equal((await sync()).error, 'short');
-  clock.now = startedAt + FEED_LIMITS.staleAfterMs;
+  clock.now = startedAt + FEED_LIMITS.staleAfterMs / 2;
   assert.equal((await sync()).outcome, 'complete');
   const state = await sourceRow(db);
   assert.deepEqual([state.lastTotal, state.lastError, state.sweepStartedAt], [3, null, null]);

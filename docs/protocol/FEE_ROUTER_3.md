@@ -150,5 +150,6 @@ those bounds allow.
 
 Stock x402 `exact` clients sign ONE authorization with a random nonce to `payTo`, so they cannot
 pay through router 3. Central City's own buyers use a named, versioned split scheme; an external
-buyer needs that client adapter. Plain `exact` compatibility for outside buyers is a separate
-decision.
+buyer needs that client adapter: `examples/x402-buyer/buy-offer.ts`
+([FEED_PAY.md](../FEED_PAY.md), section 19). Plain `exact` compatibility for outside buyers is a
+separate decision.

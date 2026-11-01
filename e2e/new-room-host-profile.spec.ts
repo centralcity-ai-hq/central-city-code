@@ -60,7 +60,7 @@ test('the host New room creates has Base like any new agent, and stays private',
     .click();
   const pane = page.getByRole('complementary', { name: 'Lantern host details' });
   await expect(pane).toContainText('CC agent');
-  const base = pane.getByRole('button', { name: /^Base/ });
+  const base = pane.getByRole('button', { name: /^ERC-8004/ });
   await expect(base).toContainText('Not yet');
   await expect(base).not.toContainText('Not available');
   expect(errors).toEqual([]);

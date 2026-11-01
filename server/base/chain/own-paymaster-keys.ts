@@ -374,6 +374,18 @@ export function registerPaymasterPublicRoute(
       verifyingSigner: keys.get('paymaster_signer')?.address ?? null,
       // The canary runs ONE lane: only submitter 1 is shown (and allowlisted).
       submitter: keys.get('paymaster_submitter_1')?.address ?? null,
+      // Arc runs every lane: all of them, for the owner to allow and fund (each is used only once
+      // the paymaster allows it and it holds gas).
+      ...(chainFamily(deps.chainId) === 'arc'
+        ? {
+            submitters: (['paymaster_submitter_1', 'paymaster_submitter_2'] as const).flatMap(
+              (purpose) => {
+                const key = keys.get(purpose);
+                return key ? [key.address] : [];
+              },
+            ),
+          }
+        : {}),
       // Which bundler this server sends with: 'direct' (ours), 'cdp', or 'cdp_fallback' when
       // direct was asked without what sponsoring needs (degraded, never "ready").
       // Configured vs in effect: 'direct' only once ours was built; 'cdp_fallback'

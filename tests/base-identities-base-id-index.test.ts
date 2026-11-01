@@ -38,7 +38,10 @@ test('migration 255: the Explorer list reads newest first through the base id in
   // With the index, the page is read in order (no sort over every registration).
   await db.query('SET enable_seqscan = off');
   await db.query('SET enable_sort = off');
-  const plan = await db.query<{ 'QUERY PLAN': string }>(`EXPLAIN ${listSql.sql}`, listSql.params as never);
+  const plan = await db.query<{ 'QUERY PLAN': string }>(
+    `EXPLAIN ${listSql.sql}`,
+    listSql.params as never,
+  );
   const text = plan.rows.map((r) => r['QUERY PLAN']).join('\n');
   assert.match(text, /base_identities_base_id/, text);
 

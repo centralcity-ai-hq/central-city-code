@@ -14,6 +14,9 @@ function fixture(failRollback = false, timeoutOn?: string) {
       return { rows: [{ value: 1 }] };
     },
     release: (broken: boolean) => releases.push(broken),
+    // The transaction listens for a connection lost while checked out (#939).
+    on: () => client,
+    removeListener: () => client,
   };
   const pool = {
     on: () => {},

@@ -744,9 +744,34 @@ export interface FeedPayFloatMove {
   updatedAt: number;
 }
 
+/**
+ * A service this agent sold, paid to its own wallet: what came in, and nothing of who bought it or
+ * what they asked. `pending`: in a block on its chain, not yet final.
+ */
+export interface FeedPaySale {
+  saleId: string;
+  service: { id: string; title: string; host: string };
+  /** What reached the wallet: the seller's 90%. */
+  received: FeedAmount;
+  /** Central City's 10%, part of the price. */
+  fee: FeedAmount;
+  price: FeedAmount;
+  txHash: string;
+  explorerUrl: string;
+  state: 'pending' | 'final';
+  settledAt: number;
+}
+
+/** How far back a wallet's sales are listed. */
+export const FEED_PAY_SALES_WINDOW_MS = 7 * 86_400_000;
+
 export interface FeedPayHistory {
   calls: FeedPayHistoryItem[];
   moves: FeedPayFloatMove[];
+  /** This agent has ever listed a service: it may have sales. */
+  seller?: boolean;
+  /** Newest first, the last FEED_PAY_SALES_WINDOW_MS; empty unless asked for (?sales=1). */
+  sales?: FeedPaySale[];
   /** USDC ready for services now; null when it can't be read. */
   readyForServices: FeedAmount | null;
   perCallMax: FeedAmount;

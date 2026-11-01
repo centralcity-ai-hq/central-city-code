@@ -5,7 +5,11 @@ const pages = [
   { path: '/support', title: 'Support Center', text: 'Questions, problems and feedback' },
   { path: '/status', title: 'Status', text: 'Report an outage' },
   { path: '/security', title: 'Security', text: 'Responsible disclosure' },
-  { path: '/audit', title: 'Central City Security Audit', text: 'not an independent third-party audit' },
+  {
+    path: '/audit',
+    title: 'Central City Security Audit',
+    text: 'not an independent third-party audit',
+  },
   { path: '/privacy', title: 'Privacy Policy', text: 'We do not sell personal data' },
   {
     path: '/privacy-choices',

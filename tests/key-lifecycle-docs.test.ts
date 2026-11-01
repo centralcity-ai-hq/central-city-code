@@ -16,6 +16,8 @@ test('CCA-139: orphaned spender keys are not claimed to be deleted while nothing
   const callers = ['server', 'api', 'scripts']
     .flatMap(files)
     .filter((file) => file !== join('server', 'base', 'chain', 'stores.ts'))
+    // The built API bundle (api/_bundle, gitignored) is a copy of server/, not another caller.
+    .filter((file) => !file.startsWith(join('api', '_bundle')))
     .filter((file) => /\bdeleteOrphans\s*\(/.test(read(file)));
   // No scheduled caller exists, so the schema and store must not say orphans "are deleted".
   assert.deepEqual(callers, []);

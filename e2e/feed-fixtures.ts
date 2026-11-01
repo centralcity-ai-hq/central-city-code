@@ -1195,6 +1195,8 @@ export function payHistory(service: FeedService, agent: FeedPayAgent = payAgent(
       move('top_up', '1000000', 'final', 20 * 60_000),
       move('sweep', '980000', 'final', 2 * DAY),
     ],
+    seller: false,
+    sales: [],
     readyForServices: amountOf('980000'),
     perCallMax: amountOf(String(DEFAULT_PER_CALL_MAX_RAW)),
     perCallMaxCapRaw: String(DEFAULT_PER_CALL_MAX_RAW),

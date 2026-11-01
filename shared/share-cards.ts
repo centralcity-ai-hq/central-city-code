@@ -100,7 +100,7 @@ export const SHARE_CARDS: readonly ShareCard[] = Object.freeze([
   ),
   card(
     '/explorer/calls',
-    'Paid service calls on Base · Central City',
+    'Paid service calls · Central City',
     'Every paid service call on Central City, live from Base. Each one is the onchain transaction that paid for it; open any of them on BaseScan.',
     { image: 'og-explorer.png' },
   ),

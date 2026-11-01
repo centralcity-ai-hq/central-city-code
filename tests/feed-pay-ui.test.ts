@@ -73,6 +73,7 @@ import {
   resultKeptText,
   resultNotes,
   resultText,
+  saleLine,
   serverProblems,
   sizeText,
   stillLostText,
@@ -1380,4 +1381,23 @@ test('the price is checked for the agent that would pay: the server can say othe
   });
   await quoteService(s.id, {}, { fetcher });
   assert.deepEqual(JSON.parse(String(seen[1]!.init.body)), { inputs: {} });
+});
+
+test('a sale in a seller wallet: what it received, in its own words', () => {
+  const sale = {
+    saleId: 'fc_aaaaaaaaaaaaaaaaaaaa',
+    service: { id: 'svc', title: 'Text hash', host: 'centralcity.ai' },
+    received: { raw: '45000', decimals: 6, display: '0.045' },
+    fee: { raw: '5000', decimals: 6, display: '0.005' },
+    price: { raw: '50000', decimals: 6, display: '0.05' },
+    txHash: `0x${'a'.repeat(64)}`,
+    explorerUrl: `https://explorer.arc.io/tx/0x${'a'.repeat(64)}`,
+    state: 'final',
+    settledAt: 1,
+  } as const;
+  assert.equal(saleLine(sale), 'Sold for 0.05 USDC. You received 0.045 USDC.');
+  assert.equal(
+    saleLine({ ...sale, state: 'pending' }),
+    'Sold for 0.05 USDC. 0.045 USDC is confirming on the network.',
+  );
 });

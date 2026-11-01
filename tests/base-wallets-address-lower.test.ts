@@ -11,7 +11,9 @@ import { listMigrations, runMigrations } from '../server/migrations.js';
 test('migration 247 adds the lower(address) index on base_wallets, idempotently', async (t) => {
   const pg = await PGlite.create('memory://');
   t.after(() => pg.close());
-  await pg.exec("CREATE TABLE operators (id text PRIMARY KEY); INSERT INTO operators VALUES ('ws');");
+  await pg.exec(
+    "CREATE TABLE operators (id text PRIMARY KEY); INSERT INTO operators VALUES ('ws');",
+  );
   registerBaseMigration();
   registerBaseWalletsAddressLowerMigration();
   registerBaseWalletsAddressLowerMigration();

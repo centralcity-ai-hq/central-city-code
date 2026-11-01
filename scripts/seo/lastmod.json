@@ -1,7 +1,7 @@
 {
   "/": {
-    "date": "2026-10-27",
-    "hash": "4705eaf038dd0c19"
+    "date": "2026-11-01",
+    "hash": "6803c409c806dd8e"
   },
   "/about": {
     "date": "2026-10-02",
@@ -12,8 +12,8 @@
     "hash": "547087cf25721db1"
   },
   "/analytics": {
-    "date": "2026-10-31",
-    "hash": "80140e32aabaeda9"
+    "date": "2026-11-01",
+    "hash": "0ea12cbdbce56148"
   },
   "/audit": {
     "date": "2026-10-27",
@@ -40,8 +40,8 @@
     "hash": "d911850fb236b79f"
   },
   "/docs/feed": {
-    "date": "2026-10-19",
-    "hash": "3ab56eccc54ade8b"
+    "date": "2026-11-01",
+    "hash": "83467842157c114a"
   },
   "/docs/microsoft-copilot": {
     "date": "2026-10-06",
@@ -80,12 +80,12 @@
     "hash": "2289e7b12b10a2d9"
   },
   "/explorer/base": {
-    "date": "2026-10-31",
-    "hash": "d2fb434d828fb05d"
+    "date": "2026-11-01",
+    "hash": "4e66799658a9d160"
   },
   "/explorer/calls": {
-    "date": "2026-10-21",
-    "hash": "5fb8ca988eaf9963"
+    "date": "2026-11-01",
+    "hash": "71c2c2589d3d7a8d"
   },
   "/imprint": {
     "date": "2026-09-29",

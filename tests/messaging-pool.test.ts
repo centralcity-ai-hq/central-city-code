@@ -122,6 +122,9 @@ async function concurrentSends(samePair: boolean) {
         release() {
           held--;
         },
+        // The transaction listens for a connection lost while checked out (#939).
+        on() {},
+        removeListener() {},
       };
     },
     async query(sql: string, params: unknown[]) {

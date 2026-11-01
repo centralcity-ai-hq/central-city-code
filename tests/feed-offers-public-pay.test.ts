@@ -1514,9 +1514,27 @@ test('on the PostgreSQL limiter: a refused simulation check spends no later buck
 test("the allowlist '*' opens every offer id, and nothing without the switch", async () => {
   const { publicOfferAllowed } = await import('../server/feed/offers/public-route.js');
   const id = 'off_226jomer6asqml5x';
-  assert.equal(publicOfferAllowed({ CITY_X402_PUBLIC_OFFERS: '1', CITY_X402_PUBLIC_OFFERS_ALLOW: '*' }, id), true);
-  assert.equal(publicOfferAllowed({ CITY_X402_PUBLIC_OFFERS: '1', CITY_X402_PUBLIC_OFFERS_ALLOW: ' * ' }, id), true);
+  assert.equal(
+    publicOfferAllowed({ CITY_X402_PUBLIC_OFFERS: '1', CITY_X402_PUBLIC_OFFERS_ALLOW: '*' }, id),
+    true,
+  );
+  assert.equal(
+    publicOfferAllowed({ CITY_X402_PUBLIC_OFFERS: '1', CITY_X402_PUBLIC_OFFERS_ALLOW: ' * ' }, id),
+    true,
+  );
   assert.equal(publicOfferAllowed({ CITY_X402_PUBLIC_OFFERS_ALLOW: '*' }, id), false);
-  assert.equal(publicOfferAllowed({ CITY_X402_PUBLIC_OFFERS: '1', CITY_X402_PUBLIC_OFFERS_ALLOW: '*' }, 'not-an-offer'), false);
-  assert.equal(publicOfferAllowed({ CITY_X402_PUBLIC_OFFERS: '1', CITY_X402_PUBLIC_OFFERS_ALLOW: 'off_aaaaaaaaaaaaaaaa' }, id), false);
+  assert.equal(
+    publicOfferAllowed(
+      { CITY_X402_PUBLIC_OFFERS: '1', CITY_X402_PUBLIC_OFFERS_ALLOW: '*' },
+      'not-an-offer',
+    ),
+    false,
+  );
+  assert.equal(
+    publicOfferAllowed(
+      { CITY_X402_PUBLIC_OFFERS: '1', CITY_X402_PUBLIC_OFFERS_ALLOW: 'off_aaaaaaaaaaaaaaaa' },
+      id,
+    ),
+    false,
+  );
 });

@@ -68,6 +68,7 @@ import { getUserOperationHash, type UserOperation } from 'viem/account-abstracti
 import type { Database, Transaction } from '../../database.js';
 import { registerMigration, type Migration } from '../../migrations.js';
 import { BASE_MAINNET, type Address } from '../../../shared/base/chains.js';
+import { chainFamily } from '../../../shared/chains.js';
 import { SPONSOR_PAYMASTERS } from '../../../shared/base/paymasters.js';
 import { assertFeeFloor, chainParams } from './chain-params.js';
 import { protocolDeployment } from '../../../shared/protocol.js';
@@ -77,6 +78,7 @@ import {
   budgetAlert,
   budgetTransient,
   type ExposureFlow,
+  boundWaits,
   ownPaymasterBudget,
   ReservationGone,
   SELF_PAID,
@@ -319,6 +321,11 @@ export interface DirectBundlerDeps {
   keystore: Keystore;
   signer: { keyRef: string; address: Address };
   submitter: { keyRef: string; address: Address };
+  /**
+   * Further submitter lanes (Arc). Each is used only while the paymaster allows it and it holds
+   * more than the reserve; an operation stays on the lane its stored row names.
+   */
+  moreSubmitters?: { keyRef: string; address: Address }[];
   budget: Pick<
     ReturnType<typeof ownPaymasterBudget>,
     | 'reserve'
@@ -329,7 +336,8 @@ export interface DirectBundlerDeps {
     | 'exposeIn'
     | 'lapsedState'
     | 'release'
-  >;
+  > &
+    Partial<Pick<ReturnType<typeof ownPaymasterBudget>, 'freshenDeposit'>>;
   policy: { addresses: PolicyAddresses; ceilings?: GasCeilings; paused?: ReadonlySet<SponsorFlow> };
   /** Receipts of operations this module never sent (the CDP bundler's, before the switch). */
   fallback?: Pick<Bundler, 'receipt'>;
@@ -362,6 +370,18 @@ export type DirectBundler = Bundler & {
     'ready' | 'prepare' | 'no_paymaster' | 'signer_mismatch' | 'not_allowlisted' | 'unavailable'
   >;
 };
+
+interface Lane {
+  keyRef: string;
+  address: Address;
+  key: string;
+}
+/** How long one lane's allowlist and balance reads are trusted when choosing a lane. */
+export const LANE_READY_TTL_MS = 30_000;
+/** A sponsorship not sent within this long was left behind: it no longer holds a lane's place. */
+export const PREPARED_HOLDS_LANE_MS = 60_000;
+/** A lane's cap was reached under its lock: nothing moved, nothing was signed. */
+class LaneFull extends Error {}
 
 const ceilMul = (value: bigint, num: bigint, den: bigint) => (value * num + den - 1n) / den;
 const maxOf = (a: bigint, b: bigint) => (a > b ? a : b);
@@ -598,8 +618,23 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
   // A ceiling under the chain's fee floor could only clamp a fee into being dropped: refused at
   // once, so no fee below can be clamped under the floor. Base's floor is 0.
   assertFeeFloor(params, ceilings.maxFeePerGas, 'The bundler fee ceiling');
-  const submitter = getAddress(deps.submitter.address);
-  const submitterKey = submitter.toLowerCase();
+  const lanes: Lane[] = [deps.submitter, ...(deps.moreSubmitters ?? [])].map((lane) => ({
+    keyRef: lane.keyRef,
+    address: getAddress(lane.address),
+    key: lane.address.toLowerCase(),
+  }));
+  const firstLane = lanes[0]!;
+  const submitter = firstLane.address;
+  /** Who sent a stored row: its own column, whichever lanes this instance runs. */
+  const senderOf = (row: { submitter: string }) => getAddress(row.submitter);
+  /** The first lane's watch stays the role's own; other lanes are tracked per wallet. */
+  const observeBalance = (lane: { key: string }, balance: bigint) =>
+    deps.hotWallets?.observe(
+      'paymaster_submitter',
+      'eth',
+      balance,
+      ...(lane.key === firstLane.key ? [] : [lane.key]),
+    );
   // Nonces, balances, fees and finality need the node's current head, never a shared cached one.
   const live = liveReads(deps.client);
   const opHash = (op: UserOperation<'0.6'>) =>
@@ -661,12 +696,17 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
           abi: paymasterAbi,
           functionName: 'pendingVerifyingSigner',
         }),
-        live.readContract({
-          address: deps.paymaster,
-          abi: paymasterAbi,
-          functionName: 'isBundlerAllowed',
-          args: [submitter],
-        }),
+        // Any lane allowed will do: choosing one (chooseLane) uses only those.
+        Promise.all(
+          lanes.map((lane) =>
+            live.readContract({
+              address: deps.paymaster!,
+              abi: paymasterAbi,
+              functionName: 'isBundlerAllowed',
+              args: [lane.address],
+            }),
+          ),
+        ).then((answers) => answers.some(Boolean)),
       ]);
       const zero = '0x0000000000000000000000000000000000000000';
       if (
@@ -684,6 +724,100 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
       return 'unavailable' as const;
     }
   }
+
+  // ---------------------------------------------------------------- lane choice
+  const cap = pool?.capPerLane ?? null;
+  const readyCache = new Map<string, { until: number; ready: boolean }>();
+  /** Allowed by the paymaster and above the reserve; a failed read is not ready. Cached briefly. */
+  const laneReady = async (lane: Lane): Promise<boolean> => {
+    const cached = readyCache.get(lane.key);
+    if (cached && now() < cached.until) return cached.ready;
+    let ready = false;
+    try {
+      const [allowed, balance] = await Promise.all([
+        deps.paymaster
+          ? live.readContract({
+              address: deps.paymaster,
+              abi: paymasterAbi,
+              functionName: 'isBundlerAllowed',
+              args: [lane.address],
+            })
+          : Promise.resolve(true),
+        live.getBalance({ address: lane.address }),
+      ]);
+      ready = allowed && balance > submitterReserve;
+    } catch {
+      ready = false;
+    }
+    readyCache.set(lane.key, { until: now() + LANE_READY_TTL_MS, ready });
+    return ready;
+  };
+  /** Unmined sends of one lane: stored and not yet below the nonce the chain has reached. */
+  const openOn = async (db: Pick<Database, 'query'>, lane: Lane, mined: number) =>
+    Number(
+      (
+        await db.query<{ n: string }>(
+          `SELECT count(*)::text AS n FROM own_paymaster_sends
+           WHERE chain_id = $1 AND submitter = $2 AND status = 'submitted' AND NOT final
+             AND own_paymaster_sends.nonce >= $3`,
+          [deps.chainId, lane.key, mined],
+        )
+      ).rows[0]?.n ?? '0',
+    );
+  /** The lanes that may take work now, each with its unmined count; submitter 1 if none is ready. */
+  const usableLanes = async () => {
+    const ready = (await Promise.all(lanes.map(laneReady))).flatMap((yes, i) =>
+      yes ? [lanes[i]!] : [],
+    );
+    return Promise.all(
+      (ready.length ? ready : [firstLane]).map(async (lane) => {
+        const mined = await live.getTransactionCount({ address: lane.address, blockTag: 'latest' });
+        return { lane, mined, open: await openOn(deps.db, lane, mined) };
+      }),
+    );
+  };
+  /**
+   * The lane for a new send: the fewest unmined among the usable ones, null when all are full.
+   * A chain with no cap and one lane (Base) reads nothing here. A failed read means "not now".
+   */
+  const chooseLane = async (): Promise<{ lane: Lane; mined: number } | null> => {
+    if (cap === null && lanes.length === 1) return { lane: firstLane, mined: 0 };
+    let usable;
+    try {
+      usable = await usableLanes();
+    } catch {
+      throw new BundlerError('RPC_UNAVAILABLE', 'eth_sendUserOperation: lanes cannot be read now.');
+    }
+    const free = usable.filter(({ open }) => cap === null || open < cap);
+    const best = free.reduce<(typeof free)[number] | null>(
+      (least, entry) => (least === null || entry.open < least.open ? entry : least),
+      null,
+    );
+    return best && { lane: best.lane, mined: best.mined };
+  };
+  /**
+   * Whether a new sponsorship could still get a place: the room on the usable lanes, less the
+   * sponsorships just handed to server flows and not yet sent. Owner-signed ones wait for a person
+   * and are checked again at their send. Only with a cap; before anything is reserved or signed.
+   */
+  const sponsorshipRoom = async (): Promise<boolean> => {
+    if (cap === null) return true;
+    let usable;
+    try {
+      usable = await usableLanes();
+    } catch {
+      throw new BundlerError('RPC_UNAVAILABLE', 'Lanes cannot be read now.');
+    }
+    const room = usable.reduce((sum, { open }) => sum + Math.max(0, cap - open), 0);
+    if (room === 0) return false;
+    const handed = await deps.db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM own_paymaster_reservations
+       WHERE chain_id = $1 AND status = 'reserved' AND created_at > $2
+         AND NOT (flow = ANY($3::text[]))`,
+      [deps.chainId, now() - PREPARED_HOLDS_LANE_MS, [...OWNER_SIGNED_FLOWS]],
+    );
+    return Number(handed.rows[0]?.n ?? '0') < room;
+  };
 
   /** Provenance: this bundler prepared it, so only this bundler sends it. */
   const prepared = (op: UserOperation<'0.6'>) =>
@@ -827,6 +961,13 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
       throw error;
     }
 
+    // Room on the lanes, before anything is held or signed: a sponsorship that cannot be sent in
+    // time is never issued.
+    if (!(await sponsorshipRoom())) {
+      log(`own paymaster: lanes full, ${intent.flow} not sponsored now`);
+      throw refuse('the submitter lanes are full.', 'busy');
+    }
+
     // 3. The budget, BEFORE the signature: the worst case is reserved under the paymaster digest
     // (getHash binds the whole operation and every paymaster field; the signature over it is
     // deterministic, so it fixes the userOpHash the reservation is re-keyed to below).
@@ -890,7 +1031,7 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
   }
 
   // ---------------------------------------------------------------- lane, signing, broadcast
-  const lockLane = async (tx: Transaction, at: number) => {
+  const lockLane = async (tx: Transaction, at: number, submitterKey: string) => {
     await tx.query(
       `INSERT INTO own_paymaster_lanes (chain_id, submitter, next_nonce, updated_at)
        VALUES ($1, $2, 0, $3) ON CONFLICT DO NOTHING`,
@@ -911,11 +1052,12 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
    * lock would wait on the pool; on one connection, PGlite, it would wait forever). The signature
    * itself stays inside the transaction, under the lane lock. The account never leaves `use`.
    */
-  const withSubmitter = <T>(use: (account: PrivateKeyAccount) => Promise<T>) =>
-    deps.keystore.withSigner(deps.submitter.keyRef, use);
+  const withSubmitter = <T>(lane: Lane, use: (account: PrivateKeyAccount) => Promise<T>) =>
+    deps.keystore.withSigner(lane.keyRef, use);
 
   const signTx = async (
     account: PrivateKeyAccount,
+    lane: Lane,
     input: {
       nonce: bigint;
       to: Address;
@@ -927,7 +1069,7 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
   ) => {
     // The last gate: every signature of the submitter passes here.
     assertFeeFloor(params, input.maxFeePerGas, 'A bundle fee');
-    if (!same(account.address, submitter)) throw new Error('Submitter key does not match.');
+    if (!same(account.address, lane.address)) throw new Error('Submitter key does not match.');
     return account.signTransaction({
       type: 'eip1559',
       chainId: deps.chainId,
@@ -985,13 +1127,18 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
   };
 
   /** One stored send; `lock` takes its row lock (inside a transaction) against other replicas. */
-  const get = async (hash: string, tx?: Transaction, lock = false): Promise<SendRow | null> =>
-    (
-      await (tx ?? deps.db).query<SendRow>(
-        `SELECT ${COLUMNS} FROM own_paymaster_sends WHERE user_op_hash = $1${lock ? ' FOR UPDATE' : ''}`,
-        [hash.toLowerCase()],
-      )
-    ).rows[0] ?? null;
+  const get = async (hash: string, tx?: Transaction, lock = false): Promise<SendRow | null> => {
+    // A chain with a lock limit: a worker queueing on a busy row answers busy and frees its connection.
+    if (lock && tx && params.budgetLockTimeoutMs) await boundWaits(tx, params.budgetLockTimeoutMs);
+    return (
+      (
+        await (tx ?? deps.db).query<SendRow>(
+          `SELECT ${COLUMNS} FROM own_paymaster_sends WHERE user_op_hash = $1${lock ? ' FOR UPDATE' : ''}`,
+          [hash.toLowerCase()],
+        )
+      ).rows[0] ?? null
+    );
+  };
 
   /**
    * The flow a stored operation's exposure is counted under: its sponsorship's (or its exposure's)
@@ -1102,17 +1249,31 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
       log(`own bundler: ${hash} too close to its validUntil, not sent`);
       return neverSent(hash, op);
     }
-    const calldata = handleOpsData(op, submitter);
+    // Its lane, before anything is built for it: the calldata names the lane as beneficiary.
+    const chosen = await chooseLane();
+    if (!chosen) {
+      log(`own bundler: ${hash} lanes full, not sent now`);
+      throw new BundlerError(
+        'RPC_ERROR',
+        'eth_sendUserOperation: the submitter lanes are full.',
+        'busy',
+        -32005,
+      );
+    }
+    const { lane, mined } = chosen;
+    const calldata = handleOpsData(op, lane.address);
     // Simulated first: a revert sends nothing, takes no nonce and moves no reservation.
     let gas: bigint;
     try {
       gas = await deps.client.estimateGas({
-        account: submitter,
+        account: lane.address,
         to: deps.entryPoint,
         data: calldata,
       });
     } catch (error) {
       const revert = handleOpsRevert(error);
+      // A lane's allowlist may have changed since it was read: asked afresh next time.
+      readyCache.delete(lane.key);
       if (!revert.reverted || transientChainError(error))
         throw new BundlerError(
           'RPC_UNAVAILABLE',
@@ -1151,10 +1312,10 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
     let l1Fee: bigint;
     try {
       [pending, balance] = await Promise.all([
-        live.getTransactionCount({ address: submitter, blockTag: 'pending' }),
-        live.getBalance({ address: submitter }),
+        live.getTransactionCount({ address: lane.address, blockTag: 'pending' }),
+        live.getBalance({ address: lane.address }),
       ]);
-      deps.hotWallets?.observe('paymaster_submitter', 'eth', balance);
+      observeBalance(lane, balance);
       l1Fee = await l1FeeFor({
         nonce: pending,
         to: deps.entryPoint,
@@ -1181,8 +1342,9 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
     let gone = false;
     let refused: BudgetError | null = null;
     let row: SendRow | null = null;
+    await deps.budget.freshenDeposit?.();
     try {
-      row = await withSubmitter((account) =>
+      row = await withSubmitter(lane, (account) =>
         deps.db.transaction(async (tx) => {
           const at = now();
           // Budget lock first (markSentIn, exposeIn), lane lock second: the one lock order here.
@@ -1204,10 +1366,12 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
             sponsored,
             floatWei: selfPaidFloat(balance),
           });
-          const lane = await lockLane(tx, at);
+          const laneRow = await lockLane(tx, at, lane.key);
           if (await get(hash, tx)) return null; // another instance stored it meanwhile
-          const nonce = maxOf(BigInt(lane.next_nonce), BigInt(pending));
-          const raw = await signTx(account, {
+          // The cap's last word, under the lane lock: thrown, the whole transaction rolls back.
+          if (cap !== null && (await openOn(tx, lane, mined)) >= cap) throw new LaneFull();
+          const nonce = maxOf(BigInt(laneRow.next_nonce), BigInt(pending));
+          const raw = await signTx(account, lane, {
             nonce,
             to: deps.entryPoint,
             data: calldata,
@@ -1216,7 +1380,7 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
           });
           await tx.query(
             'UPDATE own_paymaster_lanes SET next_nonce = $3, updated_at = $4 WHERE chain_id = $1 AND submitter = $2',
-            [deps.chainId, submitterKey, (nonce + 1n).toString(10), at],
+            [deps.chainId, lane.key, (nonce + 1n).toString(10), at],
           );
           return (
             await tx.query<SendRow>(
@@ -1229,7 +1393,7 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
               [
                 hash,
                 deps.chainId,
-                submitterKey,
+                lane.key,
                 sponsored,
                 calldata,
                 validUntilOf(op),
@@ -1249,7 +1413,15 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
     } catch (error) {
       if (error instanceof ReservationGone) gone = true;
       else if (error instanceof BudgetError) refused = error;
-      else throw error;
+      else if (error instanceof LaneFull) {
+        log(`own bundler: ${hash} lane full, not signed`);
+        throw new BundlerError(
+          'RPC_ERROR',
+          'eth_sendUserOperation: the submitter lanes are full.',
+          'busy',
+          -32005,
+        );
+      } else throw error;
     }
     if (gone) {
       log(`own bundler: ${hash} reservation not open, not sent by this call`);
@@ -1321,7 +1493,7 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
             receipt.blockHash.toLowerCase(),
             event
               ? null
-              : current.cancelled && receipt.to && same(receipt.to, submitter)
+              : current.cancelled && receipt.to && same(receipt.to, current.submitter)
                 ? 'CANCELLED'
                 : 'REVERTED',
             now(),
@@ -1407,6 +1579,13 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
    * signature; refused, nothing is signed and the row stays as it is.
    */
   async function resend(row: SendRow, cancel: boolean): Promise<SendRow> {
+    // Only the key of the row's own lane may sign at its nonce.
+    const lane = lanes.find((candidate) => candidate.key === row.submitter.toLowerCase());
+    if (!lane) {
+      log(`own bundler: ALERT ${row.user_op_hash} is on a lane this instance has no key for`);
+      return row;
+    }
+    const submitter = lane.address;
     // A cancel is decided on reads that may be old: a send mined since then also fails its
     // simulation. Asked again right before signing, outside any lock; a failed read cancels nothing.
     if (cancel) {
@@ -1433,7 +1612,7 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
     } catch {
       return row;
     }
-    deps.hotWallets?.observe('paymaster_submitter', 'eth', balance);
+    observeBalance(lane, balance);
     if (balance < exposure + submitterReserve) {
       log(`own bundler: ALERT ${row.user_op_hash} submitter low on gas funds, not re-signed`);
       return row;
@@ -1441,7 +1620,8 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
     let raw: Hex | null = null;
     let refused: BudgetError | null = null;
     let unaccounted = false;
-    const rows = await withSubmitter((account) =>
+    await deps.budget.freshenDeposit?.();
+    const rows = await withSubmitter(lane, (account) =>
       deps.db.transaction(async (tx) => {
         const at = now();
         const flow = await flowOf(tx, row.user_op_hash);
@@ -1465,11 +1645,11 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
           refused = error;
           return [] as SendRow[];
         }
-        await lockLane(tx, at);
+        await lockLane(tx, at, lane.key);
         const current = await get(row.user_op_hash, tx, true);
         if (!current || current.sent_at !== row.sent_at || current.status !== 'submitted')
           return [] as SendRow[];
-        raw = await signTx(account, { nonce: BigInt(row.nonce), to, data, gas, ...fees });
+        raw = await signTx(account, lane, { nonce: BigInt(row.nonce), to, data, gas, ...fees });
         const hash = keccak256(raw);
         return (
           await tx.query<SendRow>(
@@ -1520,7 +1700,7 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
       return false;
     try {
       await deps.client.estimateGas({
-        account: submitter,
+        account: senderOf(row),
         to: deps.entryPoint,
         data: row.calldata as Hex,
       });
@@ -1568,6 +1748,7 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
           )
         ).rows[0] ?? row;
     }
+    const submitter = senderOf(row);
     const mined = await live.getTransactionCount({ address: submitter, blockTag: 'latest' });
     if (BigInt(mined) > BigInt(row.nonce)) {
       // Our nonce is used but none of our hashes has a receipt (yet): only finalized evidence ends
@@ -1676,6 +1857,14 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
    *      (a reorg sends them back to 1)? Each check touches updated_at, so all rotate.
    */
   async function maintain(limit = 50): Promise<number> {
+    if (lanes.length === 1) return maintainLane(firstLane, limit);
+    const counts = await Promise.all(lanes.map((lane) => maintainLane(lane, limit)));
+    return counts.reduce((sum, count) => sum + count, 0);
+  }
+
+  async function maintainLane(lane: Lane, limit: number): Promise<number> {
+    const submitter = lane.address;
+    const submitterKey = lane.key;
     let done = 0;
     /**
      * Rows one after another (the lane, whose order matters), or up to `parallel` at a time
@@ -1704,7 +1893,7 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
       : await deps.db.query<SendRow>(
           `SELECT ${COLUMNS} FROM own_paymaster_sends
        WHERE chain_id = $1 AND submitter = $2 AND status = 'submitted' AND NOT final
-       ORDER BY nonce LIMIT $3`,
+       ORDER BY own_paymaster_sends.nonce LIMIT $3`,
           [deps.chainId, submitterKey, limit],
         );
     let finalizedNow: bigint | null = null;
@@ -2108,6 +2297,7 @@ export async function createDirectBundler(deps: {
   const keys = await provisionedPaymasterKeys(deps.db, deps.chainId);
   const signer = keys.get('paymaster_signer');
   const submitter = keys.get('paymaster_submitter_1');
+  const secondLane = keys.get('paymaster_submitter_2');
   if (!signer || !submitter)
     throw new BundlerError('RPC_UNAVAILABLE', 'own bundler: keys are not provisioned.');
   // Fail closed (CCA-716): a key setting that does not match the recorded keys stops ours from
@@ -2127,6 +2317,9 @@ export async function createDirectBundler(deps: {
     chainId: deps.chainId,
     // In this chain's gas asset (Base's are the budget's own defaults).
     limits: chainParams(deps.chainId).budget,
+    depositMaxAgeMs: chainParams(deps.chainId).depositMaxAgeMs ?? 0,
+    lockTimeoutMs: chainParams(deps.chainId).budgetLockTimeoutMs ?? 0,
+    historyMaxAgeMs: chainParams(deps.chainId).budgetHistoryMaxAgeMs ?? 0,
     // The proven fleet accounts (sponsor-operators.ts), read at every admission.
     operatorAccounts: sponsorOperatorAccounts,
     // Every sponsorship this bundler signs carries allowAnyBundler = false (own-paymaster.ts), it
@@ -2166,6 +2359,13 @@ export async function createDirectBundler(deps: {
     keystore: deps.keystore,
     signer: { keyRef: signer.keyRef, address: getAddress(signer.address) },
     submitter: { keyRef: submitter.keyRef, address: getAddress(submitter.address) },
+    // Arc's second lane. Safe before the owner allows or funds it: chooseLane skips it until then.
+    // Base keeps its one lane.
+    ...(secondLane && chainFamily(deps.chainId) === 'arc'
+      ? {
+          moreSubmitters: [{ keyRef: secondLane.keyRef, address: getAddress(secondLane.address) }],
+        }
+      : {}),
     budget,
     policy: {
       addresses: {

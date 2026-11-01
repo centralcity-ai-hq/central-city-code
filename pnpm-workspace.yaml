@@ -6,6 +6,11 @@ allowBuilds:
 overrides:
   fast-uri@3: 3.1.9
   fast-uri@4: 4.2.3
+  # Patched releases flagged by pnpm audit (1 Nov 2026) until the parents depend on them: glob
+  # (GHSA-3g3m-2fjr-6pw4) and its minimatch (GHSA-g3hv-75wg-m249) under @fastify/static, and zod
+  # under @vercel/blob's OIDC helper.
+  glob@13: 14.0.3
+  zod@4: 4.6.6
   # Development only (the Solidity compiler's SMT helper, never in production): the patched tmp
   # release until solc depends on one itself (GHSA-52f5-9888-hmc6, GHSA-ph9p-34f9-6g65,
   # GHSA-7c78-jf6q-g5cm).

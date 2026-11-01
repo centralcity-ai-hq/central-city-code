@@ -84,6 +84,20 @@
   border-bottom: 1px solid var(--v8-border);
   white-space: nowrap;
 }
+/* The service column takes what the others leave and shortens its title, so the table fits its
+   panel and the status pill never runs into the edge. */
+.sc-tbl td:nth-child(2) {
+  width: 100%;
+  max-width: 0;
+  min-width: 140px;
+}
+.sc-tbl td:nth-child(2) .sc-open {
+  max-width: 100%;
+}
+.sc-tbl th:last-child,
+.sc-tbl td:last-child {
+  padding-right: 20px;
+}
 .sc-tbl tbody tr:last-child td {
   border-bottom: 0;
 }
@@ -389,4 +403,20 @@
   .sc-tbl tbody tr {
     transition: none;
   }
+}
+
+/* A row's chain (shown once another chain than Base has paid calls): the Explorer's chain dot. */
+.sc-chain {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 8px;
+  vertical-align: middle;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .sc-chain .sc-chain-dark {
+    box-shadow: 0 0 0 1px rgb(255 255 255 / 55%);
+  }
+}
+:root[data-theme='dark'] .sc-chain .sc-chain-dark {
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 55%);
 }

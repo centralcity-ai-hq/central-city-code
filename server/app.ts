@@ -180,6 +180,7 @@ import { createResponder, ResponderError } from './responder/service.js';
 import {
   AgentPayError,
   createAgentPayService,
+  type AgentPayArcSide,
   type AgentPayDeps,
 } from './base/payments/agent-pay.js';
 import { registerPaymentRecoveryCron } from './base/payments/recover-cron.js';
@@ -221,6 +222,7 @@ import { chainRuntimes } from './base/chain/runtime.js';
 import { registerOnBaseRoutes } from './base/explorer/routes.js';
 import {
   ARC_MAINNET,
+  liveChainIds,
   arcNetwork,
   chainNetwork,
   usdcOf,
@@ -230,6 +232,7 @@ import {
 import { parseAbi } from 'viem';
 import {
   arcPaymasterSide,
+  arcRuntimeEnv,
   bothUpkeeps,
   paymasterSide,
   paymasterSides,
@@ -403,6 +406,7 @@ import {
   arcBalanceReader,
   arcPayChainReader,
   arcPermissionReader,
+  arcScreening,
   registerBaseWalletRoutes,
   WALLET_CHAIN_ID,
   walletReaders,
@@ -550,7 +554,7 @@ export interface AppOptions {
    * Tests only: the agent payment chain and the recipient reader of Base Pay P2c (fakes without
    * any network) instead of the wallet network's chain runtime and configured endpoint.
    */
-  agentPay?: Pick<AgentPayDeps, 'chain' | 'recipients'>;
+  agentPay?: Pick<AgentPayDeps, 'chain' | 'recipients' | 'arcSide'>;
   /** Wake-up tuning and the test webhook transport (docs/WAKE.md). */
   wake?: WakeOptions;
   /** Results tuning (ask timeout, candidate cap, principal age; docs/ANSWERS.md). */
@@ -2299,6 +2303,14 @@ async function createDatabaseApp(
   // 503, a limit view is stale, a recipient is not verified, and nothing is invented.
   let limitOperations: ReturnType<typeof ownerRevokePortFromEnv> | null = null;
   const arcLimitOperations = new Map<number, ReturnType<typeof ownerRevokePortFromEnv>>();
+  // Arc has no oracle: its withdrawals and payments are screened by Base's, read through Base's
+  // client and never Arc's. Without Base readable they are refused.
+  const arcScreeningOracle = (chainId: number) =>
+    sanctionsOracleFor(process.env, chainId, async () => {
+      const reader = (await baseRuntimes(WALLET_CHAIN_ID)).readClient;
+      if (!reader) throw new Error('No read client.');
+      return reader;
+    });
   registerBaseWalletRoutes(app, {
     db,
     env: process.env,
@@ -2330,14 +2342,7 @@ async function createDatabaseApp(
       arcLimitOperations.set(chainId, built);
       return built;
     },
-    // Arc has no oracle: its withdrawals and payments are screened by Base's, read through Base's
-    // client and never Arc's. Without Base readable they are refused.
-    arcScreeningProvider: (chainId) =>
-      sanctionsOracleFor(process.env, chainId, async () => {
-        const reader = (await baseRuntimes(WALLET_CHAIN_ID)).readClient;
-        if (!reader) throw new Error('No read client.');
-        return reader;
-      }),
+    arcScreeningProvider: arcScreeningOracle,
     limit,
     // The withdrawals sweep (vercel.json crons): expired and finished operations release the
     // sponsor's exposure even when nobody reads them.
@@ -2395,7 +2400,14 @@ async function createDatabaseApp(
     clock,
     observe: (value, at) => observeHistory('paid_calls_mainnet', value, at),
   });
-  registerServiceCallsRoutes(app, { db, limit, now: clock, counter: paidCallsReader });
+  registerServiceCallsRoutes(app, {
+    db,
+    limit,
+    now: clock,
+    counter: paidCallsReader,
+    // Every live chain's paid calls together (Arc while CITY_ARC=1), each named by the registry.
+    chains: liveChainIds(process.env),
+  });
   // Operation Directory D1: the public directory search and the owner's "Show in the directory"
   // settings per agent (server/directory/routes.ts), listing on the explorer's network.
   registerDirectoryRoutes(app, {
@@ -3495,12 +3507,49 @@ async function createDatabaseApp(
       if (!runtime.agentPayments) throw new Error('Agent payments are not configured.');
       return runtime.agentPayments(authorize);
     });
+  // An Arc agent pays on Arc: Arc's runtime and reader, screened by Base's oracle read through Base's
+  // client (arcScreeningOracle). Without an Arc side the agent is refused, as with Arc off.
+  const agentPayArcScreens = new Map<number, AgentPayArcSide['screen']>();
+  const agentPayArcSide: AgentPayDeps['arcSide'] = options.agentPay
+    ? options.agentPay.arcSide
+    : (chainId) => {
+        const network = chainNetwork(chainId, arcRuntimeEnv(process.env));
+        if (!network) return null;
+        let screen = agentPayArcScreens.get(chainId);
+        if (!screen) {
+          screen = arcScreening({
+            db,
+            env: process.env,
+            chainId,
+            now: clock,
+            log: errorLog,
+            provider: () => arcScreeningOracle(chainId),
+            event: 'agent_pay.screening_unavailable',
+            alertDetail: `agent_pay_chain_${chainId}`,
+          });
+          agentPayArcScreens.set(chainId, screen);
+        }
+        return {
+          network,
+          chain: async (authorize) => {
+            const runtime = await baseRuntimes(chainId as ChainId);
+            if (!runtime.agentPayments) throw new Error('Agent payments are not configured.');
+            return runtime.agentPayments(authorize);
+          },
+          recipients: arcPayChainReader(chainId, process.env, {
+            hosted: Boolean(options.hosted),
+          }),
+          screen,
+        };
+      };
   const agentPay = createAgentPayService({
     db,
     env: process.env,
     now: clock,
     chain: agentPayChain,
     agentChain: (agentId) => agentChainOf(db, process.env, agentId),
+    arcChainId: () => protocolArcChainIdFromEnv(process.env),
+    arcSide: agentPayArcSide,
     recipients: options.agentPay
       ? options.agentPay.recipients
       : walletReaders(process.env, { hosted: Boolean(options.hosted) }).payChain,
@@ -3515,6 +3564,19 @@ async function createDatabaseApp(
       agentPayChain(async () => {
         throw new Error('Payment recovery never authorizes a broadcast.');
       }),
+    arc: () => {
+      const chainId = protocolArcChainIdFromEnv(process.env);
+      const side = chainId === null ? null : (agentPayArcSide?.(chainId) ?? null);
+      return chainId === null || !side
+        ? null
+        : {
+            chainId,
+            chain: () =>
+              side.chain(async () => {
+                throw new Error('Payment recovery never authorizes a broadcast.');
+              }),
+          };
+    },
     cronSecret: process.env.CRON_SECRET,
     env: process.env,
     now: clock,

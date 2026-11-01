@@ -9,17 +9,20 @@ import {
 import { PublicHeader } from '../shell/PublicHeader';
 import { number } from './countLogClient';
 import { ExplorerSwitch, useOnBaseCount, useStatsCounts } from './ExplorerSwitch';
-import { basescanTx } from './onBaseData';
 import {
   agoText,
-  basescanBlock,
   callKey,
+  chainLinks,
+  chainNames,
+  darkMark,
   loadServiceCalls,
   SearchRefused,
+  AddressSearchUnavailable,
   SERVICE_CALLS_POLL_MS,
   shortHex,
   utcTime,
   type ServiceCall,
+  type ServiceCallsChain,
   type ServiceCallsPage,
 } from './serviceCallsData';
 import './verify.css';
@@ -36,6 +39,22 @@ import './service-calls.css';
  */
 
 const SEARCH_HELP = 'Search by a transaction hash, a block number or a 0x address.';
+const ADDRESS_SEARCH_HELP =
+  'Searching by this address is not available right now. Search by transaction hash or block.';
+
+/** A chain's mark, as the Explorer switch draws it (a dot in the chain's colour). */
+function ChainMark({ chain }: { chain: ServiceCallsChain }) {
+  return (
+    <span className="sc-chain" title={chain.name}>
+      <span
+        className={`ob-chain${darkMark(chain.mark) ? ' sc-chain-dark' : ''}`}
+        style={{ background: chain.mark }}
+        aria-hidden="true"
+      />
+      <span className="visually-hidden">{chain.name}</span>
+    </span>
+  );
+}
 
 type Load =
   | { phase: 'loading' }
@@ -53,12 +72,16 @@ export function CallSheet({
   call,
   now,
   onClose,
+  chains,
 }: {
   call: ServiceCall;
   now: number;
   onClose: () => void;
+  /** The answer's chains (present once another chain has paid calls). */
+  chains?: readonly ServiceCallsChain[];
 }) {
   const close = useRef<HTMLButtonElement>(null);
+  const links = chainLinks(call, chains);
   useEffect(() => {
     const before = document.activeElement as HTMLElement | null;
     close.current?.focus();
@@ -85,7 +108,7 @@ export function CallSheet({
             <X size={16} aria-hidden="true" />
           </button>
         </div>
-        <span className="sc-pill">Settled on Base</span>
+        <span className="sc-pill">Settled on {links.chain?.name ?? 'Base'}</span>
         <p className="sc-amount">
           {call.amount} <small>USDC</small>
         </p>
@@ -93,12 +116,7 @@ export function CallSheet({
         <dl className="sc-dl">
           <dt>Transaction</dt>
           <dd className="sc-mono">
-            <a
-              href={basescanTx(call.tx_hash)}
-              target="_blank"
-              rel="noreferrer"
-              title={call.tx_hash}
-            >
+            <a href={links.tx(call.tx_hash)} target="_blank" rel="noreferrer" title={call.tx_hash}>
               {shortHex(call.tx_hash, 10, 8)}
             </a>
           </dd>
@@ -107,7 +125,7 @@ export function CallSheet({
             {call.block === null ? (
               '—'
             ) : (
-              <a href={basescanBlock(call.block)} target="_blank" rel="noreferrer">
+              <a href={links.block(call.block)} target="_blank" rel="noreferrer">
                 {number.format(call.block)}
               </a>
             )}
@@ -125,7 +143,7 @@ export function CallSheet({
             {shortHex(call.provider, 8, 6)}
           </dd>
           <dt>Network</dt>
-          <dd>Base mainnet</dd>
+          <dd>{links.network}</dd>
         </dl>
         <div className="sc-legs">
           <h3>Where the payment went</h3>
@@ -154,15 +172,15 @@ export function CallSheet({
           {call.fee && call.fee.tx_hash !== call.tx_hash ? (
             <p className="sc-leg-note">
               The fee moved in its own transaction,{' '}
-              <a href={basescanTx(call.fee.tx_hash)} target="_blank" rel="noreferrer">
+              <a href={links.tx(call.fee.tx_hash)} target="_blank" rel="noreferrer">
                 {shortHex(call.fee.tx_hash, 10, 8)}
               </a>
               .
             </p>
           ) : null}
         </div>
-        <a className="sc-scan" href={basescanTx(call.tx_hash)} target="_blank" rel="noreferrer">
-          View on BaseScan
+        <a className="sc-scan" href={links.tx(call.tx_hash)} target="_blank" rel="noreferrer">
+          View on {links.scanName}
         </a>
       </aside>
     </div>
@@ -221,6 +239,9 @@ export function ServiceCalls() {
       if (mine !== generation.current) return;
       if (error instanceof SearchRefused) {
         setHint(SEARCH_HELP);
+        void read('');
+      } else if (error instanceof AddressSearchUnavailable) {
+        setHint(ADDRESS_SEARCH_HELP);
         void read('');
       } else setLoad({ phase: 'error' });
     }
@@ -295,6 +316,9 @@ export function ServiceCalls() {
   }
 
   const data = load.phase === 'ready' ? load.data : null;
+  // Present once a chain other than Base has paid calls: rows then show their chain's mark.
+  const chains = data?.chains?.length ? data.chains : undefined;
+  const onChains = chains ? chainNames(chains) : 'Base';
   const searching = load.phase === 'ready' && load.query !== '';
   const live = load.phase === 'ready' && load.page === 0 && !searching;
   const of = searching ? (data?.matches ?? null) : (data?.total ?? null);
@@ -330,8 +354,9 @@ export function ServiceCalls() {
             calls={data?.total ?? stats.calls}
           />
           <p className="vf-lede">
-            Every paid service call on Central City, live from Base. Each row is the onchain
-            transaction that paid for it; open any of them on BaseScan.
+            {chains
+              ? `Every paid service call on Central City, live from ${onChains}. Each row is the onchain transaction that paid for it; open any of them on its chain's explorer.`
+              : `Every paid service call on Central City, live from Base. Each row is the onchain transaction that paid for it; open any of them on BaseScan.`}
           </p>
         </header>
 
@@ -401,7 +426,7 @@ export function ServiceCalls() {
               </div>
             </dl>
             <p className="ob-under">
-              <span>Paid in USDC on Base mainnet. New payments appear within seconds.</span>
+              <span>Paid in USDC on {onChains} mainnet. New payments appear within seconds.</span>
               {data && dayIsStale(data, now) && data.day_as_of ? (
                 <span>
                   {' '}
@@ -440,7 +465,7 @@ export function ServiceCalls() {
                 ) : null}
               </div>
               <div className="sc-tbl">
-                <table aria-label="Paid service calls on Base">
+                <table aria-label={`Paid service calls on ${onChains}`}>
                   <thead>
                     <tr>
                       <th scope="col">Tx hash</th>
@@ -473,6 +498,7 @@ export function ServiceCalls() {
                         ))
                       : data.items.map((call) => {
                           const key = callKey(call);
+                          const links = chainLinks(call, chains);
                           return (
                             <tr
                               key={key}
@@ -480,8 +506,9 @@ export function ServiceCalls() {
                               onClick={() => setOpen(call)}
                             >
                               <td className="sc-mono">
+                                {chains && links.chain ? <ChainMark chain={links.chain} /> : null}
                                 <a
-                                  href={basescanTx(call.tx_hash)}
+                                  href={links.tx(call.tx_hash)}
                                   target="_blank"
                                   rel="noreferrer"
                                   title={call.tx_hash}
@@ -509,7 +536,7 @@ export function ServiceCalls() {
                                   '—'
                                 ) : (
                                   <a
-                                    href={basescanBlock(call.block)}
+                                    href={links.block(call.block)}
                                     target="_blank"
                                     rel="noreferrer"
                                     onClick={(event) => event.stopPropagation()}
@@ -586,7 +613,7 @@ export function ServiceCalls() {
           </>
         )}
       </main>
-      {open ? <CallSheet call={open} now={now} onClose={closeSheet} /> : null}
+      {open ? <CallSheet call={open} now={now} onClose={closeSheet} chains={chains} /> : null}
     </div>
   );
 }

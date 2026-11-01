@@ -21,7 +21,7 @@ test('public protocol fee docs preserve disclosure, cap and evidence limitations
     assert.match(page, /not by themselves delivery of a service/);
     assert.match(page, /Protocol fees are live for Feed service payments on Base/);
     assert.match(page, /\/api\/public\/protocol\/fees/);
-    assert.match(page, /history completeness\s+and finalized-block coverage/);
+    assert.match(page, /history\s+completeness\s+and\s+finalized-block\s+coverage/);
     assert.doesNotMatch(page, /rollout is in preparation/);
     assert.match(page, /does not publish\s+per-agent fee attribution/);
     assert.match(page, /Refund-adjustment accounting is not implemented/);

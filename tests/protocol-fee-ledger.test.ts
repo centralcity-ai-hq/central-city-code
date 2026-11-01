@@ -1216,7 +1216,10 @@ test('CCA-107: two consecutive empty answers for a block whose bloom matches nev
   // The published description says the same, and no longer lists the gap as a known limitation.
   const fees = readFileSync(new URL('../docs/protocol/FEES.md', import.meta.url), 'utf8');
   assert.match(fees, /protocol\.fee_scan_bloom_unconfirmed/);
-  assert.match(fees, /repeated empty range answers cannot either, as long as the block header and the by-hash/);
+  assert.match(
+    fees,
+    /repeated empty range answers cannot either, as long as the block header and the by-hash/,
+  );
   assert.doesNotMatch(fees, /two empty answers for the same block in consecutive scans still can/);
 });
 

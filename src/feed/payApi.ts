@@ -10,6 +10,7 @@ import {
   type FeedPayError,
   type FeedPayErrorCode,
   type FeedPayHistory,
+  type FeedPaySale,
   type FeedPayInputs,
   type FeedPayQuote,
   type FeedPayQuoteAnswer,
@@ -219,6 +220,17 @@ export function getCall(callId: string, options: Options = {}) {
 }
 
 /** An agent's service calls and float moves; null when there is nothing to show (404). */
+/** A seller's sales, read only when the owner asks for them (the read is not cheap). */
+export async function getSales(agentId: string, options: Options = {}): Promise<FeedPaySale[]> {
+  const history = await send<FeedPayHistory>(
+    `${fill(FEED_PAY_PATHS.history, 'agentId', agentId)}?sales=1`,
+    'GET',
+    undefined,
+    options,
+  );
+  return history?.sales ?? [];
+}
+
 export async function getServiceCalls(
   agentId: string,
   options: Options = {},

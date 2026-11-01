@@ -37,6 +37,14 @@
  * Provenance: on Base the transfer is sent by the agent's spender account (one operation: spend
  * from the agent wallet under the limit, then transfer). Answers name the agent's own wallet as
  * `from.wallet` (via 'spending_limit') and the spender only as `onchainSender`.
+ *
+ * One service per chain, as for withdrawals and owner Pay: an agent pays on the chain it lives on.
+ * Base's path is as it always was. With Arc on, an Arc agent's payment runs the same code on Arc's
+ * records, limits, consents, reader, payment chain and sponsor (deps.arcSide), and only there the
+ * parties are screened through Base's oracle at each of the checks above, refused unless cleared: a
+ * chain without an oracle of its own never runs unscreened. Recipients are read on the payer's
+ * chain, so no payment crosses chains; base_payments and the operation key already hold the chain,
+ * so one idempotency key is one payment per chain.
  */
 import { createHash } from 'node:crypto';
 import { formatUnits, getAddress } from 'viem';
@@ -45,6 +53,8 @@ import type { Database } from '../../database.js';
 import { baseNetwork, type Address } from '../../../shared/base/chains.js';
 import { PAY_MIN_AMOUNT } from '../../../shared/base/pay.js';
 import { WALLET_CHAIN_ID, WALLET_NETWORK } from '../../../shared/base/wallet-network.js';
+import { chainFamily, type ChainNetwork } from '../../../shared/chains.js';
+import type { ScreeningRequest } from '../../protocol/screening/gate.js';
 import {
   activePaymentLimit,
   PaymentChainError,
@@ -100,8 +110,12 @@ export type AgentPayErrorCode =
   | 'fee_cap_exceeded'
   | 'idempotency_conflict'
   | 'payment_not_found'
-  /** The paying agent lives on another chain: city_pay still works on Base's records only. */
+  /** The paying agent lives on a chain this deployment has no payment side for. */
   | 'other_chain'
+  /** Arc: a party of the payment didn't pass screening. */
+  | 'screening_blocked'
+  /** Arc: screening could not answer, which is never clearance. */
+  | 'screening_unavailable'
   /** Base, the chain runtime or the recipient reader is not configured or cannot be read. */
   | 'unavailable';
 
@@ -127,6 +141,8 @@ const STATUS: Record<AgentPayErrorCode, number> = {
   idempotency_conflict: 409,
   payment_not_found: 404,
   other_chain: 409,
+  screening_blocked: 409,
+  screening_unavailable: 503,
   unavailable: 503,
 };
 
@@ -220,6 +236,30 @@ export interface AgentPayCaller {
 
 export type AgentPayAuthorize = NonNullable<PaymentChainDeps['authorize']>;
 
+/** An Arc chain's side of a payment: what Base's path gets from the wallet network. */
+export interface AgentPayArcSide {
+  network: ChainNetwork;
+  /** Its agent payment chain (chain/runtime.ts agentPayments); throws when not configured. */
+  chain(authorize: AgentPayAuthorize): Promise<PaymentChainPort>;
+  /** Its ownerOf reader; absent when no endpoint is configured. */
+  recipients?: PayChainReader;
+  /** The screening gate; anything but an allowed answer stops the payment. */
+  screen(request: ScreeningRequest): Promise<{ allowed: boolean; outcome: string }>;
+}
+
+/** The chain one service pays on. */
+interface PayingChain {
+  chainId: number;
+  token: Address;
+  /** An Arc network; absent on the wallet network, whose defaults are Base's as ever. */
+  network?: ChainNetwork;
+  chain(authorize: AgentPayAuthorize): Promise<PaymentChainPort>;
+  recipients?: PayChainReader;
+  /** The chain is usable by this deployment now. */
+  usable(): boolean;
+  screen?: AgentPayArcSide['screen'];
+}
+
 export interface AgentPayDeps {
   db: Database;
   /** The deployment's settings (Base's own gate, chains.ts). */
@@ -234,6 +274,10 @@ export interface AgentPayDeps {
   recipients?: PayChainReader;
   /** The chain an agent lives on (agentChainOf); absent: the wallet network, as with Arc off. */
   agentChain?: (agentId: string) => Promise<number>;
+  /** The Arc chain that is on (protocolArcChainIdFromEnv), read per call; null with Arc off. */
+  arcChainId?: () => number | null;
+  /** That chain's side of a payment; null while it isn't complete. Absent: Arc agents are refused. */
+  arcSide?: (chainId: number) => AgentPayArcSide | null;
   /** Canonical receipts of payment operations; chain/payment-receipt.ts by default. */
   readPaymentReceipt?: PaymentReceiptReader;
   now?: () => number;
@@ -401,9 +445,10 @@ export const AGENT_PAY_STORED_SQL = `SELECT p.payment_id, p.actor_id, p.source_r
        WHERE p.payment_id = $1 AND p.operator_id = $2 AND p.chain_id = $3
          AND p.source_kind = 'agent' AND p.kind = 'transfer'`;
 
-export function createAgentPayService(deps: AgentPayDeps) {
+function agentPayOn(deps: AgentPayDeps, paying: PayingChain) {
   const db = deps.db;
   const now = deps.now ?? Date.now;
+  const CHAIN_ID = paying.chainId as typeof WALLET_CHAIN_ID;
   /** workspace and payment id -> when this instance last read Base for its status. */
   const statusReads = new Map<string, number>();
   /** True when this call may read Base for the payment; records the read before it starts. */
@@ -421,12 +466,55 @@ export function createAgentPayService(deps: AgentPayDeps) {
     }
     return true;
   };
-  const resolver = createRecipientResolver({ db, chain: deps.recipients, now });
-  const token = USDC.address;
+  const resolver = createRecipientResolver({
+    db,
+    chain: paying.recipients,
+    ...(paying.network ? { network: paying.network } : {}),
+    now,
+  });
+  const token = paying.token;
 
   const network = () => {
-    if (!baseNetwork(CHAIN_ID, deps.env)) throw unavailable();
+    if (!paying.usable()) throw unavailable();
   };
+
+  /** Arc: the payment's parties through the gate; a clear answer or nothing moves. */
+  async function screened(
+    payer: Payer,
+    to: string,
+    amount: bigint,
+    intentId: string,
+  ): Promise<void> {
+    if (!paying.screen) return;
+    const noAnswer = () =>
+      refuse(
+        'screening_unavailable',
+        "Payment screening wasn't available, so nothing was sent. Try again later.",
+      );
+    let decision;
+    try {
+      decision = await paying.screen({
+        chainId: paying.chainId,
+        token,
+        amountRaw: amount,
+        intentId: `agent-pay:${intentId}`,
+        parties: [
+          { role: 'payer', address: payer.address },
+          { role: 'spender', address: payer.spender },
+          { role: 'payee', address: to },
+        ],
+      });
+    } catch {
+      throw noAnswer();
+    }
+    if (decision.allowed) return;
+    if (decision.outcome === 'blocked')
+      throw refuse(
+        'screening_blocked',
+        "An address in this payment didn't pass payment screening. Nothing was sent.",
+      );
+    throw noAnswer();
+  }
 
   /** A live, unpaused agent of the workspace with its wallet on the wallet network there. */
   async function payerOf(workspaceId: string, agentId: string): Promise<Payer> {
@@ -665,6 +753,7 @@ export function createAgentPayService(deps: AgentPayDeps) {
           await consented(signed);
           const read = await recipientStill(recipient, checked, true);
           if (read) checked = read;
+          await screened(payer, recipient.wallet, amount, expected.operationKey);
           await audit(
             caller,
             payer.agentId,
@@ -684,7 +773,7 @@ export function createAgentPayService(deps: AgentPayDeps) {
       };
       let chain: PaymentChainPort;
       try {
-        chain = await deps.chain(authorize);
+        chain = await paying.chain(authorize);
       } catch {
         throw unavailable();
       }
@@ -729,6 +818,7 @@ export function createAgentPayService(deps: AgentPayDeps) {
           await consented(await limitOf(payer));
           if (intent.to !== recipient.wallet.toLowerCase()) throw recipientChanged();
           await recipientStill(recipient, checked, false);
+          await screened(payer, recipient.wallet, amount, expected.operationKey);
         },
       };
       const port: PaymentChain = {
@@ -807,7 +897,7 @@ export function createAgentPayService(deps: AgentPayDeps) {
         record = await store.observe(intent, null);
       else
         try {
-          const chain = await deps.chain(async () => {
+          const chain = await paying.chain(async () => {
             throw new Error('A status read never sends anything.');
           });
           record = await store.observe(intent, await chain.status(intent));
@@ -833,6 +923,76 @@ export function createAgentPayService(deps: AgentPayDeps) {
         },
         txHash: record.receipt?.txHash ?? null,
       };
+    },
+  };
+}
+
+/** The refusals of Base's path say 'Base' as they always did; on Arc they name Arc. */
+function namedOn<T>(name: string, run: () => Promise<T>): Promise<T> {
+  return run().catch((error: unknown) => {
+    if (error instanceof AgentPayError || error instanceof PayError)
+      error.message = error.message.replace(/\ba Base\b/g, 'an Base').replace(/\bBase\b/g, name);
+    throw error;
+  });
+}
+
+export function createAgentPayService(deps: AgentPayDeps) {
+  const base = agentPayOn(deps, {
+    chainId: CHAIN_ID,
+    token: USDC.address,
+    chain: deps.chain,
+    recipients: deps.recipients,
+    usable: () => baseNetwork(CHAIN_ID, deps.env) !== null,
+  });
+  /** Built on first use; a missing reader isn't remembered. */
+  const arcServices = new Map<number, ReturnType<typeof agentPayOn>>();
+  const arcOn = (chainId: number) => {
+    const known = arcServices.get(chainId);
+    if (known) return known;
+    const side = deps.arcSide?.(chainId);
+    if (!side) return null;
+    const service = agentPayOn(deps, {
+      chainId,
+      token: side.network.tokens.USDC.address,
+      network: side.network,
+      chain: side.chain,
+      recipients: side.recipients,
+      usable: () => deps.arcChainId?.() === chainId,
+      screen: side.screen,
+    });
+    if (side.recipients) arcServices.set(chainId, service);
+    return service;
+  };
+  const nameOf = (chainId: number) => deps.arcSide?.(chainId)?.network.name ?? 'Arc';
+  return {
+    /** city_pay: on the chain the paying agent lives on. */
+    async pay(caller: AgentPayCaller, args: unknown): Promise<AgentPayment> {
+      const arcId = deps.arcChainId?.() ?? null;
+      if (arcId !== null && deps.agentChain && chainFamily(arcId) === 'arc') {
+        const agentId = cityPayInput.parse(args).from_agent_id;
+        if ((await deps.agentChain(agentId)) === arcId) {
+          const arc = arcOn(arcId);
+          if (arc) return namedOn(nameOf(arcId), () => arc.pay(caller, args));
+        }
+      }
+      return base.pay(caller, args);
+    },
+
+    /** city_pay_status: on the chain the payment was made. */
+    async status(caller: AgentPayCaller, args: unknown): Promise<AgentPayment> {
+      const arcId = deps.arcChainId?.() ?? null;
+      if (arcId !== null) {
+        const input = cityPayStatusInput.parse(args);
+        const { rows } = await deps.db.query<{ chain_id: number }>(
+          'SELECT chain_id FROM base_payments WHERE payment_id = $1 AND operator_id = $2',
+          [input.payment_id, caller.workspaceId],
+        );
+        if (rows[0] && Number(rows[0].chain_id) === arcId) {
+          const arc = arcOn(arcId);
+          if (arc) return namedOn(nameOf(arcId), () => arc.status(caller, args));
+        }
+      }
+      return base.status(caller, args);
     },
   };
 }

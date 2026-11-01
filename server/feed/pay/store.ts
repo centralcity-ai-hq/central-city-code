@@ -30,6 +30,7 @@ import {
   type FeedPayPayment,
   type FeedPayPaymentState,
   type FeedPayResult,
+  type FeedPaySale,
 } from '../../../shared/feed-pay.js';
 
 export type Queryable = Pick<Transaction, 'query'>;
@@ -338,6 +339,50 @@ export function moveView(row: MoveRow, chainId: number = BASE_MAINNET): FeedPayF
     explorerUrl: txHash ? `${txExplorerOf(chainId)}${txHash}` : null,
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
+  };
+}
+
+/**
+ * A wallet's sales: fee-included calls that paid it, on its chain, settled with their transaction.
+ * Reads through feed_pay_calls_included_settled by settled time, so it walks every chain's settled
+ * calls in its window: asked for explicitly only. Only what a sale is: never the buyer's agent,
+ * wallet, request or result.
+ * $1 since, $2 chain, $3 lowercase wallet, $4 limit.
+ */
+/** How long a sales read may run. */
+export const SALES_READ_TIMEOUT_MS = 3_000;
+
+export const SALES_SQL = `SELECT c.call_id, c.service_id, c.service_title, c.host,
+    c.amount_raw::text AS amount_raw, c.fee_raw::text AS fee_raw, c.tx_hash, c.settled_at,
+    c.pay_final_at
+  FROM feed_pay_calls c
+  WHERE c.pay_kind = 'included' AND c.payment_state = 'settled' AND c.settled_at > $1
+    AND c.chain_id = $2 AND lower(c.pay_to) = $3 AND c.tx_hash IS NOT NULL
+  ORDER BY c.settled_at DESC, c.call_id DESC LIMIT $4`;
+
+export interface SaleRow {
+  call_id: string;
+  service_id: string;
+  service_title: string;
+  host: string;
+  amount_raw: string;
+  fee_raw: string;
+  tx_hash: string;
+  settled_at: string | number;
+  pay_final_at: string | number | null;
+}
+
+export function saleView(row: SaleRow, chainId: number): FeedPaySale {
+  return {
+    saleId: row.call_id,
+    service: { id: row.service_id, title: row.service_title, host: row.host },
+    received: amountOf(row.amount_raw),
+    fee: amountOf(row.fee_raw),
+    price: amountOf((BigInt(row.amount_raw) + BigInt(row.fee_raw)).toString(10)),
+    txHash: row.tx_hash,
+    explorerUrl: `${txExplorerOf(chainId)}${row.tx_hash}`,
+    state: row.pay_final_at === null ? 'pending' : 'final',
+    settledAt: Number(row.settled_at),
   };
 }
 

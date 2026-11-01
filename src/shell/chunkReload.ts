@@ -165,6 +165,9 @@ const missingChunks = new WeakSet<object>();
  * one caught reaches `unhandledrejection` and reloads here.
  */
 export function installChunkReload() {
+  // The entry module runs: from here a failed /assets/ file is a lazy chunk's, and this file owns
+  // its reloads. public/boot-guard.js stops, so one missing chunk never spends two budgets.
+  (window as Window & { __ccBooted?: boolean }).__ccBooted = true;
   window.addEventListener('vite:preloadError', (event) => {
     const payload = (event as Event & { payload?: unknown }).payload;
     if (payload && typeof payload === 'object') missingChunks.add(payload);

@@ -462,7 +462,7 @@ const testKeystore = {
 
 const ownBundler = async (lines: string[]) => (await ownBundlerWithDb(lines)).bundler;
 
-async function ownBundlerWithDb(lines: string[]) {
+async function ownBundlerWithDb(lines: string[], moreKeys: string[] = []) {
   const db = await database();
   const paymaster = need('paymaster');
   const budget = ownPaymasterBudget({
@@ -495,6 +495,7 @@ async function ownBundlerWithDb(lines: string[]) {
     keystore: testKeystore,
     signer: { keyRef: 'paymaster-signer', address: testKey('paymaster-signer').address },
     submitter: { keyRef: 'submitter', address: testKey('submitter').address },
+    moreSubmitters: moreKeys.map((keyRef) => ({ keyRef, address: testKey(keyRef).address })),
     budget,
     policy: {
       addresses: {
@@ -644,6 +645,74 @@ async function accountStep() {
   );
   await bundler.maintain();
   record('bundler_log', { lines });
+}
+
+// ---------------------------------------------------------------- submitter lanes
+/**
+ * A second lane, not allowed and then allowed: nothing goes on it before the allowlist says so, and
+ * operations in flight together then land from both keys. It is removed from the allowlist after.
+ */
+async function lanesStep() {
+  const second = testKey('fee-test');
+  const paymaster = need('paymaster');
+  const allowlist = (allowed: boolean) =>
+    sent(
+      testKey('paymaster-owner'),
+      paymaster,
+      encodeFunctionData({
+        abi: parseAbi(['function updateBundlerAllowlist(address bundler, bool allowed)']),
+        functionName: 'updateBundlerAllowlist',
+        args: [second.address, allowed],
+      }),
+    );
+  await topUp(testKey('submitter').address, 3n * 10n ** 17n, 'lanes_fund_first');
+  await topUp(second.address, 3n * 10n ** 17n, 'lanes_fund_second');
+  await topUp(testKey('paymaster-owner').address, 3n * 10n ** 16n, 'lanes_fund_owner');
+
+  const round = async (label: string, keys: string[]) => {
+    const lines: string[] = [];
+    const bundler = await ownBundler2(lines);
+    const stamp = Date.now();
+    const found = await Promise.all(
+      keys.map(async (key, index) => {
+        const recipe = spenderAccountRecipe(network, testKey(key).address);
+        const { receipt } = await operation(
+          bundler,
+          lines,
+          `lanes_${label}_${key}`,
+          key,
+          recipe,
+          [registerCall(`https://example.invalid/arc-testnet/lanes-${stamp}-${index}`)],
+          'registration',
+        );
+        return getAddress(receipt.from);
+      }),
+    );
+    record(`lanes_${label}`, { from: found, log: lines });
+    return found;
+  };
+  const ownBundler2 = (lines: string[]) =>
+    ownBundlerWithDb(lines, ['fee-test']).then(({ bundler }) => bundler);
+
+  if (
+    await client.readContract({
+      address: paymaster,
+      abi: parseAbi(['function isBundlerAllowed(address bundler) view returns (bool)']),
+      functionName: 'isBundlerAllowed',
+      args: [second.address],
+    })
+  )
+    await allowlist(false);
+  const before = await round('not_allowed', ['spender', 'wallet-owner']);
+  if (before.includes(getAddress(second.address)))
+    throw new Error('An operation went on a lane the paymaster does not allow.');
+  record('lanes_allowlist', recorded(await allowlist(true)));
+  try {
+    const after = await round('allowed', ['spender', 'wallet-owner', 'buyer', 'seller']);
+    if (new Set(after).size !== 2) throw new Error('The operations did not use both lanes.');
+  } finally {
+    record('lanes_allowlist_removed', recorded(await allowlist(false)));
+  }
 }
 
 // ---------------------------------------------------------------- d. spend permission
@@ -1069,6 +1138,7 @@ const steps: Record<string, () => Promise<void>> = {
   usdc: usdcStep,
   router: routerStep,
   account: accountStep,
+  lanes: lanesStep,
   permission: permissionStep,
   withdraw: withdrawStep,
   'smart-settle': smartSettleStep,

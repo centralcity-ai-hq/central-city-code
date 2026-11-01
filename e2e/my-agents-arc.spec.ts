@@ -779,7 +779,9 @@ test('registering on Arc: named Arc, on its home row and its screen', async ({ p
   const server = await arcServer(page);
   server.identity = { ...IDENTITY, state: 'submitted', stage: 'registering', startedAt: NOW };
   const home = await openAgent(page);
-  await expect(home.locator('[data-k="row-base"]')).toContainText(NAME);
+  // The row is named for the standard (#898); its screen names the chain.
+  await expect(home.locator('[data-k="row-base"]')).toContainText('ERC-8004');
+  await expect(home.locator('[data-k="row-base"]')).toContainText('Registering');
   await expect(home.locator('[data-k="row-base"]')).not.toContainText(/\bBase\b/);
   const screen = await openRegistration(page);
   await expect(screen.getByText(`Registering on ${NAME}`, { exact: true })).toBeVisible();
@@ -856,7 +858,7 @@ test('Arc chosen on the start: the offer names Arc before anything is registered
   server.arcRated = 200;
   const panel = await openAgent(page);
   await panel.locator('[data-k="row-base"]').getByRole('button').first().click();
-  const before = panel.getByRole('region', { name: 'Research scout · Base', exact: true });
+  const before = panel.getByRole('region', { name: 'Research scout · Base or Arc', exact: true });
   await before.getByRole('radio', { name: /^Arc/ }).check();
   await before.getByRole('button', { name: 'Continue', exact: true }).click();
   const screen = panel.getByRole('region', { name: 'Research scout · Arc', exact: true });
@@ -882,7 +884,11 @@ for (const [arcRated, line] of [
 }
 
 for (const [arcRated, line] of [
-  [200, 'Your wallet key is ready. Create Research scout’s wallet.'],
+  // Arc on and no chain known: the chain is asked before a wallet is made (#905).
+  [
+    200,
+    'Your wallet key is ready. Choose where Research scout registers: its wallet is made there.',
+  ],
   [
     404,
     `Your wallet key is ready. Create Research scout’s wallet ${

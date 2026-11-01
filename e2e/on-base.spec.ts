@@ -65,11 +65,11 @@ test('On Base: the switch, the five numbers, Basescan and the newest-first list'
   await page.goto('/explorer/base');
   await expect(page.getByRole('heading', { level: 1, name: 'Agent Explorer' })).toBeVisible();
   const views = page.getByRole('navigation', { name: 'Explorer views' });
-  await expect(views.getByRole('link', { name: /On Base · 1,284/ })).toHaveAttribute(
+  await expect(views.getByRole('link', { name: /On Base\s*1,284/ })).toHaveAttribute(
     'aria-current',
     'page',
   );
-  await expect(views.getByRole('link', { name: /All agents · 805,272/ })).toHaveAttribute(
+  await expect(views.getByRole('link', { name: /All agents\s*805,272/ })).toHaveAttribute(
     'href',
     '/explorer',
   );
@@ -453,7 +453,7 @@ test('All agents shows the same switch with On Base beside it', async ({ page })
     'aria-current',
     'page',
   );
-  await expect(views.getByRole('link', { name: /On Base · 1,284/ })).toHaveAttribute(
+  await expect(views.getByRole('link', { name: /On Base\s*1,284/ })).toHaveAttribute(
     'href',
     '/explorer/base',
   );
@@ -571,7 +571,9 @@ for (const total of [0, 1284])
     await page.goto('/explorer');
     const views = page.getByRole('navigation', { name: 'Explorer views' });
     await expect(
-      views.getByRole('link', { name: `On Base · ${total.toLocaleString('en-US')}`, exact: true }),
+      views.getByRole('link', {
+        name: new RegExp(`^On Base\\s*${total.toLocaleString('en-US')}$`),
+      }),
     ).toBeVisible();
     expect(directoryReads).toBe(0);
     // One for checkpoint verification, one shared by the two switch hooks.

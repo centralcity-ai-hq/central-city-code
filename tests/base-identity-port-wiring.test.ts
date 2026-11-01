@@ -10,6 +10,7 @@ import {
   type PublicClient,
 } from 'viem';
 import type { Database } from '../server/database.js';
+import { sponsorshipPastDue } from '../server/base/chain/identity-port.js';
 import {
   BASE_IDENTITY_PROVISIONAL_SQL,
   BASE_IDENTITY_HANDOVER_BACKOFF_SQL,
@@ -1004,3 +1005,16 @@ for (const variant of [
     assertFinalHandoverReconciled(ctx);
   });
 }
+
+test('a sponsorship is past due only after its validUntil, and only when it has one', () => {
+  const seconds = 1_800_000_000;
+  const data = `0x${'00'.repeat(20)}${seconds.toString(16).padStart(12, '0')}${'00'.repeat(168)}`;
+  const signed = JSON.stringify({ paymasterAndData: data });
+  assert.equal(sponsorshipPastDue(signed, seconds * 1000), false);
+  assert.equal(sponsorshipPastDue(signed, seconds * 1000 + 1), true);
+  assert.equal(
+    sponsorshipPastDue(JSON.stringify({ paymasterAndData: '0x' }), seconds * 2000),
+    false,
+  );
+  assert.equal(sponsorshipPastDue('', seconds * 2000), false);
+});

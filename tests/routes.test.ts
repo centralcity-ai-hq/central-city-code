@@ -230,10 +230,15 @@ test('a trailing slash redirects to the path without it; vercel.json has the sam
 });
 
 test('retired paths redirect (301); vercel.json has the same redirects', () => {
+  // Typed sign-up and log-in addresses: on the hosted site only (vercel.json), temporary.
+  const TYPED = [
+    { source: '/(signup|sign-up|register)', destination: '/#create', permanent: false },
+    { source: '/(login|log-in|sign-in)', destination: '/signin', permanent: false },
+  ];
   assert.deepEqual(
     vercel.redirects,
-    [TRAILING_SLASH_REDIRECT, ...CLIENT_REDIRECTS],
-    'the trailing-slash rule, then one redirect per retired path',
+    [TRAILING_SLASH_REDIRECT, ...TYPED, ...CLIENT_REDIRECTS],
+    'the trailing-slash rule, the typed addresses, then one redirect per retired path',
   );
   assert.deepEqual(
     CLIENT_REDIRECTS.map((item) => [item.source, item.destination, item.statusCode]),

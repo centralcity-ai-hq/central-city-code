@@ -90,12 +90,19 @@ export function registerJoinLinkRoutes(app: FastifyInstance, d: JoinLinkRouteDep
       // A guest's waiting read (wait 1-25 s): the socket outlasts the wait, and a closed
       // connection ends it (the same as a member's long-poll, docs/WAKE.md).
       const wait = (request.body as { wait?: unknown } | null)?.wait;
-      const waiting = tool === 'city_room_read' && typeof wait === 'number' && wait > 0 && wait <= 25;
+      const waiting =
+        tool === 'city_room_read' && typeof wait === 'number' && wait > 0 && wait <= 25;
       // Only for a credential that verifies: unauthenticated sockets keep 15 s.
       if (waiting && (await d.links.invites.verify(token))) keepSocket(request, (wait + 15) * 1000);
       const closed = waiting ? disconnectSignal(request) : null;
       try {
-        return await d.links.invites.invoke(token, tool, request.body, d.originOf(request), closed?.signal);
+        return await d.links.invites.invoke(
+          token,
+          tool,
+          request.body,
+          d.originOf(request),
+          closed?.signal,
+        );
       } finally {
         closed?.done();
       }

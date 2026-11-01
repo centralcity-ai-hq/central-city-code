@@ -84,7 +84,7 @@ minute. Settlement protects the network fees Central City pays:
 - One settlement in flight per buyer: the next one is taken once the previous one is in a block.
 - New settlements are budgeted: 20 an hour per buyer, 100 a day per calling client, 100 a day per
   payee and 500 a day in all, checked in that order.
-- A buyer whose settlement failed on Base gets no new settlement for up to an hour.
+- A buyer whose settlement failed on Base gets no new settlement for an hour.
 - During a network fee spike, or while an earlier transaction waits unmined, new settlements wait.
 
 Over a limit, `/settle` answers `settlement_unavailable` and the money does not move; verification

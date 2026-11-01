@@ -73,9 +73,20 @@ export interface ChainParams {
    * A node that holds only a few nonces ahead of the mined head (own bundler): what lies past
    * `windowNonces` is refused, so it is not offered yet, and upkeep works the window until the lane
    * stops moving. `stuckMs` replaces STUCK_MS for a head the node knows but does not mine. Unset
-   * (Base): one pass, lane head first, with no window.
+   * (Base): one pass, lane head first, with no window. `capPerLane` is the most unmined sends one
+   * submitter may have: past it nothing is signed or sponsored, and the caller hears "busy".
    */
-  lanePool?: { windowNonces: number; stuckMs: number };
+  lanePool?: { windowNonces: number; stuckMs: number; capPerLane: number };
+  /**
+   * How old a deposit reading the sponsorship budget may decide on, in ms. Set, the reading is taken
+   * before the budget lock and shared, so the lock is not held across RPC calls. Unset (Base): a
+   * fresh read inside the lock at every admission.
+   */
+  depositMaxAgeMs?: number;
+  /** The longest a transaction waits for the budget lock, in ms. Unset (Base): no limit of its own. */
+  budgetLockTimeoutMs?: number;
+  /** How old the budget's settled and exit-day sums may be, in ms. Unset (Base): counted under the lock. */
+  budgetHistoryMaxAgeMs?: number;
   /** The keyless public RPC used as the second read endpoint when hosted. */
   publicReadRpc: string | undefined;
   facilitator: {
@@ -142,6 +153,8 @@ const BASE_COMMON: Omit<ChainParams, 'feeBudgetRequired' | 'publicReadRpc'> = {
   // 0.001 gwei, what Base includes at. Far under the 0.05 gwei tip ceiling: a step that reached the
   // ceiling would end every later replacement, and with them the cancel of a send that lapsed.
   minBumpWei: 1_000_000n,
+  // Longer than Arc's: Base still reads the deposit inside the budget lock, two RPC calls an admission.
+  budgetLockTimeoutMs: 5_000,
   facilitator: {
     minBalanceWei: 500_000_000_000_000n, // 0.0005 ETH
     caps: {
@@ -250,7 +263,18 @@ const ARC_COMMON: Omit<ChainParams, 'feeBudgetRequired' | 'publicReadRpc'> = {
   minBumpWei: GWEI,
   // Measured on Arc testnet, 1 Nov: 16 held past a gap, then "txpool is full" (once 17); blocks
   // every 0.5 s mined 18 of one key's transactions in 1.3 s, so 30 s without a move is not traffic.
-  lanePool: { windowNonces: 16, stuckMs: 30_000 },
+  // The cap stays under the node's limit of 16, so every send is held at once. The time window
+  // does not bind: 12 sends fit the 7 minutes a sponsorship can be sent in even at the slowest pace
+  // seen on mainnet in a backlog (174 nonces in 14 minutes, about 0.2 per second, 84 in 7 minutes).
+  lanePool: { windowNonces: 16, stuckMs: 30_000, capPerLane: 12 },
+  // 100k registrations a day is 2.3 operations a second, each admitted twice: at about 0.1 s per RPC
+  // call, two calls per fresh read inside the lock would cap the whole chain near that rate.
+  depositMaxAgeMs: 8_000,
+  // Half of the age above stays above this, so a reading does not age out in the queue.
+  budgetLockTimeoutMs: 3_000,
+  // At 100k a day about 400k rows are added daily, and these two sums read them all: spent in this
+  // time passes the 10,000 ceiling at most by the hourly cap's share, about 17 USDC.
+  budgetHistoryMaxAgeMs: 120_000,
   facilitator: {
     minBalanceWei: usdcGas(100n), // 1 USDC, about 202 settles at 25 gwei
     caps: {

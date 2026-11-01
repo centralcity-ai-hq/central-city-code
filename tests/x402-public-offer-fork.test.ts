@@ -24,6 +24,7 @@ import {
   type PublicClient,
 } from 'viem';
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts';
+import { BASE_MAINNET_TERMS, buyOffer } from '../examples/x402-buyer/buy-offer.js';
 import { createChainRuntime } from '../server/base/chain/runtime.js';
 import { createKeystore, parseKeks } from '../server/base/chain/keystore.js';
 import { pgSpenderKeyStore } from '../server/base/chain/stores.js';
@@ -1060,48 +1061,53 @@ test(
       assert.equal(await nonceUsed(s.payer, feeNonce!), false, 'the fee leg rolled back');
     });
 
-    await t.test('reverted, both legs settled by someone else: paid, with their transaction', async () => {
-      const buyer = await fundedBuyer();
-      const accepted = await challenge();
-      const payment = await signedPayment(buyer, CONFIG, accepted);
-      const s = settlementOf(payment);
-      const relayer = privateKeyToAccount(generatePrivateKey());
-      await fundEth(relayer.address, '0.01');
-      let outsideHash: Hex | undefined;
-      guard.beforeNextSettle = async () => {
-        outsideHash = await createWalletClient({
-          account: relayer,
-          chain,
-          transport: http(anvilUrl),
-        }).sendTransaction({
-          to: ROUTER3,
-          data: encodeSettle(s),
-          maxFeePerGas: 500_000_000n,
-          maxPriorityFeePerGas: 1_000_000n,
-        });
-        const outside = await client.waitForTransactionReceipt({ hash: outsideHash });
-        assert.equal(outside.status, 'success');
-      };
-      const before = await balances(buyer.address);
-      const first = await post({ 'payment-signature': paymentHeader(payment) });
-      assert.equal(first.statusCode, 202, `${first.body}\n${logLines.join('\n')}`);
-      assert.equal((await lane.status(keyOf(accepted.extra.callId)))?.errorCode, 'REVERTED');
+    await t.test(
+      'reverted, both legs settled by someone else: paid, with their transaction',
+      async () => {
+        const buyer = await fundedBuyer();
+        const accepted = await challenge();
+        const payment = await signedPayment(buyer, CONFIG, accepted);
+        const s = settlementOf(payment);
+        const relayer = privateKeyToAccount(generatePrivateKey());
+        await fundEth(relayer.address, '0.01');
+        let outsideHash: Hex | undefined;
+        guard.beforeNextSettle = async () => {
+          outsideHash = await createWalletClient({
+            account: relayer,
+            chain,
+            transport: http(anvilUrl),
+          }).sendTransaction({
+            to: ROUTER3,
+            data: encodeSettle(s),
+            maxFeePerGas: 500_000_000n,
+            maxPriorityFeePerGas: 1_000_000n,
+          });
+          const outside = await client.waitForTransactionReceipt({ hash: outsideHash });
+          assert.equal(outside.status, 'success');
+        };
+        const before = await balances(buyer.address);
+        const first = await post({ 'payment-signature': paymentHeader(payment) });
+        assert.equal(first.statusCode, 202, `${first.body}\n${logLines.join('\n')}`);
+        assert.equal((await lane.status(keyOf(accepted.extra.callId)))?.errorCode, 'REVERTED');
 
-      await pastFinality();
-      await workUntil(accepted.extra.callId, 'delivered');
-      assert.equal((await row(accepted.extra.callId))?.tx_hash, outsideHash);
-      assert.ok(logLines.some((line) => /x402_offer.settled_elsewhere/.test(line)));
-      const end = await balances(buyer.address);
-      assert.equal(before.payer - end.payer, GROSS, 'the buyer paid once');
-      assert.equal(end.seller - before.seller, NET);
-      assert.equal(end.treasury - before.treasury, FEE);
-    });
+        await pastFinality();
+        await workUntil(accepted.extra.callId, 'delivered');
+        assert.equal((await row(accepted.extra.callId))?.tx_hash, outsideHash);
+        assert.ok(logLines.some((line) => /x402_offer.settled_elsewhere/.test(line)));
+        const end = await balances(buyer.address);
+        assert.equal(before.payer - end.payer, GROSS, 'the buyer paid once');
+        assert.equal(end.seller - before.seller, NET);
+        assert.equal(end.treasury - before.treasury, FEE);
+      },
+    );
 
     await t.test('the lane reads the public checks use', async () => {
       assert.equal(await lane.hasCode(ROUTER3), true);
       assert.equal(await lane.hasCode(newBuyer().address), false);
       const buyer = await fundedBuyer();
-      const data = encodeSettle(settlementOf(await signedPayment(buyer, CONFIG, await challenge())));
+      const data = encodeSettle(
+        settlementOf(await signedPayment(buyer, CONFIG, await challenge())),
+      );
       const answer = await lane.simulate(data);
       assert.ok(answer.ok && answer.gas, 'a simulation answers the gas it used');
       assert.equal(await lane.withinCaps(data, answer.gas), true, 'a normal settlement fits');
@@ -1171,6 +1177,67 @@ test(
         await workUntil(callId, 'delivered');
         assert.equal(guard.settles.length, sendsBefore + 1, 'sent once');
         await assertPaid(callId, s, before);
+      },
+    );
+
+    await t.test(
+      'the outside buyer module pays on the fork: real router, real USDC, real nonces',
+      async () => {
+        const buyer = await fundedBuyer();
+        await syncClock();
+        const before = await balances(buyer.address);
+        const callIds: string[] = [];
+        const signatures = new Set<string>();
+        const appFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+          const headers = init?.headers as Record<string, string>;
+          const res = await post(
+            headers['PAYMENT-SIGNATURE']
+              ? { 'payment-signature': headers['PAYMENT-SIGNATURE'] }
+              : {},
+          );
+          assert.equal(new URL(String(input)).pathname, OFFER_URL);
+          const out = new Headers();
+          for (const [k, v] of Object.entries(res.headers))
+            if (v !== undefined) out.set(k, String(v));
+          return new Response(res.body, { status: res.statusCode, headers: out });
+        }) as typeof globalThis.fetch;
+        const bought = await buyOffer({
+          account: buyer,
+          url: url,
+          input: INPUT,
+          maxPriceRaw: GROSS,
+          payTo: SELLER,
+          terms: { ...BASE_MAINNET_TERMS, reservedPayees: [ROUTER3, TREASURY, USDC_ADDRESS] },
+          fetch: appFetch,
+          now: f.clock,
+          onSigned: (pending) => {
+            callIds.push(pending.callId);
+            signatures.add(pending.paymentHeader);
+          },
+          // The worker runs between two resends, as the cron does in production.
+          sleep: async () => {
+            await sleep(100);
+            await work();
+          },
+        });
+        assert.equal(callIds.length, 1);
+        assert.equal(signatures.size, 1);
+        assert.equal(bought.result.includes(RESULT), true, bought.result);
+        const after = await balances(buyer.address);
+        assert.equal(before.payer - after.payer, GROSS, 'the buyer paid the price, no more');
+        assert.equal(after.seller - before.seller, NET);
+        assert.equal(after.treasury - before.treasury, FEE);
+        assert.equal(after.router, before.router);
+        const receipt = await client.getTransactionReceipt({ hash: bought.transaction });
+        assert.equal(receipt.status, 'success');
+        const events = feeEventsOf(
+          BASE_MAINNET,
+          ROUTER3,
+          receipt.logs.map((log) => ({ address: log.address, topics: log.topics, data: log.data })),
+        );
+        assert.equal(events.length, 1, 'exactly one FeeCharged');
+        assert.equal(getAddress(events[0]!.payer), buyer.address);
+        assert.equal(events[0]!.gross, GROSS);
       },
     );
 

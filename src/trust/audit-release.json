@@ -12,9 +12,7 @@
   },
   "github": "https://github.com/centralcity-ai-hq/central-city-code/tree/main/audits/2026-10-v1.1",
   "summary": {
-    "statuses": [
-      "Fixed"
-    ],
+    "statuses": ["Fixed"],
     "rows": {
       "Critical": {
         "byStatus": {

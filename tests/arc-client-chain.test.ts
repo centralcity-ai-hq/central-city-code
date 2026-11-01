@@ -317,7 +317,10 @@ test('Arc mainnet: the recorded manager and only its pinned sponsor; an unlisted
   const { input } = withdrawal(ARC_TESTNET);
   const asMainnet = { ...input, chainId: ARC_MAINNET, agentChainId: ARC_MAINNET };
   // The testnet paymaster is not mainnet's pinned sponsor: refused, nothing signed.
-  assert.throws(() => checkOperation(asMainnet), (error: unknown) => error instanceof WithdrawalCheckError);
+  assert.throws(
+    () => checkOperation(asMainnet),
+    (error: unknown) => error instanceof WithdrawalCheckError,
+  );
   // A sponsor passed in by the server is never accepted in place of the pinned one.
   assert.throws(
     () => checkOperation({ ...asMainnet, sponsors: { [ARC_MAINNET]: [ARC_PAYMASTER] } }),
@@ -467,7 +470,8 @@ test('a limit for the other chain is refused, both ways; an unlisted one too', (
   // Mainnet with the testnet's hash: the hash binds the chain.
   assert.throws(
     () => checkLimit({ ...limitInput(p, ARC_MAINNET, arcHash), agentChainId: ARC_MAINNET }),
-    (error: unknown) => error instanceof LimitCheckError && /doesn’t match its hash/.test(error.message),
+    (error: unknown) =>
+      error instanceof LimitCheckError && /doesn’t match its hash/.test(error.message),
   );
 });
 

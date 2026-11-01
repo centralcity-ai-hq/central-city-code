@@ -80,6 +80,19 @@
  *   - the sponsored calls read through migration 251's partial indexes
  *     (server/feed/pay/sponsored-explorer-schema.ts): the page and the day by
  *     updated_at, searches by tx_hash, block_number or (lower(pay_to), updated_at).
+ *
+ * Every live chain (deps.chains: shared/chains.ts liveChainIds, e.g. Arc 5042 while CITY_ARC=1,
+ * paid through fee router 3 on Arc). Their paid calls are feed_pay_calls rows with their own
+ * chain_id, listed with Base's in the one order; each such row carries `chain_id`, and the answer
+ * names every chain listed (`chains`, from the registry's chainView: name, explorer, mark), so a
+ * new chain shows up with no change to the page. A Base row carries no chain field, so Base's
+ * rows are unchanged. Each chain is its own branch, never a widening of Base's: it names that
+ * chain's wallets that have paid (`c.wallet_id = ANY(...)`, read at most once per
+ * CHAIN_WALLETS_TTL_MS per server) so the planner reads feed_pay_calls_paid by (wallet_id,
+ * settled_at) for those wallets only, never through Base's rows; its page floor is its own
+ * counter row's `recent`, like Base's. Total adds each chain's counter row (primary key). A chain
+ * whose counter row shows no paid call yet runs no statement at all; while every other chain is
+ * off or has none, the answer is exactly as before. At most MAX_LISTED_CHAINS chains are read.
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { formatUnits, getAddress } from 'viem';
@@ -90,6 +103,7 @@ import { clientAddressKey } from '../../rate-limit.js';
 import { createPaidCallsReader, type PaidCallsReader } from '../../stats/paid-calls.js';
 import { PAID_CALLS_RECENT_MAX } from '../../../shared/paid-calls.js';
 import { WALLET_CHAIN_ID } from '../../../shared/base/wallet-network.js';
+import { chainView, type ChainView } from '../../../shared/chains.js';
 import {
   PAID_CALLS_CHAIN_ID,
   SERVICE_CALLS_CURSOR,
@@ -143,6 +157,12 @@ export const PER_MINUTE_WINDOW_MS = 60_000;
  * showed a steady ~99 a minute (23 Oct 2026), and the Explorer often showed 0.
  */
 export const PER_MINUTE_AVERAGE_MINUTES = 5;
+/** A live chain's wallets (its branch's index keys) are looked up at most this often per server. */
+export const CHAIN_WALLETS_TTL_MS = 60_000;
+/** The longest that lookup may run. */
+export const CHAIN_WALLETS_TIMEOUT_MS = 2_000;
+/** Chains besides the primary one read per request at most (the live ones; deps.chains). */
+export const MAX_LISTED_CHAINS = 8;
 /** Whether the sponsored tables exist and the sponsor's address are looked up at most this often. */
 export const SPONSOR_TTL_MS = 60_000;
 /**
@@ -215,6 +235,8 @@ interface CallRow {
    * bound applies to the feed's rows only). Absent without the sponsored side.
    */
   sponsored?: boolean | null;
+  /** The chain of a row from another chain's branch; null on the primary chain's rows. */
+  side_chain?: string | number | null;
 }
 
 /**
@@ -230,8 +252,28 @@ const COLUMNS = `c.tx_hash, c.settled_block::text AS settled_block, c.settled_at
  * Settled calls on one chain with their transaction: the predicate of feed_pay_calls_paid
  * (migration 120) plus the chain, so the planner can read through that index.
  */
-const SETTLED = `c.chain_id = $1 AND c.payment_state = 'settled' AND c.tx_hash IS NOT NULL
-  AND c.settled_at IS NOT NULL`;
+const settledOn = (chainAt: string) => `c.chain_id = ${chainAt} AND c.payment_state = 'settled'
+  AND c.tx_hash IS NOT NULL AND c.settled_at IS NOT NULL`;
+const SETTLED = settledOn('$1');
+
+/**
+ * Another chain's branch: its settled calls of its wallets ($chain, $wallets), so the planner
+ * reads feed_pay_calls_paid by wallet_id for that chain's wallets only, never through Base's rows.
+ */
+const sideSettled = (chainAt: string, walletsAt: string) =>
+  `${settledOn(chainAt)} AND c.wallet_id = ANY(${walletsAt}::text[])`;
+
+/** A chain the page lists, as the registry names it. */
+export type ListedChainView = Pick<ChainView, 'name' | 'explorerUrl' | 'mark'>;
+
+/** Another live chain with paid calls, for one read: its wallets and its counter row. */
+interface ChainSide {
+  chainId: number;
+  wallets: string[];
+  view: ListedChainView;
+  total: number;
+  recent: number[];
+}
 
 /**
  * A sponsored call Base shows paid, with its transaction: the predicate of migration 251's partial
@@ -252,7 +294,7 @@ const sponsoredColumns = (payer: string, titles: boolean) => `s.tx_hash,
   (s.gross_raw - s.fee_raw)::text AS amount_raw, s.fee_raw::text AS fee_raw,
   'charged'::text AS fee_state, NULL::text AS fee_tx_hash, NULL::text AS fee_block,
   'included'::text AS pay_kind, s.call_id, md5(s.call_id) AS row_key, true AS sponsored,
-  s.updated_at AS sort_at`;
+  s.updated_at AS sort_at, NULL::integer AS side_chain`;
 
 /**
  * A public call Base shows paid (server/feed/offers/public-pay.ts): the predicate of migration 354's
@@ -266,7 +308,7 @@ const publicColumns = (titles: boolean) => `x.tx_hash,
   (x.gross_raw - x.fee_raw)::text AS amount_raw, x.fee_raw::text AS fee_raw,
   'charged'::text AS fee_state, NULL::text AS fee_tx_hash, NULL::text AS fee_block,
   'included'::text AS pay_kind, x.call_id, md5(x.call_id) AS row_key, true AS sponsored,
-  x.updated_at AS sort_at`;
+  x.updated_at AS sort_at, NULL::integer AS side_chain`;
 /** A search over the public calls `x`, its value at `at`. */
 function publicSearchSql(search: ServiceCallsSearch, at: string): string {
   switch (search.kind) {
@@ -302,8 +344,11 @@ function sponsoredSearchSql(search: ServiceCallsSearch, sponsor: Sponsor, at: st
   }
 }
 
-/** A search as SQL over `c`, its value at $2. */
-function searchSql(search: ServiceCallsSearch): { sql: string; value: string | number } {
+/** A search as SQL over `c`, its value at $2 (its chain at `chainAt`, Base's $1 by default). */
+function searchSql(
+  search: ServiceCallsSearch,
+  chainAt = '$1',
+): { sql: string; value: string | number } {
   switch (search.kind) {
     case 'tx':
       return { sql: 'c.tx_hash = $2', value: search.hash };
@@ -313,7 +358,7 @@ function searchSql(search: ServiceCallsSearch): { sql: string; value: string | n
       // The provider, or the payer: the spender account of the paying wallet, on this chain.
       return {
         sql: `(lower(c.pay_to) = $2 OR c.wallet_id IN (SELECT wallet_id FROM base_wallets
-               WHERE chain_id = $1 AND lower(spender_address) = $2))`,
+               WHERE chain_id = ${chainAt} AND lower(spender_address) = $2))`,
         value: search.address,
       };
   }
@@ -364,6 +409,8 @@ export function publicCall(row: CallRow): ServiceCall {
     // payment): unique per call, so a page can key calls that share one batch transaction.
     ref: feeRef(row.call_id),
     status: 'settled',
+    // Only another chain's row names its chain: a Base row is exactly as before.
+    ...(row.side_chain != null ? { chain_id: Number(row.side_chain) } : {}),
   };
 }
 
@@ -387,6 +434,15 @@ export interface ServiceCallsRouteDeps {
   sponsoredChainId?: number;
   /** How many search matches are counted before `matches` is unknown; SEARCH_MATCHES_MAX by default. */
   searchMatchesMax?: number;
+  /**
+   * The live chains (shared/chains.ts liveChainIds): every one besides `chainId` with paid calls
+   * is listed with it. Absent: the primary chain only.
+   */
+  chains?: readonly number[];
+  /** How a chain is named and linked: the shared registry (chainView) unless a test says otherwise. */
+  chainViewOf?: (chainId: number) => ListedChainView | null;
+  /** Each other chain's paid_call_count reader; by default one of this route's own per chain. */
+  counters?: Readonly<Record<number, PaidCallsReader>>;
 }
 
 interface PageRead {
@@ -395,6 +451,8 @@ interface PageRead {
   matches: number | null;
   /** Paid service calls in the minute before this read, counted exactly (paidMinute). */
   perMinute: number;
+  /** The other chains this read listed (each with paid calls); none: the primary chain only. */
+  sides: ChainSide[];
 }
 
 export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCallsRouteDeps) {
@@ -407,13 +465,82 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
    * The counter row, never waited for longer than COUNTER_READ_BUDGET_MS: past that (or on a
    * failure) its last good copy, or null. The read itself carries on and fills the reader's cache.
    */
-  async function counterSnapshot() {
-    const fallback = () => counter.lastGood?.() ?? null;
-    const read = counter.read().catch(() => fallback());
+  async function counterSnapshot(reader: PaidCallsReader = counter) {
+    const fallback = () => reader.lastGood?.() ?? null;
+    const read = reader.read().catch(() => fallback());
     const late = new Promise<null>((resolve) =>
       setTimeout(() => resolve(null), COUNTER_READ_BUDGET_MS).unref?.(),
     );
     return (await Promise.race([read, late])) ?? fallback();
+  }
+
+  const viewOf = deps.chainViewOf ?? chainView;
+  const primaryView = viewOf(chainId);
+  /** The other live chains the registry names, each with its own counter reader. */
+  const others = [...new Set(deps.chains ?? [])]
+    .filter((id) => id !== chainId)
+    .slice(0, MAX_LISTED_CHAINS)
+    .flatMap((id) => {
+      const view = viewOf(id);
+      if (!view) return [];
+      const reader =
+        deps.counters?.[id] ?? createPaidCallsReader({ db: deps.db, clock, chainId: id });
+      return [{ chainId: id, view, reader }];
+    });
+  /** The other chains whose counter row shows a paid call (no statement for the rest). */
+  async function paidOthers() {
+    const snapshots = await Promise.all(others.map((o) => counterSnapshot(o.reader)));
+    return others.flatMap((o, index) => {
+      const snapshot = snapshots[index];
+      return snapshot && snapshot.total > 0
+        ? [{ ...o, total: snapshot.total, recent: snapshot.recent }]
+        : [];
+    });
+  }
+  const walletsKnown = new Map<number, { at: number; wallets: string[] }>();
+  /** Those chains with their wallets (read at most every CHAIN_WALLETS_TTL_MS); none without. */
+  async function sidesIn(
+    tx: Transaction,
+    paid: Awaited<ReturnType<typeof paidOthers>>,
+  ): Promise<ChainSide[]> {
+    const sides: ChainSide[] = [];
+    for (const o of paid) {
+      const at = clock();
+      let known = walletsKnown.get(o.chainId);
+      if (!known || at - known.at >= CHAIN_WALLETS_TTL_MS) {
+        // Only those that have paid: a fleet of 100,000 idle wallets stays out of every statement.
+        // Read through feed_pay_calls_paid_other_chains (chain_id, wallet_id), built by hand on
+        // 1 Nov 2026 and not a migration: a plain build, or waiting for its table lock, blocks
+        // payments. `<> 8453` is its predicate, so the planner can use it. Without it this walks
+        // every settled call, so it has its own short limit: past it the last list stands until
+        // the next try. The rollback ends the limit too.
+        let wallets = known?.wallets ?? [];
+        await tx.query('SAVEPOINT chain_wallets');
+        try {
+          await tx.query(`SET LOCAL statement_timeout = '${CHAIN_WALLETS_TIMEOUT_MS}ms'`);
+          const { rows } = await tx.query<{ wallet_id: string }>(
+            `SELECT DISTINCT c.wallet_id FROM feed_pay_calls c
+             WHERE ${SETTLED} AND c.chain_id <> 8453`,
+            [o.chainId],
+          );
+          wallets = rows.map((r) => r.wallet_id);
+        } catch {
+          // The list as it was; the page still answers.
+        }
+        await tx.query('ROLLBACK TO SAVEPOINT chain_wallets');
+        known = { at, wallets };
+        walletsKnown.set(o.chainId, known);
+      }
+      if (known.wallets.length)
+        sides.push({
+          chainId: o.chainId,
+          wallets: known.wallets,
+          view: o.view,
+          total: o.total,
+          recent: o.recent,
+        });
+    }
+    return sides;
   }
 
   /** One slot set for every uncached read of this route on this server. */
@@ -491,6 +618,7 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
     floor: number | null,
     sponsor: Sponsor | null,
     pub: { titles: boolean } | null,
+    sides: ReadonlyArray<{ side: ChainSide; floor: number | null }> = [],
   ): Promise<CallRow[]> {
     const params: unknown[] = [chainId];
     const where = [SETTLED];
@@ -504,9 +632,13 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
       if (own) sponsoredWhere.push(own);
       if (pub) publicWhere.push(publicSearchSql(options.search, '$2'));
     }
+    // The conditions every chain's branch shares: the search and the cursor (each branch adds its
+    // own chain, wallets and floor).
+    const shared: string[] = [];
     if (options.cursor?.key) {
       params.push(options.cursor.at, options.cursor.tx, options.cursor.key);
       const after = `($${params.length - 2}::bigint, $${params.length - 1}::text, $${params.length}::text)`;
+      shared.push(`(c.settled_at, c.tx_hash, md5(c.call_id)) < ${after}`);
       where.push(`(c.settled_at, c.tx_hash, md5(c.call_id)) < ${after}`);
       sponsoredWhere.push(`(s.updated_at, s.tx_hash, md5(s.call_id)) < ${after}`);
       publicWhere.push(`(x.updated_at, x.tx_hash, md5(x.call_id)) < ${after}`);
@@ -514,6 +646,7 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
       // A cursor from before the row key (time and tx only): as before.
       params.push(options.cursor.at, options.cursor.tx);
       const after = `($${params.length - 1}::bigint, $${params.length}::text)`;
+      shared.push(`(c.settled_at, c.tx_hash) < ${after}`);
       where.push(`(c.settled_at, c.tx_hash) < ${after}`);
       sponsoredWhere.push(`(s.updated_at, s.tx_hash) < ${after}`);
       publicWhere.push(`(x.updated_at, x.tx_hash) < ${after}`);
@@ -523,12 +656,32 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
       params.push(floor);
       where.push(`c.settled_at >= $${params.length}::bigint`);
     }
-    const feed = `SELECT ${COLUMNS}${sponsor || pub ? ', false AS sponsored, c.settled_at AS sort_at' : ''}
+    const merged = !!sponsor || !!pub || sides.length > 0;
+    const feed = `SELECT ${COLUMNS}${merged ? ', false AS sponsored, c.settled_at AS sort_at, NULL::integer AS side_chain' : ''}
        FROM feed_pay_calls c JOIN base_wallets w ON w.wallet_id = c.wallet_id
        WHERE ${where.join(' AND ')}
        ORDER BY c.settled_at DESC, c.tx_hash DESC, md5(c.call_id) DESC
        LIMIT ${SERVICE_CALLS_PAGE_SIZE + 1}`;
-    if (!sponsor && !pub) return (await tx.query<CallRow>(feed, params)).rows;
+    if (!merged) return (await tx.query<CallRow>(feed, params)).rows;
+    // Each other chain: its own branch through feed_pay_calls_paid by its wallets, LIMITed alone.
+    const chainSides = sides.map(({ side, floor: sideFloor }) => {
+      params.push(side.chainId, side.wallets);
+      const chainAt = `$${params.length - 1}`;
+      const own = [sideSettled(`${chainAt}::integer`, `$${params.length}`)];
+      if (options.search) own.push(searchSql(options.search, `${chainAt}::integer`).sql);
+      own.push(...shared);
+      if (sideFloor !== null) {
+        params.push(sideFloor);
+        own.push(`c.settled_at >= $${params.length}::bigint`);
+      }
+      return `UNION ALL
+         (SELECT ${COLUMNS}, false AS sponsored, c.settled_at AS sort_at,
+                 ${chainAt}::integer AS side_chain
+          FROM feed_pay_calls c JOIN base_wallets w ON w.wallet_id = c.wallet_id
+          WHERE ${own.join(' AND ')}
+          ORDER BY c.settled_at DESC, c.tx_hash DESC, md5(c.call_id) DESC
+          LIMIT ${SERVICE_CALLS_PAGE_SIZE + 1})`;
+    });
     let sponsoredSide = '';
     if (sponsor) {
       params.push(sponsor.address);
@@ -550,6 +703,7 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
     const { rows } = await tx.query<CallRow>(
       `SELECT * FROM (
          (${feed})
+         ${chainSides.join('\n')}
          ${sponsoredSide}
          ${publicSide}
        ) u ORDER BY u.sort_at DESC, u.tx_hash DESC, u.row_key DESC`,
@@ -573,6 +727,26 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
       own ? [searchSql(search).value] : [],
     );
     return Number(rows[0]?.n ?? 0);
+  }
+
+  /**
+   * A search's matches on another chain, through its branch's index, counted up to
+   * SEARCH_MATCHES_MAX; null past it.
+   */
+  async function sideMatches(
+    tx: Transaction,
+    search: ServiceCallsSearch,
+    side: ChainSide,
+  ): Promise<number | null> {
+    const { sql, value } = searchSql(search, '$1::integer');
+    const { rows } = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM (
+         SELECT 1 FROM feed_pay_calls c WHERE ${sideSettled('$1::integer', '$3')} AND ${sql}
+         LIMIT ${matchesMax + 1}) m`,
+      [side.chainId, value, side.wallets],
+    );
+    const n = Number(rows[0]?.n ?? 0);
+    return n > matchesMax ? null : n;
   }
 
   /** A search's public matches, counted up to the same cap. */
@@ -600,10 +774,20 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
     tx: Transaction,
     sponsor: Sponsor | null,
     pub: { titles: boolean } | null,
+    sides: readonly ChainSide[] = [],
   ): Promise<number> {
     const since = `(extract(epoch FROM now()) * 1000)::bigint - $2::bigint`;
+    const params: unknown[] = [chainId, PER_MINUTE_AVERAGE_MINUTES * PER_MINUTE_WINDOW_MS];
+    const sideCounts = sides
+      .map((side) => {
+        params.push(side.chainId, side.wallets);
+        return ` + (SELECT count(*) FROM feed_pay_calls c
+                  WHERE ${sideSettled(`$${params.length - 1}::integer`, `$${params.length}`)}
+                    AND c.settled_at > ${since})`;
+      })
+      .join('');
     const { rows } = await tx.query<{ n: string }>(
-      `SELECT ((SELECT count(*) FROM feed_pay_calls c WHERE ${SETTLED} AND c.settled_at > ${since})${
+      `SELECT ((SELECT count(*) FROM feed_pay_calls c WHERE ${SETTLED} AND c.settled_at > ${since})${sideCounts}${
         sponsor
           ? ` + (SELECT count(*) FROM feed_pay_sponsored_calls s
                   WHERE ${SPONSORED_PAID} AND s.updated_at > ${since})`
@@ -614,7 +798,7 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
                   WHERE ${PUBLIC_PAID} AND x.updated_at > ${since})`
           : ''
       })::text AS n`,
-      [chainId, PER_MINUTE_AVERAGE_MINUTES * PER_MINUTE_WINDOW_MS],
+      params,
     );
     return Math.round(Number(rows[0]?.n ?? 0) / PER_MINUTE_AVERAGE_MINUTES);
   }
@@ -625,7 +809,10 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
    */
   async function newestFloor(): Promise<number | null> {
     const snapshot = await counterSnapshot();
-    const recent = [...(snapshot?.recent ?? [])].sort((a, b) => b - a);
+    return floorOf(snapshot?.recent ?? []);
+  }
+  function floorOf(kept: readonly number[]): number | null {
+    const recent = [...kept].sort((a, b) => b - a);
     return recent.length > SERVICE_CALLS_PAGE_SIZE ? recent[SERVICE_CALLS_PAGE_SIZE]! : null;
   }
 
@@ -635,15 +822,40 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
   ): Promise<PageRead> {
     // An older page is bounded the same way by its cursor: at most OLDER_WINDOW_MS older.
     const floor = search ? null : cursor ? cursor.at - OLDER_WINDOW_MS : await newestFloor();
+    const paid = await paidOthers();
     return readOnly(PAGE_TIMEOUT_MS, async (tx) => {
       const sponsor = await sponsorIn(tx);
       const pub = await publicIn(tx);
-      let rows = await readPage(tx, { cursor, search }, floor, sponsor, pub);
+      const sides = await sidesIn(tx, paid);
+      // Each other chain is bounded the same way by its own counter row (or the cursor).
+      let bounded = sides.map((side) => ({
+        side,
+        floor: search ? null : cursor ? cursor.at - OLDER_WINDOW_MS : floorOf(side.recent),
+      }));
+      let rows = await readPage(tx, { cursor, search }, floor, sponsor, pub, bounded);
       // The bound found fewer rows than a page (the counter skipped a payment, one left 'settled'
-      // after a reorg, or payments are sparse there): the same page without it. Only the feed's
-      // own rows decide: the bound is never applied to the sponsored side.
-      if (floor !== null && rows.filter((row) => !row.sponsored).length <= SERVICE_CALLS_PAGE_SIZE)
-        rows = await readPage(tx, { cursor, search }, null, sponsor, pub);
+      // after a reorg, or payments are sparse there): the same page without it. Each chain's own
+      // rows decide for its own bound; the bound is never applied to the sponsored side.
+      const short = (chain: number | null) =>
+        rows.filter(
+          (row) =>
+            !row.sponsored && (row.side_chain == null ? null : Number(row.side_chain)) === chain,
+        ).length <= SERVICE_CALLS_PAGE_SIZE;
+      const baseShort = floor !== null && short(null);
+      const sidesShort = bounded.some((b) => b.floor !== null && short(b.side.chainId));
+      if (baseShort || sidesShort) {
+        bounded = bounded.map((b) =>
+          b.floor !== null && short(b.side.chainId) ? { ...b, floor: null } : b,
+        );
+        rows = await readPage(
+          tx,
+          { cursor, search },
+          baseShort ? null : floor,
+          sponsor,
+          pub,
+          bounded,
+        );
+      }
       let matches: number | null = null;
       if (search && !cursor) {
         // Counted up to SEARCH_MATCHES_MAX, in its own savepoint: a busy wallet's count over the
@@ -661,6 +873,11 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
           matches = n > matchesMax ? null : n;
           if (matches !== null && sponsor) matches += await sponsoredMatches(tx, search, sponsor);
           if (matches !== null && pub) matches += await publicMatches(tx, search);
+          for (const side of sides) {
+            if (matches === null) break;
+            const own = await sideMatches(tx, search, side);
+            matches = own === null ? null : matches + own;
+          }
           await tx.query('RELEASE SAVEPOINT search_matches');
         } catch {
           await tx.query('ROLLBACK TO SAVEPOINT search_matches');
@@ -668,7 +885,7 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
           matches = null;
         }
       }
-      const perMinute = await paidMinute(tx, sponsor, pub);
+      const perMinute = await paidMinute(tx, sponsor, pub, sides);
       const page = rows.slice(0, SERVICE_CALLS_PAGE_SIZE);
       const items = page.map(publicCall);
       const last = page.at(-1);
@@ -684,6 +901,7 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
             : null,
         matches,
         perMinute,
+        sides,
       };
     });
   }
@@ -738,33 +956,50 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
     if (!takeSlot()) return Promise.resolve();
     dayTriedAt = clock();
     const since = dayTriedAt - DAY_MS;
-    dayInflight = readOnly(DAY_TIMEOUT_MS, async (tx) => {
-      const sponsor = await sponsorIn(tx);
-      const pub = await publicIn(tx);
-      if (!sponsor && !pub) {
-        const rows = await tx.query<{
-          calls: string;
-          services: string;
-          value_raw: string;
-          fee_raw: string;
-        }>(
-          `SELECT count(*)::text AS calls, count(DISTINCT c.service_id)::text AS services,
+    dayInflight = paidOthers()
+      .then((paid) =>
+        readOnly(DAY_TIMEOUT_MS, async (tx) => {
+          const sponsor = await sponsorIn(tx);
+          const pub = await publicIn(tx);
+          const sides = await sidesIn(tx, paid);
+          if (!sponsor && !pub && !sides.length) {
+            const rows = await tx.query<{
+              calls: string;
+              services: string;
+              value_raw: string;
+              fee_raw: string;
+            }>(
+              `SELECT count(*)::text AS calls, count(DISTINCT c.service_id)::text AS services,
                   coalesce(sum(c.amount_raw + CASE WHEN c.fee_state = 'charged' THEN c.fee_raw ELSE 0 END), 0)::text AS value_raw,
                   coalesce(sum(c.fee_raw) FILTER (WHERE c.fee_state = 'charged'), 0)::text AS fee_raw
            FROM feed_pay_calls c WHERE ${SETTLED} AND c.settled_at > $2::bigint`,
-          [chainId, since],
-        );
-        return rows;
-      }
-      // The sponsored calls of the day as well, each table through its own index: the price
-      // (gross_raw, fee included) and the fee charged in the same transaction (fee_raw).
-      const counted = await tx.query<{
-        calls: string;
-        services: string;
-        value_raw: string;
-        fee_raw: string;
-      }>(
-        `SELECT count(*)::text AS calls, count(DISTINCT d.service_id)::text AS services,
+              [chainId, since],
+            );
+            return rows;
+          }
+          // The sponsored calls of the day as well, each table through its own index: the price
+          // (gross_raw, fee included) and the fee charged in the same transaction (fee_raw). Each
+          // other chain through its own branch (its wallets), like the page.
+          const dayParams: unknown[] = [chainId, since];
+          const sideArms = sides
+            .map((side) => {
+              dayParams.push(side.chainId, side.wallets);
+              return `UNION ALL
+           SELECT c.service_id,
+                  c.amount_raw + CASE WHEN c.fee_state = 'charged' THEN c.fee_raw ELSE 0 END,
+                  CASE WHEN c.fee_state = 'charged' THEN c.fee_raw ELSE 0 END
+           FROM feed_pay_calls c
+           WHERE ${sideSettled(`$${dayParams.length - 1}::integer`, `$${dayParams.length}`)}
+             AND c.settled_at > $2::bigint`;
+            })
+            .join('\n');
+          const counted = await tx.query<{
+            calls: string;
+            services: string;
+            value_raw: string;
+            fee_raw: string;
+          }>(
+            `SELECT count(*)::text AS calls, count(DISTINCT d.service_id)::text AS services,
                 coalesce(sum(d.value_raw), 0)::text AS value_raw,
                 coalesce(sum(d.fee_raw), 0)::text AS fee_raw
          FROM (
@@ -772,6 +1007,7 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
                   c.amount_raw + CASE WHEN c.fee_state = 'charged' THEN c.fee_raw ELSE 0 END AS value_raw,
                   CASE WHEN c.fee_state = 'charged' THEN c.fee_raw ELSE 0 END AS fee_raw
            FROM feed_pay_calls c WHERE ${SETTLED} AND c.settled_at > $2::bigint
+           ${sideArms}
            ${
              sponsor
                ? `UNION ALL
@@ -787,10 +1023,11 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
                : ''
            }
          ) d`,
-        [chainId, since],
-      );
-      return counted;
-    })
+            dayParams,
+          );
+          return counted;
+        }),
+      )
       .then(({ rows }) => {
         day = {
           calls: Number(rows[0]?.calls ?? 0),
@@ -883,10 +1120,36 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
     }
     const now = clock();
     const [numbers, day24] = await Promise.all([counted(), dayNow()]);
+    // Every other chain with paid calls this read listed: their totals add to Total, and the
+    // answer names each chain listed (Base first). None: the answer exactly as before.
+    const listed =
+      page.sides.length && primaryView
+        ? [
+            {
+              chain_id: chainId,
+              name: primaryView.name,
+              explorer_url: primaryView.explorerUrl,
+              mark: primaryView.mark,
+              total: numbers.total,
+            },
+            ...page.sides.map((side) => ({
+              chain_id: side.chainId,
+              name: side.view.name,
+              explorer_url: side.view.explorerUrl,
+              mark: side.view.mark,
+              total: side.total,
+            })),
+          ]
+        : null;
+    const total =
+      listed && numbers.total !== null
+        ? numbers.total + page.sides.reduce((sum, side) => sum + side.total, 0)
+        : numbers.total;
     // Built field by field: nothing else can reach the answer.
     const body: ServiceCallsPage = {
-      // The counter row: feed_pay_calls and the paid sponsored calls (migration 252).
-      total: numbers.total,
+      // The counter row: feed_pay_calls and the paid sponsored calls (migration 252), plus each
+      // other chain's counter row when it is listed.
+      total,
       last24h: day24?.calls ?? null,
       // Counted exactly with the page read (paidMinute), kept as long as the page.
       perMinute: page.perMinute,
@@ -898,6 +1161,7 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
       matches: page.matches,
       items: page.items,
       next_cursor: page.nextCursor,
+      ...(listed ? { chains: listed } : {}),
     };
     return reply
       .header('Cache-Control', SERVICE_CALLS_LIVE)

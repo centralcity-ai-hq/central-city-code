@@ -492,10 +492,32 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
-/* A phone: only the current view keeps its count, so the three fit side by side. */
-@media (max-width: 440px) {
-  .ob-switch a:not([aria-current='page']) small {
+/* Short labels exist for phones only. */
+.ob-switch .ob-l-short {
+  display: none;
+}
+/* A phone: the views share the bar's width equally under short labels, with no count (each page
+   shows its own number below), so all four fit with nothing cut off and no sideways scroll. */
+@media (max-width: 520px) {
+  .ob-switch {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+    overflow: visible;
+  }
+  .ob-switch a {
+    min-width: 0;
+    height: 36px;
+    padding: 0 6px;
+    gap: 6px;
+    font-size: 13.5px;
+  }
+  .ob-switch a small,
+  .ob-switch .ob-l-long {
     display: none;
+  }
+  .ob-switch .ob-l-short {
+    display: inline;
   }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -978,6 +1000,23 @@
 ::view-transition-old(ob-switch),
 ::view-transition-new(ob-switch) {
   animation: none;
+}
+/* Leaving the Explorer (or arriving from another page): the bar exists on one side only, so it
+   must not stay frozen over the next page while the transition runs. It is dropped at once. */
+::view-transition-old(ob-switch):only-child,
+::view-transition-old(ob-switch-pill):only-child {
+  display: none;
+}
+::view-transition-new(ob-switch):only-child,
+::view-transition-new(ob-switch-pill):only-child {
+  animation: none;
+}
+/* On a phone the pill does not glide (Safari stretches it between two widths): it changes in place
+   with a short colour fade, and only the page below cross-fades. */
+@media (max-width: 520px) {
+  .ob-switch a[aria-current='page'] {
+    view-transition-name: none;
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   ::view-transition-group(ob-switch-pill) {

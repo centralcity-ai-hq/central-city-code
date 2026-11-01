@@ -113,7 +113,11 @@ import {
 } from '../pay/agent-history.js';
 import { registerPayRoutes } from '../pay/routes.js';
 import { createPayService, payAnyAddressEnabled, type PayService } from '../pay/service.js';
-import { createScreeningGate, type ScreeningProvider } from '../../protocol/screening/gate.js';
+import {
+  createScreeningGate,
+  type ScreeningProvider,
+  type ScreeningRequest,
+} from '../../protocol/screening/gate.js';
 import { registerRateRoutes } from '../rate/routes.js';
 import { createRateService, rateDailyMax, rateEnabled, type RateService } from '../rate/service.js';
 import { RATE_PATHS } from '../../../shared/base/rate.js';
@@ -258,6 +262,53 @@ export function arcPayChainReader(
   const network = chainNetwork(chainId, scoped);
   const urls = network ? baseReadUrls(scoped[network.bundlerEnv], scoped, chainId, options) : [];
   return network && urls.length > 0 ? payChainReader(urls, network) : undefined;
+}
+
+/**
+ * An Arc chain's screening of payments: the gate over Arc's settings and the given provider (Base's
+ * oracle), with an outage said out loud at most once per alert period.
+ */
+export function arcScreening(input: {
+  db: Pick<Database, 'query'>;
+  env: Record<string, string | undefined>;
+  chainId: number;
+  now: () => number;
+  log: (line: string) => void;
+  provider: () => ScreeningProvider | null;
+  event: string;
+  alertDetail: string;
+}) {
+  const { chainId, now, log } = input;
+  const gate = createScreeningGate({
+    db: input.db,
+    env: arcRuntimeEnv(input.env),
+    now,
+    provider: input.provider,
+  });
+  // Refused with nothing but a code is how an outage goes unseen; every refusal would be too many.
+  let screeningAlertedAt: number | null = null;
+  const screeningWebhook = createFeedPayAlerts({ env: input.env, log });
+  const screeningOutage = (reason: string) => {
+    const at = Number(now());
+    if (screeningAlertedAt !== null && at - screeningAlertedAt < FEED_PAY_SCREENING_ALERT_EVERY_MS)
+      return;
+    screeningAlertedAt = at;
+    log(JSON.stringify({ event: input.event, level: 'ALERT', chainId, reason }));
+    // The same webhook as Feed pay's outage, so someone hears it. It never stops a refusal.
+    void screeningWebhook({
+      kind: 'screening_unavailable',
+      at,
+      detail: `${input.alertDetail}:${reason}`,
+    });
+  };
+  return async (request: ScreeningRequest) => {
+    const decision = await gate.screen(request).catch((error: unknown) => {
+      screeningOutage('gate_failed');
+      throw error;
+    });
+    if (decision.outcome === 'unavailable') screeningOutage(decision.reason);
+    return decision;
+  };
 }
 
 /**
@@ -866,38 +917,16 @@ export function registerBaseWalletRoutes(app: FastifyInstance, deps: WalletRoute
     if (!network) return null;
     const balances = deps.arcBalances?.(chainId);
     const chain = deps.arcPayChain?.(chainId);
-    const gate = createScreeningGate({
+    const screen = arcScreening({
       db: deps.db,
-      env: scoped,
+      env: deps.env,
+      chainId,
       now,
+      log,
       provider: () => deps.arcScreeningProvider?.(chainId) ?? null,
+      event: 'withdrawal.screening_unavailable',
+      alertDetail: `withdrawals_chain_${chainId}`,
     });
-    // Refused with nothing but a code is how an outage goes unseen; every refusal would be too many.
-    let screeningAlertedAt: number | null = null;
-    const screeningWebhook = createFeedPayAlerts({ env: deps.env, log });
-    const screeningOutage = (reason: string) => {
-      const at = Number(now());
-      if (
-        screeningAlertedAt !== null &&
-        at - screeningAlertedAt < FEED_PAY_SCREENING_ALERT_EVERY_MS
-      )
-        return;
-      screeningAlertedAt = at;
-      log(
-        JSON.stringify({
-          event: 'withdrawal.screening_unavailable',
-          level: 'ALERT',
-          chainId,
-          reason,
-        }),
-      );
-      // The same webhook as Feed pay's outage, so someone hears it. It never stops a refusal.
-      void screeningWebhook({
-        kind: 'screening_unavailable',
-        at,
-        detail: `withdrawals_chain_${chainId}:${reason}`,
-      });
-    };
     const arcWithdrawals: WithdrawalService = createWithdrawalService({
       db: deps.db,
       chain: {
@@ -919,14 +948,7 @@ export function registerBaseWalletRoutes(app: FastifyInstance, deps: WalletRoute
           return runtime.protocolKeyAddresses();
         },
       },
-      screen: async (request) => {
-        const decision = await gate.screen(request).catch((error: unknown) => {
-          screeningOutage('gate_failed');
-          throw error;
-        });
-        if (decision.outcome === 'unavailable') screeningOutage(decision.reason);
-        return decision;
-      },
+      screen,
       operations: async () => {
         const runtime = await deps.runtime(chainId);
         if (!runtime.arcOwnerOperations) throw new Error('Owner operations are not configured.');

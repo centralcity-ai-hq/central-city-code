@@ -1788,3 +1788,47 @@ test('a delivered call waiting only for finality is left out of the sweep until 
   await f.cron();
   assert.ok((await marks()).pay_final_at !== null, 'finality recorded');
 });
+
+test('a Base seller sees its sale in its wallet history; a call that never settled is no sale', async (t) => {
+  const f = await feesOn(t);
+  await f.limit();
+  const seller = await f.addPayer('Sale seller', 'Synthetic sale seller password');
+  const { id } = await listOffer(f, { priceRaw: '50000', payTo: seller.wallet });
+  const res = await payOffer(f, id);
+  assert.equal(res.statusCode, 200, res.body);
+  const call = await done(f, res.json().callId);
+  assert.equal(call.moneyMoved, 'yes');
+
+  const read = (agentId: string, cookie: string) =>
+    f.app.inject({
+      url: `${FEED_PAY_PATHS.history.replace(':agentId', agentId)}?sales=1`,
+      headers: { 'x-city-request': '1', cookie },
+    });
+  const history = (await read(seller.agentId, seller.owner.cookie)).json();
+  assert.equal(history.sales.length, 1);
+  assert.equal(history.sales[0].received.raw, '45000');
+  assert.equal(history.sales[0].fee.raw, '5000');
+  assert.equal(history.sales[0].price.raw, '50000');
+  assert.equal(history.sales[0].txHash, call.payment!.txHash);
+  // A plain read never asks for them, and says only that this agent sells.
+  const plain = (
+    await f.app.inject({
+      url: FEED_PAY_PATHS.history.replace(':agentId', seller.agentId),
+      headers: { 'x-city-request': '1', cookie: seller.owner.cookie },
+    })
+  ).json();
+  assert.deepEqual(plain.sales, []);
+  assert.equal(plain.seller, true);
+  assert.match(history.sales[0].explorerUrl, /basescan/);
+  // The buyer's own view is as it was.
+  const bought = (await read(f.agentId, f.owner.cookie)).json();
+  assert.equal(bought.calls.length, 1);
+  assert.deepEqual(bought.sales, []);
+  // Past the window, or not settled: not listed.
+  await f.sql('UPDATE feed_pay_calls SET settled_at = $1', [f.clock() - 31 * 86_400_000]);
+  assert.deepEqual((await read(seller.agentId, seller.owner.cookie)).json().sales, []);
+  await f.sql("UPDATE feed_pay_calls SET settled_at = $1, payment_state = 'cancelled'", [
+    f.clock(),
+  ]);
+  assert.deepEqual((await read(seller.agentId, seller.owner.cookie)).json().sales, []);
+});

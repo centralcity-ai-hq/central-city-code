@@ -17,11 +17,12 @@ import {
   type FeedPayFloatMove,
   type FeedPayHistory,
   type FeedPayHistoryItem,
+  type FeedPaySale,
 } from '../../../shared/feed-pay';
 import { chainWords } from '../../../shared/base/wallet-chains';
 import { workspaceClick } from '../../feed/feedNav';
 import { feedHref } from '../../feed/feedPaths';
-import { getServiceCalls, payFailure } from '../../feed/payApi';
+import { getSales, getServiceCalls, payFailure } from '../../feed/payApi';
 import {
   agentLines,
   callMoneyLines,
@@ -41,6 +42,7 @@ import {
   POT_HELP,
   floatTargetRaw,
   perCallMaxRaw,
+  saleLine,
   usdcText,
 } from '../../feed/pay/payModel';
 import { saveFloatTarget, savePerCallMax, usePayAccess } from '../../feed/pay/usePayAccess';
@@ -53,7 +55,8 @@ import { saveFloatTarget, savePerCallMax, usePayAccess } from '../../feed/pay/us
  * details open in a sheet: the service calls it paid,
  * from the Feed or the owner's AI (with Central City's fee on top: the price, the fee and the
  * total, the amount being the total; fee included: the price, which is the amount, and Central
- * City's part of it), and the USDC moved between its own two accounts, which are never
+ * City's part of it), the services it sold (what reached its wallet, nothing of the buyer) and the
+ * USDC moved between its own two accounts, which are never
  * payments to anyone. A call whose result is still kept opens it (/feed/calls/<id>). Read when
  * shown, and again every POLL_MS only while a call, its fee or a move is still going on; nothing
  * shows while Feed pay never touched this agent. WalletScreen loads this lazily: the workspace
@@ -130,12 +133,14 @@ function markColour(host: string): string {
 
 type Line =
   | { kind: 'call'; key: string; at: number; item: FeedPayHistoryItem }
-  | { kind: 'move'; key: string; at: number; move: FeedPayFloatMove };
+  | { kind: 'move'; key: string; at: number; move: FeedPayFloatMove }
+  | { kind: 'sale'; key: string; at: number; sale: FeedPaySale };
 
-type Show = 'all' | 'call' | 'move';
+type Show = 'all' | 'call' | 'sale' | 'move';
 const SHOWS: { value: Show; label: string }[] = [
   { value: 'all', label: 'All' },
   { value: 'call', label: 'Payments' },
+  { value: 'sale', label: 'Sales' },
   { value: 'move', label: 'Transfers' },
 ];
 
@@ -146,7 +151,7 @@ function Mark({ line }: { line: Line }) {
         <Wallet size={16} strokeWidth={1.8} />
       </span>
     );
-  const host = line.item.service.host;
+  const host = line.kind === 'sale' ? line.sale.service.title : line.item.service.host;
   return (
     <span className="w4-mark" style={{ background: markColour(host) }} aria-hidden="true">
       {(host.match(/[a-z0-9]/i)?.[0] ?? '?').toUpperCase()}
@@ -172,6 +177,12 @@ const origin = (item: FeedPayHistoryItem) => (item.origin === 'mcp' ? 'By your A
 function Amount({ line }: { line: Line }) {
   if (line.kind === 'move')
     return <span className="w4-amt w4-pend w4-neutral">{usdcText(line.move.amount.raw)}</span>;
+  if (line.kind === 'sale')
+    return (
+      <span className={`w4-amt in${line.sale.state === 'final' ? '' : ' w4-pend'}`}>
+        +{usdcText(line.sale.received.raw)}
+      </span>
+    );
   const amount = historyAmountRaw(line.item);
   if (!amount) return null;
   const paid = line.item.moneyMoved === 'yes';
@@ -195,7 +206,15 @@ function Row({
   onOpen: () => void;
 }) {
   const call = line.kind === 'call' ? line.item : null;
-  const state = line.kind === 'call' ? callState(line.item) : moveState(line.move);
+  const sale = line.kind === 'sale' ? line.sale : null;
+  const state =
+    line.kind === 'call'
+      ? callState(line.item)
+      : line.kind === 'move'
+        ? moveState(line.move)
+        : line.sale.state === 'pending'
+          ? 'Confirming'
+          : null;
   return (
     <button
       type="button"
@@ -205,19 +224,23 @@ function Row({
       onClick={onOpen}
       {...(call
         ? { 'data-k': 'service-call', 'data-state': call.state, 'data-money': call.moneyMoved }
-        : { 'data-k': 'float-move', 'data-state': line.kind === 'move' ? line.move.state : '' })}
+        : sale
+          ? { 'data-k': 'service-sale', 'data-state': sale.state }
+          : { 'data-k': 'float-move', 'data-state': line.kind === 'move' ? line.move.state : '' })}
     >
       <Mark line={line} />
       <span className="w4-act-who">
         <b>
           {call
             ? call.service.host
-            : line.kind === 'move' && line.move.kind === 'top_up'
-              ? 'To Ready to spend'
-              : 'Back to the wallet'}
+            : sale
+              ? sale.service.title
+              : line.kind === 'move' && line.move.kind === 'top_up'
+                ? 'To Ready to spend'
+                : 'Back to the wallet'}
         </b>
         <span>
-          {call ? origin(call) : 'Own accounts'}
+          {call ? origin(call) : sale ? 'Sale' : 'Own accounts'}
           {' · '}
           {clock(line.at)}
           {state ? ` · ${state}` : ''}
@@ -324,6 +347,24 @@ function MoveSheetBody({ move, on }: { move: FeedPayFloatMove; on: string }) {
   );
 }
 
+function SaleSheetBody({ sale, on }: { sale: FeedPaySale; on: string }) {
+  return (
+    <>
+      <dl className="w4-facts-card" aria-label="Sale">
+        <Fact label="Price">{usdcText(sale.price.raw)} USDC</Fact>
+        <Fact label="Central City fee">{usdcText(sale.fee.raw)} USDC</Fact>
+        <Fact label="You received">
+          <b>{usdcText(sale.received.raw)} USDC</b>
+        </Fact>
+        <Fact label="Status">{sale.state === 'final' ? `Final on ${on}` : 'Confirming'}</Fact>
+      </dl>
+      <div className="w4-sheet-actions">
+        <TxLink className="ap4-btn ap4-ghost" href={sale.explorerUrl} label={`${on} transaction`} />
+      </div>
+    </>
+  );
+}
+
 /**
  * One entry's details, over the page: a side sheet (a bottom sheet on phones). A dialog: the rest
  * of the page is inert while it is open, focus starts on Close, and Escape, the scrim or Close
@@ -377,9 +418,11 @@ function Sheet({
   const call = line.kind === 'call' ? line.item : null;
   const title = call
     ? call.service.host
-    : line.kind === 'move' && line.move.kind === 'top_up'
-      ? 'To Ready to spend'
-      : 'Back to the wallet';
+    : line.kind === 'sale'
+      ? line.sale.service.title
+      : line.kind === 'move' && line.move.kind === 'top_up'
+        ? 'To Ready to spend'
+        : 'Back to the wallet';
   return createPortal(
     <div className="ap4 w4-sheet-layer" ref={layer} onKeyDown={onKeyDown}>
       <div className="w4-scrim" aria-hidden="true" onClick={onClose} />
@@ -411,13 +454,19 @@ function Sheet({
           data-state={call ? call.state : undefined}
           data-k={call ? undefined : 'float-move-line'}
         >
-          {call ? historyLine(call) : line.kind === 'move' ? moveLine(line.move) : null}
+          {line.kind === 'call'
+            ? historyLine(line.item)
+            : line.kind === 'move'
+              ? moveLine(line.move)
+              : saleLine(line.sale)}
         </p>
-        {call ? (
-          <CallSheetBody item={call} now={now} />
+        {line.kind === 'call' ? (
+          <CallSheetBody item={line.item} now={now} />
         ) : line.kind === 'move' ? (
           <MoveSheetBody move={line.move} on={on} />
-        ) : null}
+        ) : (
+          <SaleSheetBody sale={line.sale} on={on} />
+        )}
       </aside>
     </div>,
     host,
@@ -619,6 +668,26 @@ export function ServiceCalls({
   const [show, setShow] = useState<Show>('all');
   const [open, setOpen] = useState<string | null>(null);
   const rowId = useId();
+  // Read once, when the owner picks Sales: a plain read of this panel never asks for them.
+  const [sales, setSales] = useState<FeedPaySale[] | 'failed' | null>(null);
+
+  useEffect(() => {
+    if (show !== 'sale' || (sales !== null && sales !== 'failed')) return;
+    let stop = false;
+    getSales(agentId).then(
+      (read) => {
+        if (!stop) setSales(read);
+      },
+      () => {
+        if (!stop) setSales('failed');
+      },
+    );
+    return () => {
+      stop = true;
+    };
+    // A failed read is tried again the next time Sales is picked.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [show, agentId]);
 
   useEffect(() => {
     if (editing || !refocus.current) return;
@@ -659,8 +728,12 @@ export function ServiceCalls({
 
   if (!history) return null;
   const ready = history.readyForServices;
+  const saleLines = Array.isArray(sales) ? sales : [];
   const touched =
-    history.calls.length > 0 || history.moves.length > 0 || (ready !== null && ready.raw !== '0');
+    history.calls.length > 0 ||
+    history.moves.length > 0 ||
+    history.seller === true ||
+    (ready !== null && ready.raw !== '0');
   if (!on && !touched) return null;
   const all: Line[] = [
     ...history.calls.map((item) => ({
@@ -674,6 +747,12 @@ export function ServiceCalls({
       key: `m-${move.moveId}`,
       at: move.createdAt,
       move,
+    })),
+    ...saleLines.map((sale) => ({
+      kind: 'sale' as const,
+      key: `s-${sale.saleId}`,
+      at: sale.settledAt,
+      sale,
     })),
   ].sort((a, b) => b.at - a.at);
   const lines = all.filter((line) => show === 'all' || line.kind === show).slice(0, SHOWN);
@@ -818,18 +897,20 @@ export function ServiceCalls({
       ) : null}
       <div className="w4-section w4-acthead">
         <span>Activity</span>
-        {all.length ? (
+        {all.length || history.seller === true ? (
           <span className="w4-filter" role="group" aria-label="Show">
-            {SHOWS.map((option) => (
-              <button
-                key={option.value}
-                type="button"
-                aria-pressed={show === option.value}
-                onClick={() => setShow(option.value)}
-              >
-                {option.label}
-              </button>
-            ))}
+            {SHOWS.filter((option) => option.value !== 'sale' || history.seller === true).map(
+              (option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  aria-pressed={show === option.value}
+                  onClick={() => setShow(option.value)}
+                >
+                  {option.label}
+                </button>
+              ),
+            )}
           </span>
         ) : null}
       </div>
@@ -854,11 +935,17 @@ export function ServiceCalls({
         </div>
       ) : (
         <p className="w4-hint">
-          {!all.length
+          {!all.length && show !== 'sale'
             ? 'No service calls yet.'
             : show === 'call'
               ? 'No payments yet.'
-              : 'No transfers yet.'}
+              : show === 'sale'
+                ? sales === 'failed'
+                  ? 'Sales could not be read now. Try again in a moment.'
+                  : sales === null
+                    ? 'Reading sales…'
+                    : 'No sales in the last 7 days.'
+                : 'No transfers yet.'}
         </p>
       )}
       <p className="w4-hint">Amounts in USDC. Results are kept for {RESULT_KEEP_DAYS} days.</p>

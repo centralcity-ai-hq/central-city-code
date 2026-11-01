@@ -18,7 +18,7 @@ import {
 import type { Database } from '../../database.js';
 import type { Address, BaseNetwork } from '../../../shared/base/chains.js';
 import type { ChainId } from '../../../shared/chains.js';
-import type { SponsorAllowlist } from '../../../shared/base/paymasters.js';
+import { sponsoredValidUntil, type SponsorAllowlist } from '../../../shared/base/paymasters.js';
 import type { IdentityChainPort, IdentityOp } from '../identity/service.js';
 import { deriveAddressLocal, spenderAccountRecipe } from './derive.js';
 import {
@@ -260,6 +260,17 @@ const view = (row: StoredOperation): IdentityOp => ({
   txHash: row.txHash,
 });
 
+/** Whether the sponsorship in a signed operation has passed its validUntil; false without one. */
+export function sponsorshipPastDue(signedOperation: string, now: number): boolean {
+  try {
+    const { paymasterAndData } = JSON.parse(signedOperation) as { paymasterAndData?: string };
+    const until = sponsoredValidUntil(paymasterAndData);
+    return until !== null && now > until;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The block an operation landed in: for included and final operations, and for failed ones whose
  * revert was final. A row that moved on from an inclusion (reorged, nonce consumed) may still carry
@@ -488,9 +499,18 @@ export function createIdentityChainPort(deps: IdentityPortDeps): IdentityEvidenc
     }
   }
 
-  /** A stored operation with its finality refreshed (read-only; nothing is signed). */
+  /**
+   * A stored operation with its finality refreshed (read-only; nothing is signed). One whose
+   * sponsorship ran out without landing is retired as failed, so the owner can try again: without
+   * it, a send the bundler cancelled stays 'submitted' for good (1 Nov: 106 hand-overs). Only asked
+   * past validUntil, as the check reads three chain values.
+   */
   async function refreshed(row: StoredOperation): Promise<StoredOperation> {
-    return (await refreshFinality(readOnlyDeps(row), row.idempotencyKey)) ?? row;
+    return (
+      (await refreshFinality(readOnlyDeps(row), row.idempotencyKey, {
+        retireLapsed: sponsorshipPastDue(row.signedOperation, Date.now()),
+      })) ?? row
+    );
   }
 
   /**

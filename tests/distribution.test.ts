@@ -557,9 +557,10 @@ test('llms.txt follows the llmstxt.org structure and covers every tool', () => {
   // about 3.8k tokens: still a small part of any client's context, next to about 130 KB for a
   // full tools/list. Raised from 12 KB (29 Sep 2026) so the next tool family fits without
   // cutting rules, from 14 KB (7 Oct 2026) for the Microsoft Copilot and Mistral Le Chat docs
-  // pages, and from 15 KB (13 Oct 2026) for the Feed's tool and docs page; keep adding detail to
-  // llms-full.txt and the /docs/*.md pages instead.
-  assert.ok(Buffer.byteLength(text) < 16_000, 'llms.txt stays small (under 16 KB)');
+  // pages, from 15 KB (13 Oct 2026) for the Feed's tool and docs page, and from 16 KB (1 Nov 2026)
+  // for the one sentence on buying an offer from outside; keep adding detail to llms-full.txt and
+  // the /docs/*.md pages instead.
+  assert.ok(Buffer.byteLength(text) < 16_500, 'llms.txt stays small (under 16.5 KB)');
 
   const full = read('public/llms-full.txt');
   assert.equal(full.split('\n')[0], '# Central City');

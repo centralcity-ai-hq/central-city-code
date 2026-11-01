@@ -18,7 +18,7 @@
  *   short page far from the total) records its code and ends the run; the cursor stays, so the
  *   next run (15 minutes later: the back-off) reads the same page again. A failed page never
  *   completes a sweep or withdraws. A total under half the last complete one fails as 'short'
- *   only until the sweep is staleAfterMs old; after that a catalog that really shrank completes.
+ *   only until the sweep is half of staleAfterMs old; after that a catalog that really shrank completes.
  * - The noon checkpoint (12:00 Europe/Berlin) runs undisturbed: no page is fetched from 11:30 to
  *   12:30 Berlin time (daylight saving included). A run in that window does nothing at all, not
  *   even a database read; a run that reaches it stops, and the sweep resumes after.
@@ -229,9 +229,12 @@ export async function runFeedSync(deps: FeedSyncDeps): Promise<FeedSyncRun> {
     offset = 0;
     sweepStartedAt = started;
   }
-  // The halving guard holds a sweep back for staleAfterMs at most: by then its listings show as
-  // stale anyway, and a catalog that really shrank would otherwise stall the sweep for good.
-  const lastTotal = started - sweepStartedAt >= FEED_LIMITS.staleAfterMs ? null : source.lastTotal;
+  // The halving guard holds a sweep back for half of staleAfterMs at most: a catalog that really
+  // shrank would otherwise stall the sweep for good. Listings go stale from the last success, and a
+  // sweep starts syncEveryMs after it, so a full staleAfterMs here would always mark them stale
+  // first (1 Nov: 104,695 down to 49,678, every listing about to read stale).
+  const lastTotal =
+    started - sweepStartedAt >= FEED_LIMITS.staleAfterMs / 2 ? null : source.lastTotal;
   run.sweepId = sweepId;
   run.offset = offset;
   run.outcome = 'partial';

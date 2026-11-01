@@ -2,9 +2,10 @@ import {
   SERVICE_CALLS_PATH,
   SERVICE_CALLS_QUERY_MAX,
   type ServiceCall,
+  type ServiceCallsChain,
   type ServiceCallsPage,
 } from '../../shared/explorer-calls';
-import { BASESCAN } from './onBaseData';
+import { BASESCAN, basescanTx } from './onBaseData';
 
 /*
  * The Agent Explorer's "Service calls" data (shared/explorer-calls.ts; the approved mockup
@@ -12,7 +13,7 @@ import { BASESCAN } from './onBaseData';
  * from the public route. The screen uses only this module.
  */
 
-export type { ServiceCall, ServiceCallsPage };
+export type { ServiceCall, ServiceCallsChain, ServiceCallsPage };
 
 /** The first page is read again this often while the tab is visible; other pages stay as read. */
 export const SERVICE_CALLS_POLL_MS = 5_000;
@@ -46,6 +47,8 @@ export const searchText = (q: string) => q.trim().slice(0, SERVICE_CALLS_QUERY_M
 
 /** Thrown for a search the server refused (400): the text is not one it can search by. */
 export class SearchRefused extends Error {}
+/** An address search the server could not finish in time (no index on the provider yet). */
+export class AddressSearchUnavailable extends Error {}
 
 export async function loadServiceCalls(
   query: { q?: string; cursor?: string | null } = {},
@@ -62,9 +65,53 @@ export async function loadServiceCalls(
     signal: AbortSignal.timeout(SERVICE_CALLS_TIMEOUT_MS),
   });
   if (q && response.status === 400) throw new SearchRefused(q);
+  if (response.status === 503 && /^0x[0-9a-f]{40}$/i.test(q)) throw new AddressSearchUnavailable(q);
   if (!response.ok) throw new Error(`${path} ${response.status}`);
   return (await response.json()) as ServiceCallsPage;
 }
 
 /** How long one paid-calls read may take before it fails (the list reads use the same 12 s). */
 export const SERVICE_CALLS_TIMEOUT_MS = 12_000;
+
+/**
+ * Where a row's chain links to. A row without chain_id is Base mainnet (as every row was before
+ * another chain had paid calls); any other chain is named by the answer's `chains`, from the
+ * shared chain registry, so a new chain needs no change here.
+ */
+export function chainLinks(call: ServiceCall, chains: readonly ServiceCallsChain[] | undefined) {
+  const chain =
+    call.chain_id === undefined
+      ? null
+      : (chains?.find((c) => c.chain_id === call.chain_id) ?? null);
+  if (!chain)
+    return {
+      chain: chains?.[0] ?? null,
+      network: 'Base mainnet',
+      tx: basescanTx,
+      block: basescanBlock,
+      scanName: 'BaseScan',
+    };
+  return {
+    chain,
+    network: /testnet/i.test(chain.name) ? chain.name : `${chain.name} mainnet`,
+    tx: (hash: string) => `${chain.explorer_url}/tx/${hash}`,
+    block: (block: number) => `${chain.explorer_url}/block/${block}`,
+    scanName: new URL(chain.explorer_url).host,
+  };
+}
+
+/** "Base", "Base and Arc", "Base, Arc and X". */
+export function chainNames(chains: readonly ServiceCallsChain[]) {
+  const names = chains.map((c) => c.name);
+  return names.length < 2
+    ? (names[0] ?? 'Base')
+    : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
+}
+
+/** A near-black mark (Arc's) gets a light ring on a dark page, as in the Explorer switch. */
+export function darkMark(mark: string) {
+  const hex = /^#([0-9a-f]{6})$/i.exec(mark)?.[1];
+  if (!hex) return false;
+  const [r, g, b] = [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  return 0.2126 * r! + 0.7152 * g! + 0.0722 * b! < 48;
+}

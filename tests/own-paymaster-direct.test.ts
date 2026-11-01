@@ -13,6 +13,7 @@ import {
   parseAbi,
   parseAbiParameters,
   parseTransaction,
+  recoverTransactionAddress,
   recoverMessageAddress,
   TransactionNotFoundError,
   TransactionReceiptNotFoundError,
@@ -2179,8 +2180,11 @@ const arcLane = async (t: Parameters<typeof setup>[0], count: number) => {
       sponsor: false,
     });
     await ctx.bundler.send(signed(op)).catch(() => undefined);
+    // A backlog from before the cap: hidden from it while it is built.
+    await ctx.db.query("UPDATE own_paymaster_sends SET status = 'included'");
   }
   ctx.chain.state.sendFails = false;
+  await ctx.db.query("UPDATE own_paymaster_sends SET status = 'submitted'");
   return { ...ctx, clock };
 };
 /** A node as measured: refuses past the window, mines every contiguous nonce it holds. */
@@ -2302,4 +2306,284 @@ test('Arc: the node\'s pool and rate limits are "not now": no failure line, the 
     ),
     [],
   );
+});
+
+// Arc's lanes: a second submitter, each op on its row's lane, gated on chain, capped.
+const secondKey = generatePrivateKey();
+const second = privateKeyToAccount(secondKey);
+const lanesOn = async (t: Parameters<typeof setup>[0], clock = { at: NOW }) => {
+  const ctx = await setup(t, { chainId: ARC_TESTNET, now: clock });
+  const { state } = ctx.chain;
+  state.balance = 10n ** 19n;
+  state.finalized = 0;
+  const allowed = new Map<string, boolean>([
+    [submitter.address.toLowerCase(), true],
+    [second.address.toLowerCase(), true],
+  ]);
+  const balances = new Map<string, bigint>();
+  const client = ctx.chain.client as unknown as Record<string, (args: never) => unknown>;
+  const read = client.readContract!;
+  client.readContract = ((args: { functionName: string; args?: string[] }) =>
+    args.functionName === 'isBundlerAllowed'
+      ? Promise.resolve(allowed.get(args.args![0]!.toLowerCase()) ?? false)
+      : read(args as never)) as never;
+  client.getBalance = (async (args: { address: string }) =>
+    balances.get(args.address.toLowerCase()) ?? state.balance) as never;
+  const nonces = new Map<string, number>();
+  client.getTransactionCount = (async (args: { address: string }) =>
+    nonces.get(args.address.toLowerCase()) ?? 0) as never;
+  const budget = ownPaymasterBudget({
+    db: ctx.db,
+    chainId: ARC_TESTNET,
+    deposit: async () => ({ wei: 10n ** 20n, block: 100n }),
+    now: () => clock.at,
+    limits: chainParams(ARC_TESTNET).budget,
+    submitterBound: true,
+  });
+  const keys = {
+    withSigner: async <T>(
+      keyRef: string,
+      use: (a: ReturnType<typeof privateKeyToAccount>) => Promise<T>,
+    ) =>
+      use(
+        privateKeyToAccount(
+          keyRef === 'v1:signer' ? signerKey : keyRef === 'v1:second' ? secondKey : submitterKey,
+        ),
+      ),
+  };
+  const make = () =>
+    directBundler({
+      db: ctx.db,
+      client: ctx.chain.client,
+      chainId: ARC_TESTNET,
+      entryPoint: ENTRY_POINT,
+      mode: 'on',
+      paymaster: PAYMASTER,
+      keystore: keys,
+      signer: { keyRef: 'v1:signer', address: signer.address },
+      submitter: { keyRef: 'v1:submitter', address: submitter.address },
+      moreSubmitters: [{ keyRef: 'v1:second', address: second.address }],
+      budget,
+      policy: { addresses: ADDRESSES },
+      now: () => clock.at,
+      autoMaintain: false,
+      log: (line: string) => void ctx.lines.push(line),
+    });
+  const selfPaid = async (bundler: ReturnType<typeof make>, nonce: number) =>
+    bundler.send(
+      signed(
+        await bundler.prepare(await unsigned([register()], { nonce: BigInt(nonce) }), {
+          sponsor: false,
+        }),
+      ),
+    );
+  const rows = async () =>
+    (
+      await ctx.db.query<{ submitter: string; nonce: string; hash: string }>(
+        `SELECT submitter, nonce::text AS nonce, user_op_hash AS hash FROM own_paymaster_sends
+         ORDER BY own_paymaster_sends.nonce, submitter`,
+      )
+    ).rows;
+  return { ...ctx, clock, allowed, balances, nonces, make, selfPaid, rows, bundler: make() };
+};
+const from = async (raw: Hex) =>
+  (await recoverTransactionAddress({ serializedTransaction: raw as never })).toLowerCase();
+
+test('Arc lanes: fewest open first, each lane its own nonces, key and beneficiary', async (t) => {
+  const { bundler, selfPaid, rows, chain } = await lanesOn(t);
+  for (let i = 0; i < 4; i++) await selfPaid(bundler, i);
+  const a = submitter.address.toLowerCase();
+  const b = second.address.toLowerCase();
+  assert.deepEqual(
+    (await rows()).map((r) => [r.submitter, r.nonce]).sort(),
+    [
+      [a, '0'],
+      [a, '1'],
+      [b, '0'],
+      [b, '1'],
+    ].sort(),
+  );
+  for (const raw of chain.state.sent) {
+    const signerOf = await from(raw);
+    const data = parseTransaction(raw).data!;
+    // handleOps(ops, beneficiary): the beneficiary word is the lane that signed.
+    assert.equal(`0x${data.slice(10 + 64 + 24, 10 + 128)}`, signerOf);
+  }
+});
+
+test('Arc lanes: a lane not allowed or not funded gets nothing', async (t) => {
+  const { bundler, selfPaid, rows, allowed, balances, clock } = await lanesOn(t);
+  const a = submitter.address.toLowerCase();
+  const b = second.address.toLowerCase();
+  allowed.set(b, false);
+  await selfPaid(bundler, 0);
+  await selfPaid(bundler, 1);
+  assert.deepEqual(
+    (await rows()).map((r) => r.submitter),
+    [a, a],
+  );
+  // Allowed now but with only the reserve: still skipped once the cache has passed.
+  clock.at += 31_000;
+  allowed.set(b, true);
+  balances.set(b, chainParams(ARC_TESTNET).submitterReserveWei);
+  await selfPaid(bundler, 2);
+  assert.deepEqual(
+    (await rows()).map((r) => r.submitter),
+    [a, a, a],
+  );
+  // Allowed and funded: it takes the next one, as the emptier lane.
+  clock.at += 31_000;
+  balances.delete(b);
+  await selfPaid(bundler, 3);
+  assert.ok((await rows()).some((r) => r.submitter === b));
+});
+
+test('Arc lanes: with no lane ready the send falls back to submitter 1', async (t) => {
+  const { bundler, selfPaid, rows, allowed } = await lanesOn(t);
+  allowed.set(submitter.address.toLowerCase(), false);
+  allowed.set(second.address.toLowerCase(), false);
+  await selfPaid(bundler, 0);
+  assert.deepEqual(
+    (await rows()).map((r) => r.submitter),
+    [submitter.address.toLowerCase()],
+  );
+});
+
+test("Arc lanes: follow-ups use the row's lane: its key, its nonce, its own head", async (t) => {
+  const { bundler, selfPaid, rows, chain, clock, nonces } = await lanesOn(t);
+  await selfPaid(bundler, 0);
+  await selfPaid(bundler, 1);
+  const b = second.address.toLowerCase();
+  const row = (await rows()).find((r) => r.submitter === b)!;
+  chain.state.simulate = 'revert';
+  // The other lane's head moved on: it must not count for this row.
+  nonces.set(submitter.address.toLowerCase(), 1);
+  clock.at += 31_000;
+  const before = chain.state.sent.length;
+  await bundler.maintain(5);
+  const cancels = chain.state.sent
+    .slice(before)
+    .filter((raw) => (parseTransaction(raw).data ?? '0x') === '0x');
+  assert.equal(cancels.length, 1);
+  assert.equal(await from(cancels[0]!), b, "the row's own key");
+  assert.equal(parseTransaction(cancels[0]!).to!.toLowerCase(), b, 'a transfer to itself');
+  assert.equal(String(parseTransaction(cancels[0]!).nonce ?? 0), row.nonce);
+});
+
+test('Arc lanes: past the cap a send is busy, nothing moves and nothing is signed', async (t) => {
+  const { bundler, selfPaid, chain, rows, db } = await lanesOn(t);
+  const cap = chainParams(ARC_TESTNET).lanePool!.capPerLane;
+  for (let i = 0; i < 2 * cap; i++) await selfPaid(bundler, i);
+  const sentBefore = chain.state.sent.length;
+  const error = await selfPaid(bundler, 999).catch((e: unknown) => e);
+  assert.ok(error instanceof BundlerError && bundlerRateLimited(error), 'retryable busy');
+  assert.equal(chain.state.sent.length, sentBefore);
+  assert.equal((await rows()).length, 2 * cap);
+  const open = await db.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM own_paymaster_reservations WHERE status = 'sent'`,
+  );
+  assert.equal(Number(open.rows[0]!.n), 2 * cap, 'one exposure per stored send, none for the busy');
+});
+
+test('Arc lanes: mined sends free their lane before their receipts are read', async (t) => {
+  const { bundler, selfPaid, nonces, rows } = await lanesOn(t);
+  const cap = chainParams(ARC_TESTNET).lanePool!.capPerLane;
+  for (let i = 0; i < 2 * cap; i++) await selfPaid(bundler, i);
+  nonces.set(submitter.address.toLowerCase(), 5);
+  await selfPaid(bundler, 500);
+  assert.equal((await rows()).length, 2 * cap + 1);
+});
+
+test('Arc lanes: with the lanes full no sponsorship is reserved or signed', async (t) => {
+  const { bundler, selfPaid, chain, db } = await lanesOn(t);
+  const cap = chainParams(ARC_TESTNET).lanePool!.capPerLane;
+  for (let i = 0; i < 2 * cap; i++) await selfPaid(bundler, i);
+  const signatures = chain.state.paymasterSignatures;
+  const error = await bundler
+    .prepare(await unsigned(), { intent: intentOf('registration') })
+    .catch((e: unknown) => e);
+  assert.ok(error instanceof SponsorError && error.rejection === 'busy');
+  assert.ok(transientChainError(error), 'the register route answers it as busy');
+  assert.equal(chain.state.paymasterSignatures, signatures);
+  const held = await db.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM own_paymaster_reservations WHERE status = 'reserved'`,
+  );
+  assert.equal(held.rows[0]!.n, '0');
+});
+
+test('Arc lanes: sponsorships just handed out hold their place', async (t) => {
+  const { bundler, selfPaid } = await lanesOn(t);
+  const cap = chainParams(ARC_TESTNET).lanePool!.capPerLane;
+  for (let i = 0; i < 2 * cap - 1; i++) await selfPaid(bundler, i);
+  // One place left: the first sponsorship takes it, the second hears busy.
+  await bundler.prepare(await unsigned([register()], { nonce: 900n }), {
+    intent: intentOf('registration'),
+  });
+  const error = await bundler
+    .prepare(await unsigned([register()], { nonce: 901n }), { intent: intentOf('registration') })
+    .catch((e: unknown) => e);
+  assert.ok(error instanceof SponsorError && error.rejection === 'busy');
+});
+
+test('Arc lanes: two instances racing one operation store and sign it once', async (t) => {
+  const { make, chain, rows, bundler: first } = await lanesOn(t);
+  const other = make();
+  const op = signed(await first.prepare(await unsigned(), { sponsor: false }));
+  await Promise.allSettled([first.send(op), other.send(op)]);
+  assert.equal((await rows()).length, 1);
+  assert.equal(new Set(chain.state.sent).size, 1);
+});
+
+test('Arc lanes: a lane going unallowed: its op is cancelled by its key, no new work on it', async (t) => {
+  const { bundler, selfPaid, chain, allowed, clock, rows } = await lanesOn(t);
+  await selfPaid(bundler, 0);
+  await selfPaid(bundler, 1);
+  const b = second.address.toLowerCase();
+  allowed.set(b, false);
+  // The chain now refuses that origin only.
+  const client = chain.client as unknown as { estimateGas: (a: never) => Promise<bigint> };
+  const estimate = client.estimateGas;
+  client.estimateGas = ((args: { account: unknown; to: string }) =>
+    String(args.account).toLowerCase() === b && args.to.toLowerCase() === ENTRY_POINT.toLowerCase()
+      ? Promise.reject(
+          Object.assign(new Error('execution reverted'), { name: 'ExecutionRevertedError' }),
+        )
+      : estimate(args as never)) as never;
+  clock.at += 31_000;
+  const before = chain.state.sent.length;
+  await bundler.maintain(5);
+  const cancels = chain.state.sent
+    .slice(before)
+    .filter((raw) => (parseTransaction(raw).data ?? '0x') === '0x');
+  assert.equal(cancels.length, 1);
+  assert.equal(await from(cancels[0]!), b);
+  await selfPaid(bundler, 2);
+  assert.equal((await rows()).filter((r) => r.submitter === b).length, 1, 'no new work on it');
+});
+
+test('Base: one lane, no cap, no lane reads: 30 open sends all go out', async (t) => {
+  const { bundler, chain, db } = await setup(t);
+  chain.state.balance = 10n ** 18n;
+  const client = chain.client as unknown as { readContract: (a: never) => Promise<unknown> };
+  const read = client.readContract;
+  let laneReads = 0;
+  client.readContract = ((args: { functionName: string }) => {
+    if (args.functionName === 'isBundlerAllowed') laneReads++;
+    return read(args as never);
+  }) as never;
+  for (let i = 0; i < 30; i++)
+    await bundler.send(
+      signed(
+        await bundler.prepare(await unsigned([register()], { nonce: BigInt(i) }), {
+          sponsor: false,
+        }),
+      ),
+    );
+  const stored = await db.query<{ submitter: string }>('SELECT submitter FROM own_paymaster_sends');
+  assert.equal(stored.rows.length, 30);
+  assert.deepEqual(
+    [...new Set(stored.rows.map((r) => r.submitter))],
+    [submitter.address.toLowerCase()],
+  );
+  assert.equal(laneReads, 0, 'a self-paid send reads no allowlist on Base');
 });

@@ -354,7 +354,11 @@ test('the whole run: inputs, agent, price, one confirm, every state, the Externa
   await expect(sheet.locator('.fp-ok')).toHaveText('Price checked with the service just now');
   expect(pay.quotes).toHaveLength(1);
   expect(pay.quotes[0]!.serviceId).toBe(WHOIS);
-  expect(pay.quotes[0]!.body).toEqual({ inputs: { query: { domain: 'stripe.com' } } });
+  // The price is checked for the paying agent, so another chain is refused before Pay.
+  expect(pay.quotes[0]!.body).toEqual({
+    agentId: PAY_AGENT_IDS.ready,
+    inputs: { query: { domain: 'stripe.com' } },
+  });
   expect(pay.quotes[0]!.headers['x-city-request']).toBe('1');
   await shot(page, 'confirm-1440-light');
 
@@ -1097,6 +1101,7 @@ test('POST services: typed body inputs, and inputs the listing doesn’t name as
   await sheet.getByRole('button', { name: 'Check price' }).click();
   await expect(payButton(page)).toHaveText('Pay 0.007 USDC');
   expect(pay.quotes[0]!.body).toEqual({
+    agentId: PAY_AGENT_IDS.ready,
     inputs: { body: { query: 'pdf invoices', numResults: 3, contents: { text: true } } },
   });
 });

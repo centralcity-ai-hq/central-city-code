@@ -69,16 +69,16 @@ test('the explorer switch has three views, the current one marked, counts when k
   const html = renderToStaticMarkup(
     createElement(ExplorerSwitch, { current: 'calls', all: 1732720, onBase: 55201, calls: 7040 }),
   );
-  assert.match(html, /href="\/explorer"[^>]*>All agents<small> · 1,732,720<\/small>/);
-  assert.match(html, /href="\/explorer\/base"[^>]*>On Base<small> · 55,201<\/small>/);
+  assert.match(html, /href="\/explorer">.*?All agents<\/span>.*?<small>1,732,720<\/small>/);
+  assert.match(html, /href="\/explorer\/base">.*?On Base<\/span>.*?<small>55,201<\/small>/);
   assert.match(
     html,
-    /href="\/explorer\/calls" aria-current="page">Service calls<small> · 7,040<\/small>/,
+    /href="\/explorer\/calls" aria-current="page">.*?Service calls<\/span>.*?<small>7,040<\/small>/,
   );
   const unknown = renderToStaticMarkup(
     createElement(ExplorerSwitch, { current: 'all', all: null, onBase: null }),
   );
-  assert.match(unknown, />Service calls<\/a>/);
+  assert.match(unknown, />Calls<\/span><\/a>/);
 });
 
 test('the page: its copy, the three numbers, the columns, and no arrows', () => {
@@ -152,4 +152,25 @@ test('the sheet: the transaction, where the payment went, and BaseScan', () => {
   );
   assert.ok(onTop.includes('10% fee, on top of the price'));
   assert.ok(onTop.includes(`https://basescan.org/tx/0x${'cd'.repeat(32)}`));
+});
+
+test('an address search the server could not finish says so; a page read does not', async (t) => {
+  const { AddressSearchUnavailable } = await import('../src/verify/serviceCallsData');
+  const real = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = real;
+  });
+  globalThis.fetch = (async () => new Response('{}', { status: 503 })) as typeof fetch;
+  await assert.rejects(
+    loadServiceCalls({ q: `0x${'a'.repeat(40)}` }),
+    (error: unknown) => error instanceof AddressSearchUnavailable,
+  );
+  await assert.rejects(
+    loadServiceCalls({ q: '52693856' }),
+    (error: unknown) => !(error instanceof AddressSearchUnavailable),
+  );
+  await assert.rejects(
+    loadServiceCalls(),
+    (error: unknown) => !(error instanceof AddressSearchUnavailable),
+  );
 });

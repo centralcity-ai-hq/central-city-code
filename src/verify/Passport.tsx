@@ -20,6 +20,7 @@ import {
   initial,
   loadOnBase,
   loadPassport,
+  passportPath,
   scoreClaim,
   shownName,
   shortWallet,
@@ -143,6 +144,16 @@ function Facts({ passport }: { passport: PassportData }) {
         <dt>Base ID</dt>
         <dd className="ob-pp-num">
           <b>{passport.baseId}</b>
+        </dd>
+      </div>
+      <div className="ob-pp-fact" data-tool="true">
+        <dt>Passport</dt>
+        <dd>
+          <span className="ob-pp-mono">{passportPath(passport.short)}</span>
+          <CopyButton
+            text={`https://centralcity.ai${passportPath(passport.short)}`}
+            label="Copy passport link"
+          />
         </dd>
       </div>
       <div className="ob-pp-fact" data-tool="true">
@@ -471,7 +482,14 @@ function ServicePayments({ short }: { short: string }) {
   );
 }
 
-const FACT_LABELS = ['Base ID', 'Owner wallet', 'Agent wallet', 'Registration', 'Finality'];
+const FACT_LABELS = [
+  'Base ID',
+  'Passport',
+  'Owner wallet',
+  'Agent wallet',
+  'Registration',
+  'Finality',
+];
 const SKELETON_WIDTHS = ['56px', '62%', '62%', '44%', '36%'];
 
 function SkeletonHead() {

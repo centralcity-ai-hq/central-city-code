@@ -13,7 +13,13 @@ const PAID_CALLS_SCHEMA_DOC = readFileSync(
   new URL('../server/feed/pay/count-schema.ts', import.meta.url),
   'utf8',
 );
-import { checkPaidCalls, PAID_CALLS_CHECK_SQL } from '../server/stats/paid-calls.js';
+import {
+  checkPaidCalls,
+  PAID_CALLS_CHECK_SQL,
+  PAID_CALLS_CHECK_WITH_PUBLIC_SQL,
+  PAID_CALLS_CHECK_WITH_SPONSORED_AND_PUBLIC_SQL,
+  PAID_CALLS_CHECK_WITH_SPONSORED_SQL,
+} from '../server/stats/paid-calls.js';
 import {
   ALL,
   base,
@@ -376,6 +382,13 @@ async function value(db: Pick<Database, 'query'>, chainId = 8453): Promise<bigin
   return BigInt(row?.v ?? '0');
 }
 
+const CHECK_SQLS = new Set([
+  PAID_CALLS_CHECK_SQL,
+  PAID_CALLS_CHECK_WITH_PUBLIC_SQL,
+  PAID_CALLS_CHECK_WITH_SPONSORED_SQL,
+  PAID_CALLS_CHECK_WITH_SPONSORED_AND_PUBLIC_SQL,
+]);
+
 const REAL_PG = { skip: !process.env.CITY_TEST_POSTGRES_URL, timeout: 60_000 };
 
 /** A fresh database with every migration and `connections` single-connection pools. */
@@ -553,7 +566,8 @@ test(
             ...tx,
             query: async (sql: string, params?: unknown[]) => {
               const result = await tx.query(sql, params);
-              if (sql === PAID_CALLS_CHECK_SQL) {
+              // Whichever variant the present tables pick (public calls since migration 356).
+              if (CHECK_SQLS.has(sql)) {
                 read();
                 await paused;
               }

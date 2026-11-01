@@ -3,7 +3,9 @@
 // the app runs, and the page stays blank (src/shell/chunkReload.ts only covers lazy chunks, once
 // the app runs). This file has a fixed name in every build, so it is always there. It reloads the
 // page when an /assets/ script or stylesheet fails, after refetching that file past the cache
-// (hashed assets are cached immutable, including a 404), at most 3 times within a minute.
+// (hashed assets are cached immutable, including a 404), at most 3 times within a minute. Once the
+// entry module runs (window.__ccBooted, set by installChunkReload) it does nothing: a lazy chunk's
+// script, preload or CSS failing then is chunkReload.ts's to reload, on its own budget.
 (function () {
   var KEY = 'cc.bootGuard';
   var DELAYS = [0, 1000, 3000];
@@ -19,6 +21,7 @@
     'error',
     function (ev) {
       var el = ev && ev.target;
+      if (window.__ccBooted) return;
       if (pending || !el || (el.tagName !== 'SCRIPT' && el.tagName !== 'LINK')) return;
       var url = el.src || el.href || '';
       if (url.indexOf('/assets/') === -1) return;

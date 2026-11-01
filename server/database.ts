@@ -77,6 +77,13 @@ export function postgresDatabase(pool: Pool): Database {
     const client = await pool.connect();
     let broken = false;
     let readFailure: unknown;
+    // The server may end a checked-out connection (an idle-in-transaction limit, a restart): without
+    // a listener that error is uncaught and takes the process and its other requests with it.
+    const lost = (error: unknown) => {
+      broken = true;
+      readFailure = error;
+    };
+    client.on('error', lost);
     const run = async (sql: string, params?: unknown[]) => {
       if (broken) throw readFailure;
       try {
@@ -110,6 +117,7 @@ export function postgresDatabase(pool: Pool): Database {
       }
       throw error;
     } finally {
+      client.removeListener('error', lost);
       client.release(broken);
     }
   };

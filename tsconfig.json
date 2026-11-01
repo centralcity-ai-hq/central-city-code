@@ -23,6 +23,7 @@
     "protocol",
     "tests",
     "e2e",
+    "examples/x402-buyer",
     "vite.config.ts",
     "playwright.config.ts"
   ]

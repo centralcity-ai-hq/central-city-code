@@ -53,6 +53,9 @@
  * whose compare-and-set won.
  *
  * Fails closed: without the bearer secret the route answers 404, exactly like an unknown path.
+ *
+ * With Arc on, one run per chain, side by side, each on its own rows, cursor and payment chain; Base's
+ * answer keeps its fields and gains `arc` (null when Arc's run failed or outlasted the budget).
  */
 import type { FastifyInstance } from 'fastify';
 import type { Database } from '../../database.js';
@@ -140,28 +143,21 @@ const STALE_OPEN = `p.chain_id = $1 AND p.state IN ${OPEN} AND p.kind = 'transfe
   AND NOT EXISTS (SELECT 1 FROM base_wallet_reservations r WHERE r.holder_kind = 'payment'
     AND r.state = 'held' AND r.chain_id = $1 AND r.holder_ref = ${OPERATION_KEY_SQL})`;
 
-export function registerPaymentRecoveryCron(
-  app: FastifyInstance,
-  deps: {
-    db: Database;
-    /** The wallet network: the one network agent payments reserve on. */
-    chainId: number;
-    /**
-     * The wallet network's agent payment chain (chain/runtime.ts agentPayments); throws when it is
-     * not configured.
-     */
-    chain(): Promise<PaymentChainPort>;
-    /** Enables the cron (Vercel Cron's bearer secret); without it the route is absent. */
-    cronSecret?: string;
-    /** The deployment's settings, for Base's own gate when a payment's intent is rebuilt. */
-    env?: Record<string, string | undefined>;
-    /** The canonical receipt reader (chain/payment-receipt.ts by default). */
-    readPaymentReceipt?: PaymentReceiptReader;
-    now?: () => number;
-  },
-) {
-  const cronSecret = deps.cronSecret;
-  if (cronSecret === undefined) return;
+interface RecoveryChainDeps {
+  db: Database;
+  /** The network this run walks: agent payments reserve on the chain the agent lives on. */
+  chainId: number;
+  /** That network's agent payment chain (chain/runtime.ts agentPayments); throws when not configured. */
+  chain(): Promise<PaymentChainPort>;
+  /** The deployment's settings, for Base's own gate when a payment's intent is rebuilt. */
+  env?: Record<string, string | undefined>;
+  /** The canonical receipt reader (chain/payment-receipt.ts by default). */
+  readPaymentReceipt?: PaymentReceiptReader;
+  now?: () => number;
+}
+
+/** One run over one chain's rows; null when there is work and no payment chain to do it with. */
+function paymentRecoveryOn(deps: RecoveryChainDeps) {
   const clock = deps.now ?? Date.now;
   const store = createPaymentIntentStore({
     db: deps.db,
@@ -258,9 +254,7 @@ export function registerPaymentRecoveryCron(
     BigInt(a.createdAt) < BigInt(b.createdAt) ||
     (a.createdAt === b.createdAt && a.reservationId < b.reservationId);
 
-  app.get(PAY_RECOVER_PATH, async (request, reply) => {
-    if (!cronAuthorized(request.headers.authorization, cronSecret))
-      return reply.code(404).send({ error: 'Not found.' });
+  return async (): Promise<PaymentRecoveryRun | null> => {
     const started = clock();
     // One grace cutoff for the whole run: the same `now` on every page of both parts.
     const cutoff = started - RECOVERY_GRACE_MS;
@@ -288,7 +282,7 @@ export function registerPaymentRecoveryCron(
     try {
       chain = await deps.chain();
     } catch {
-      return reply.code(503).send({ error: 'Payment recovery is not available.' });
+      return null;
     }
 
     // Part 1: held payment reservations (recover()), within its own share, resumed where the
@@ -369,5 +363,54 @@ export function registerPaymentRecoveryCron(
     if (run.errors || !run.complete)
       console.info(JSON.stringify({ event: 'payment.recover_run', ...run }));
     return run;
+  };
+}
+
+export function registerPaymentRecoveryCron(
+  app: FastifyInstance,
+  deps: RecoveryChainDeps & {
+    /** Enables the cron (Vercel Cron's bearer secret); without it the route is absent. */
+    cronSecret?: string;
+    /** The Arc chain that is on and its payment chain, read per run; null with Arc off. */
+    arc?: () => { chainId: number; chain(): Promise<PaymentChainPort> } | null;
+  },
+) {
+  const cronSecret = deps.cronSecret;
+  if (cronSecret === undefined) return;
+  const onBase = paymentRecoveryOn(deps);
+  const arcRuns = new Map<number, ReturnType<typeof paymentRecoveryOn>>();
+
+  app.get(PAY_RECOVER_PATH, async (request, reply) => {
+    if (!cronAuthorized(request.headers.authorization, cronSecret))
+      return reply.code(404).send({ error: 'Not found.' });
+    // Arc's rows side by side with Base's, as the withdrawals sweep: whatever Arc's run does (fails,
+    // or has no end) the answer waits only for Base's and the budget. Its next run takes over.
+    const arc = deps.arc?.() ?? null;
+    let arcRun: Promise<PaymentRecoveryRun | null> | null = null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (arc) {
+      let run = arcRuns.get(arc.chainId);
+      if (!run) {
+        run = paymentRecoveryOn({ ...deps, ...arc });
+        arcRuns.set(arc.chainId, run);
+      }
+      arcRun = Promise.race([
+        run().catch(() => {
+          console.info(JSON.stringify({ event: 'payment.recover_failed', chainId: arc.chainId }));
+          return null;
+        }),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), PAY_RECOVER_BUDGET_MS);
+          timer.unref?.();
+        }),
+      ]);
+    }
+    try {
+      const [run, other] = await Promise.all([onBase(), arcRun]);
+      if (!run) return reply.code(503).send({ error: 'Payment recovery is not available.' });
+      return arc ? { ...run, arc: other } : run;
+    } finally {
+      clearTimeout(timer);
+    }
   });
 }

@@ -93,6 +93,24 @@ export interface ServiceCall {
    * also when several calls were settled in one transaction (batch lane).
    */
   ref: string;
+  /**
+   * The chain it was paid on, only when that is not Base mainnet (an Arc call: 5042). Absent on a
+   * Base row, so Base rows read exactly as before. Named and linked by `ServiceCallsPage.chains`.
+   */
+  chain_id?: number;
+}
+
+/** A chain the page lists, as the shared chain registry names it (shared/chains.ts chainView). */
+export interface ServiceCallsChain {
+  chain_id: number;
+  /** "Base", "Arc". */
+  name: string;
+  /** Its block explorer's origin: a transaction is `${explorer_url}/tx/<hash>`. */
+  explorer_url: string;
+  /** Its mark colour (CSS). */
+  mark: string;
+  /** Its paid service calls ever (its counter row); null while not readable. */
+  total: number | null;
 }
 
 /** GET /api/public/explorer/calls?cursor=&q= */
@@ -118,6 +136,12 @@ export interface ServiceCallsPage {
   items: ServiceCall[];
   /** The cursor of the next (older) page, or null at the end. */
   next_cursor: string | null;
+  /**
+   * Every chain listed, Base first, only once a chain other than Base has a paid call: then rows
+   * carry `chain_id` (all but Base's) and the page names and marks each row's chain. Absent while
+   * Base is the only one, so the answer reads exactly as before.
+   */
+  chains?: ServiceCallsChain[];
 }
 
 /** Past this age the 24 h numbers on the page say when they were counted. */

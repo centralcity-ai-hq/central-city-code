@@ -59,7 +59,7 @@ import {
   assertAgentPayConsent,
 } from '../../base/wallet/agent-pay-consent.js';
 import { agentChainOf } from '../../base/wallet/routes.js';
-import { feedListedSql } from '../services-schema.js';
+import { feedListedSql, feedSellerKeySql } from '../services-schema.js';
 import {
   FEED_HTTP_METHODS,
   FEED_USDC,
@@ -79,6 +79,7 @@ import {
   FEED_PAY_ERRORS,
   FEED_PAY_IDEMPOTENCY_KEY,
   FEED_PAY_LIMITS,
+  FEED_PAY_SALES_WINDOW_MS,
   FEED_PAY_NOT_PAYABLE_MESSAGES,
   FEED_PAY_QUOTE_ID,
   FEED_PAY_RETRYABLE,
@@ -145,6 +146,10 @@ import {
   loadCall,
   MOVE_COLUMNS,
   moveView,
+  saleView,
+  SALES_READ_TIMEOUT_MS,
+  SALES_SQL,
+  type SaleRow,
   newCallId,
   newQuoteId,
   num,
@@ -4995,14 +5000,42 @@ function createChainEngine(deps: FeedPayEngineDeps, setup: ChainSetup) {
   }
 
   /** The wallet History part (FeedPayHistory); null when the wallet is not this account's. */
-  async function history(accountId: string, agentId: string): Promise<FeedPayHistory | null> {
-    const { rows: wallets } = await db.query<{ wallet_id: string; spender_address: string }>(
-      `SELECT wallet_id, spender_address FROM base_wallets
+  async function history(
+    accountId: string,
+    agentId: string,
+    options: { sales?: boolean } = {},
+  ): Promise<FeedPayHistory | null> {
+    const { rows: wallets } = await db.query<{
+      wallet_id: string;
+      spender_address: string;
+      address: string;
+    }>(
+      `SELECT wallet_id, spender_address, address FROM base_wallets
        WHERE agent_id = $1 AND chain_id = $2 AND owner_account_id = $3`,
       [agentId, CHAIN_ID, accountId],
     );
     const wallet = wallets[0];
     if (!wallet) return null;
+    // Its sales: only when the owner asks, and only for a wallet that has ever had a listing
+    // (feed_services_seller). SALES_SQL walks every chain's settled calls in its window, so it never
+    // runs on a plain wallet read, and has its own limit: the pool's timeouts do not bind.
+    const seller = wallet.address.toLowerCase();
+    const { rows: listed } = await db.query(
+      `SELECT 1 FROM feed_services WHERE ${feedSellerKeySql('feed_services')} = $1 LIMIT 1`,
+      [seller],
+    );
+    const { rows: sales } =
+      options.sales && listed.length
+        ? await db.transaction(async (tx) => {
+            await tx.query(`SET LOCAL statement_timeout = '${SALES_READ_TIMEOUT_MS}ms'`);
+            return tx.query<SaleRow>(SALES_SQL, [
+              now() - FEED_PAY_SALES_WINDOW_MS,
+              CHAIN_ID,
+              seller,
+              FEED_PAY_LIMITS.historyMax,
+            ]);
+          })
+        : { rows: [] as SaleRow[] };
     const { rows } = await db.query<CallRow>(
       `${CALL_SELECT} WHERE c.wallet_id = $1 ORDER BY c.created_at DESC, c.call_id DESC LIMIT $2`,
       [wallet.wallet_id, FEED_PAY_LIMITS.historyMax],
@@ -5037,6 +5070,8 @@ function createChainEngine(deps: FeedPayEngineDeps, setup: ChainSetup) {
     return {
       calls: rows.map(historyItem),
       moves: moves.map((move) => moveView(move, CHAIN_ID)),
+      seller: listed.length > 0,
+      sales: sales.map((sale) => saleView(sale, CHAIN_ID)),
       readyForServices: float === null ? null : amountOf(float),
       perCallMax: amountOf(perCallMax ?? BigInt(DEFAULT_PER_CALL_MAX_RAW)),
       perCallMaxCapRaw: perCallCap().toString(10),
@@ -5776,8 +5811,8 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
       return (await engineOf(agentId)).setPerCallMax(accountId, agentId, body);
     },
 
-    async history(accountId: string, agentId: string) {
-      return (await engineOf(agentId)).history(accountId, agentId);
+    async history(accountId: string, agentId: string, options: { sales?: boolean } = {}) {
+      return (await engineOf(agentId)).history(accountId, agentId, options);
     },
 
     /** Base's agents, then Arc's, each agent once and on its own chain; those that can pay first. */

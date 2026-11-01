@@ -932,9 +932,12 @@ test('Listed on stands still with reduced motion; the dot field is decoration on
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await home(page);
   await page.goto('/');
+  // The app replaces the prerendered page once it starts: measure only after that.
+  await expect(page.locator('#root')).not.toHaveAttribute('aria-busy', 'true');
   await expect(page.locator('.cc-mq-track')).toHaveCSS('animation-name', 'none');
   // Still, the strip wraps one set so every listing is in view; the copy is not drawn.
   await expect(page.locator('.cc-lo-set[aria-hidden="true"]')).toBeHidden();
+  await expect(page.locator('.cc-mq')).toBeVisible();
   const strip = await page.locator('.cc-mq').boundingBox();
   for (const item of LISTINGS) {
     const link = page.locator('.cc-lo-set:not([aria-hidden]) .cc-lo', { hasText: item.name });

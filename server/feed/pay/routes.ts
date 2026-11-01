@@ -223,7 +223,9 @@ export function registerFeedPayRoutes(app: FastifyInstance, deps: FeedPayRouteDe
     try {
       const history =
         typeof agentId === 'string' && agentId.length <= 100
-          ? await deps.engine.history(person.accountId, agentId)
+          ? await deps.engine.history(person.accountId, agentId, {
+              sales: (request.query as { sales?: unknown } | undefined)?.sales === '1',
+            })
           : null;
       if (!history) return reply.code(404).send({ error: 'Not found.' });
       return reply.header('Cache-Control', 'no-store').send(history);

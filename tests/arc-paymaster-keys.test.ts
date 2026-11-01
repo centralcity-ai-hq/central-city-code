@@ -432,6 +432,11 @@ test('the public view: Base route shows Base, Arc route shows Arc, Arc off has n
   assert.equal(shownArc.paymaster, addr(0xa1));
   assert.equal(shownArc.verifyingSigner, arc.get('paymaster_signer')!.address);
   assert.equal(shownArc.submitter, arc.get('paymaster_submitter_1')!.address);
+  assert.deepEqual(shownArc.submitters, [
+    arc.get('paymaster_submitter_1')!.address,
+    arc.get('paymaster_submitter_2')!.address,
+  ]);
+  assert.equal(shownBase.submitters, undefined);
   assert.doesNotMatch(JSON.stringify(shownArc), /v1:/);
 
   // A server running Arc's alone answers the old path with Arc's keys.
