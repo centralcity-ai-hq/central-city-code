@@ -435,23 +435,23 @@ test('inbox depth, message size and per-sender rate limits', async (t) => {
   advance(61_000);
   await owner(app, cookie, 'POST', `/api/agents/${b.agent.id}/inbox/ack`, { seq: 4 });
 
-  const tooLongText = await send(a.agent.id, { to_agent_id: b.agent.id, text: 'x'.repeat(16_385) });
+  const tooLongText = await send(a.agent.id, { to_agent_id: b.agent.id, text: 'x'.repeat(65_537) });
   assert.equal(tooLongText.statusCode, 400);
   const bigData = await send(a.agent.id, {
     to_agent_id: b.agent.id,
-    parts: [{ type: 'data', data: { blob: 'y'.repeat(33_000) } }],
+    parts: [{ type: 'data', data: { blob: 'y'.repeat(132_000) } }],
   });
   assert.equal(bigData.statusCode, 400);
   const bigTotal = await send(a.agent.id, {
     to_agent_id: b.agent.id,
     parts: [
-      { type: 'text', text: 'a'.repeat(16_000) },
-      { type: 'text', text: 'b'.repeat(16_000) },
-      { type: 'text', text: 'c'.repeat(1_000) },
+      { type: 'text', text: 'a'.repeat(64_000) },
+      { type: 'text', text: 'b'.repeat(64_000) },
+      { type: 'text', text: 'c'.repeat(4_000) },
     ],
   });
   assert.equal(bigTotal.statusCode, 400);
-  const multibyte = await send(a.agent.id, { to_agent_id: b.agent.id, text: '€'.repeat(16_000) });
+  const multibyte = await send(a.agent.id, { to_agent_id: b.agent.id, text: '€'.repeat(60_000) });
   assert.equal(multibyte.statusCode, 413);
   assert.equal(codeOf(multibyte), 'message_too_large');
   const both = await send(a.agent.id, {
@@ -795,10 +795,13 @@ test('a single data part may use the whole message budget (large structured clai
   assert.equal(sent.statusCode, 201, sent.body);
   const page = (await inbox(b.agent.id)).json() as InboxPage;
   assert.deepEqual((page.messages[0]!.parts[0] as any).data, claim);
+  // A full 65,536-character text part fits, although its request body is over 64 KiB.
+  const longText = await send(a.agent.id, { to_agent_id: b.agent.id, text: 'z'.repeat(65_536) });
+  assert.equal(longText.statusCode, 201, longText.body);
   // The whole message still has one total budget.
   const over = await send(a.agent.id, {
     to_agent_id: b.agent.id,
-    parts: [{ type: 'data', data: { blob: 'y'.repeat(33_000) } }],
+    parts: [{ type: 'data', data: { blob: 'y'.repeat(132_000) } }],
   });
   assert.ok([400, 413].includes(over.statusCode), over.body);
 });
@@ -828,4 +831,65 @@ test('a replay returns the original message even after the connection was remove
   // A new message still needs the connection.
   const fresh = await send(a.agent.id, { to_agent_id: b.agent.id, text: 'Again' });
   assert.equal(codeOf(fresh), 'connection_required');
+});
+
+test('CCA-624: private messages refuse Central City credentials for every sender, before anything is stored', async (t) => {
+  const { a, b, send, inbox, runtime, app } = await setup(t);
+  const secret = `cca_${'x'.repeat(43)}`;
+  // Console (owner session) with the credential in text.
+  const byOwner = await send(a.agent.id, { to_agent_id: b.agent.id, text: `here: ${secret}` });
+  assert.equal(byOwner.statusCode, 400, byOwner.body);
+  assert.equal(codeOf(byOwner), 'credential_in_message');
+  // Runtime credential with an enrollment code hidden in a data part key, in another case.
+  const byRuntime = await runtime(a.token, 'POST', '/api/runtime/messages', {
+    to_agent_id: b.agent.id,
+    idempotency_key: randomUUID(),
+    parts: [{ type: 'data', data: { [`CCE_${'y'.repeat(20)}`]: 1 } }],
+  });
+  assert.equal(byRuntime.statusCode, 400, byRuntime.body);
+  assert.equal(codeOf(byRuntime), 'credential_in_message');
+  const page = (await inbox(b.agent.id)).json() as InboxPage;
+  assert.equal(page.messages.length, 0, 'nothing was delivered');
+  assert.equal(
+    Number(
+      (await app.city.db.query<{ n: string }>('SELECT count(*)::text AS n FROM message_receipts'))
+        .rows[0]!.n,
+    ),
+    0,
+    'no receipt was written',
+  );
+  // An ordinary message still goes through.
+  const fine = await send(a.agent.id, { to_agent_id: b.agent.id, text: 'no secrets here' });
+  assert.equal(fine.statusCode, 201, fine.body);
+});
+
+test('inbox pages stop at about 1 MiB of messages; paging reaches all of them', async (t) => {
+  const { a, b, send, inbox } = await setup(t, { sendsPerMinute: 100 });
+  for (let index = 1; index <= 30; index++) {
+    const sent = await send(a.agent.id, {
+      to_agent_id: b.agent.id,
+      parts: [
+        { type: 'text', text: `#${index} `.padEnd(60_000, 'a') },
+        { type: 'text', text: 'b'.repeat(60_000) },
+      ],
+    });
+    assert.equal(sent.statusCode, 201, sent.body.slice(0, 300));
+  }
+  const seen = new Set<number>();
+  let since = 0;
+  for (let pages = 0; pages < 30 && seen.size < 30; pages++) {
+    const res = await inbox(b.agent.id, `?since=${since}&limit=100`);
+    assert.equal(res.statusCode, 200, res.body.slice(0, 300));
+    assert.ok(res.body.length < 2.5 * 1024 * 1024, `inbox page ${res.body.length} bytes`);
+    const page = res.json() as InboxPage;
+    assert.ok(page.messages.length >= 1);
+    if (pages === 0) assert.equal(page.has_more, true);
+    for (const message of page.messages) seen.add(message.seq);
+    since = page.next_since;
+  }
+  assert.equal(seen.size, 30);
+  // Newest first (no since): the newest messages, has_more, and before pages on.
+  const latest = (await inbox(b.agent.id, '?limit=100')).json() as InboxPage;
+  assert.equal(latest.messages.at(-1)!.seq, 30);
+  assert.equal(latest.has_more, true);
 });

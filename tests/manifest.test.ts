@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   MANIFEST_API_VERSION,
   MANIFEST_LIMITS,
@@ -22,8 +23,10 @@ import {
   publicHttpsUrlProblem,
   resolveManifest,
   signAgentCard,
+  signDetached,
   templateRef,
   verifyAgentCard,
+  verifyDetached,
   type AgentCard,
   type AgentLoader,
   type ExistingManifestAgent,
@@ -810,6 +813,53 @@ test('Agent Card compiles to the pinned A2A 1.0 shape with native auth', () => {
   assert.equal(local.supportedInterfaces[0]!.url, 'http://127.0.0.1:8787/api/runtime/a2a/a');
 });
 
+test('CCA-617: Agent Card signatures carry iat and exp; an expired, future or undated card never verifies', () => {
+  const card = cardFor(
+    resolveManifest(agent({ extends: 'template:fact-checker@1.0.0' }, { name: 'c' })).manifest,
+  );
+  const key = generateSigningKey();
+  const jwks = exportJwks([key]);
+  const issued = Date.parse('2026-10-26T12:00:00Z');
+  const signed = signAgentCard(card, key, { now: issued });
+  const header = JSON.parse(Buffer.from(signed.signatures![0]!.protected, 'base64url').toString());
+  assert.equal(header.iat, issued / 1000);
+  assert.equal(header.exp, issued / 1000 + 86_400, '24 hours');
+  assert.equal(verifyAgentCard(signed, jwks, { now: issued }).valid, true);
+  assert.equal(verifyAgentCard(signed, jwks, { now: issued + 86_399_000 }).valid, true);
+  assert.deepEqual(verifyAgentCard(signed, jwks, { now: issued + 86_400_000 }).results, [
+    { valid: false, reason: 'expired' },
+  ]);
+  // Issued more than the skew in the future (a clock or a forged header): refused.
+  assert.deepEqual(verifyAgentCard(signed, jwks, { now: issued - 301_000 }).results, [
+    { valid: false, reason: 'not-yet-valid' },
+  ]);
+  assert.equal(verifyAgentCard(signed, jwks, { now: issued - 299_000 }).valid, true);
+  // A card signed the old way (no iat/exp) is refused by the Agent Card check.
+  const { signatures: _none, ...unsignedCard } = card;
+  const undated = { ...card, signatures: [signDetached(unsignedCard, key)] };
+  assert.deepEqual(verifyAgentCard(undated, jwks, { now: issued }).results, [
+    { valid: false, reason: 'missing-exp' },
+  ]);
+  // The generic check honours exp when present, and refuses malformed times.
+  const payload = { hello: 'world' };
+  const expired = signDetached(payload, key, { iat: 100, exp: 200 });
+  assert.deepEqual(verifyDetached(payload, expired, jwks, { now: 300_000 }), {
+    valid: false,
+    reason: 'expired',
+  });
+  const strings = signDetached(payload, key, { iat: '100', exp: '9999999999' });
+  assert.deepEqual(verifyDetached(payload, strings, jwks), {
+    valid: false,
+    reason: 'malformed-times',
+  });
+  const onlyExp = signDetached(payload, key, { exp: 9_999_999_999 });
+  assert.equal(verifyDetached(payload, onlyExp, jwks).valid, false);
+  // The published verification guidance says the same.
+  const guide = readFileSync(new URL('../docs/REMOTE_MCP.md', import.meta.url), 'utf8');
+  assert.match(guide, /protected header carries `iat`[\s\S]{0,80}`exp` \(24 hours later\)/);
+  assert.match(guide, /refuses a signature past its `exp`/);
+});
+
 test('Agent Card signatures verify, detect tampering and survive key rotation', () => {
   const card = cardFor(
     resolveManifest(agent({ extends: 'template:fact-checker@1.0.0' }, { name: 'c' })).manifest,
@@ -818,7 +868,15 @@ test('Agent Card signatures verify, detect tampering and survive key rotation', 
   assert.match(oldKey.kid, /^[A-Za-z0-9_-]{43}$/);
   const signed = signAgentCard(card, oldKey);
   const header = JSON.parse(Buffer.from(signed.signatures![0]!.protected, 'base64url').toString());
-  assert.deepEqual(header, { alg: 'EdDSA', kid: oldKey.kid, typ: 'JOSE' });
+  // CCA-617: the protected header also carries the issue time and a 24 h expiry.
+  assert.deepEqual(header, {
+    alg: 'EdDSA',
+    kid: oldKey.kid,
+    typ: 'JOSE',
+    iat: header.iat,
+    exp: header.iat + 86_400,
+  });
+  assert.ok(Math.abs(header.iat - Date.now() / 1000) < 60);
   assert.equal(verifyAgentCard(signed, exportJwks([oldKey])).valid, true);
   // Key order and re-serialization do not matter: verification uses the canonical form.
   const roundTrip = JSON.parse(JSON.stringify({ ...signed, name: signed.name })) as AgentCard;

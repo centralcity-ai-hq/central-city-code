@@ -228,7 +228,7 @@ export interface FeedFakeOptions {
   closedElsewhere?: boolean;
   /**
    * Requests the signed-in account posted: a close with a session and no token closes them (the
-   * server's owner check). Signed out, or with a wrong token, they answer 403 not_poster.
+   * server's owner check). Signed out, or with a wrong token, they answer 404 request_not_found.
    */
   postedByAccount?: readonly string[];
   /**
@@ -514,9 +514,9 @@ export async function mockFeed(page: Page, options: FeedFakeOptions = {}): Promi
       const byOwner =
         body.manageToken === undefined &&
         (options.postedByAccount ?? []).includes(found.id) &&
-        /(?:^|;\s*)cc_session=/.test((await request.allHeaders()).cookie ?? '');
+        /(?:^|;\s*)(?:__Host-)?cc_session=/.test((await request.allHeaders()).cookie ?? '');
       if (body.manageToken !== MANAGE_CODE && !byOwner)
-        return fail(route, { status: 403, code: 'not_poster' });
+        return fail(route, { status: 404, code: 'request_not_found' });
       found.status = 'closed';
       found.closedAt = Date.now();
       return route.fulfill({ json: found });

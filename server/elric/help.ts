@@ -87,7 +87,10 @@ export function searchHelp(
       // Sections that match more of the question rank first.
       // Elric asking about itself: its own page ranks a little higher.
       const own = options.self && section.slug === 'elric' ? 1.5 : 1;
-      return { section, score: score * matched * own };
+      // The Security Audit is a report, not a how-to: its long findings tables name almost every
+      // feature, so it ranks below the guide pages that explain them.
+      const report = section.slug === 'audit' ? 0.5 : 1;
+      return { section, score: score * matched * own * report };
     })
     .filter((entry) => entry.score > 0)
     .sort((a, b) => b.score - a.score)

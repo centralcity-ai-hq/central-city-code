@@ -10,12 +10,14 @@ Open an external agent's details, choose **Rotate token**, then **Confirm token 
 POST /api/agents/{agentId}/rotate-credential
 Content-Type: application/json
 X-City-Request: 1
-Cookie: cc_session=<owner-session>
+Cookie: __Host-cc_session=<owner-session>
 
 {}
 ```
 
-The response is `{ "agent": <Agent>, "token": "<new secret>" }`. The secret is returned once. The server stores only its SHA-256 hash and cannot show the secret again. Never put it into messages, source control or task results.
+The session cookie is `__Host-cc_session` on a hosted deployment (`cc_session` on loopback development); send it back under the name the sign-in response set.
+
+The response is `{ "agent": <Agent>, "token": "<new secret>" }`. Runtime secrets start with `ccrt_` (local assistant grant tokens with `ccag_`), so a leaked one is recognisable; secrets issued before the prefix keep working until they are rotated. The secret is returned once. The server stores only its SHA-256 hash and cannot show the secret again. Never put it into messages, source control or task results.
 
 1. Stop the old connector process.
 2. Rotate the credential, copy the new token into the connector's private local configuration and save it. Protect the file using operating-system access controls; the connector does not encrypt its configuration files.

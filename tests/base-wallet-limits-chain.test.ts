@@ -353,6 +353,99 @@ test('the reader fails whole and loud: never zeros for a broken read', async (t)
   assert.equal((await reader.read([active])).permissions[0].phase, 'active');
 });
 
+const headReadsOf = (calls: Array<{ method: string; params: unknown[] }>) =>
+  calls.filter(
+    (call) =>
+      call.method === 'eth_blockNumber' ||
+      (call.method === 'eth_getBlockByNumber' && call.params[0] === 'finalized'),
+  ).length;
+
+test('CCA-112: limit writes reuse the settled block for 10 s instead of reading Base every time', async (t) => {
+  const { state, url } = await mockBase(t);
+  let clock = 1_000_000;
+  const reader = basePermissionReader(url, NETWORK, 3_000, { now: () => clock });
+  const active = permission();
+  state.approved.add(spendPermissionHash(CHAIN_ID, active));
+  const first = await reader.read([active], { settled: true });
+  assert.equal(first.blockNumber, 4_997n);
+  const heads = headReadsOf(state.calls);
+  assert.ok(heads >= 1);
+  // A second write inside the window: the same settled block, no new head read; the permission
+  // itself is read again (a new aggregate3 at that block) and sees the revocation.
+  state.head = 5_010;
+  state.revoked.add(spendPermissionHash(CHAIN_ID, active));
+  clock += 9_999;
+  const second = await reader.read([active], { settled: true });
+  assert.equal(second.blockNumber, 4_997n);
+  assert.equal(second.permissions[0].revoked, true);
+  assert.equal(headReadsOf(state.calls), heads);
+  assert.deepEqual(blockTagsOf(state.calls), [toHex(4_997), toHex(4_997)]);
+  // Past the window the settled block is read again.
+  clock += 1;
+  assert.equal((await reader.read([active], { settled: true })).blockNumber, 5_007n);
+  assert.ok(headReadsOf(state.calls) > heads);
+  // An unsettled read always asks for the head.
+  const before = headReadsOf(state.calls);
+  assert.equal((await reader.read([active])).blockNumber, 5_010n);
+  assert.ok(headReadsOf(state.calls) > before);
+  assert.deepEqual(state.broken, []);
+});
+
+/** A Base mainnet client that counts finalized-block reads (no network). */
+function countingMainnet() {
+  const counts = { finalized: 0, fail: false };
+  const client = {
+    getChainId: async () => BASE_MAINNET,
+    getBlock: async ({ blockTag }: { blockTag: string }) => {
+      assert.equal(blockTag, 'finalized');
+      counts.finalized++;
+      if (counts.fail) throw new Error('synthetic outage');
+      return { number: 30_000_000n + BigInt(counts.finalized) };
+    },
+    getBlockNumber: async () => 30_000_100n,
+    readContract: async () => [
+      {
+        success: true,
+        returnData: encodeFunctionResult({
+          abi: multicall3Abi,
+          functionName: 'getCurrentBlockTimestamp',
+          result: BigInt(START),
+        }),
+      },
+    ],
+  } as unknown as PublicClient;
+  return { client, counts };
+}
+
+test('CCA-112: the finalized-block cache is per reader and chain, shared by concurrent writes, never caches a failure', async () => {
+  let clock = 0;
+  const { client, counts } = countingMainnet();
+  const reader = permissionReaderFor(client, BASE_NETWORKS[BASE_MAINNET], {
+    settledBlockCacheMs: 10_000,
+    now: () => clock,
+  });
+  const reads = await Promise.all(
+    Array.from({ length: 5 }, () => reader.read([], { settled: true })),
+  );
+  assert.deepEqual(
+    reads.map((read) => read.blockNumber),
+    Array(5).fill(30_000_001n),
+  );
+  assert.equal(counts.finalized, 1, 'five writes at once, one finalized-block read');
+  clock = 10_000;
+  counts.fail = true;
+  await assert.rejects(reader.read([], { settled: true }), /synthetic outage/);
+  counts.fail = false;
+  assert.equal((await reader.read([], { settled: true })).blockNumber, 30_000_003n);
+  assert.equal(counts.finalized, 3, 'a failed read is asked again, not reused');
+  // Without the option (permissionReaderFor's default) every settled read asks Base.
+  const plain = countingMainnet();
+  const uncached = permissionReaderFor(plain.client, BASE_NETWORKS[BASE_MAINNET]);
+  await uncached.read([], { settled: true });
+  await uncached.read([], { settled: true });
+  assert.equal(plain.counts.finalized, 2);
+});
+
 function memoryStore(): ChainOperationStore & { rows: Map<string, StoredOperation> } {
   const rows = new Map<string, StoredOperation>();
   return {
@@ -506,6 +599,13 @@ test('owner revoke: prepared from the wallet, signed over the raw hash, sent exa
   assert.equal(refreshed?.userOpHash, prepared.userOpHash);
   assert.equal(await port.refresh('unknown-key'), null);
   assert.deepEqual(state.broken, []);
+  // A prepared revoke that will never be signed: the bundler gives its sponsorship back.
+  const released: string[] = [];
+  bundler.release = async (hash) => {
+    released.push(hash);
+  };
+  await port.release?.(prepared.userOpHash);
+  assert.deepEqual(released, [prepared.userOpHash]);
 });
 
 test('owner revoke: outdated nonce, no sponsorship, fee cap and a wrong recipe are refused', async (t) => {

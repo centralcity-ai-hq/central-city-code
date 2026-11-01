@@ -50,8 +50,10 @@ export function Auth({
   context?: SignInContext | null;
 }) {
   const title = context?.title;
-  useEffect(() => (title ? applyPageTitle(document, title) : undefined), [title]);
   const [register, setRegister] = useState(initialRegister);
+  // Without a page's own title, the tab names the form: never the generic home title.
+  const pageTitle = title ?? (register ? 'Sign up · Central City' : 'Sign in · Central City');
+  useEffect(() => applyPageTitle(document, pageTitle), [pageTitle]);
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
   // The newsletter opt-in (Sign up only): unticked by default and never required. Password

@@ -150,6 +150,11 @@ export const SPONSOR_TTL_MS = 60_000;
  * address matches every sponsored call): past it, `matches` is a lower bound.
  */
 export const SPONSORED_MATCHES_MAX = 100_000;
+/**
+ * A search's own matches are counted up to this many; past it (a busy fleet or seller wallet) the
+ * count would not fit the page's time limit, so `matches` is null and the rows are still served.
+ */
+export const SEARCH_MATCHES_MAX = 10_000;
 
 /**
  * Below this span the kept times are never extrapolated: sponsored calls are recorded paid in
@@ -248,6 +253,31 @@ const sponsoredColumns = (payer: string, titles: boolean) => `s.tx_hash,
   'charged'::text AS fee_state, NULL::text AS fee_tx_hash, NULL::text AS fee_block,
   'included'::text AS pay_kind, s.call_id, md5(s.call_id) AS row_key, true AS sponsored,
   s.updated_at AS sort_at`;
+
+/**
+ * A public call Base shows paid (server/feed/offers/public-pay.ts): the predicate of migration 354's
+ * partial indexes, and the same columns; here the payer is the row's own, the outside buyer. Marked
+ * `sponsored` too: that internal flag means "not from the feed's table" (the page's bound).
+ */
+const PUBLIC_PAID = `x.state IN ('paid','delivered','paid_no_result') AND x.tx_hash IS NOT NULL`;
+const publicColumns = (titles: boolean) => `x.tx_hash,
+  x.block_number::text AS settled_block, x.updated_at::text AS settled_at, x.payer::text AS payer,
+  x.pay_to, ${titles ? `coalesce((SELECT v.title FROM feed_services v WHERE v.id = x.service_id), '')` : `''::text`} AS service_title,
+  (x.gross_raw - x.fee_raw)::text AS amount_raw, x.fee_raw::text AS fee_raw,
+  'charged'::text AS fee_state, NULL::text AS fee_tx_hash, NULL::text AS fee_block,
+  'included'::text AS pay_kind, x.call_id, md5(x.call_id) AS row_key, true AS sponsored,
+  x.updated_at AS sort_at`;
+/** A search over the public calls `x`, its value at `at`. */
+function publicSearchSql(search: ServiceCallsSearch, at: string): string {
+  switch (search.kind) {
+    case 'tx':
+      return `x.tx_hash = ${at}`;
+    case 'block':
+      return `x.block_number = ${at}`;
+    case 'address':
+      return `(x.pay_to = ${at} OR x.payer = ${at})`;
+  }
+}
 
 /** The sponsored side of the page, when the tables exist and the sponsor is known. */
 interface Sponsor {
@@ -355,6 +385,8 @@ export interface ServiceCallsRouteDeps {
   counter?: PaidCallsReader;
   /** The network sponsored first purchases are paid on (WALLET_CHAIN_ID); listed only there. */
   sponsoredChainId?: number;
+  /** How many search matches are counted before `matches` is unknown; SEARCH_MATCHES_MAX by default. */
+  searchMatchesMax?: number;
 }
 
 interface PageRead {
@@ -368,6 +400,7 @@ interface PageRead {
 export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCallsRouteDeps) {
   const chainId = deps.chainId ?? PAID_CALLS_CHAIN_ID;
   const clock = deps.now ?? Date.now;
+  const matchesMax = deps.searchMatchesMax ?? SEARCH_MATCHES_MAX;
   const counter = deps.counter ?? createPaidCallsReader({ db: deps.db, clock, chainId: chainId });
 
   /**
@@ -409,6 +442,20 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
    */
   const sponsoredChain = chainId === (deps.sponsoredChainId ?? WALLET_CHAIN_ID);
   let sponsorKnown: { at: number; value: Sponsor | null } | null = null;
+  /** The public calls' table exists (with whether feed_services does): looked up the same way. */
+  let publicKnown: { at: number; value: { titles: boolean } | null } | null = null;
+  async function publicIn(tx: Transaction): Promise<{ titles: boolean } | null> {
+    if (!sponsoredChain) return null;
+    const at = clock();
+    if (publicKnown && at - publicKnown.at < SPONSOR_TTL_MS) return publicKnown.value;
+    const { rows } = await tx.query<{ calls: boolean; titles: boolean }>(
+      `SELECT to_regclass('feed_pay_public_calls') IS NOT NULL AS calls,
+              to_regclass('feed_services') IS NOT NULL AS titles`,
+    );
+    const value = rows[0]?.calls ? { titles: !!rows[0]?.titles } : null;
+    publicKnown = { at, value };
+    return value;
+  }
   async function sponsorIn(tx: Transaction): Promise<Sponsor | null> {
     if (!sponsoredChain) return null;
     const at = clock();
@@ -443,50 +490,68 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
     },
     floor: number | null,
     sponsor: Sponsor | null,
+    pub: { titles: boolean } | null,
   ): Promise<CallRow[]> {
     const params: unknown[] = [chainId];
     const where = [SETTLED];
     const sponsoredWhere = [SPONSORED_PAID];
+    const publicWhere = [PUBLIC_PAID];
     if (options.search) {
       const { sql, value } = searchSql(options.search);
       params.push(value);
       where.push(sql);
       const own = sponsor ? sponsoredSearchSql(options.search, sponsor, '$2') : '';
       if (own) sponsoredWhere.push(own);
+      if (pub) publicWhere.push(publicSearchSql(options.search, '$2'));
     }
     if (options.cursor?.key) {
       params.push(options.cursor.at, options.cursor.tx, options.cursor.key);
       const after = `($${params.length - 2}::bigint, $${params.length - 1}::text, $${params.length}::text)`;
       where.push(`(c.settled_at, c.tx_hash, md5(c.call_id)) < ${after}`);
       sponsoredWhere.push(`(s.updated_at, s.tx_hash, md5(s.call_id)) < ${after}`);
+      publicWhere.push(`(x.updated_at, x.tx_hash, md5(x.call_id)) < ${after}`);
     } else if (options.cursor) {
       // A cursor from before the row key (time and tx only): as before.
       params.push(options.cursor.at, options.cursor.tx);
       const after = `($${params.length - 1}::bigint, $${params.length}::text)`;
       where.push(`(c.settled_at, c.tx_hash) < ${after}`);
       sponsoredWhere.push(`(s.updated_at, s.tx_hash) < ${after}`);
+      publicWhere.push(`(x.updated_at, x.tx_hash) < ${after}`);
     }
     // The floor comes from the counter row (feed_pay_calls only): never on the sponsored side.
     if (floor !== null) {
       params.push(floor);
       where.push(`c.settled_at >= $${params.length}::bigint`);
     }
-    const feed = `SELECT ${COLUMNS}${sponsor ? ', false AS sponsored, c.settled_at AS sort_at' : ''}
+    const feed = `SELECT ${COLUMNS}${sponsor || pub ? ', false AS sponsored, c.settled_at AS sort_at' : ''}
        FROM feed_pay_calls c JOIN base_wallets w ON w.wallet_id = c.wallet_id
        WHERE ${where.join(' AND ')}
        ORDER BY c.settled_at DESC, c.tx_hash DESC, md5(c.call_id) DESC
        LIMIT ${SERVICE_CALLS_PAGE_SIZE + 1}`;
-    if (!sponsor) return (await tx.query<CallRow>(feed, params)).rows;
-    params.push(sponsor.address);
-    const { rows } = await tx.query<CallRow>(
-      `SELECT * FROM (
-         (${feed})
-         UNION ALL
+    if (!sponsor && !pub) return (await tx.query<CallRow>(feed, params)).rows;
+    let sponsoredSide = '';
+    if (sponsor) {
+      params.push(sponsor.address);
+      sponsoredSide = `UNION ALL
          (SELECT ${sponsoredColumns(`$${params.length}`, sponsor.titles)}
           FROM feed_pay_sponsored_calls s
           WHERE ${sponsoredWhere.join(' AND ')}
           ORDER BY s.updated_at DESC, s.tx_hash DESC, md5(s.call_id) DESC
-          LIMIT ${SERVICE_CALLS_PAGE_SIZE + 1})
+          LIMIT ${SERVICE_CALLS_PAGE_SIZE + 1})`;
+    }
+    const publicSide = pub
+      ? `UNION ALL
+         (SELECT ${publicColumns(pub.titles)}
+          FROM feed_pay_public_calls x
+          WHERE ${publicWhere.join(' AND ')}
+          ORDER BY x.updated_at DESC, x.tx_hash DESC, md5(x.call_id) DESC
+          LIMIT ${SERVICE_CALLS_PAGE_SIZE + 1})`
+      : '';
+    const { rows } = await tx.query<CallRow>(
+      `SELECT * FROM (
+         (${feed})
+         ${sponsoredSide}
+         ${publicSide}
        ) u ORDER BY u.sort_at DESC, u.tx_hash DESC, u.row_key DESC`,
       params,
     );
@@ -510,6 +575,18 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
     return Number(rows[0]?.n ?? 0);
   }
 
+  /** A search's public matches, counted up to the same cap. */
+  async function publicMatches(tx: Transaction, search: ServiceCallsSearch): Promise<number> {
+    const { rows } = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM (
+         SELECT 1 FROM feed_pay_public_calls x
+         WHERE ${PUBLIC_PAID} AND ${publicSearchSql(search, '$1')}
+         LIMIT ${SPONSORED_MATCHES_MAX}) m`,
+      [searchSql(search).value],
+    );
+    return Number(rows[0]?.n ?? 0);
+  }
+
   /**
    * Paid service calls a minute, averaged over the last PER_MINUTE_AVERAGE_MINUTES on the
    * database clock (rounded), each counted exactly:
@@ -519,13 +596,22 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
    * statement, two bounded index ranges. Not from the counter row's `recent`: its 64 times can be
    * one batch of sponsored calls recorded within a second.
    */
-  async function paidMinute(tx: Transaction, sponsor: Sponsor | null): Promise<number> {
+  async function paidMinute(
+    tx: Transaction,
+    sponsor: Sponsor | null,
+    pub: { titles: boolean } | null,
+  ): Promise<number> {
     const since = `(extract(epoch FROM now()) * 1000)::bigint - $2::bigint`;
     const { rows } = await tx.query<{ n: string }>(
       `SELECT ((SELECT count(*) FROM feed_pay_calls c WHERE ${SETTLED} AND c.settled_at > ${since})${
         sponsor
           ? ` + (SELECT count(*) FROM feed_pay_sponsored_calls s
                   WHERE ${SPONSORED_PAID} AND s.updated_at > ${since})`
+          : ''
+      }${
+        pub
+          ? ` + (SELECT count(*) FROM feed_pay_public_calls x
+                  WHERE ${PUBLIC_PAID} AND x.updated_at > ${since})`
           : ''
       })::text AS n`,
       [chainId, PER_MINUTE_AVERAGE_MINUTES * PER_MINUTE_WINDOW_MS],
@@ -551,23 +637,38 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
     const floor = search ? null : cursor ? cursor.at - OLDER_WINDOW_MS : await newestFloor();
     return readOnly(PAGE_TIMEOUT_MS, async (tx) => {
       const sponsor = await sponsorIn(tx);
-      let rows = await readPage(tx, { cursor, search }, floor, sponsor);
+      const pub = await publicIn(tx);
+      let rows = await readPage(tx, { cursor, search }, floor, sponsor, pub);
       // The bound found fewer rows than a page (the counter skipped a payment, one left 'settled'
       // after a reorg, or payments are sparse there): the same page without it. Only the feed's
       // own rows decide: the bound is never applied to the sponsored side.
       if (floor !== null && rows.filter((row) => !row.sponsored).length <= SERVICE_CALLS_PAGE_SIZE)
-        rows = await readPage(tx, { cursor, search }, null, sponsor);
+        rows = await readPage(tx, { cursor, search }, null, sponsor, pub);
       let matches: number | null = null;
       if (search && !cursor) {
+        // Counted up to SEARCH_MATCHES_MAX, in its own savepoint: a busy wallet's count over the
+        // bound, or out of time, leaves matches null and the page is still answered.
         const { sql, value } = searchSql(search);
-        const counted = await tx.query<{ n: string }>(
-          `SELECT count(*)::text AS n FROM feed_pay_calls c WHERE ${SETTLED} AND ${sql}`,
-          [chainId, value],
-        );
-        matches = Number(counted.rows[0]?.n ?? 0);
-        if (sponsor) matches += await sponsoredMatches(tx, search, sponsor);
+        await tx.query('SAVEPOINT search_matches');
+        try {
+          const counted = await tx.query<{ n: string }>(
+            `SELECT count(*)::text AS n FROM (
+               SELECT 1 FROM feed_pay_calls c WHERE ${SETTLED} AND ${sql}
+               LIMIT ${matchesMax + 1}) m`,
+            [chainId, value],
+          );
+          const n = Number(counted.rows[0]?.n ?? 0);
+          matches = n > matchesMax ? null : n;
+          if (matches !== null && sponsor) matches += await sponsoredMatches(tx, search, sponsor);
+          if (matches !== null && pub) matches += await publicMatches(tx, search);
+          await tx.query('RELEASE SAVEPOINT search_matches');
+        } catch {
+          await tx.query('ROLLBACK TO SAVEPOINT search_matches');
+          await tx.query('RELEASE SAVEPOINT search_matches');
+          matches = null;
+        }
       }
-      const perMinute = await paidMinute(tx, sponsor);
+      const perMinute = await paidMinute(tx, sponsor, pub);
       const page = rows.slice(0, SERVICE_CALLS_PAGE_SIZE);
       const items = page.map(publicCall);
       const last = page.at(-1);
@@ -639,7 +740,8 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
     const since = dayTriedAt - DAY_MS;
     dayInflight = readOnly(DAY_TIMEOUT_MS, async (tx) => {
       const sponsor = await sponsorIn(tx);
-      if (!sponsor) {
+      const pub = await publicIn(tx);
+      if (!sponsor && !pub) {
         const rows = await tx.query<{
           calls: string;
           services: string;
@@ -670,9 +772,20 @@ export function registerServiceCallsRoutes(app: FastifyInstance, deps: ServiceCa
                   c.amount_raw + CASE WHEN c.fee_state = 'charged' THEN c.fee_raw ELSE 0 END AS value_raw,
                   CASE WHEN c.fee_state = 'charged' THEN c.fee_raw ELSE 0 END AS fee_raw
            FROM feed_pay_calls c WHERE ${SETTLED} AND c.settled_at > $2::bigint
-           UNION ALL
+           ${
+             sponsor
+               ? `UNION ALL
            SELECT s.service_id, s.gross_raw, s.fee_raw
-           FROM feed_pay_sponsored_calls s WHERE ${SPONSORED_PAID} AND s.updated_at > $2::bigint
+           FROM feed_pay_sponsored_calls s WHERE ${SPONSORED_PAID} AND s.updated_at > $2::bigint`
+               : ''
+           }
+           ${
+             pub
+               ? `UNION ALL
+           SELECT x.service_id, x.gross_raw, x.fee_raw
+           FROM feed_pay_public_calls x WHERE ${PUBLIC_PAID} AND x.updated_at > $2::bigint`
+               : ''
+           }
          ) d`,
         [chainId, since],
       );

@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { PGlite } from '@electric-sql/pglite';
-import Fastify from 'fastify';
 import {
   DOMAIN_SNAPSHOT,
+  domainRegistrations,
   ensureShortId,
-  registerShortLinks,
 } from '../server/base/identity/short-links.js';
 import type { Database } from '../server/database.js';
 import { BASE_MIGRATION_SQL, baseShortIdsMigration } from '../server/base/schema.js';
+import { BASE_IDENTITY_MOVES_SQL } from '../server/base/identity/moves.js';
 
 async function setup(t: { after: (fn: () => Promise<unknown>) => void }): Promise<Database> {
   const pg = await PGlite.create('memory://');
@@ -18,6 +18,7 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }): Promis
     "CREATE TABLE operators (id text PRIMARY KEY); INSERT INTO operators VALUES ('ws-a'), ('ws-b'), ('ws-c');",
   );
   await pg.exec(BASE_MIGRATION_SQL);
+  await pg.exec(BASE_IDENTITY_MOVES_SQL);
   return {
     query: (sql, params) => pg.query(sql, params) as never,
     exec: (sql) => pg.exec(sql),
@@ -27,8 +28,9 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }): Promis
 }
 
 // The domain file's query was an EXISTS that expanded a whole workspace once per identity; with
-// workspaces of 10,000+ agents it could no longer finish (15 Oct 2026). The linear form must list
-// exactly the same registrations. The old query is kept here as the reference.
+// workspaces of 10,000+ agents it could no longer finish (15 Oct 2026). The linear form (read
+// until the public cards of migration 280 are backfilled) must list exactly the same
+// registrations. The old query is kept here as the reference.
 const BEFORE = `SELECT i.chain_id, i.registry_address,
     i.erc8004_agent_id::text AS erc8004_agent_id
   FROM base_identities i
@@ -56,6 +58,9 @@ test('the linear domain file lists exactly what the per-identity query listed', 
   await db.exec(`
     CREATE TABLE workspaces (operator_id text PRIMARY KEY, data jsonb NOT NULL);
     CREATE TABLE agent_manifests (agent_id text, operator_id text, revision int, manifest jsonb);
+    -- The public cards (280) not backfilled yet: the two reads of the workspace documents.
+    CREATE TABLE agent_public_cards_backfill (id int PRIMARY KEY, ready boolean NOT NULL);
+    INSERT INTO agent_public_cards_backfill VALUES (1, false);
   `);
   type Agent = {
     id: string;
@@ -171,12 +176,14 @@ test('the linear domain file lists exactly what the per-identity query listed', 
   }
 
   const before = (await db.query(BEFORE, [ORIGIN])).rows;
-  const app = Fastify();
-  t.after(() => app.close());
-  registerShortLinks(app, { db, originOf: () => ORIGIN });
-  const file = (await app.inject({ url: '/.well-known/agent-registration.json' })).json() as {
-    registrations: Array<{ agentId: number; agentRegistry: string }>;
-  };
+  const registrationsOf = (
+    rows: Array<{ chain_id: number; registry_address: string; erc8004_agent_id: string }>,
+  ) =>
+    rows.map((row) => ({
+      agentId: Number(row.erc8004_agent_id),
+      agentRegistry: `eip155:${row.chain_id}:${row.registry_address}`,
+    }));
+  const file = { registrations: registrationsOf(await domainRegistrations(db, ORIGIN)) };
   const expected = before.map((row) => ({
     agentId: Number(row.erc8004_agent_id),
     agentRegistry: `eip155:${row.chain_id}:${row.registry_address}`,
@@ -206,13 +213,10 @@ test('the linear domain file lists exactly what the per-identity query listed', 
         }),
       ),
   };
-  const app2 = Fastify();
-  t.after(() => app2.close());
-  registerShortLinks(app2, { db: counted, originOf: () => ORIGIN });
-  const again = await app2.inject({ url: '/.well-known/agent-registration.json' });
-  assert.deepEqual(again.json(), file);
-  // One read-only snapshot, then the two reads.
-  assert.equal(statements.length, 3, statements.map((s) => s.sql.slice(0, 40)).join(' | '));
+  const again = { registrations: registrationsOf(await domainRegistrations(counted, ORIGIN)) };
+  assert.deepEqual(again, file);
+  // One read-only snapshot, whether the public cards are backfilled, then the two reads.
+  assert.equal(statements.length, 4, statements.map((s) => s.sql.slice(0, 40)).join(' | '));
   assert.equal(statements[0]!.sql, DOMAIN_SNAPSHOT);
   const expanding = statements.filter((s) => s.sql.includes('jsonb_array_elements'));
   assert.equal(expanding.length, 1);

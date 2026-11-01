@@ -4,7 +4,6 @@ import {
   type ServiceCall,
   type ServiceCallsPage,
 } from '../../shared/explorer-calls';
-import { json } from './countLogClient';
 import { BASESCAN } from './onBaseData';
 
 /*
@@ -57,11 +56,15 @@ export async function loadServiceCalls(
   if (query.cursor) params.set('cursor', query.cursor);
   const search = params.toString();
   const path = `${SERVICE_CALLS_PATH}${search ? `?${search}` : ''}`;
-  if (q) {
-    const response = await fetch(path, { headers: { accept: 'application/json' } });
-    if (response.status === 400) throw new SearchRefused(q);
-    if (!response.ok) throw new Error(`${path} ${response.status}`);
-    return (await response.json()) as ServiceCallsPage;
-  }
-  return json<ServiceCallsPage>(path);
+  // A deadline on every read, so a stalled request can never hold a poller (Explorer, 25 Oct).
+  const response = await fetch(path, {
+    headers: { accept: 'application/json' },
+    signal: AbortSignal.timeout(SERVICE_CALLS_TIMEOUT_MS),
+  });
+  if (q && response.status === 400) throw new SearchRefused(q);
+  if (!response.ok) throw new Error(`${path} ${response.status}`);
+  return (await response.json()) as ServiceCallsPage;
 }
+
+/** How long one paid-calls read may take before it fails (the list reads use the same 12 s). */
+export const SERVICE_CALLS_TIMEOUT_MS = 12_000;

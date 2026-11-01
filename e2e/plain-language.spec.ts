@@ -39,6 +39,7 @@ test('public pages show no tool names, JSON or idempotency', async ({ page, brow
   // (lazy pages sat on "Opening Central City") until the test timed out. A route turns off the
   // HTTP cache for this page (Playwright), so every read is a plain request that completes.
   await page.route('**/api/public/stats', (route) => route.continue());
+  await page.route('**/api/public/code', (r) => r.continue());
   // Not the first account, so the landing page shows its normal state.
   const setup = await browser.newContext();
   await setup.request.post('/api/auth/register', {

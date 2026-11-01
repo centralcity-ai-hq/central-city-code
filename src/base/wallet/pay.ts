@@ -10,6 +10,9 @@
  *   - the operation decodes to one USDC transfer of exactly the amount, to exactly that wallet.
  *
  * The note is display only: never signed, never on Base.
+ *
+ * For an agent on Arc all of this is on Arc (the chain from its wallet view): its server lookup, the
+ * registry and endpoint from the build's list (shared/base/wallet-chains.ts), and Arc's words.
  */
 import { getAddress, isAddress, type Hex } from 'viem';
 import { api, ApiError } from '../../api';
@@ -33,6 +36,7 @@ import {
 } from '../../../shared/base/pay';
 import { WITHDRAWAL_CHAIN_ID } from '../../../shared/base/withdraw';
 import type { SponsorAllowlist } from '../../../shared/base/paymasters';
+import { arcReadChain, chainWords, isChainIdOf } from '../../../shared/base/wallet-chains';
 import { pageOutOfDate, STALE_PAGE } from '../stalePage';
 import {
   checkOperation,
@@ -81,8 +85,8 @@ const strictAddress = (value: unknown): `0x${string}` | null =>
     : null;
 
 /** Why the typed text isn't a recipient Pay can look up, or null when it is one. */
-export function recipientProblem(text: string): string | null {
-  return parseRecipient(text).length ? null : NOT_A_RECIPIENT;
+export function recipientProblem(text: string, chainId?: number): string | null {
+  return parseRecipient(text).length ? null : chainWords(chainId).say(NOT_A_RECIPIENT);
 }
 
 /** Why an amount (USDC base units) can't be paid, or null: at least PAY_MIN_AMOUNT (0.01 USDC). */
@@ -101,17 +105,26 @@ export function noteProblem(note: string): string | null {
 /**
  * The server's answer, checked: a Central City agent on this wallet's network and registry, that
  * is one of the readings of what was typed, with its evidence and an expiry still ahead.
+ * `agentChainId`: the paying agent's chain, from its wallet view (the wallet network when not given).
  */
 export function checkRecipient(
   answer: PayRecipient,
   readings: readonly RecipientQuery[],
   now: number,
+  agentChainId?: number,
 ): PayRecipientAgent {
-  if (answer?.kind === 'address') throw new RecipientError(ONLY_AGENTS);
+  const arc = arcReadChain(agentChainId, (message) => new RecipientError(message));
+  const words = chainWords(agentChainId);
+  if (answer?.kind === 'address') throw new RecipientError(words.say(ONLY_AGENTS));
   if (answer?.kind !== 'central_city_agent' || answer.verification !== 'point_in_time')
     throw new RecipientError('The recipient couldn’t be read. Try again.');
-  if (pageOutOfDate(answer.chainId)) throw new RecipientError(STALE_PAGE);
-  if (answer.chainId !== WITHDRAWAL_CHAIN_ID || !REGISTRY || !same(answer.registry, REGISTRY))
+  if (!arc && pageOutOfDate(answer.chainId)) throw new RecipientError(STALE_PAGE);
+  const registry = arc ? arc.identityRegistry : REGISTRY;
+  if (
+    answer.chainId !== (arc ? arc.chainId : WITHDRAWAL_CHAIN_ID) ||
+    !registry ||
+    !same(answer.registry, registry)
+  )
     throw new RecipientError('This agent isn’t registered on this wallet’s network.');
   const wallet = strictAddress(answer.wallet);
   const { verified } = answer;
@@ -138,20 +151,29 @@ export function checkRecipient(
   );
   if (!asked) throw new RecipientError('The answer isn’t the agent that was typed. Try again.');
   if (answer.expiresAt <= now)
-    throw new RecipientError('That check on Base is too old. Look the recipient up again.');
+    throw new RecipientError(
+      words.say('That check on Base is too old. Look the recipient up again.'),
+    );
   return { ...answer, wallet, name: typeof answer.name === 'string' ? answer.name : '' };
 }
 
-/** Who a payment would go to: looked up by the server on Base, then checked here. */
-export async function lookupRecipient(text: string): Promise<PayRecipientAgent> {
+/**
+ * Who a payment would go to: looked up by the server on the paying agent's chain (`?chain=` on Arc
+ * only; Arc mainnet is refused before anything is asked), then checked here.
+ */
+export async function lookupRecipient(
+  text: string,
+  agentChainId?: number,
+): Promise<PayRecipientAgent> {
+  const arc = arcReadChain(agentChainId, (message) => new RecipientError(message));
   const readings = parseRecipient(text);
-  if (!readings.length) throw new RecipientError(NOT_A_RECIPIENT);
+  if (!readings.length) throw new RecipientError(chainWords(agentChainId).say(NOT_A_RECIPIENT));
   const answer = await api<PayRecipient>(
-    `${PAY_PATHS.recipient}?q=${encodeURIComponent(text.trim())}`,
+    `${PAY_PATHS.recipient}?q=${encodeURIComponent(text.trim())}${arc ? `&chain=${arc.chainId}` : ''}`,
     undefined,
     'GET',
   );
-  return checkRecipient(answer, readings, Date.now());
+  return checkRecipient(answer, readings, Date.now(), agentChainId);
 }
 
 /* ---------- this browser's own read of Base ---------- */
@@ -169,23 +191,33 @@ const READ_TIMEOUT_MS = 8_000;
  * ownerOf(Base ID) in the recipient's registry, read from Base by this browser at one block: plain
  * JSON-RPC to Base's public endpoint, no keys. Base mainnet only (the one endpoint this site may
  * reach); on any other network, or when Base doesn't answer, it throws and nothing is signed.
+ *
+ * For an agent on Arc (`chainId`, from its wallet view): the same read at Arc's own endpoint and
+ * registry, both from the build's list, and only after that node says it is that chain. A node
+ * saying anything else is refused, as is a recipient on another chain; Arc mainnet reads nothing
+ * until it is recorded (arcReadChain).
  */
 export async function ownerOnBase(
   recipient: Pick<PayRecipientAgent, 'baseId' | 'registry' | 'chainId'>,
-  options: { fetch?: typeof fetch; timeoutMs?: number } = {},
+  options: { fetch?: typeof fetch; timeoutMs?: number; chainId?: number } = {},
 ): Promise<{ owner: `0x${string}` | null; block: number }> {
-  if (recipient.chainId !== BASE_MAINNET)
+  const arc = arcReadChain(options.chainId, (message) => new RecipientError(message));
+  if (recipient.chainId !== (arc ? arc.chainId : BASE_MAINNET))
     throw new RecipientError(
-      'This browser can only check recipients on Base itself, so nothing is signed on this network.',
+      arc
+        ? 'This agent isn’t registered on this wallet’s network.'
+        : 'This browser can only check recipients on Base itself, so nothing is signed on this network.',
     );
   const send = options.fetch ?? globalThis.fetch.bind(globalThis);
   const unreachable = () =>
-    new RecipientError('Couldn’t check on Base. Nothing was signed. Try again in a moment.');
+    new RecipientError(
+      `Couldn’t check on ${chainWords(options.chainId).on}. Nothing was signed. Try again in a moment.`,
+    );
   async function rpc(method: string, params: unknown[]): Promise<unknown> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? READ_TIMEOUT_MS);
     try {
-      const response = await send(PAY_BASE_RPC, {
+      const response = await send(arc ? arc.publicRpc : PAY_BASE_RPC, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
@@ -206,11 +238,14 @@ export async function ownerOnBase(
       clearTimeout(timer);
     }
   }
+  if (arc && !isChainIdOf(await rpc('eth_chainId', []), arc.chainId))
+    throw new RecipientError(`That node isn’t ${arc.name}. Nothing was signed.`);
   const head = await rpc('eth_blockNumber', []);
   if (typeof head !== 'string' || !/^0x[0-9a-f]+$/i.test(head)) throw unreachable();
   const block = Number(BigInt(head));
   const data = `${OWNER_OF}${BigInt(recipient.baseId).toString(16).padStart(64, '0')}`;
-  const result = await rpc('eth_call', [{ to: recipient.registry, data }, head]);
+  const to = arc ? arc.identityRegistry : recipient.registry;
+  const result = await rpc('eth_call', [{ to, data }, head]);
   if (result === null) return { owner: null, block };
   if (typeof result !== 'string' || !/^0x0{24}[0-9a-f]{40}$/i.test(result)) throw unreachable();
   return { owner: getAddress(`0x${result.slice(-40)}`), block };
@@ -219,10 +254,11 @@ export async function ownerOnBase(
 /** Base, read here, still has `recipient.wallet` as the owner of its Base ID; the block it read. */
 export async function confirmOnBase(
   recipient: PayRecipientAgent,
-  options?: { fetch?: typeof fetch; timeoutMs?: number },
+  options?: { fetch?: typeof fetch; timeoutMs?: number; chainId?: number },
 ): Promise<number> {
   const read = await ownerOnBase(recipient, options);
-  if (!read.owner || !same(read.owner, recipient.wallet)) throw new RecipientError(CHANGED);
+  if (!read.owner || !same(read.owner, recipient.wallet))
+    throw new RecipientError(chainWords(options?.chainId).say(CHANGED));
   return read.block;
 }
 
@@ -259,6 +295,8 @@ export function createPayment(
  */
 export function checkPayment(input: {
   request: PaySigningRequest;
+  /** The chain the paying agent is on, from its wallet view (withdraw.ts checkOperation). */
+  agentChainId?: number;
   recipient: PayRecipientAgent;
   amount: string;
   wallet: string;
@@ -285,6 +323,7 @@ export function checkPayment(input: {
     userOpHash: request.userOpHash,
     entryPoint: request.entryPoint,
     chainId: request.chainId,
+    agentChainId: input.agentChainId,
     wallet: input.wallet,
     owner: input.owner,
     agentId: input.agentId,

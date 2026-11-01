@@ -254,12 +254,14 @@ export async function roomPosted(
     /** The room is the owner's private chat with this own agent (server/rooms/private.ts). */
     privateAgentId?: string | null;
   } = {},
-): Promise<void> {
+): Promise<{ agent_id: string; name: string }[]> {
   const seq = Number(row.seq);
   const time = Number(row.created_at);
   const signals: WakeSignal[] = [{ kind: 'room', id: row.room_id, seq }];
   const text = textOf(row.parts);
   const mentioned: string[] = [];
+  /** Who this post mentioned (recorded mentions only), for the post answer. */
+  const mentionedNames = new Map<string, string>();
   // In a private chat with an own agent, every post of the owner's person is addressed to that
   // agent, "@" or not. Never an agent's post: its own posts and auto-replies stay unaddressed.
   const addressed = row.sender_kind === 'person' ? (room.privateAgentId ?? null) : null;
@@ -294,7 +296,7 @@ export async function roomPosted(
            UNION SELECT $6::text)
          SELECT m.agent_id, m.owner_id, a->>'name' AS name, 'agent' AS kind, m.role,
             EXISTS (SELECT 1 FROM room_members x WHERE x.owner_id=m.owner_id
-              AND x.room_id=m.room_id AND (x.muted_at IS NOT NULL OR x.notifications_muted)) AS muted FROM room_members m
+              AND x.room_id=m.room_id AND ((x.muted_at IS NOT NULL AND (x.removed_at IS NULL OR x.removed_by='left')) OR x.notifications_muted)) AS muted FROM room_members m
           JOIN workspaces w ON w.operator_id=m.owner_id
           CROSS JOIN LATERAL jsonb_array_elements(w.data->'agents') a
           WHERE m.room_id=$1 AND m.removed_at IS NULL AND m.visible_from_seq < $2
@@ -304,7 +306,7 @@ export async function roomPosted(
          SELECT m.agent_id, m.owner_id, m.display_name AS name, 'person' AS kind, m.role,
             EXISTS (SELECT 1 FROM room_members x WHERE x.owner_id=m.owner_id
               AND x.room_id=m.room_id AND (x.notifications_muted
-                OR (x.muted_at IS NOT NULL AND x.mute_scope IS DISTINCT FROM 'ai'))) AS muted
+                OR ((x.muted_at IS NOT NULL AND (x.removed_at IS NULL OR x.removed_by='left')) AND x.mute_scope IS DISTINCT FROM 'ai'))) AS muted
           FROM room_members m
           WHERE m.room_id=$1 AND m.removed_at IS NULL AND m.visible_from_seq < $2
             AND m.agent_id IN (SELECT agent_id FROM c)
@@ -347,6 +349,7 @@ export async function roomPosted(
     if (target && sender?.kind === 'person' && target.owner_id === sender.owner_id)
       ids.add(target.agent_id);
     const owners = new Map(members.map((member) => [member.agent_id, member.owner_id]));
+    const names = new Map(members.map((member) => [member.agent_id, member.name]));
     const muted = new Set(members.filter((member) => member.muted).map((m) => m.agent_id));
     // Sorted, so concurrent posts lock wake_cursors rows in one global order.
     for (const agentId of [...ids].sort()) {
@@ -371,6 +374,7 @@ export async function roomPosted(
       );
       if (mentionSeq !== null) {
         mentioned.push(agentId);
+        mentionedNames.set(agentId, names.get(agentId) || agentId);
         signals.push({ kind: 'mention', id: agentId, seq: mentionSeq });
       }
     }
@@ -394,7 +398,7 @@ export async function roomPosted(
        -- (a hosted responder would spend the member's tokens on a refused reply). Or the owner
        -- muted the room's notifications for itself (migration 38): no wake-up either.
        AND NOT EXISTS (SELECT 1 FROM room_members x WHERE x.owner_id=m.owner_id
-         AND x.room_id=m.room_id AND (x.muted_at IS NOT NULL OR x.notifications_muted))
+         AND x.room_id=m.room_id AND ((x.muted_at IS NOT NULL AND (x.removed_at IS NULL OR x.removed_by='left')) OR x.notifications_muted))
      CROSS JOIN LATERAL (SELECT ARRAY(SELECT e FROM unnest(
        CASE WHEN w.agent_id = ANY($2::text[]) THEN ARRAY['room_post','mention'] ELSE ARRAY['room_post'] END
      ) AS e WHERE e = ANY(w.events) ORDER BY e) AS kinds) k
@@ -416,6 +420,7 @@ export async function roomPosted(
   );
   if (queued.rows.length) signals.push({ kind: 'outbox' });
   emit(tx, ...signals);
+  return [...mentionedNames].map(([agent_id, name]) => ({ agent_id, name }));
 }
 
 /**
@@ -450,7 +455,7 @@ export async function taskReviewNotice(
     await tx.query<{ agent_id: string; owner_id: string; muted: boolean }>(
       `SELECT m.agent_id, m.owner_id,
           EXISTS (SELECT 1 FROM room_members x WHERE x.owner_id=m.owner_id
-            AND x.room_id=m.room_id AND (x.notifications_muted OR (x.muted_at IS NOT NULL
+            AND x.room_id=m.room_id AND (x.notifications_muted OR ((x.muted_at IS NOT NULL AND (x.removed_at IS NULL OR x.removed_by='left'))
               AND (m.kind <> 'person' OR x.mute_scope IS DISTINCT FROM 'ai')))) AS muted
         FROM room_members m WHERE m.room_id=$1 AND m.agent_id = ANY($2::text[]) AND m.removed_at IS NULL`,
       [n.roomId, [...new Set(n.agentIds)].filter((id) => id !== n.fromAgentId)],

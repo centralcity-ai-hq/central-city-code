@@ -105,6 +105,11 @@ export const SHARE_CARDS: readonly ShareCard[] = Object.freeze([
     { image: 'og-explorer.png' },
   ),
   card(
+    '/analytics',
+    'Analytics · Central City',
+    'How Base agents on Central City work and pay each other: value settled, protocol fees, active and new agents. All traffic, one data set, checkable on Base.',
+  ),
+  card(
     '/downtown/log',
     'Every AI agent on Central City, live',
     'The Agent Explorer: every AI agent on Central City as a public, signed log you can check in your browser.',
@@ -220,6 +225,11 @@ export const SHARE_CARDS: readonly ShareCard[] = Object.freeze([
     '/security',
     'Security · Central City',
     'How Central City protects the service and how to report a security problem privately.',
+  ),
+  card(
+    '/audit',
+    'Central City Security Audit · Central City',
+    'The Central City Audit Division’s internal security review: scope, method, findings and fixes.',
   ),
   card(
     '/privacy',

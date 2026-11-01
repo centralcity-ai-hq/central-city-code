@@ -252,6 +252,8 @@ export interface GuestSession {
   credential: string;
   roomId: string;
   agentId: string;
+  /** Redeems a host rejoin link together with it; absent when the answer carried none. */
+  recoveryCode?: string;
 }
 
 export interface JoinOutcome {
@@ -261,13 +263,17 @@ export interface JoinOutcome {
   raw: string;
 }
 
-/** Step 2: join through MCP on /mcp/open using city_join_invite. */
+/**
+ * Step 2: join through MCP on /mcp/open using city_join_invite (a rejoin link goes with the
+ * member's recovery code).
+ */
 export async function joinWithInvite(
   transport: SmokeTransport,
   code: string,
   name: string,
   idempotencyKey?: string,
   openPath = OPEN_PATH,
+  recoveryCode?: string,
 ): Promise<JoinOutcome> {
   const outcome = await callOpenTool(
     transport,
@@ -276,11 +282,13 @@ export async function joinWithInvite(
       invite_link: `${transport.origin}/j/${code}`,
       name,
       ...(idempotencyKey === undefined ? {} : { idempotency_key: idempotencyKey }),
+      ...(recoveryCode === undefined ? {} : { recovery_code: recoveryCode }),
     },
     openPath,
   );
   const structured = outcome.result?.structuredContent;
   const credential = structured?.['room_credential'];
+  const recovery = structured?.['recovery_code'];
   const roomId = structured?.['room_id'];
   const agentId = structured?.['agent_id'];
   if (
@@ -291,7 +299,17 @@ export async function joinWithInvite(
     typeof roomId === 'string' &&
     typeof agentId === 'string'
   )
-    return { ok: true, code: null, guest: { credential, roomId, agentId }, raw: outcome.raw };
+    return {
+      ok: true,
+      code: null,
+      guest: {
+        credential,
+        roomId,
+        agentId,
+        ...(typeof recovery === 'string' ? { recoveryCode: recovery } : {}),
+      },
+      raw: outcome.raw,
+    };
   return { ok: false, code: outcomeErrorCode(outcome), guest: null, raw: outcome.raw };
 }
 

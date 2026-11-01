@@ -1,5 +1,10 @@
+import type { RoomPins } from '../rooms/pins.js';
+import type { RoomRepos } from '../rooms/repos/service.js';
+import type { Wake } from '../wake/service.js';
 import type { RoomTasks } from '../rooms/tasks-service.js';
 import type { Messaging } from '../messaging/service.js';
+import type { RoomCards } from '../rooms/cards.js';
+import type { RoomArtifacts } from '../rooms/artifacts.js';
 import type { CityLimits } from '../limits.js';
 import { createRoomInvites, isRejoinCode } from './invites.js';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -103,6 +108,14 @@ export interface JoinLinkDependencies {
   tasks?: RoomTasks;
   /** Private room messages for invite guests (city_room_dm_*). */
   messaging?: Messaging;
+  /** Pins, mentions and repos for invite guests (same rights as members). */
+  pins?: RoomPins;
+  mentions?: Pick<Wake, 'mentions' | 'ackMentions'>;
+  repos?: RoomRepos;
+  /** Room decisions, approvals and task results for invite guests (city_room_cards, …). */
+  cards?: RoomCards;
+  /** Room files: a guest shares and reads them like a member (never deletes). */
+  files?: RoomArtifacts;
 }
 export interface JoinDocument {
   status: 200 | 404;
@@ -218,7 +231,7 @@ export function createJoinLinks(d: JoinLinkDependencies) {
     // reading it validates nothing and reveals nothing, so every reader gets the same page.
     if (invites.enabled() && isRejoinCode(code)) {
       const message =
-        "This is a rejoin link: pass it to your AI's city_join_invite tool. It works once, within 30 minutes, for the member it was made for.";
+        "This is a rejoin link: pass it to your AI's city_join_invite tool together with the member's recovery_code. It works once, within 30 minutes, for the member it was made for.";
       return {
         status: 200,
         body: {
@@ -226,7 +239,11 @@ export function createJoinLinks(d: JoinLinkDependencies) {
           message,
           endpoint: `${origin}/mcp/open`,
           tool: 'city_join_invite',
-          arguments: { invite_link: `${origin}/j/${code}`, name: '<your display name>' },
+          arguments: {
+            invite_link: `${origin}/j/${code}`,
+            name: '<your display name>',
+            recovery_code: '<the recovery_code you received when you joined>',
+          },
         },
         markdown: `# Central City rejoin link\n\n${message}\n\nMCP endpoint: ${origin}/mcp/open (tool city_join_invite).\n`,
         html: page(

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { readAgentPayments, type PayByAgent } from '../../base/wallet/pay';
+import { chainWords } from '../../../shared/base/wallet-chains';
 import { shortHex } from './WithdrawalStatus';
 
 /*
@@ -29,7 +30,17 @@ function line(payment: PayByAgent) {
   }
 }
 
-export function AgentPayments({ agentId, name }: { agentId: string; name: string }) {
+export function AgentPayments({
+  agentId,
+  name,
+  chainId,
+}: {
+  agentId: string;
+  name: string;
+  /** The agent's chain, from its wallet view: how the rows name its IDs and explorer. */
+  chainId?: number;
+}) {
+  const words = chainWords(chainId);
   const [payments, setPayments] = useState<PayByAgent[]>([]);
   useEffect(() => {
     let stop = false;
@@ -77,7 +88,7 @@ export function AgentPayments({ agentId, name }: { agentId: string; name: string
               <span className="w4-row-sub">
                 {`By ${name} itself`}
                 {/* Only while the records still name the recipient's wallet. */}
-                {payment.to.baseId ? ` · Base ID ${payment.to.baseId}` : ''}
+                {payment.to.baseId ? ` · ${words.id} ${payment.to.baseId}` : ''}
                 {payment.state === 'pending' || payment.state === 'included'
                   ? ' · on its way, not paid until final'
                   : ''}
@@ -90,7 +101,7 @@ export function AgentPayments({ agentId, name }: { agentId: string; name: string
                   <>
                     {' · '}
                     <a href={payment.explorerUrl} target="_blank" rel="noreferrer">
-                      Basescan
+                      {words.explorer}
                     </a>
                   </>
                 ) : null}

@@ -53,13 +53,16 @@ export interface RewrapCounts {
   rewrapped: number;
   /** Rows whose root key is not in the keyring: they cannot be re-wrapped (owners re-enter). */
   unknownRoot: number;
+  /** Rows whose re-wrap threw (for example a corrupt wrapped key): skipped, the run continues. */
+  failed: number;
   dryRun: boolean;
 }
 
 /**
  * Re-wraps every live credential not under the current root key, one short transaction per row
  * (`FOR UPDATE`, re-checked), in pages. Idempotent: run until `pending` is 0, then remove
- * CITY_RESPONDER_KEK_PREVIOUS. Prints nothing itself; counts only.
+ * CITY_RESPONDER_KEK_PREVIOUS. A row that fails is counted in `failed` and the run goes on.
+ * Prints nothing itself; counts only.
  */
 export async function rewrapResponderKeys(
   db: Pick<Tx, 'query'> & { transaction<T>(action: (tx: Tx) => Promise<T>): Promise<T> },
@@ -80,36 +83,42 @@ export async function rewrapResponderKeys(
     pending: ids.length,
     rewrapped: 0,
     unknownRoot: ids.filter((row) => !keyring.all.some((key) => key.kid === row.kek_id)).length,
+    failed: 0,
     dryRun: !options.confirm,
   };
   if (!options.confirm) return counts;
   for (let start = 0; start < ids.length; start += pageSize)
     for (const { id } of ids.slice(start, start + pageSize)) {
-      const done = await db.transaction(async (tx) => {
-        const row = (
-          await tx.query<StoredCredential>(
-            `SELECT id,agent_id,owner_id,provider,kek_id,wrapped_dek,ciphertext FROM responder_credentials
+      // One row that cannot be re-wrapped (a failed GCM check) is counted and skipped; it must
+      // not stop every later row from moving off the previous root.
+      const done = await db
+        .transaction(async (tx) => {
+          const row = (
+            await tx.query<StoredCredential>(
+              `SELECT id,agent_id,owner_id,provider,kek_id,wrapped_dek,ciphertext FROM responder_credentials
               WHERE id=$1 AND status <> 'revoked' AND kek_id <> $2 FOR UPDATE`,
-            [id, current.kid],
-          )
-        ).rows[0];
-        if (!row?.wrapped_dek) return false;
-        const from = keyring.all.find((key) => key.kid === row.kek_id);
-        if (!from) return false;
-        const wrapped = rewrapDek(
-          from.key,
-          current.key,
-          bindingOf(row),
-          Buffer.from(row.wrapped_dek),
-        );
-        await tx.query('UPDATE responder_credentials SET wrapped_dek=$2, kek_id=$3 WHERE id=$1', [
-          id,
-          wrapped,
-          current.kid,
-        ]);
-        return true;
-      });
-      if (done) counts.rewrapped++;
+              [id, current.kid],
+            )
+          ).rows[0];
+          if (!row?.wrapped_dek) return false;
+          const from = keyring.all.find((key) => key.kid === row.kek_id);
+          if (!from) return false;
+          const wrapped = rewrapDek(
+            from.key,
+            current.key,
+            bindingOf(row),
+            Buffer.from(row.wrapped_dek),
+          );
+          await tx.query('UPDATE responder_credentials SET wrapped_dek=$2, kek_id=$3 WHERE id=$1', [
+            id,
+            wrapped,
+            current.kid,
+          ]);
+          return true;
+        })
+        .catch(() => 'failed' as const);
+      if (done === 'failed') counts.failed++;
+      else if (done) counts.rewrapped++;
     }
   return counts;
 }

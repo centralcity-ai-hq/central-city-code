@@ -1,5 +1,6 @@
 import {
   parseAgentCount,
+  parseArcAgents,
   parseBaseAgents,
   parsePaidCalls,
   type AgentCount,
@@ -109,7 +110,10 @@ export async function fetchBuildHomeStats(
     ]);
     const count = parseAgentCount(body);
     const paid = parsePaidCalls(body);
-    const base = parseBaseAgents(body);
+    const baseOnly = parseBaseAgents(body);
+    const arc = parseArcAgents(body);
+    // The landing tile's number: Base plus Arc (arc_agents only while Arc is on).
+    const base = baseOnly ? { ...baseOnly, total: baseOnly.total + (arc?.total ?? 0) } : null;
     const paidCalls = (paid !== null && paid.total >= 1) || (base !== null && base.total >= 1);
     // Never a 0 in the HTML: a Base agents number is baked only from 1 up.
     const baked = base !== null && base.total >= 1 ? base : null;

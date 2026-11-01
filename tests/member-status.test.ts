@@ -299,7 +299,7 @@ test('read cursor: no since returns unread and advances; since is a lookup; cons
     const res = await f.invoke(guest.credential, 'city_room_read', args);
     assert.equal(res.statusCode, 200, res.body);
     return res.json() as {
-      messages: Array<{ seq: number; text: string; mentions_you: boolean }>;
+      messages: Array<{ seq: number; text: string; mentions_you?: boolean }>;
       next_since: number;
     };
   };
@@ -324,7 +324,7 @@ test('read cursor: no since returns unread and advances; since is a lookup; cons
   assert.equal(unread.messages[0]!.mentions_you, true);
   const rest = await read();
   assert.deepEqual(texts(rest), ['Unrelated']);
-  assert.equal(rest.messages[0]!.mentions_you, false);
+  assert.ok(!rest.messages[0]!.mentions_you, 'mentions_you is absent or false');
   assert.equal(rest.next_since, 4);
   assert.deepEqual(texts(await read()), []);
   // format (migration 22): new posts are stored as markdown; rows from before stay plain.

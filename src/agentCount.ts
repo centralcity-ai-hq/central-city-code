@@ -126,8 +126,25 @@ export interface BaseAgents {
 
 /** The `base_agents` field of a stats response, or null when it is missing or not readable. */
 export function parseBaseAgents(value: unknown): BaseAgents | null {
+  return parseAgentsField(value, 'base_agents');
+}
+
+/** The optional `arc_agents` field (sent only while Arc is on), or null. */
+export function parseArcAgents(value: unknown): BaseAgents | null {
+  return parseAgentsField(value, 'arc_agents');
+}
+
+/**
+ * The landing tile's "Central City ERC-8004 Agents" number: Base plus Arc (Arc missing counts 0);
+ * null without a Base number. Base-only places (Explorer, Feed) keep reading `base` alone.
+ */
+export function ercAgentsTotal(stats: Pick<StatsResponse, 'base' | 'arc'>): number | null {
+  return stats.base ? stats.base.total + (stats.arc?.total ?? 0) : null;
+}
+
+function parseAgentsField(value: unknown, name: 'base_agents' | 'arc_agents'): BaseAgents | null {
   if (!value || typeof value !== 'object') return null;
-  const field = (value as Record<string, unknown>).base_agents;
+  const field = (value as Record<string, unknown>)[name];
   if (!field || typeof field !== 'object') return null;
   const { total, as_of: asOfText } = field as Record<string, unknown>;
   const asOf = typeof asOfText === 'string' ? Date.parse(asOfText) : NaN;
@@ -140,6 +157,7 @@ export interface StatsRates {
   agents?: number;
   paid?: number;
   base?: number;
+  arc?: number;
   valueRaw?: number;
 }
 
@@ -156,10 +174,12 @@ export function parseStatsRates(value: unknown): StatsRates {
   const agents = read('ai_agents');
   const paid = read('paid_calls');
   const base = read('base_agents');
+  const arc = read('arc_agents');
   const valueRaw = read('value_settled_raw');
   if (agents !== undefined) out.agents = agents;
   if (paid !== undefined) out.paid = paid;
   if (base !== undefined) out.base = base;
+  if (arc !== undefined) out.arc = arc;
   if (valueRaw !== undefined) out.valueRaw = valueRaw;
   return out;
 }
@@ -170,6 +190,8 @@ export interface StatsResponse {
   paid: PaidCalls | null;
   /** The Base agents number (`base_agents`), when the server sent it. */
   base: BaseAgents | null;
+  /** The Arc agents number (`arc_agents`), only while Arc is on; else null. */
+  arc?: BaseAgents | null;
   /** Growth per second of each number, where the server knows it (`rates`); else empty. */
   rates?: StatsRates;
   /** The edge's Age header in seconds (0 when missing). */
@@ -192,6 +214,7 @@ export function fetchStats(signal?: AbortSignal): Promise<StatsResponse | null> 
       agents: parseAgentCount(body),
       paid: parsePaidCalls(body),
       base: parseBaseAgents(body),
+      arc: parseArcAgents(body),
       rates: parseStatsRates(body),
       ageS: Number.isFinite(age) && age > 0 ? age : 0,
       arrived: Date.now(),
@@ -392,6 +415,8 @@ export function storeAgentCount(count: AgentCount): void {
 export interface StoredLiveNumbers {
   paid: { total: number; at: number } | null;
   base: { total: number; at: number } | null;
+  /** The Arc agents number (only while Arc is on); added to `base` on the landing tile. */
+  arc?: { total: number; at: number } | null;
   /** Total value settled, USDC base units as decimal text (like PaidCalls.valueRaw). */
   value: { raw: string; at: number } | null;
 }
@@ -424,6 +449,8 @@ export function readStoredLiveNumbers(): StoredLiveNumbers {
     return {
       paid: storedCount(value.paid),
       base: storedCount(value.base),
+      // Only while Arc is on: an answer without Arc keeps the stored shape unchanged.
+      ...(storedCount(value.arc) ? { arc: storedCount(value.arc) } : {}),
       value: storedValue(value.value),
     };
   } catch {
@@ -435,7 +462,7 @@ export function readStoredLiveNumbers(): StoredLiveNumbers {
  * Keeps the numbers one stats answer carried. A field the answer left out keeps what is stored;
  * a stored field from a later answer than this one (another tab) is never replaced by it.
  */
-export function storeLiveNumbers(stats: Pick<StatsResponse, 'paid' | 'base'>): void {
+export function storeLiveNumbers(stats: Pick<StatsResponse, 'paid' | 'base' | 'arc'>): void {
   const stored = readStoredLiveNumbers();
   const newer = <T extends { at: number }>(next: T | null, kept: T | null) =>
     next && (!kept || next.at >= kept.at) ? next : kept;
@@ -447,6 +474,11 @@ export function storeLiveNumbers(stats: Pick<StatsResponse, 'paid' | 'base'>): v
       stored.value,
     ),
   };
+  const arc = newer(
+    stats.arc ? { total: stats.arc.total, at: stats.arc.asOf } : null,
+    stored.arc ?? null,
+  );
+  if (arc) next.arc = arc;
   if (!next.paid && !next.base && !next.value) return;
   try {
     window.localStorage.setItem(LIVE_NUMBERS_STORAGE_KEY, JSON.stringify(next));

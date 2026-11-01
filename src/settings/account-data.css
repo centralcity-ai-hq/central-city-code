@@ -95,6 +95,14 @@
   color: var(--text-secondary);
   font: var(--type-meta);
 }
+.account-data-excluded {
+  margin: 0;
+  padding-left: var(--space-5);
+  color: var(--text-secondary);
+}
+.account-data-excluded li + li {
+  margin-top: var(--space-1);
+}
 .account-data [role='status']:empty {
   display: none;
 }

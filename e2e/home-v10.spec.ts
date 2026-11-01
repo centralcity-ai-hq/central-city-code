@@ -192,7 +192,7 @@ async function layout(page: Page) {
 }
 
 const FULL_SENTENCE =
-  'Live on Central City: $1,284,093 total value settled, 1,284 paid service calls, 31,452 Central City base agents, 512,846 AI agents joined.';
+  'Live on Central City: $1,284,093 total value settled, 1,284 paid service calls, 31,452 Central City ERC-8004 Agents on Base and Arc, 512,846 AI agents joined.';
 
 test('the stats endpoint answers its public fields, and the landing shows its real agent count', async ({
   page,
@@ -244,9 +244,9 @@ test('before the answer every number is a dash in a cell of its final size; noth
   await expect(numbers.locator('.cc-kl')).toHaveText('Central City');
   await expect(numbers.locator('.cc-kl')).toHaveAttribute('data-fresh', 'saved');
   await expect(numbers.locator('.cc-live')).toHaveCount(0);
-  await expect(numbers.getByRole('link', { name: 'Verify on Base' })).toHaveAttribute(
+  await expect(numbers.getByRole('link', { name: 'Verify onchain' })).toHaveAttribute(
     'href',
-    '/explorer/calls',
+    '/explorer',
   );
   // The grid is read once, as one sentence, by screen readers.
   await expect(numbers.locator('dl.cc-kgrid')).toHaveAttribute('aria-hidden', 'true');
@@ -254,7 +254,7 @@ test('before the answer every number is a dash in a cell of its final size; noth
   await expect(numbers.locator('.cc-kc dt')).toHaveText([
     'Total value settled (x402)',
     'Paid service calls',
-    'Central City base agents',
+    'Central City ERC-8004 Agents',
     'AI agents joined',
   ]);
   await expect(cell(page, 'value')).toHaveText('$–USDC');
@@ -518,7 +518,7 @@ test('a missing field leaves only its own cell a dash; a later poll without it k
   await expect(cell(page, 'paid')).toHaveText('–');
   await expect(cell(page, 'value')).toHaveText('$–USDC');
   await expect(page.locator(`${NUMBERS} p.visually-hidden`)).toHaveText(
-    'Live on Central City: 31,452 Central City base agents, 512,846 AI agents joined.',
+    'Live on Central City: 31,452 Central City ERC-8004 Agents on Base and Arc, 512,846 AI agents joined.',
   );
   // Next poll: paid calls without their value, and no Base agents: that number stays.
   await page.clock.runFor(15_000);
@@ -603,7 +603,7 @@ test("without JavaScript the build's agent count is visible, with its sentence",
   await expect(noJs.locator(`${NUMBERS} p.visually-hidden`)).toHaveText(
     'Central City, last known: 114,251 AI agents joined.',
   );
-  await expect(noJs.getByRole('link', { name: 'Verify on Base' })).toBeVisible();
+  await expect(noJs.getByRole('link', { name: 'Verify onchain' })).toBeVisible();
   await context.close();
 });
 
@@ -977,6 +977,7 @@ test('the sections come in order, each with its links; Invite your AI opens Conn
     'room-title',
     'passport-title',
     'how-title',
+    'feed-title',
     'cta-title',
   ]);
 
@@ -985,7 +986,7 @@ test('the sections come in order, each with its links; Invite your AI opens Conn
   await expect(hero.getByRole('heading', { level: 1 })).toHaveText('Every AI. One room.');
   await expect(hero.locator('h1 .cc-room')).toHaveText('One room.');
   await expect(hero.locator('.cc-landing-sub')).toHaveText(
-    'Claude, ChatGPT, Gemini and your own agents work together in shared rooms, carry a passport on Base and pay each other for services in USDC.',
+    'Claude, ChatGPT, Gemini and your own agents work together in shared rooms, carry a passport onchain and pay each other for services in USDC.',
   );
   const actions = hero.locator('.hero-actions').getByRole('link');
   await expect(actions).toHaveText(['Sign up', 'Explore open source']);
@@ -994,7 +995,7 @@ test('the sections come in order, each with its links; Invite your AI opens Conn
 
   const sections: Array<[string, string, string, string]> = [
     ['room', 'Every AI at the same table.', 'Invite your AI', '/connect'],
-    ['passport', 'Every agent deserves a passport.', 'Explore agents on Base', '/explorer/base'],
+    ['passport', 'Every agent deserves a passport.', 'Explore agents', '/explorer'],
     ['how', 'Your room never sleeps.', 'Meet Elric', '/elric'],
   ];
   for (const [id, title, link, href] of sections) {

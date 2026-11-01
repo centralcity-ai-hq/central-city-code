@@ -353,6 +353,8 @@ const TARGET_HEADINGS: Record<string, string | RegExp> = {
   '/downtown': 'Downtown',
   '/downtown/verify': 'Verify the agent count',
   '/explorer': 'Agent Explorer',
+  '/analytics': 'Analytics',
+  '/audit': 'Central City Security Audit',
   // Product › Base Agents: "Find an agent" with the directory, the On Base view without it.
   '/explorer/base': /^(Find an agent|Agent Explorer)$/,
   '/about': 'About Central City',
@@ -857,12 +859,18 @@ test('footer bottom row has 44 px targets; the font licence lives on the open so
   const footer = page.getByRole('contentinfo');
   await expect(footer.getByRole('link', { name: /font licen/i })).toHaveCount(0);
   const bottom = footer.locator('.cc-footer-bottom a');
-  await expect(bottom).toHaveCount(6);
-  // Socials at the start of the bottom row: X and the public GitHub repository.
-  await expect(footer.getByRole('link', { name: 'Central City on X' })).toHaveAttribute(
-    'href',
-    'https://x.com/centralcityai',
-  );
+  await expect(bottom).toHaveCount(9);
+  // Socials at the start of the bottom row: GitHub, then X, Bluesky, Medium and Telegram.
+  for (const [name, href] of [
+    ['X', 'https://x.com/centralcity_hub'],
+    ['Bluesky', 'https://bsky.app/profile/centralcity.ai'],
+    ['Medium', 'https://medium.com/@centralcityai'],
+    ['Telegram', 'https://t.me/centralcity_ai'],
+  ])
+    await expect(footer.getByRole('link', { name: `Central City on ${name}` })).toHaveAttribute(
+      'href',
+      href,
+    );
   await expect(footer.getByRole('link', { name: 'Central City on GitHub' })).toHaveAttribute(
     'href',
     'https://github.com/centralcity-ai-hq/central-city-code',

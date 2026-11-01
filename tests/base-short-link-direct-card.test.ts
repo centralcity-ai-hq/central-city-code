@@ -8,6 +8,7 @@ import type { Database } from '../server/database.js';
 import { publicAgentCard } from '../server/manifest/card-agent.js';
 import { buildRegistrationFile, standardDescription } from '../shared/base/registration.js';
 import { PASSWORD } from './oauth-helpers.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 // /a/<id> reads the agent's public card directly instead of requesting the card route with an
 // internal app.inject. The file must stay byte-for-byte what the card route path produced.
@@ -105,7 +106,7 @@ test('/a/<id> read directly is byte-for-byte the file the card route path made',
     payload: JSON.stringify({ name: 'Card owner', password: PASSWORD }),
   });
   assert.equal(registered.statusCode, 201, registered.body);
-  const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(registered.cookies);
   const create = async (body: Record<string, unknown>) => {
     const res = await app.inject({
       method: 'POST',

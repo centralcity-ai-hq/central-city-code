@@ -113,8 +113,45 @@ export const x402FacilitatorBatchMigration: Migration = {
   sql: X402_FACILITATOR_BATCH_SQL,
 };
 
+/**
+ * Migration 269 `x402_facilitator_key_purposes` (Operation x402scan, 25 Oct): a second provisioned
+ * key, `public-settle`, the public x402 facilitator's own sender EOA (server/protocol/x402/
+ * public-settle.ts), never the router 3 facilitator's. Only the purpose CHECK of the one-row-per-
+ * purpose table changes (a table of at most a few rows).
+ */
+export const X402_FACILITATOR_KEY_PURPOSES_SQL = `
+ALTER TABLE x402_facilitator_key DROP CONSTRAINT IF EXISTS x402_facilitator_key_purpose_check;
+ALTER TABLE x402_facilitator_key ADD CONSTRAINT x402_facilitator_key_purpose_check
+  CHECK (purpose IN ('router3', 'public-settle'));
+`;
+
+export const x402FacilitatorKeyPurposesMigration: Migration = {
+  version: 269,
+  name: 'x402_facilitator_key_purposes',
+  sql: X402_FACILITATOR_KEY_PURPOSES_SQL,
+};
+
+/**
+ * Migration 352 `x402_facilitator_key_arc_purpose`: a third provisioned key, `arc-router3`, fee router
+ * 3's facilitator on Arc, never one of Base's. Only the purpose CHECK changes; existing rows are
+ * untouched and not revalidated.
+ */
+export const X402_FACILITATOR_KEY_ARC_PURPOSE_SQL = `
+SET LOCAL lock_timeout = '2s';
+ALTER TABLE x402_facilitator_key DROP CONSTRAINT IF EXISTS x402_facilitator_key_purpose_check;
+ALTER TABLE x402_facilitator_key ADD CONSTRAINT x402_facilitator_key_purpose_check CHECK (purpose IN ('router3', 'public-settle', 'arc-router3')) NOT VALID;
+`;
+
+export const x402FacilitatorKeyArcPurposeMigration: Migration = {
+  version: 352,
+  name: 'x402_facilitator_key_arc_purpose',
+  sql: X402_FACILITATOR_KEY_ARC_PURPOSE_SQL,
+};
+
 /** Idempotent; call before runMigrations. */
 export function registerX402FacilitatorMigration(): void {
   registerMigration(x402FacilitatorMigration);
   registerMigration(x402FacilitatorBatchMigration);
+  registerMigration(x402FacilitatorKeyPurposesMigration);
+  registerMigration(x402FacilitatorKeyArcPurposeMigration);
 }

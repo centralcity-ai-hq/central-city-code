@@ -557,6 +557,7 @@ function Console({
           setActionError('');
           setClaimSheetError(failure);
         }
+        return claimed;
       }}
     />
   );
@@ -1442,7 +1443,8 @@ function ClaimAgents({
   busy: boolean;
   /** A failed claim, shown with the form (in a sheet the page's banner is hidden). */
   error?: string;
-  onClaim: (token: string) => Promise<void>;
+  /** Resolves true when the claim went through. */
+  onClaim: (token: string) => Promise<boolean>;
 }) {
   const [token, setToken] = useState(
     () => /^#claim=(ccw?claim_[A-Za-z0-9_-]{43})$/.exec(window.location.hash)?.[1] ?? '',
@@ -1496,7 +1498,8 @@ function ClaimAgents({
       }
       return;
     }
-    await onClaim(value);
+    // A failed claim keeps the one-time link in the form, so the person can try again.
+    if (!(await onClaim(value))) return;
     setToken('');
     setPreview(null);
   }
@@ -1515,6 +1518,7 @@ function ClaimAgents({
             onChange={(event) => {
               setToken(event.target.value);
               setPreview(null);
+              setPreviewError('');
             }}
           />
           <button className="button primary compact" type="submit" disabled={busy || !token.trim()}>

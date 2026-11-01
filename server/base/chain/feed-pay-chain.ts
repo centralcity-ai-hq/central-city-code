@@ -19,6 +19,7 @@
  * Nothing here decides whether a payment may happen: the engine checks flags, limits and owners
  * and passes `beforeBroadcast`, run right before an operation's first send.
  */
+import { isRealMoneyChain } from '../../../shared/chains.js';
 import {
   BaseError,
   ContractFunctionRevertedError,
@@ -34,7 +35,7 @@ import {
   type PublicClient,
 } from 'viem';
 import type { Database } from '../../database.js';
-import { BASE_MAINNET, type Address, type BaseNetwork } from '../../../shared/base/chains.js';
+import { type Address, type BaseNetwork } from '../../../shared/base/chains.js';
 import { sponsoredWithoutCharge, type SponsorAllowlist } from '../../../shared/base/paymasters.js';
 import type { ChainOpKind, SpendPermission } from '../../../shared/base/types.js';
 import { spenderAccountRecipe } from './derive.js';
@@ -122,6 +123,11 @@ export interface WalletRef {
   /** Its spender smart account (the payer of every authorization). */
   spender: Address;
   spenderKeyRef: string;
+  /**
+   * The wallet's workspace, whose sponsorship budget its operations count against (the engine
+   * always names it; absent: none).
+   */
+  accountId?: string;
 }
 
 export interface PermissionRef {
@@ -177,6 +183,8 @@ export type AuthorizationOutcome =
   | { kind: 'used'; txHash: Hex; blockNumber: bigint; at: number }
   | { kind: 'canceled'; txHash: Hex; blockNumber: bigint }
   | { kind: 'expired' }
+  /** Past its window and used at Base's safe block, but no event in the blocks searched. */
+  | { kind: 'used_unseen' }
   | { kind: 'pending' };
 
 const usdcAbi = parseAbi([
@@ -219,12 +227,16 @@ export function createFeedPayChain(deps: FeedPayChainDeps) {
   const usdc = getAddress(network.tokens.USDC.address);
   const now = deps.now ?? Date.now;
 
-  const submitDeps = (signer: Parameters<typeof submitOperation>[0]['signer']) => ({
+  const submitDeps = (
+    signer: Parameters<typeof submitOperation>[0]['signer'],
+    beforeRebroadcast?: (row: StoredOperation) => Promise<void>,
+  ) => ({
     network,
     client,
     store: deps.operations,
     bundler: deps.bundler,
     signer,
+    ...(beforeRebroadcast ? { beforeRebroadcast } : {}),
   });
 
   /** Reconciling only reads and rebroadcasts the stored operation; nothing is signed. */
@@ -237,9 +249,9 @@ export function createFeedPayChain(deps: FeedPayChainDeps) {
 
   function guard() {
     // Real money is never moved without a fee budget and a pinned sponsor.
-    if (network.chainId === BASE_MAINNET && deps.maxCostWeiCap === undefined)
+    if (isRealMoneyChain(network.chainId) && deps.maxCostWeiCap === undefined)
       throw new FeedPayChainError('FEE_BUDGET_REQUIRED', 'Base operations need a fee budget.');
-    if (network.chainId === BASE_MAINNET && deps.sponsors === undefined)
+    if (isRealMoneyChain(network.chainId) && deps.sponsors === undefined)
       throw new FeedPayChainError('SPONSOR_REQUIRED', 'Base operations need a pinned sponsor.');
   }
 
@@ -335,6 +347,7 @@ export function createFeedPayChain(deps: FeedPayChainDeps) {
         intentHash: input.intentHash,
         kind: input.kind,
         sponsorFlow: 'feedPay',
+        sponsorAccountId: input.wallet.accountId ?? null,
         account: {
           address: input.wallet.spender,
           recipe: spenderAccountRecipe(network, signerAddress),
@@ -373,6 +386,13 @@ export function createFeedPayChain(deps: FeedPayChainDeps) {
 
     async headBlock(): Promise<bigint> {
       return client.getBlockNumber({ cacheTime: 0 });
+    },
+
+    /** Base's safe block number (a block at or below it is treated as final). Throws when unknown. */
+    async safeBlock(): Promise<bigint> {
+      const safe = await client.getBlock({ blockTag: 'safe' });
+      if (safe.number === null) throw new Error('no safe block');
+      return safe.number;
     },
 
     /**
@@ -469,6 +489,8 @@ export function createFeedPayChain(deps: FeedPayChainDeps) {
       const existing = await deps.operations.get(input.key);
       if (!existing)
         try {
+          // Read from Base before the transaction: nothing waits on the network under the lock.
+          const read = await deps.ledger.readBalance(getAddress(input.wallet.address), usdc);
           await deps.db.transaction((tx) =>
             deps.ledger.reserve(tx, {
               walletId: input.wallet.walletId,
@@ -477,6 +499,7 @@ export function createFeedPayChain(deps: FeedPayChainDeps) {
               amount: input.amount,
               holder: { kind: 'float', ref: input.key },
               intentHash: input.intentHash,
+              read,
             }),
           );
         } catch (error) {
@@ -677,7 +700,15 @@ export function createFeedPayChain(deps: FeedPayChainDeps) {
     async opStatus(
       key: string,
       walletId: string,
-      options: { expireQueuedBefore?: number } = {},
+      options: {
+        expireQueuedBefore?: number;
+        /**
+         * Runs before a first send that may never have reached the bundler is sent again
+         * (submit.ts beforeRebroadcast): the caller's current authority (the owner's or
+         * operator's stop). Throwing keeps it unsent; its sponsorship then lapses (CCA-110).
+         */
+        beforeRebroadcast?: (row: StoredOperation) => Promise<void>;
+      } = {},
     ): Promise<FeedPayOp | null> {
       let stored = await deps.operations.get(key);
       if (!stored) return null;
@@ -700,7 +731,7 @@ export function createFeedPayChain(deps: FeedPayChainDeps) {
         return op;
       }
       const row =
-        (await refreshFinality(submitDeps(readOnly(stored)), key, {
+        (await refreshFinality(submitDeps(readOnly(stored), options.beforeRebroadcast), key, {
           retireLapsed: true,
           ownLane: true,
         })) ?? stored;
@@ -870,6 +901,8 @@ export function createFeedPayChain(deps: FeedPayChainDeps) {
      *             a transaction the service named is checked first
      *   canceled  an AuthorizationCanceled event likewise
      *   expired   Base's safe block is at or past validBefore and the nonce is unused there
+     *   used_unseen  likewise past the window, but the nonce is used there and no event of it was
+     *             found from fromBlock (AUTHORIZATION_SEARCH_BLOCKS blocks)
      */
     async outcome(input: {
       payer: Address;
@@ -969,6 +1002,9 @@ export function createFeedPayChain(deps: FeedPayChainDeps) {
           args: [payer, input.nonce],
           blockNumber: safe.number,
         });
+        // Used (or cancelled) with no event in the searched blocks: never 'expired', and said
+        // apart from 'pending' so the caller can alert instead of waiting forever (CCA-739).
+        if (consumed === true) return { kind: 'used_unseen' };
         if (consumed !== false) return { kind: 'pending' };
         return { kind: 'expired' };
       } catch {

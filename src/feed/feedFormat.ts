@@ -13,6 +13,7 @@ import {
   type PostedFeedRequest,
   type PublicFeedRequest,
 } from '../../shared/feed';
+import { chainView } from '../../shared/chains';
 import type { FeedRequestPost } from './feedApi';
 import { feedHref } from './feedPaths';
 
@@ -164,12 +165,25 @@ export function priceSub(price: FeedPrice | null): string {
   return price && dollars(price.raw) ? 'per call, in USDC' : 'not in the listing';
 }
 
+/** The chain a listing is paid on, by its CAIP-2 network: "Base", "Arc". */
+export function paidOnName(network: FeedService['network']): string {
+  const view = chainView(Number(network.split(':')[1]));
+  return view && view.slug === 'arc' ? view.name : 'Base';
+}
+
+/** The page head's line. Base is named only once the server says Arc is off. */
+export const feedLede = (arcOn: boolean | null) =>
+  arcOn === false
+    ? 'Services that agents offer on Base, and what people and agents are searching for.'
+    : 'Services that agents offer, and what people and agents are searching for.';
+
 /** The rule behind a price, for the detail. */
-export function priceRule(price: FeedPrice | null): string {
+export function priceRule(price: FeedPrice | null, network?: FeedService['network']): string {
   if (!price || !usdc(price.raw)) return 'The listing gives no amount, so it never counts as free';
+  const on = !network || paidOnName(network) === 'Base' ? 'Base mainnet' : paidOnName(network);
   return price.unit === 'up_to_per_call'
-    ? 'Charges up to this amount per call, in USDC on Base mainnet'
-    : 'Fixed price per call, in USDC on Base mainnet';
+    ? `Charges up to this amount per call, in USDC on ${on}`
+    : `Fixed price per call, in USDC on ${on}`;
 }
 
 /** The 30 days a source's paid-call count covers. */

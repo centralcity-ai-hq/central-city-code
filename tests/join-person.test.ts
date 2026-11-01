@@ -11,6 +11,7 @@ import {
 } from '../server/links/short-code.js';
 import { cleanDisplayName, personMemberId, uuidV5 } from '../server/rooms/person.js';
 import { taskReviewNotice } from '../server/wake/hooks.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 process.env.CITY_INVITE_FLOW = '1';
 process.env.CITY_RATE_LIMIT_KEY ??= 'synthetic-join-person-test-root-secret';
@@ -58,7 +59,7 @@ async function fixture(t: { after(fn: () => Promise<unknown>): void }) {
       `203.0.113.${address++}`,
     );
     assert.equal(registered.statusCode, 201, registered.body);
-    const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+    const cookie = sessionPair(registered.cookies);
     const agent = await post(
       '/api/agents',
       { name: agentName, capability: 'research', mode: 'hosted' },
@@ -564,7 +565,7 @@ test('a person who joined by invite adds and takes room tasks as themselves', as
     `203.0.113.${address++}`,
   );
   assert.equal(registered.statusCode, 201, registered.body);
-  const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(registered.cookies);
   const joined = await f.joinPerson(cookie, { code: f.code, name: 'Tasker' });
   assert.equal(joined.statusCode, 200, joined.body);
   const me = (await f.members(cookie)).find((m) => m.own)!;

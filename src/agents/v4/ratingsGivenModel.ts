@@ -5,6 +5,7 @@
  * their way. Never "final" before Base says final.
  */
 import type { RatingGiven } from '../../base/wallet/rate';
+import { chainWords } from '../../../shared/base/wallet-chains';
 
 export const GIVEN_FINAL = 'Rated ✓ · on Base';
 export const GIVEN_ON_BASE = 'On Base · final in about 15 minutes';
@@ -22,17 +23,21 @@ export type GivenPhase = 'final' | 'on_base' | 'on_its_way' | 'failed' | 'cancel
  * final follows in about 15 minutes; when the server says the block isn't at Base's safe head yet
  * (`safe` false), it is still on its way. Prepared, sent, or with a cancel asked for: on its way.
  */
-export function givenStatus(row: Pick<RatingGiven, 'state' | 'safe'>): {
+export function givenStatus(
+  row: Pick<RatingGiven, 'state' | 'safe'>,
+  chainId?: number,
+): {
   phase: GivenPhase;
   line: string;
 } {
+  const { say } = chainWords(chainId);
   switch (row.state) {
     case 'final':
-      return { phase: 'final', line: GIVEN_FINAL };
+      return { phase: 'final', line: say(GIVEN_FINAL) };
     case 'included':
       return row.safe === false
-        ? { phase: 'on_its_way', line: GIVEN_ON_ITS_WAY }
-        : { phase: 'on_base', line: GIVEN_ON_BASE };
+        ? { phase: 'on_its_way', line: say(GIVEN_ON_ITS_WAY) }
+        : { phase: 'on_base', line: say(GIVEN_ON_BASE) };
     case 'failed':
       return { phase: 'failed', line: GIVEN_FAILED };
     case 'cancelled':
@@ -40,7 +45,7 @@ export function givenStatus(row: Pick<RatingGiven, 'state' | 'safe'>): {
     case 'expired':
       return { phase: 'expired', line: GIVEN_NEVER_SENT };
     default:
-      return { phase: 'on_its_way', line: GIVEN_ON_ITS_WAY };
+      return { phase: 'on_its_way', line: say(GIVEN_ON_ITS_WAY) };
   }
 }
 
@@ -82,8 +87,8 @@ export function latestPerAgent(rows: readonly RatingGiven[]): RatingGiven[] {
 }
 
 /** The rated agent as shown: its public name, else its passport number, else its Base ID. */
-export const givenName = (row: Pick<RatingGiven, 'name' | 'short' | 'baseId'>) =>
-  row.name.trim() || (row.short ? `CC-${row.short}` : `Base ID ${row.baseId}`);
+export const givenName = (row: Pick<RatingGiven, 'name' | 'short' | 'baseId'>, chainId?: number) =>
+  row.name.trim() || (row.short ? `CC-${row.short}` : `${chainWords(chainId).id} ${row.baseId}`);
 
 /** "Oct 11", as the wallet's other lists date a row. */
 export const givenDate = (ms: number) =>

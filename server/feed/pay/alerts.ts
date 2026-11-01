@@ -9,6 +9,7 @@
 import { httpsWebhookTransport, type WebhookTransport } from '../../wake/webhooks.js';
 import {
   FEED_PAY_ALERT_WEBHOOK_FLAG,
+  FEED_PAY_SCREENING_ALERT_EVERY_MS,
   type FeedPayAlert,
   type FeedPayAlertKind,
 } from '../../../shared/feed-pay.js';
@@ -24,6 +25,8 @@ const TEXT: Record<FeedPayAlertKind, string> = {
   protocol_fee_failed:
     'Feed pay: the protocol fee of a paid call could not be charged. The seller was paid; review the fee.',
   payment_rejected: 'Feed pay: a service or its facilitator refused our payment.',
+  screening_unavailable:
+    'Payment screening is unavailable, so new Feed calls or withdrawals on this chain are refused. Nothing was paid.',
   protocol_fee_screening_hold:
     'Feed pay: the protocol fee of a paid call is on hold because payment screening did not clear it. Nothing was charged; it is screened again later.',
   payment_anomaly:
@@ -55,10 +58,13 @@ export function createFeedPayAlerts(deps: {
       const value = clean(input);
       // Every alert is a log line (the record ops count from); only the webhook is rate-limited.
       log(JSON.stringify({ event: 'feed_pay_alert', ...value }));
-      const key = `${value.kind}:${value.serviceId ?? value.walletId ?? ''}`;
+      const screening = value.kind === 'screening_unavailable';
+      // Screening has no service or wallet: its detail names the chain, and each chain is heard.
+      const key = `${value.kind}:${(screening ? value.detail : (value.serviceId ?? value.walletId)) ?? ''}`;
       const at = now();
       const previous = last.get(key);
-      if (previous !== undefined && at - previous < FEED_PAY_ALERT_EVERY_MS) return;
+      const every = screening ? FEED_PAY_SCREENING_ALERT_EVERY_MS : FEED_PAY_ALERT_EVERY_MS;
+      if (previous !== undefined && at - previous < every) return;
       last.set(key, at);
       if (last.size > 10_000) last.clear();
       const url = deps.env[FEED_PAY_ALERT_WEBHOOK_FLAG];

@@ -16,6 +16,7 @@ import {
 } from '../shared/routes.js';
 import { SHARE_CARDS } from '../shared/share-cards.js';
 import { ACCEPTS_PAGE } from '../server/base/identity/short-links.js';
+import { CONTENT_SECURITY_POLICY } from '../server/security-headers.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const vercel = JSON.parse(readFileSync(join(root, 'vercel.json'), 'utf8')) as {
@@ -46,8 +47,12 @@ const SERVER_REWRITES = [
   { source: '/.well-known/jwks.json', destination: '/api' },
   { source: '/.well-known/agent-registration.json', destination: '/api' },
   { source: '/a2a/:path*', destination: '/api' },
+  // The public x402 facilitator (server/protocol/x402/public-facilitator.ts).
+  { source: '/x402/:path*', destination: '/api' },
   { source: '/a/:path*', destination: '/api' },
   { source: '/j/:path*', destination: '/api' },
+  // The Analytics page's data, the same answer as /api/public/dashboard.
+  { source: '/dashboard.json', destination: '/api' },
   // Only a build file that doesn't exist: an uncacheable 404 instead of /assets' immutable one.
   { source: '/assets/:path*', destination: '/api' },
   // The Markdown docs index (scripts/public-docs/build.ts) lives outside dist/docs/, so /docs
@@ -73,6 +78,7 @@ const KNOWN = [
   '/privacy',
   '/terms',
   '/security',
+  '/audit',
   '/support',
   '/status',
   '/privacy-choices',
@@ -101,6 +107,7 @@ const UNKNOWN = [
   // Retired paths: redirects (CLIENT_REDIRECTS), never the SPA.
   '/how',
   '/answers',
+  '/dashboard',
   '/no-such-page',
   '/some/deep/link',
   '/rooms/a/b',
@@ -122,6 +129,11 @@ const UNKNOWN = [
 
 test('vercel.json rewrites match the shared route table exactly', () => {
   const shells = new Set(CLIENT_ROUTES.map((entry) => entry.shell));
+  assert.equal(
+    CLIENT_ROUTES.find((entry) => entry.path === '/analytics')?.shell,
+    '/share/analytics.html',
+    '/analytics gets its own share-card copy',
+  );
   // The one conditional rewrite: a browser at /a/<short> gets the passport page (the app shell),
   // ahead of the function that answers resolvers with the registration file (short-links.ts).
   const negotiated = vercel.rewrites.filter((item) => item.has);
@@ -228,8 +240,16 @@ test('retired paths redirect (301); vercel.json has the same redirects', () => {
     [
       ['/how', '/#how', 301],
       ['/answers', '/docs', 301],
+      ['/dashboard', '/analytics', 308],
+      ['/audit/Central-City-Audit-2026-10.pdf', '/audit', 301],
+      ['/audit/Central-City-Audit-2026-10.pdf.sha256', '/audit', 301],
+      ['/audit/central-city-audit-2026-10-v1.0.pdf', '/audit', 301],
+      ['/audit/central-city-audit-2026-10-v1.0.pdf.sha256', '/audit', 301],
     ],
   );
+  // The current audit PDF is a static file and is never redirected.
+  assert.equal(movedPath('/audit/central-city-audit-2026-10-v1.1.pdf'), null);
+  assert.equal(movedPath('/audit/central-city-audit-2026-10-v1.0.pdf?x=1'), '/audit?x=1');
   for (const { source } of CLIENT_REDIRECTS) {
     assert.ok(!isClientRoute(source), `${source} is not a client route`);
     assert.ok(!vercel.rewrites.some((item) => item.source === source), `${source}: no rewrite`);
@@ -341,6 +361,17 @@ test('the local server serves client routes with 200 and everything else with a 
   const api = await fetch(`${base}/api/no-such-route`);
   assert.equal(api.status, 404);
   assert.deepEqual(await api.json(), { error: 'Unknown API route' });
+  // Headers as in production: the shell, 404.html and static files get the edge's
+  // Referrer-Policy, function answers the function's (server/security-headers.ts).
+  for (const path of ['/rooms', '/no-such-page', '/index.html']) {
+    const headers = (await fetch(`${base}${path}`)).headers;
+    assert.equal(headers.get('referrer-policy'), 'no-referrer', path);
+    assert.equal(headers.get('x-frame-options'), 'DENY', path);
+    assert.equal(headers.get('content-security-policy'), CONTENT_SECURITY_POLICY, path);
+  }
+  assert.equal(api.headers.get('referrer-policy'), 'same-origin');
+  assert.equal(api.headers.get('x-frame-options'), 'DENY');
+  assert.equal(api.headers.get('content-security-policy'), CONTENT_SECURITY_POLICY);
   const session = await fetch(`${base}/api/session`);
   assert.equal(session.status, 200);
   assert.equal(typeof (await session.json()), 'object');
@@ -395,6 +426,10 @@ test('the local server redirects /how and /answers with 301, query kept', async 
     assert.equal(response.status, from.endsWith('/') ? 308 : 301, from);
     assert.equal(response.headers.get('location'), to, from);
   }
+  // The renamed dashboard moves with 308, query kept.
+  const moved = await fetch(`${base}/dashboard?range=7d`, { redirect: 'manual' });
+  assert.equal(moved.status, 308);
+  assert.equal(moved.headers.get('location'), '/analytics?range=7d');
   const head = await fetch(`${base}/answers`, { method: 'HEAD', redirect: 'manual' });
   assert.equal(head.status, 301);
   // Followed, both end on a real page.

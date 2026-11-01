@@ -15,6 +15,7 @@ import {
   renewAsGuest,
   type SmokeTransport,
 } from '../scripts/smoke/ai-guest.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 process.env.CITY_INVITE_FLOW = '1';
 process.env.CITY_RATE_LIMIT_KEY ??= 'synthetic-renew-test-root-stand-in';
@@ -57,7 +58,7 @@ async function fixture(
     password: 'Synthetic renew test password',
   });
   assert.equal(registered.statusCode, 201, registered.body);
-  const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(registered.cookies);
   const host = { cookie };
   const agent = await post(
     '/api/agents',
@@ -104,7 +105,7 @@ async function fixture(
   };
 }
 
-test('a guest renews its credential before expiry; the old one stops working', async (t) => {
+test('a guest renews its credential before expiry; the old one only reads, briefly', async (t) => {
   const f = await fixture(t);
   const joined = await joinWithInvite(f.transport, f.code, SMOKE_GUEST_NAME);
   assert.equal(joined.ok, true, joined.raw);
@@ -114,7 +115,18 @@ test('a guest renews its credential before expiry; the old one stops working', a
   assert.ok(renewed.credential);
   assert.notEqual(renewed.credential, first.credential);
   assert.ok(!renewed.raw.includes(first.credential));
-  // The old credential stops working the moment the renewal succeeds.
+  // The old credential still reads for 10 minutes (grace) but cannot post; then it stops.
+  const graced = await readAsGuest(f.transport, first.credential);
+  assert.equal(graced.ok, true, graced.raw);
+  const oldPost = await postAsGuest(f.transport, first.credential, SMOKE_POST_TEXT, randomUUID());
+  assert.equal(oldPost.ok, false);
+  assert.equal(oldPost.code, 'room_credential_denied');
+  // The hint names the new credential, never another renew (an AI would loop).
+  assert.match(
+    oldPost.raw,
+    /You already renewed: use the room_credential that city_room_renew returned/,
+  );
+  f.advance(10 * 60_000 + 1);
   const stale = await readAsGuest(f.transport, first.credential);
   assert.equal(stale.ok, false);
   assert.equal(stale.code, 'room_credential_denied');
@@ -137,7 +149,8 @@ test('renew after expiry is refused', async (t) => {
   f.advance(86_400_000 + 1);
   const renewed = await renewAsGuest(f.transport, guest.credential);
   assert.equal(renewed.ok, false);
-  assert.equal(renewed.code, 'room_credential_denied');
+  // Expired, not "denied": the answer points at a rejoin link, never at another renew (#767).
+  assert.equal(renewed.code, 'room_credential_expired');
   assert.ok(!renewed.raw.includes(guest.credential));
 });
 
@@ -157,4 +170,22 @@ test('renew after the host removes the member is refused', async (t) => {
   // The member hears why.
   assert.equal(renewed.code, 'removed_from_room');
   assert.ok(!renewed.raw.includes(guest.credential));
+});
+
+test('a keyed join replayed after a renew never returns the superseded credential', async (t) => {
+  const f = await fixture(t);
+  const key = randomUUID();
+  const joined = await joinWithInvite(f.transport, f.code, SMOKE_GUEST_NAME, key);
+  assert.equal(joined.ok, true, joined.raw);
+  const first = joined.guest!;
+  const renewed = await renewAsGuest(f.transport, first.credential);
+  assert.equal(renewed.ok, true, renewed.raw);
+  f.advance(60_000);
+  const replay = await joinWithInvite(f.transport, f.code, SMOKE_GUEST_NAME, key);
+  assert.ok(!replay.raw.includes(first.credential), replay.raw);
+  assert.equal(replay.ok, false, replay.raw);
+  assert.equal(replay.code, 'room_credential_invalid');
+  // The renewed credential stays live.
+  const read = await readAsGuest(f.transport, renewed.credential!);
+  assert.equal(read.ok, true, read.raw);
 });

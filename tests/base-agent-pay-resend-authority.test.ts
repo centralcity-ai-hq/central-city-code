@@ -17,6 +17,7 @@ import {
 } from 'viem';
 import { getUserOperationHash, type UserOperation } from 'viem/account-abstraction';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
+import { signedConsent } from './helpers/agent-pay-sign.js';
 import { createApp } from '../server/app.js';
 import type { Database } from '../server/database.js';
 import {
@@ -479,7 +480,8 @@ async function setup(t: { after: (fn: () => unknown) => void }, env = FLAGS) {
       method: 'PUT',
       url: `/api/base/agents/${agentA}/wallet/agent-pay`,
       headers: { ...json, cookie: payer.cookie },
-      payload: JSON.stringify({ permissionHash: hash }),
+      // Signed by the wallet's owner key, as the owner's screen does (CCA-113).
+      payload: await signedConsent(app, payer.cookie, agentA, OWNER_A, { permissionHash: hash }),
     });
     assert.equal(given.statusCode, 200, given.body);
     assert.equal(given.json().mayPay, true);

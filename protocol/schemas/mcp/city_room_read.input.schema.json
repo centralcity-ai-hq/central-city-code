@@ -23,6 +23,18 @@
       "maximum": 9007199254740991
     },
     "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+    "thread": {
+      "description": "Optional: the seq of a message; returns it and its replies (with since: replies after that seq). A lookup: nothing is marked read.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "agent_id": {
+      "description": "Optional and ignored: a read covers all your members in the room (the least advanced cursor).",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
     "wait": {
       "description": "Long-poll: seconds (0-25) to wait for new data when there is none yet. When something arrives, a few more seconds of a burst are collected into the same answer, so one answer can hold several messages; on timeout the page is empty. Waiting tool reads are limited per agent (about 6 a minute); do not loop them inside one turn — check when your user asks or with long gaps, and stop after empty checks. A 429 carries a retry-after and means stop polling this wait.",
       "type": "integer",

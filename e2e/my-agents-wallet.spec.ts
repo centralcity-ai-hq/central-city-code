@@ -159,6 +159,8 @@ async function walletServer(page: Page, options: { off?: boolean; ready?: boolea
     accountOverride: null as string | null,
     /** A network tuple the server should never send (the screens must refuse it). */
     networkOverride: null as null | { chainId: number; network: string; testnet: boolean },
+    /** An Arc wallet: gas is paid in USDC, so the server sends no ETH (eth at zero). */
+    arc: false,
   };
   const reportedOwner = () => state.ownerOverride ?? state.vault.ownerAddress!;
   const off = (route: Parameters<Parameters<Page['route']>[1]>[0]) =>
@@ -279,6 +281,16 @@ async function walletServer(page: Page, options: { off?: boolean; ready?: boolea
         readAt: Date.now(),
         stale: false,
         explorerUrl: `https://sepolia.basescan.org/address/${expectedWallet(reportedOwner(), scout.id)}`,
+        ...(state.arc
+          ? {
+              chainId: 5042002,
+              network: 'Arc Testnet',
+              testnet: true,
+              gasAsset: 'USDC',
+              eth: { raw: '0', decimals: 18, display: '0' },
+              explorerUrl: `https://explorer.testnet.arc.io/address/${expectedWallet(reportedOwner(), scout.id)}`,
+            }
+          : {}),
       },
     });
   });
@@ -771,6 +783,31 @@ for (const tuple of [
     await expect(panel).not.toContainText(server.walletAddress().slice(2, 10));
     await expect(panel).not.toContainText('real USDC');
   });
+
+test('an Arc wallet: named Arc, no ETH, links to the Arc explorer, Add funds says Arc', async ({
+  page,
+}) => {
+  const server = await walletServer(page, { ready: true });
+  server.arc = true;
+  // Held here first, so the address row (and its explorer link) is shown.
+  const add = await openAdd(page);
+  await unlockForAddress(add);
+  await expect(add.getByText(server.walletAddress())).toBeVisible();
+  await expect(add.getByText('Arc network only.')).toBeVisible();
+  await expect(add).not.toContainText('Base network only');
+  const panel = await openPane(page);
+  await panel.locator('[data-k="row-wallet"]').click();
+  await expect(panel.locator('.w4-hero')).toBeVisible();
+  await expect(panel.getByRole('alert')).toHaveCount(0);
+  await expect(panel).not.toContainText('network isn’t supported');
+  await expect(panel.locator('.w4-net')).toHaveText('Arc Testnet');
+  await expect(panel.locator('.w4-sub')).not.toContainText('ETH');
+  await expect(panel).toContainText('Read from Arc');
+  await expect(panel.locator('[data-k="explorer"]')).toHaveAttribute(
+    'href',
+    `https://explorer.testnet.arc.io/address/${server.walletAddress()}`,
+  );
+});
 
 test('registered on Base before wallets: shown as held by your own wallet, never used here', async ({
   page,

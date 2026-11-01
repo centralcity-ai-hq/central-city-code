@@ -11,8 +11,12 @@ Developer Platform). This page is the overview; the code is in `server/base/chai
 | Verifying paymaster | Pays the gas of the operations Central City signs a sponsorship for, from its EntryPoint deposit.  | `0x8Bf5b18b733a864c17Cd92615cD45D833Fcfe105` on Base |
 | Sponsorship signer  | Signs each sponsorship off-chain after the policy and budget checks. It never sends a transaction. | `0x5DF424aB1BD45ce2faCBbC002Aa53504CF5710A5`         |
 | Bundler submitter   | Sends `handleOps` to the EntryPoint v0.6 and is repaid by it as the beneficiary.                   | `0xbbd1B99822d03a1C46F8b4C063dd1a66fCCa1D47`         |
-| Paymaster owner     | Admin actions only: deposits, withdrawals, signer rotation, bundler allowlist.                     | `0x3Cc6b541a88fcE61d4eA769703fA5025cCF498d1`         |
+| Paymaster owner     | Admin actions only: deposits, withdrawals, signer rotation, bundler allowlist.                     | `owner()` on chain                                   |
 | EntryPoint v0.6     | The standard ERC-4337 entry point the agents' smart accounts use.                                  | `0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789`         |
+
+The owner history, the deploy transaction's
+constructor arguments and the upstream release are recorded in the private operations repository; the addresses are fixed in code in
+`shared/base/own-paymaster-record.ts`.
 
 The live configuration is public: `GET /api/public/paymaster` answers the mode, the chain, the
 EntryPoint, the paymaster, the signer and submitter addresses, the configured bundler

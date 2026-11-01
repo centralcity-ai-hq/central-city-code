@@ -64,6 +64,7 @@ export function useBaseRegistration(
     cancelMakePublic: controller.cancelMakePublic,
     makePublicAndRegister: controller.makePublicAndRegister,
     setMode: controller.setMode,
+    setChain: controller.setChain,
   };
 }
 

@@ -49,16 +49,38 @@ export interface DraftKey {
   leaseId: string;
 }
 
-/** Writes (or replaces) the draft, only while the run holds its lease. */
+/**
+ * SQL: the Elric `agent` may still write in `room`, as elricRoomAccess's write check reads it
+ * (Elric active, its member row there not removed, the room open with responders allowed, the
+ * owner not muted there). A draft is shown and written only while this holds, so a pause, a
+ * removal or the host's off switch stops the draft at once, not when the model call ends.
+ */
+const elricMayWrite = (agent: string, room: string) => `EXISTS (
+  SELECT 1 FROM elric_agents e
+    JOIN room_members m ON m.room_id=${room} AND m.agent_id=e.agent_id AND m.kind='agent'
+     AND m.owner_id=e.owner_id AND m.removed_at IS NULL
+    JOIN rooms r ON r.id=${room} AND r.deleted_at IS NULL AND r.closed_at IS NULL
+     AND r.responders_allowed
+   WHERE e.agent_id=${agent} AND e.status='active'
+     AND NOT EXISTS (SELECT 1 FROM room_members x WHERE x.room_id=${room} AND x.owner_id=e.owner_id
+                       AND (x.muted_at IS NOT NULL OR x.notifications_muted)))`;
+
+/** Writes (or replaces) the draft, only while the run holds its lease and Elric may write. */
 export async function writeDraft(db: Q, key: DraftKey, text: string, time: number): Promise<void> {
   await db.query(
     `INSERT INTO elric_drafts(agent_id,room_id,source_seq,text,updated_at)
      SELECT $1,$2,$3,$4,$5 WHERE EXISTS (
        SELECT 1 FROM elric_invocations
         WHERE agent_id=$1 AND room_id=$2 AND source_seq=$3 AND lease_id=$6)
+       AND ${elricMayWrite('$1::text', '$2::text')}
      ON CONFLICT (agent_id,room_id,source_seq) DO UPDATE SET text=$4, updated_at=$5`,
     [key.agentId, key.roomId, key.sourceSeq, text, time, key.leaseId],
   );
+}
+
+/** Deletes every draft of one Elric (paused or revoked: nothing it was writing stays shown). */
+export async function deleteElricDrafts(db: Q, agentId: string): Promise<void> {
+  await db.query('DELETE FROM elric_drafts WHERE agent_id=$1', [agentId]);
 }
 
 /** Deletes drafts older than staleMs (a run that died without its finish). */
@@ -90,7 +112,8 @@ export interface PublicDraft {
 
 /**
  * The live drafts of a room, for an operator with an active member in it (else null: 404).
- * Only drafts answering a message the operator's member may see. As the room's access rule, a
+ * Only drafts answering a message the operator's member may see, of an Elric that may still
+ * write there. As the room's access rule, a
  * member counts only when it is a person or a live (not revoked) agent of the operator.
  */
 export async function roomDrafts(
@@ -123,8 +146,10 @@ export async function roomDrafts(
       text: string;
       updated_at: string | number;
     }>(
-      `SELECT agent_id,source_seq,text,updated_at FROM elric_drafts
-        WHERE room_id=$1 AND source_seq > $2 AND updated_at > $3 ORDER BY source_seq`,
+      `SELECT d.agent_id,d.source_seq,d.text,d.updated_at FROM elric_drafts d
+        WHERE d.room_id=$1 AND d.source_seq > $2 AND d.updated_at > $3
+          AND ${elricMayWrite('d.agent_id', 'd.room_id')}
+        ORDER BY d.source_seq`,
       [roomId, member.from_seq, time - DRAFT_LIMITS.staleMs],
     )
   ).rows;

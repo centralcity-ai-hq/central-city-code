@@ -4,9 +4,11 @@ import {
   agentPayFailure,
   agentPayPanel,
   allowAgentPay,
+  AgentPaySignError,
   boundsText,
   changedText,
   notStoredText,
+  passwordSigner,
   readAgentPay,
   recheckAllow,
   recipientLines,
@@ -32,6 +34,9 @@ import { limitText, type LimitView } from '../../base/wallet/limits';
  * confirm that fails for any other reason reads the view again too: the screen shows what is
  * stored, or says plainly that it can't tell, never just what it showed before.
  * Nothing shows while the server doesn't offer this (404) or the limit isn't active.
+ * Allowing is signed by the wallet's owner key (CCA-113): the owner types the wallet password, the
+ * vault key signs exactly what is sent, and the password is cleared after each attempt and when
+ * the page is hidden or left.
  */
 
 type Read =
@@ -65,6 +70,8 @@ export function AgentPayConsent({
   const [busy, setBusy] = useState<Busy>(null);
   const [error, setError] = useState('');
   const [confirming, setConfirming] = useState(false);
+  const [password, setPassword] = useState('');
+  const passwordId = useId();
   const headingId = useId();
   const questionId = useId();
   const promptId = useId();
@@ -110,6 +117,20 @@ export function AgentPayConsent({
     },
     [],
   );
+  // The typed password goes when the page is hidden or left.
+  useEffect(() => {
+    if (!password) return;
+    const clear = () => setPassword('');
+    const hidden = () => {
+      if (document.visibilityState === 'hidden') clear();
+    };
+    document.addEventListener('visibilitychange', hidden);
+    window.addEventListener('pagehide', clear);
+    return () => {
+      document.removeEventListener('visibilitychange', hidden);
+      window.removeEventListener('pagehide', clear);
+    };
+  }, [password]);
 
   useEffect(() => {
     const target = focusNext.current;
@@ -139,13 +160,20 @@ export function AgentPayConsent({
 
   async function allow(kind: 'allow' | 'also') {
     if (busy || read.k !== 'ready') return;
+    if (!password) {
+      setError('Type your wallet password: it signs this permission with your wallet key.');
+      focusNext.current = 'error';
+      return;
+    }
     // Exactly the view on screen: its limit and its confirmRecipients.
     const shown = read.view;
+    const signer = passwordSigner(password);
+    setPassword('');
     const mine = startRequest();
     setBusy(kind);
     setError('');
     try {
-      const result = await allowAgentPay(agentId, shown);
+      const result = await allowAgentPay(agentId, shown, signer);
       if (mine !== generation.current) return;
       if (result.kind === 'allowed') {
         setRead({ k: 'ready', view: result.view });
@@ -159,6 +187,12 @@ export function AgentPayConsent({
       }
     } catch (err) {
       if (mine !== generation.current) return;
+      // The wallet key couldn't sign (wrong password, another key): nothing was sent.
+      if (err instanceof AgentPaySignError) {
+        setError(err.message);
+        focusNext.current = 'error';
+        return;
+      }
       // Not refused for a change: without a clear answer it may still have been stored, so the
       // view is read again and the screen shows that, never just what it showed before.
       const check = await recheckAllow(agentId, shown, err);
@@ -277,6 +311,20 @@ export function AgentPayConsent({
   /** Null while the view is about another limit than the card, or none (both are read again). */
   const shown = panel.k === 'shown' ? panel : null;
 
+  // The wallet password that signs an allow (shown with the allow buttons only).
+  const passwordField = (
+    <label className="w4-field" htmlFor={passwordId}>
+      <span>Wallet password</span>
+      <input
+        id={passwordId}
+        type="password"
+        autoComplete="current-password"
+        data-k="agent-pay-password"
+        value={password}
+        onChange={(event) => setPassword(event.target.value)}
+      />
+    </label>
+  );
   // What the owner can do now: allow, answer the withdraw confirmation, or withdraw.
   const action = !shown ? null : !shown.allowed ? (
     <button
@@ -417,6 +465,7 @@ export function AgentPayConsent({
           <span id={promptId}>{withdrawPrompt(name)}</span>
         </p>
       ) : null}
+      {shown && (!shown.allowed || (shown.addsFeed && !confirming)) ? passwordField : null}
       {errorText}
       {action}
     </section>

@@ -206,8 +206,8 @@ test('parser DoS bounds: input is capped and deep nesting is flattened', () => {
   assert.ok((out.match(/<blockquote>/g) ?? []).length <= 26);
   const list = `${Array.from({ length: 500 }, (_, i) => `${'  '.repeat(i)}- x`).join('\n')}`;
   assert.ok(html(list).length > 0);
-  // Only the first 16 KB are parsed.
-  const tree = parseMarkdown(`${'a'.repeat(16_384)}TAIL`);
+  // Only the first 64 KB (MAX_MARKDOWN_CHARS) are parsed.
+  const tree = parseMarkdown(`${'a'.repeat(65_536)}TAIL`);
   assert.ok(!JSON.stringify(tree).includes('TAIL'));
 });
 
@@ -396,8 +396,8 @@ test('bidi override and isolate controls are removed (P3)', () => {
   assert.equal(withoutBidiControls('a‮b⁧c'), 'abc');
 });
 
-test('text past 16 KB is marked "(message truncated)" (P3)', () => {
-  assert.match(html(`${'word '.repeat(4_000)}`), /\(message truncated\)/);
+test('text past 64 KB is marked "(message truncated)" (P3)', () => {
+  assert.match(html(`${'word '.repeat(14_000)}`), /\(message truncated\)/);
   assert.doesNotMatch(html('short'), /truncated/);
 });
 

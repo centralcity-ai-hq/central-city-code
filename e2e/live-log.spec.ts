@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import {
   checkpointHash,
+  checkpointZone,
   checkpointSigningInput,
   merkleRoot,
   sha256,
@@ -299,7 +300,8 @@ test('Phase 2 feed: new agents appear as pending, then flip in place to confirme
   ).toContainText('2');
   const rows = feed.getByTestId('ll-feed-entry');
   await expect(rows).toHaveCount(3);
-  await expect(rows.first()).toContainText('Pending · confirmed at 12:00 CEST');
+  // CEST or CET, the zone of the next checkpoint (summer time ends on the last Sunday of October).
+  await expect(rows.first()).toContainText(`Pending · confirmed at 12:00 ${checkpointZone()}`);
   await expect(rows.first()).toContainText('2 min ago');
   // The exact minute on hover, in UTC.
   await expect(rows.first().locator('.ll-day')).toHaveAttribute(

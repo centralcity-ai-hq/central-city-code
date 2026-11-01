@@ -4,7 +4,8 @@ import { z } from 'zod';
 import type { Database, Transaction } from '../database.js';
 import type { HostedConfig } from '../hosted.js';
 import { requestOrigin } from '../oauth/server.js';
-import { clientAddressKey, type RateLimiter } from '../rate-limit.js';
+import { clientAddressKey, type RateLimiter, type RateLimitResult } from '../rate-limit.js';
+import { admitNameCheck } from '../signup-admission.js';
 import {
   GOOGLE_ENDPOINTS,
   GOOGLE_LIMITS,
@@ -80,7 +81,8 @@ export interface GoogleSignInDeps {
    * Without it, an unknown Google account is refused (`not_linked`).
    */
   signup?: {
-    registrationsPerWindow: number;
+    /** The sign-up admission shared with the password sign-up (signup-admission.ts). */
+    admit(ip: string): Promise<RateLimitResult>;
     create(
       tx: Transaction,
       id: string,
@@ -132,7 +134,6 @@ export type GoogleOutcome =
 export const GOOGLE_SALT_PENDING_NAME = `${'0'.repeat(31)}1`;
 export const GOOGLE_SALT_NO_PASSWORD = '0'.repeat(32);
 const googleOnlyPasswordHash = () => randomBytes(64).toString('hex');
-const REGISTRATION_WINDOW_MS = 15 * 60_000;
 class Rollback extends Error {
   constructor(public outcome: GoogleOutcome) {
     super(outcome);
@@ -276,16 +277,20 @@ export function registerGoogleSignInRoutes(app: FastifyInstance, d: GoogleSignIn
           )
         ).rows[0]
       : undefined;
-    const handleNeeded = signedIn
+    const salt = signedIn
       ? (
           await d.db.query<{ salt: string }>('SELECT salt FROM operators WHERE id=$1', [
             signedIn.id,
           ])
-        ).rows[0]?.salt === GOOGLE_SALT_PENDING_NAME
-      : false;
+        ).rows[0]?.salt
+      : undefined;
     return {
       enabled: on,
-      handle_needed: handleNeeded,
+      handle_needed: salt === GOOGLE_SALT_PENDING_NAME,
+      // No password to fall back on: the unlink route refuses it (google_only).
+      ...(salt === GOOGLE_SALT_PENDING_NAME || salt === GOOGLE_SALT_NO_PASSWORD
+        ? { google_only: true }
+        : {}),
       linked: linked
         ? {
             email: linked.email,
@@ -586,13 +591,8 @@ export function registerGoogleSignInRoutes(app: FastifyInstance, d: GoogleSignIn
     if (await emailTaken(d.db)) return 'email_exists';
     // A Google account unlinked within 30 days cannot start a new account either.
     if (await cooldownBlocks(d.db, identity.sub, '', d.clock())) return 'relink_cooldown';
-    // The password sign-up's per-address budget (the same bucket).
-    const budget = await d.limiter.hit(
-      `register:${clientAddressKey(request.ip)}`,
-      signup.registrationsPerWindow,
-      REGISTRATION_WINDOW_MS,
-    );
-    if (!budget.allowed) return 'signup_limited';
+    // The password sign-up's admission (the same buckets).
+    if (!(await signup.admit(request.ip)).allowed) return 'signup_limited';
     const id = randomUUID();
     try {
       return await d.db.transaction(async (tx): Promise<GoogleOutcome> => {
@@ -636,6 +636,15 @@ export function registerGoogleSignInRoutes(app: FastifyInstance, d: GoogleSignIn
       (await person(request)) ?? refuse(401, 'sign_in_required', 'Sign in to continue.');
     await limit(`register:handle:${signedIn.id}`, GOOGLE_LIMITS.ageWritesPerAccount);
     const { name } = handleInput.parse(request.body ?? {});
+    // Each name check also spends the per-address name-check budget, before the lookup.
+    const check = await admitNameCheck(d.limiter, request.ip);
+    if (!check.allowed)
+      throw new GoogleSignInError(
+        429,
+        'rate_limited',
+        'Too many requests. Try again later.',
+        check.retryAfterMs,
+      );
     const outcome = await d.db.transaction(async (tx) => {
       const row = (
         await tx.query<{ salt: string }>('SELECT salt FROM operators WHERE id=$1 FOR UPDATE', [

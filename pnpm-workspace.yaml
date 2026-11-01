@@ -2,3 +2,11 @@ packages:
   - .
 allowBuilds:
   esbuild: true
+# Patched releases of a transitive dependency (fastify's URI parser) until fastify pins them itself.
+overrides:
+  fast-uri@3: 3.1.9
+  fast-uri@4: 4.2.3
+  # Development only (the Solidity compiler's SMT helper, never in production): the patched tmp
+  # release until solc depends on one itself (GHSA-52f5-9888-hmc6, GHSA-ph9p-34f9-6g65,
+  # GHSA-7c78-jf6q-g5cm).
+  tmp@0: 0.2.7

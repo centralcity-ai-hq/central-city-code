@@ -72,10 +72,16 @@ function open(key: Uint8Array, sealed: Uint8Array, aad: Uint8Array): Buffer {
   const decipher = createDecipheriv('aes-256-gcm', key, buffer.subarray(0, IV_BYTES));
   decipher.setAAD(aad);
   decipher.setAuthTag(buffer.subarray(buffer.length - TAG_BYTES));
-  return Buffer.concat([
-    decipher.update(buffer.subarray(IV_BYTES, buffer.length - TAG_BYTES)),
-    decipher.final(),
-  ]);
+  // The intermediate plaintext chunks are zeroed once copied (CCA-719); only the result remains,
+  // and the caller zeroes it.
+  const parts: Buffer[] = [];
+  try {
+    parts.push(decipher.update(buffer.subarray(IV_BYTES, buffer.length - TAG_BYTES)));
+    parts.push(decipher.final());
+    return Buffer.concat(parts);
+  } finally {
+    for (const part of parts) part.fill(0);
+  }
 }
 
 const aadFor = (keyId: string, kekVersion: number) => Buffer.from(`${keyId}|${kekVersion}`, 'utf8');
@@ -121,6 +127,18 @@ export function createKeystore(deps: {
     },
 
     /**
+     * The stored public address of a key, WITHOUT decrypting it (CCA-719): for paths that only
+     * compare or show the address. Signing still goes through withSigner, which checks the
+     * decrypted key against this same stored address.
+     */
+    async addressOf(keyRef: string): Promise<Address> {
+      const { kekVersion, keyId } = parseKeyRef(keyRef);
+      const row = await deps.store.get(keyId);
+      if (!row || row.kekVersion !== kekVersion) throw new Error('Spender key not found.');
+      return row.signerAddress;
+    },
+
+    /**
      * Runs `use` with the decrypted signer, then zeroes the plaintext. The account object must not
      * escape `use`; sign inside it and return only signatures.
      */
@@ -148,4 +166,47 @@ export function createKeystore(deps: {
       }
     },
   };
+}
+
+/**
+ * Re-encrypts one stored key under the CURRENT KEK version (scripts/rewrap-spender-keys.ts).
+ * Both GCM layers bind keyId||kekVersion, so the data key AND the ciphertext are sealed again
+ * (fresh data key, fresh IVs); the key itself and its address are unchanged and checked. The
+ * key's ref becomes `v<current>:<keyId>`: every reference to the old ref must move with it.
+ * Plaintext buffers are zeroed. Throws when the row's version is unavailable or already current.
+ */
+export function rewrapStoredSpenderKey(
+  row: Pick<
+    StoredSpenderKey,
+    'keyId' | 'kekVersion' | 'wrappedDek' | 'ciphertext' | 'signerAddress'
+  >,
+  keks: KeyEncryptionKeys,
+): { kekVersion: number; wrappedDek: Uint8Array; ciphertext: Uint8Array; keyRef: string } {
+  if (row.kekVersion === keks.current) throw new Error('The key is already under the current KEK.');
+  const from = keks.keys.get(row.kekVersion);
+  if (!from) throw new Error('Key-encryption key version is not available.');
+  const to = keks.keys.get(keks.current)!;
+  const oldAad = aadFor(row.keyId, row.kekVersion);
+  const newAad = aadFor(row.keyId, keks.current);
+  const dek = open(from, row.wrappedDek, oldAad);
+  const fresh = randomBytes(32);
+  let secret: Buffer | null = null;
+  try {
+    secret = open(dek, row.ciphertext, oldAad);
+    if (
+      privateKeyToAccount(`0x${secret.toString('hex')}`).address.toLowerCase() !==
+      row.signerAddress.toLowerCase()
+    )
+      throw new Error('Spender key does not match its address.');
+    return {
+      kekVersion: keks.current,
+      wrappedDek: seal(to, fresh, newAad),
+      ciphertext: seal(fresh, secret, newAad),
+      keyRef: `v${keks.current}:${row.keyId}`,
+    };
+  } finally {
+    dek.fill(0);
+    fresh.fill(0);
+    secret?.fill(0);
+  }
 }

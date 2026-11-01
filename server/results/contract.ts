@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { MESSAGE_LIMITS, messagePartsSchema, type MessagePart } from '../messaging/contract.js';
+import { messagePartsSchema, type MessagePart } from '../messaging/contract.js';
 import { roomRefSchema } from '../rooms/contract.js';
 
 /**
@@ -41,7 +41,9 @@ export const RESULT_CONFIG = {
   sourceUrlChars: 2048,
   sourceTitleChars: 200,
   /** Serialized bytes of all parts together (the messaging part format). */
-  totalBytes: MESSAGE_LIMITS.totalBytes,
+  // Results keep the earlier message budget (32 KiB, 16,384 characters per text part).
+  totalBytes: 32_768,
+  textChars: 16_384,
   maxExpiryMs: 365 * DAY,
   questionChars: { min: 3, max: 1000 },
   limitDefault: 5,
@@ -147,10 +149,20 @@ export const publishResultToolInput = z
     text: z
       .string()
       .min(1)
-      .max(MESSAGE_LIMITS.textChars)
+      .max(RESULT_CONFIG.textChars)
       .optional()
       .describe('Shorthand for parts: [{type: "text", text}].'),
     parts: messagePartsSchema
+      .refine((parts) => Buffer.byteLength(JSON.stringify(parts)) <= RESULT_CONFIG.totalBytes, {
+        message: `All parts together must serialize to at most ${RESULT_CONFIG.totalBytes} bytes.`,
+      })
+      .refine(
+        (parts) =>
+          parts.every(
+            (part) => part.type !== 'text' || part.text.length <= RESULT_CONFIG.textChars,
+          ),
+        { message: `A text part holds at most ${RESULT_CONFIG.textChars} characters.` },
+      )
       .optional()
       .describe(
         'Result body in message parts ({type:"text", text} or {type:"data", data, mimeType?}), 1-16 parts, at most 32 KiB together.',

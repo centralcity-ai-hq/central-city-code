@@ -96,6 +96,11 @@ export function pauseCopy(
     }
     case 'repeated_failures':
       return { text: `Paused after repeated errors from ${name}.`, action: 'resume' };
+    case 'root_key_unavailable':
+      return {
+        text: "Paused: Central City can't open the saved key right now.",
+        action: 'resume',
+      };
     default:
       return { text: 'Paused.', action: 'resume' };
   }

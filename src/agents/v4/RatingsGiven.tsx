@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { ApiError } from '../../api';
 import { readRatingsGiven, type RatingGiven } from '../../base/wallet/rate';
 import { readWithdrawal } from '../../base/wallet/withdraw';
+import { chainWords } from '../../../shared/base/wallet-chains';
 import {
   givenDate,
   givenFollowed,
@@ -31,11 +32,15 @@ const FOLLOW_MAX = 5;
 
 export function RatingsGiven({
   agentId,
+  chainId,
   onPick,
 }: {
   agentId: string;
+  /** The rater's chain, from its wallet view: the words for it. */
+  chainId?: number;
   onPick: (rating: RatingGiven) => void;
 }) {
+  const words = chainWords(chainId);
   const [rows, setRows] = useState<RatingGiven[]>([]);
   useEffect(() => {
     let stop = false;
@@ -95,8 +100,8 @@ export function RatingsGiven({
       </p>
       <div className="ap4-group w4-list" role="list" aria-label="Ratings given">
         {rows.map((row) => {
-          const name = givenName(row);
-          const status = givenStatus(row);
+          const name = givenName(row, chainId);
+          const status = givenStatus(row, chainId);
           return (
             <div
               className="ap4-row v4s-still w4-given-row"
@@ -129,9 +134,9 @@ export function RatingsGiven({
                   href={row.explorerUrl}
                   target="_blank"
                   rel="noreferrer"
-                  aria-label={`Rating of ${name} on Basescan`}
+                  aria-label={`Rating of ${name} on ${words.explorer}`}
                 >
-                  Basescan
+                  {words.explorer}
                 </a>
               ) : null}
             </div>

@@ -47,3 +47,9 @@
 .result-facts dd {
   overflow-wrap: anywhere;
 }
+
+/* CCA-611: the destination host after a source title that does not name it. */
+.result-source-host {
+  color: var(--text-muted);
+  font: var(--type-meta);
+}

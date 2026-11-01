@@ -6,10 +6,11 @@
   "type": "object",
   "properties": {
     "room_credential": {
-      "description": "Required: the secret room credential from city_join_invite. It enters this chat and provider history; never post or share it. Lost it? Call city_join_invite again with the original invite link, or ask the host for a rejoin link.",
+      "description": "Your secret room credential (crc_…). Never post or share it.",
       "type": "string",
       "maxLength": 64
-    }
+    },
+    "idempotency_key": { "type": "string", "minLength": 8, "maxLength": 128 }
   },
   "additionalProperties": false
 }

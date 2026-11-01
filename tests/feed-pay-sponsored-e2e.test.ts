@@ -8,10 +8,11 @@ import { HOSTED_SOURCE } from '../server/feed/types.js';
 import type { FeedPayOp } from '../server/base/chain/feed-pay-chain.js';
 import type { AuthorizationStore, IssuedAuthorization } from '../server/base/chain/x402.js';
 import type { Router3FacilitatorPort } from '../server/feed/pay/router3.js';
-import { createSponsorSigner } from '../server/feed/pay/sponsor-signer.js';
+import { createSponsorSigner, pgSponsorReservations } from '../server/feed/pay/sponsor-signer.js';
 import { AGENT_URI_ORIGIN } from '../shared/base/on-base.js';
 import { BASE_NETWORKS, type Address } from '../shared/base/chains.js';
 import { offerInputSummary, offerOutputSummary } from '../shared/feed-offers.js';
+import { PROTOCOL_BASE_MAINNET } from '../shared/protocol.js';
 import { setup } from './helpers/feed-pay-app.js';
 import { WALLET_EXPECTED } from './wallet-network-fixture.js';
 
@@ -23,8 +24,10 @@ import { WALLET_EXPECTED } from './wallet-network-fixture.js';
  */
 
 const SELLER = getAddress(`0x${'5e'.repeat(20)}`);
-const ROUTER3 = getAddress(`0x${'43'.repeat(20)}`);
-const TREASURY = getAddress(`0x${'7e'.repeat(20)}`);
+// Base mainnet: router 3 and the treasury are fixed in code (shared/protocol.ts), and the engine's
+// pre-send checks compare the router's treasury() with the code's before the sponsor signs.
+const ROUTER3 = PROTOCOL_BASE_MAINNET.feeRouter3;
+const TREASURY = PROTOCOL_BASE_MAINNET.treasury;
 const START = Date.now() - 3_600_000;
 
 function fakeFacilitator() {
@@ -77,17 +80,23 @@ test('sponsored first purchase end to end: owner session → sponsor signs → i
     now: Date.now,
     router: ROUTER3,
     treasuryOf: async () => TREASURY,
+    // The signer reads the stored reservation itself (lazily: the database exists by the first sign).
+    reservationOf: (key) => pgSponsorReservations(f.db)(key),
   });
   let workspace = '';
+  let sponsorUsdc = 1_000_000_000n;
   const f = await setup(t, {
     sponsorPay: async () => ({
       signer,
       facilitator: facilitator.port,
-      usdcBalance: async () => 1_000_000_000n,
+      usdcBalance: async () => sponsorUsdc,
       expiredUnused: async () => false,
     }),
   });
   workspace = f.owner.id;
+  // Router 3 on the fake Base: code, limits, token, treasury and nonceFor (its readiness probe).
+  f.base.state.feeRouter3 = { router: ROUTER3, treasury: TREASURY };
+  f.base.state.code.add(ROUTER3.toLowerCase());
   // A Central City hosted 'hash' offer for 0.10 USDC, sold by another (fleet) workspace.
   const offerId = 'off_aaaaaaaaaaaaaaaa';
   const url = `https://centralcity.ai/api/public/x402/${offerId}`;
@@ -174,6 +183,16 @@ test('sponsored first purchase end to end: owner session → sponsor signs → i
   // Signed out: 401. Without use_credit: 400 (never a normal paid call).
   assert.equal((await post(body, '')).statusCode, 401);
   assert.equal((await post({ ...body, use_credit: undefined })).statusCode, 400);
+
+  // The sponsor is low: a pause, retryable, with the wait; nothing is used up.
+  sponsorUsdc = 0n;
+  const paused = await post(body);
+  assert.equal(paused.statusCode, 503, paused.body);
+  assert.equal(paused.json().code, 'unavailable');
+  assert.equal(paused.json().retryable, true);
+  assert.equal(paused.headers['retry-after'], '15');
+  sponsorUsdc = 1_000_000_000n;
+  f.advance(11_000); // past the cached balance
 
   const started = await post(body);
   assert.equal(started.statusCode, 200, started.body);

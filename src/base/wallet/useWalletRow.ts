@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { chainWords } from '../../../shared/base/wallet-chains';
 import { readWallet, usdcAmountText, type WalletRead } from './api';
 
 /** The row's value when the read failed: still shown, so the Wallet screen (with retry) opens. */
@@ -10,7 +11,7 @@ export function walletRowValue(read: WalletRead): string | null {
   if (read.kind === 'wallet') return `${usdcAmountText(read.wallet.usdc)} USDC`;
   if (read.kind === 'none') return 'Set up';
   if (read.kind === 'registered_elsewhere') return 'In your own wallet';
-  return 'Base isn’t answering';
+  return `${chainWords(read.chainId).on} isn’t answering`;
 }
 
 /**

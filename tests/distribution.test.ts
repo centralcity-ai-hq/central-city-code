@@ -682,7 +682,8 @@ test('vercel.json keeps every existing route and serves the discovery files corr
   assert.equal(vercel.buildCommand, 'pnpm build && rm -rf dist/.vite');
   assert.equal(vercel.outputDirectory, 'dist');
   assert.deepEqual(vercel.functions, {
-    'api/index.js': { maxDuration: 300, includeFiles: 'api/_bundle/*.map' },
+    // The whole bundle directory ships: the PDF text worker is started by path, not imported.
+    'api/index.js': { maxDuration: 300, includeFiles: 'api/_bundle/**' },
   });
   const agent = randomUUID();
   for (const path of [

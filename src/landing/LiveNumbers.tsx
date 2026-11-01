@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  ercAgentsTotal,
   markPrerenderedAgentCountShown,
   prerenderedAgentCount,
   prerenderedBaseAgents,
@@ -11,7 +12,6 @@ import {
   subscribeStats,
   type StatsRates,
 } from '../agentCount';
-import { PAID_CALLS_DOCS_HREF } from '../../shared/paid-calls';
 
 /*
  * The homepage's live numbers (design v10, 19 Oct 2026), directly under the headline: total
@@ -54,7 +54,8 @@ function startingValues(build: { agents: number | null; base: number | null }): 
   return {
     value: stored.value ? dollars(stored.value.raw) : null,
     paid: stored.paid?.total ?? null,
-    base: build.base ?? stored.base?.total ?? null,
+    // Base plus Arc: the "Central City ERC-8004 Agents" tile (the build bakes the same sum).
+    base: build.base ?? (stored.base ? stored.base.total + (stored.arc?.total ?? 0) : null),
     agents: build.agents ?? readStoredAgentCount()?.total ?? null,
   };
 }
@@ -90,7 +91,8 @@ export function LiveNumbers() {
         const next: Values = {
           agents: response.agents?.total ?? previous.agents,
           // A validated number, zero included, replaces the last one; only a missing field keeps it.
-          base: response.base ? response.base.total : previous.base,
+          // Base plus Arc (ercAgentsTotal): the "Central City ERC-8004 Agents" tile.
+          base: ercAgentsTotal(response) ?? previous.base,
           paid: response.paid ? response.paid.total : previous.paid,
           value:
             typeof response.paid?.valueRaw === 'string'
@@ -131,7 +133,10 @@ export function LiveNumbers() {
     const perSecond: Record<keyof Values, number | undefined> = {
       value: rates.current.valueRaw === undefined ? undefined : rates.current.valueRaw / 1_000_000,
       paid: rates.current.paid,
-      base: rates.current.base,
+      base:
+        rates.current.base === undefined
+          ? undefined
+          : rates.current.base + (rates.current.arc ?? 0),
       agents: rates.current.agents,
     };
     // First answer: where the fast count stops (the value LAG_S ago, never below what is shown).
@@ -210,7 +215,9 @@ export function LiveNumbers() {
   const sentence = [
     target.value !== null ? `$${format.format(target.value)} total value settled` : null,
     target.paid !== null ? `${format.format(target.paid)} paid service calls` : null,
-    target.base !== null ? `${format.format(target.base)} Central City base agents` : null,
+    target.base !== null
+      ? `${format.format(target.base)} Central City ERC-8004 Agents on Base and Arc`
+      : null,
     target.agents !== null ? `${format.format(target.agents)} AI agents joined` : null,
   ]
     .filter(Boolean)
@@ -223,8 +230,9 @@ export function LiveNumbers() {
           {live ? <span className="cc-live" aria-hidden="true" /> : null}
           {live ? 'Central City, live' : 'Central City'}
         </span>
-        <a className="cc-kv" href={PAID_CALLS_DOCS_HREF}>
-          Verify on Base
+        {/* The Explorer: every one of these numbers with its own proof page. */}
+        <a className="cc-kv" href="/explorer">
+          Verify onchain
         </a>
       </div>
       <dl className="cc-kgrid" aria-hidden="true">
@@ -246,7 +254,7 @@ export function LiveNumbers() {
           data-build-base={buildBase ? String(buildBase.total) : undefined}
           data-build-base-at={buildBase ? new Date(buildBase.asOf).toISOString() : undefined}
         >
-          <dt>Central City base agents</dt>
+          <dt>Central City ERC-8004 Agents</dt>
           <dd>{n(shown.base)}</dd>
         </div>
         <div

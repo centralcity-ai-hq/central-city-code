@@ -83,6 +83,7 @@ test('the contract mirrors #93: limits, defaults and pause reasons', () => {
     'quota',
     'rate_limited',
     'repeated_failures',
+    'root_key_unavailable',
   ]);
 });
 
@@ -162,6 +163,7 @@ test('every pause reason reads as plain words with the action that resolves it',
     model_unavailable: [/can't use the chosen model/, 'pick_model'],
     rate_limited: [/^Paused for 15 min: OpenAI rate limit\. It resumes by itself\.$/, null],
     repeated_failures: [/^Paused after repeated errors from OpenAI\.$/, 'resume'],
+    root_key_unavailable: [/^Paused: Central City can't open the saved key right now\.$/, 'resume'],
   };
   for (const reason of PAUSE_REASONS) {
     const copy = pauseCopy(reason, 'openai', '2026-09-28T10:15:00Z', now);

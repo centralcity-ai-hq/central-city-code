@@ -13,10 +13,22 @@
  * (409 scope_changed) and read again, so the owner looks at the narrower terms before confirming.
  * A changed limit (409 limit_changed) is read again too, and so is a confirm that failed for any
  * other reason (it may have been stored even without an answer): the screen shows what is stored,
- * or says plainly that it can't tell. Nothing here moves money or signs anything.
+ * or says plainly that it can't tell. Nothing here moves money.
+ *
+ * The permission is signed by the wallet's owner key (CCA-113): the confirm unlocks the vault with
+ * the wallet password, signs exactly what is sent (the limit, the recipients, a one-time nonce and
+ * the time; shared/base/agent-pay-consent.ts) and sends the signature with it. A console session
+ * alone can't give the permission. Withdrawing needs no signature.
  */
+import { getAddress, isAddress, type Hex } from 'viem';
+import { privateKeyToAccount, signTypedData } from 'viem/accounts';
 import { api, ApiError } from '../../api';
 import { DEFAULT_PER_CALL_MAX_RAW } from '../../../shared/feed-pay';
+import { agentPayConsentTypedData } from '../../../shared/base/agent-pay-consent';
+import { walletChain } from '../../../shared/base/wallet-chains';
+import { UNSUPPORTED_NETWORK } from '../stalePage';
+import { unlockVault } from '../vault/vault';
+import { chainRefusal } from './api';
 import { usdcText } from './limits';
 
 /** Who an agent with this permission may pay: Central City agents, and Feed services when confirmed. */
@@ -50,6 +62,8 @@ export interface AgentPayView {
     coversCurrentLimit: boolean;
   } | null;
   mayPay: boolean;
+  /** What the owner key signs a confirm for: the agent's wallet, the token, and its owner key. */
+  signing?: { wallet: string; token: string; owner: string };
   /** What a confirm from this view stores: sent back exactly as read. */
   confirmRecipients: AgentPayRecipients;
   /** The permission covers Central City agents only, and confirming again adds Feed services. */
@@ -139,6 +153,41 @@ const CHANGES: Readonly<Record<string, AgentPayChange>> = {
   no_spending_limit: 'limit',
 };
 
+/** Signs the consent's typed data with the owner key; throws AgentPaySignError when it can't. */
+export type ConsentSigner = (
+  typedData: ReturnType<typeof agentPayConsentTypedData>,
+  owner: string,
+) => Promise<Hex>;
+
+/** The owner key couldn't sign (wrong password, another key): nothing was sent. */
+export class AgentPaySignError extends Error {}
+
+/** The signer for the wallet password typed on the screen: the vault key, which must be the owner's. */
+export function passwordSigner(password: string): ConsentSigner {
+  return async (typedData, owner) => {
+    let privateKey: Hex;
+    try {
+      privateKey = await unlockVault(password);
+    } catch (error) {
+      throw new AgentPaySignError(
+        error instanceof Error && error.message
+          ? error.message
+          : 'That password didn’t unlock your wallet key.',
+      );
+    }
+    if (privateKeyToAccount(privateKey).address !== getAddress(owner))
+      throw new AgentPaySignError(
+        'Your wallet key isn’t this wallet’s owner, so nothing was signed.',
+      );
+    return signTypedData({ privateKey, ...typedData });
+  };
+}
+
+const randomNonce = (): Hex => {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return `0x${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`;
+};
+
 export type AllowResult =
   | { kind: 'allowed'; view: AgentPayView }
   /** Nothing was stored; `view` is the one read again (null: no longer offered here). */
@@ -149,14 +198,45 @@ export type AllowResult =
  * `confirmRecipients` being the wider one). A 409 because what it covers or the limit changed reads
  * the view again and answers it, for the owner to look at before confirming again.
  */
-export async function allowAgentPay(agentId: string, shown: AgentPayView): Promise<AllowResult> {
+export async function allowAgentPay(
+  agentId: string,
+  shown: AgentPayView,
+  sign: ConsentSigner,
+  now: () => number = Date.now,
+): Promise<AllowResult> {
   const body = consentRequest(shown);
   if (!body) {
     const read = await readAgentPay(agentId);
     return { kind: 'changed', change: 'limit', view: read.kind === 'view' ? read.view : null };
   }
+  if (!shown.signing) throw new AgentPaySignError('This page can’t sign this yet. Read it again.');
+  // Signed for a chain this build lists, and its own USDC: neither is taken on the server's word.
+  const chain = walletChain(shown.chainId);
+  if (!chain) throw new AgentPaySignError(UNSUPPORTED_NETWORK);
+  if (!isAddress(shown.signing.token) || getAddress(shown.signing.token) !== chain.owner.usdc)
+    throw new AgentPaySignError('This permission names a different token.');
+  const nonce = randomNonce();
+  const issuedAt = now();
+  // Signed before anything is sent: a failed unlock sends nothing (AgentPaySignError).
+  const signature = await sign(
+    agentPayConsentTypedData({
+      chainId: chain.chainId,
+      wallet: shown.signing.wallet,
+      token: shown.signing.token,
+      permissionHash: body.permissionHash,
+      recipients: body.recipients,
+      nonce,
+      issuedAt,
+    }),
+    shown.signing.owner,
+  );
   try {
-    return { kind: 'allowed', view: viewOf(await api<unknown>(path(agentId), body, 'PUT')) };
+    return {
+      kind: 'allowed',
+      view: viewOf(
+        await api<unknown>(path(agentId), { ...body, nonce, issuedAt, signature }, 'PUT'),
+      ),
+    };
   } catch (error) {
     const change =
       error instanceof ApiError && error.status === 409 && error.code
@@ -376,7 +456,14 @@ export function changedText(
 
 /** A failed request, in plain words. */
 export function agentPayFailure(error: unknown): string {
-  if (error instanceof ApiError || error instanceof AgentPayReadError) return error.message;
+  const refused = chainRefusal(error);
+  if (refused) return refused;
+  if (
+    error instanceof ApiError ||
+    error instanceof AgentPayReadError ||
+    error instanceof AgentPaySignError
+  )
+    return error.message;
   return 'Something went wrong. Try again.';
 }
 

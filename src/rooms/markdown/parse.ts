@@ -9,7 +9,7 @@ import type { Nodes, Root } from 'mdast';
 import { tooComplexForMarkdown } from './guard';
 
 /** The server's text limit per part; the parser never sees more (DoS bound). */
-export const MAX_MARKDOWN_CHARS = 16_384;
+export const MAX_MARKDOWN_CHARS = 65_536;
 
 export type ParseResult = { tree: Root } | { plain: true };
 

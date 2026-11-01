@@ -5,9 +5,12 @@
  * Mainnet is listed but disabled until the mainnet gate is opened (CITY_BASE_MAINNET=1).
  */
 
+import type { ArcChainId } from '../chains.js';
+
 export type Address = `0x${string}`;
 
 export const BASE_SEPOLIA = 84532;
+
 export const BASE_MAINNET = 8453;
 export const ANVIL = 31337;
 export type BaseChainId = typeof BASE_SEPOLIA | typeof BASE_MAINNET | typeof ANVIL;
@@ -30,7 +33,7 @@ export interface TokenInfo {
 }
 
 export interface BaseNetwork {
-  chainId: BaseChainId;
+  chainId: BaseChainId | ArcChainId;
   name: string;
   /** False until the gate for this network is open. */
   enabledByDefault: boolean;
@@ -44,7 +47,8 @@ export interface BaseNetwork {
     /** ERC-8004 Reputation Registry (feedback after real interactions; owners cannot rate their own agents). */
     reputationRegistry: Address;
   };
-  tokens: Record<'USDC' | 'ETH', TokenInfo>;
+  /** No ETH on Arc: its native balance is USDC, and nothing may name it a second time. */
+  tokens: { USDC: TokenInfo; ETH?: TokenInfo };
   /** The env var holding the CDP bundler/paymaster URL (it contains the key: never the URL itself). */
   bundlerEnv: string;
   /** Blocks after inclusion before an operation counts as final. */
@@ -58,7 +62,7 @@ const SHARED = {
   entryPointV07: '0x0000000071727De22E5E9d8BAf0edAc6f37da032',
 } as const satisfies Record<string, Address>;
 
-const ETH: TokenInfo = { symbol: 'ETH', address: NATIVE_ETH, decimals: 18 };
+export const ETH_TOKEN: TokenInfo = { symbol: 'ETH', address: NATIVE_ETH, decimals: 18 };
 
 export const BASE_NETWORKS: Readonly<Record<BaseChainId, BaseNetwork>> = Object.freeze({
   [BASE_SEPOLIA]: {
@@ -77,7 +81,7 @@ export const BASE_NETWORKS: Readonly<Record<BaseChainId, BaseNetwork>> = Object.
         decimals: 6,
         eip712: { name: 'USDC', version: '2' },
       },
-      ETH,
+      ETH: ETH_TOKEN,
     },
     bundlerEnv: 'CITY_BASE_CDP_SEPOLIA_RPC_URL',
     confirmations: 3,
@@ -98,7 +102,7 @@ export const BASE_NETWORKS: Readonly<Record<BaseChainId, BaseNetwork>> = Object.
         decimals: 6,
         eip712: { name: 'USD Coin', version: '2' },
       },
-      ETH,
+      ETH: ETH_TOKEN,
     },
     bundlerEnv: 'CITY_BASE_CDP_RPC_URL',
     confirmations: 12,
@@ -120,7 +124,7 @@ export const BASE_NETWORKS: Readonly<Record<BaseChainId, BaseNetwork>> = Object.
         decimals: 6,
         eip712: { name: 'USDC', version: '2' },
       },
-      ETH,
+      ETH: ETH_TOKEN,
     },
     bundlerEnv: 'CITY_BASE_ANVIL_RPC_URL',
     confirmations: 1,

@@ -1,5 +1,6 @@
 import {
   FEED_ERRORS,
+  FEED_FRESH_STEP_MS,
   FEED_LIMITS,
   FEED_RESPOND_ERRORS,
   FEED_PATHS,
@@ -357,11 +358,11 @@ type Common = {
 /**
  * A list read again past every cache (cursor_stale, Try again) carries a throwaway `fresh`
  * parameter: the browser's no-store does not reach past the edge, which keeps a page for up to
- * about 3 minutes (and with it the cursor that just went stale). The services route ignores
- * parameters it does not know; the requests route refuses them, so only services get it.
+ * about 3 minutes (and with it the cursor that just went stale). Only the services route takes it
+ * (the requests route refuses it), as a time rounded down to FEED_FRESH_STEP_MS.
  */
 export function freshParam(search: string, now = Date.now()): string {
-  return `${search}${search ? '&' : '?'}fresh=${now}`;
+  return `${search}${search ? '&' : '?'}fresh=${now - (now % FEED_FRESH_STEP_MS)}`;
 }
 
 export function getServices(filters: OfferedFilters, cursor: string | null, options: Common = {}) {
@@ -508,6 +509,13 @@ export function feedErrorCopy(error: unknown, action: FeedAction): FeedCopy {
         detail: 'x402 Bazaar may no longer list it, or it was hidden.',
       };
     case 'request_not_found':
+      // Close answers this for any request the link or account may not close, so it says both.
+      if (action === 'close')
+        return {
+          title: "This link can't close the request.",
+          detail:
+            'Use the private link shown when it was posted, or the account that posted it. It may also have been closed, expired or hidden.',
+        };
       return {
         title: "This request isn't listed.",
         detail: 'It may have been closed, expired or hidden, or it is still in review.',

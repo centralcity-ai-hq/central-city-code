@@ -259,3 +259,92 @@ test('a lagging balance read never gives spent funds back', async (t) => {
     (e: unknown) => e instanceof ReservationError && e.code === 'INSUFFICIENT_BALANCE',
   );
 });
+
+test('a balance read made before the transaction: no network call under the wallet lock', async (t) => {
+  const { db, ledger } = await setup(t, { [USDC.toLowerCase()]: 100n });
+  let reads = 0;
+  const counted = createReservationLedger({
+    chainId: 84532,
+    balanceOf: async () => {
+      reads += 1;
+      return { balance: 100n, blockNumber: 1_000n };
+    },
+    now: () => 1_000,
+  });
+  const read = await counted.readBalance(WALLET_ADDRESS as Address, USDC);
+  assert.equal(reads, 1);
+  const held = await db.transaction((tx) =>
+    counted.reserve(tx, { ...base, amount: 60n, holder: { kind: 'payment', ref: 'p-1' }, read }),
+  );
+  assert.equal(held.amount, 60n);
+  assert.equal(reads, 1, 'reserve made no read of its own');
+  // The read counts what is held at its block: 100 - 60 leaves 40.
+  const second = await counted.readBalance(WALLET_ADDRESS as Address, USDC);
+  await assert.rejects(
+    db.transaction((tx) =>
+      counted.reserve(tx, {
+        ...base,
+        amount: 41n,
+        holder: { kind: 'payment', ref: 'p-2' },
+        read: second,
+      }),
+    ),
+    (e: unknown) => e instanceof ReservationError && e.code === 'INSUFFICIENT_BALANCE',
+  );
+
+  // A failed read: the holder's own reservation is still answered, a new one fails with it.
+  const failing = createReservationLedger({
+    chainId: 84532,
+    balanceOf: async () => {
+      throw new Error('Base is not answering.');
+    },
+    now: () => 1_000,
+  });
+  const failed = await failing.readBalance(WALLET_ADDRESS as Address, USDC);
+  assert.ok('error' in failed);
+  const same = await db.transaction((tx) =>
+    failing.reserve(tx, {
+      ...base,
+      amount: 60n,
+      holder: { kind: 'payment', ref: 'p-1' },
+      read: failed,
+    }),
+  );
+  assert.equal(same.reservationId, held.reservationId);
+  await assert.rejects(
+    db.transaction((tx) =>
+      failing.reserve(tx, {
+        ...base,
+        amount: 1n,
+        holder: { kind: 'payment', ref: 'p-3' },
+        read: failed,
+      }),
+    ),
+    /Base is not answering/,
+  );
+  // A read of another wallet or token is never used.
+  const other = await counted.readBalance('0x2222222222222222222222222222222222222222', USDC);
+  await assert.rejects(
+    db.transaction((tx) =>
+      ledger.reserve(tx, {
+        ...base,
+        amount: 1n,
+        holder: { kind: 'payment', ref: 'p-4' },
+        read: other,
+      }),
+    ),
+    (e: unknown) => e instanceof ReservationError,
+  );
+  const eth = await counted.readBalance(WALLET_ADDRESS as Address, NATIVE_ETH as Address);
+  await assert.rejects(
+    db.transaction((tx) =>
+      ledger.reserve(tx, {
+        ...base,
+        amount: 1n,
+        holder: { kind: 'payment', ref: 'p-5' },
+        read: eth,
+      }),
+    ),
+    (e: unknown) => e instanceof ReservationError,
+  );
+});

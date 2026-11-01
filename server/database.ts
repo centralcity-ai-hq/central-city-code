@@ -37,6 +37,19 @@ const TRANSIENT_POOL_MESSAGE =
   /^(timeout exceeded when trying to connect|Connection terminated|Query read timeout)/;
 
 /**
+ * A read that ran out of time, never one that is wrong: its statement timeout (57014), the
+ * driver's read timeout, or no pooled connection in time. Searches answer these as busy (503);
+ * anything else stays an error of its own.
+ */
+export function readTimeoutError(error: unknown): boolean {
+  if ((error as { code?: unknown } | null)?.code === '57014') return true;
+  return (
+    error instanceof Error &&
+    (readTimedOut(error) || /^timeout exceeded when trying to connect/.test(error.message))
+  );
+}
+
+/**
  * A database failure that a later identical request may not meet: the request did nothing it can
  * report, but nothing it wrote is half-done either (every statement is atomic). Anything else
  * (a constraint violation, a syntax error, a programming error) is not transient.

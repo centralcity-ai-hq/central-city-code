@@ -6,6 +6,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { createApp } from '../server/app.js';
 import { postgresDatabase } from '../server/database.js';
 import { loadHostedConfig } from '../server/hosted.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 process.env.CITY_RATE_LIMIT_KEY ??= 'synthetic-test-only-rate-limit-secret-0000';
 
@@ -108,7 +109,7 @@ test(
         password: 'Synthetic pool race password',
       });
       assert.equal(res.statusCode, 201, res.body);
-      return `cc_session=${res.cookies.find((item) => item.name === 'cc_session')!.value}`;
+      return sessionPair(res.cookies);
     };
     const one = await account('Pool requester');
     const two = await account('Pool recipient');

@@ -10,6 +10,9 @@ import {
   type Mention,
   type MentionAck,
   type MentionPage,
+  excerptTruncation,
+  mentionFullLength,
+  mentionNextActions,
   type WakeEventKind,
   type WakeToolName,
   type WakeWebhookView,
@@ -118,6 +121,8 @@ type MentionRow = {
   excerpt: string;
   created_at: string | number;
   read_at: string | number | null;
+  /** Characters of the source message's text (listing only; null when it is gone). */
+  full_length?: string | number | null;
 };
 type WebhookRow = {
   id: string;
@@ -190,7 +195,7 @@ export interface Wake {
   mentions(
     p: WakePrincipal,
     agentId: string,
-    query: { since?: number; limit?: number },
+    query: { since?: number; limit?: number; guest?: boolean },
     guard?: WakeGuard,
   ): Promise<MentionPage>;
   ackMentions(
@@ -334,6 +339,10 @@ export function createWake(d: WakeDependencies): Wake {
       from_owner_label: row.from_owner_label,
       origin: row.source_kind === 'room' || row.from_owner_label !== null ? 'external' : 'internal',
       excerpt: row.excerpt,
+      ...excerptTruncation(
+        row.excerpt,
+        row.full_length === undefined || row.full_length === null ? null : Number(row.full_length),
+      ),
       created_at: iso(Number(row.created_at)),
       read: row.read_at !== null || seq <= acked,
     };
@@ -357,7 +366,7 @@ export function createWake(d: WakeDependencies): Wake {
   async function mentions(
     p: WakePrincipal,
     agentId: string,
-    query: { since?: number; limit?: number },
+    query: { since?: number; limit?: number; guest?: boolean },
     guard?: WakeGuard,
   ): Promise<MentionPage> {
     const limit = Math.min(query.limit ?? WAKE_LIMITS.defaultPageSize, WAKE_LIMITS.pageSize);
@@ -369,7 +378,7 @@ export function createWake(d: WakeDependencies): Wake {
       const since = query.since ?? cursor.acked;
       const rows = (
         await tx.query<MentionRow>(
-          `SELECT m.* FROM mentions m WHERE m.agent_id=$1 AND ${VISIBLE} AND m.seq>$3 ORDER BY m.seq LIMIT $4`,
+          `SELECT m.*, ${mentionFullLength('m')} AS full_length FROM mentions m WHERE m.agent_id=$1 AND ${VISIBLE} AND m.seq>$3 ORDER BY m.seq LIMIT $4`,
           [agentId, kinds, since, limit + 1],
         )
       ).rows;
@@ -390,6 +399,9 @@ export function createWake(d: WakeDependencies): Wake {
         unread,
         next_since: page.at(-1)?.seq ?? since,
         has_more: rows.length > limit,
+        ...(mentionNextActions(page, query.guest)
+          ? { next_actions: mentionNextActions(page, query.guest) }
+          : {}),
       };
     });
   }

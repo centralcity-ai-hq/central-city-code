@@ -1,9 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { PGlite } from '@electric-sql/pglite';
 import { createApp } from '../server/app.js';
+import { setResponderTarget } from '../server/responder/targets.js';
 import { elricFixture } from './elric-fixture.js';
+import { sessionPair } from './session-cookie-pair.js';
+
+const FAKE_OPENAI = 'sk-proj-test-openai-placeholder-0000';
 
 /**
  * Who controls Elric: CITY_ELRIC unset (no routes, no hook), and third-party grants (a grant or
@@ -29,7 +33,7 @@ test('flag off: routes are not registered and the room hook is a no-op', async (
     payload: JSON.stringify({ name: 'Flag off owner', password: 'Synthetic flag off password' }),
   });
   assert.equal(register.statusCode, 201, register.body);
-  const cookie = `cc_session=${register.cookies.find((item) => item.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(register.cookies);
   const call = (method: string, url: string, body?: unknown) =>
     app.inject({
       method: method as 'GET',
@@ -215,7 +219,7 @@ test('the accountless invite join cannot take the reserved name (any look-alike)
     name: 'Invite name host',
     password: 'Synthetic invite name password',
   });
-  const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(registered.cookies);
   const agent = await post(
     '/api/agents',
     { name: 'Host', capability: 'research', mode: 'hosted' },
@@ -272,4 +276,93 @@ test("Elric's own off switch still pauses and revokes it after the managed refus
   const revoked = await f.call(s.owner.cookie, 'POST', '/api/elric/revoke', {});
   assert.equal(revoked.statusCode, 200, revoked.body);
   assert.equal(await status(), 'revoked');
+});
+
+test('Auto-reply: never set up on Elric; revoking Elric deletes a key stored for it', async (t) => {
+  const f = await elricFixture(t, {
+    responder: {
+      enabled: true,
+      env: { CITY_RESPONDER_KEK: randomBytes(32).toString('base64') },
+      transport: async () => ({ status: 200 }),
+      delivery: false,
+    },
+  });
+  const s = await f.scene();
+  const body = { provider: 'openai', key: FAKE_OPENAI };
+  // An ordinary agent of the same owner still gets its key.
+  const desk = await f.agent(s.owner, 'Owner desk');
+  const ok = await f.call(s.owner.cookie, 'POST', `/api/agents/${desk}/responder/key`, body);
+  assert.equal(ok.statusCode, 200, ok.body);
+  // Elric answers through Central City: no key, no settings change.
+  const stored = await f.call(
+    s.owner.cookie,
+    'POST',
+    `/api/agents/${s.elricId}/responder/key`,
+    body,
+  );
+  assert.equal(stored.statusCode, 409, stored.body);
+  assert.equal(stored.json().code, 'elric_managed');
+  const settings = await f.call(s.owner.cookie, 'PUT', `/api/agents/${s.elricId}/responder`, {
+    enabled: true,
+  });
+  assert.equal(settings.statusCode, 409, settings.body);
+  assert.equal(settings.json().code, 'elric_managed');
+  // A key stored for Elric before this rule (live, auto-reply on, wake target on).
+  const time = f.now();
+  await f.db.query(
+    `INSERT INTO responder_credentials(id,agent_id,owner_id,provider,kek_id,wrapped_dek,ciphertext,
+       status,created_at,created_by,validated_at)
+     VALUES('rsk_elric',$1,$2,'openai','kek-1','\\x01','\\x02','active',$3,'the owner',$3)`,
+    [s.elricId, s.owner.operatorId, time],
+  );
+  await f.db.query(
+    `INSERT INTO responder_settings(agent_id,owner_id,enabled,provider,model,created_at,updated_at,updated_by)
+     VALUES($1,$2,true,'openai','gpt-5-mini',$3,$3,'the owner')`,
+    [s.elricId, s.owner.operatorId, time],
+  );
+  await setResponderTarget(f.db, {
+    agentId: s.elricId,
+    ownerId: s.owner.operatorId,
+    on: true,
+    time,
+    actor: 'the owner',
+  });
+  const revoked = await f.call(s.owner.cookie, 'POST', '/api/elric/revoke', {});
+  assert.equal(revoked.statusCode, 200, revoked.body);
+  const credential = (
+    await f.db.query<{
+      status: string;
+      ciphertext: unknown;
+      wrapped_dek: unknown;
+      kek_id: unknown;
+    }>('SELECT status,ciphertext,wrapped_dek,kek_id FROM responder_credentials WHERE agent_id=$1', [
+      s.elricId,
+    ])
+  ).rows[0]!;
+  assert.deepEqual(
+    [credential.status, credential.ciphertext, credential.wrapped_dek, credential.kek_id],
+    ['revoked', null, null, null],
+  );
+  const after = (
+    await f.db.query<{ enabled: boolean }>(
+      'SELECT enabled FROM responder_settings WHERE agent_id=$1',
+      [s.elricId],
+    )
+  ).rows[0]!;
+  assert.equal(after.enabled, false);
+  const target = (
+    await f.db.query<{ disabled_at: string | null }>(
+      "SELECT disabled_at FROM wake_webhooks WHERE agent_id=$1 AND kind='responder'",
+      [s.elricId],
+    )
+  ).rows[0]!;
+  assert.notEqual(target.disabled_at, null);
+  // The other agent's key is untouched.
+  const other = (
+    await f.db.query<{ status: string }>(
+      'SELECT status FROM responder_credentials WHERE agent_id=$1',
+      [desk],
+    )
+  ).rows[0]!;
+  assert.equal(other.status, 'active');
 });

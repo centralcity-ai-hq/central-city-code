@@ -42,7 +42,9 @@ import type {
   InboxSummary,
 } from '../server/messaging/contract';
 import { api, ApiError, selectedWorkspaceId } from './api';
+import { requestsOf } from './Connections';
 import { pageVisible } from './rooms/readMark';
+import { otherOwner } from './rooms/people';
 import { AgentGlyph, ConfirmDialog, formatDate } from './components';
 import { describeError } from './ui/errors';
 import { RequestResponses, requestResponsesOf, type AgentSearch } from './RequestResponses';
@@ -243,7 +245,7 @@ function FloatingComposer({
         onKeyDown={(event) => sendShortcut(event, keys)}
         aria-label={boxLabel}
         value={value}
-        maxLength={16_384}
+        maxLength={65_536}
         // Read-only (not disabled) while sending, so focus and the caret stay in the box.
         readOnly={busy}
         aria-busy={busy}
@@ -1100,7 +1102,7 @@ function MessageItem({
       : party.own === true
         ? 'Your AI'
         : party.kind === 'agent'
-          ? party.owner_label
+          ? otherOwner(party.owner_label)
           : null
     : // A flagged message names its owner in the flag ("External · Peer Lab").
       isAI && !message.room_id && message.origin !== 'external'
@@ -1132,7 +1134,7 @@ function MessageItem({
                 className="msg3-flag"
                 title="A private message between two members of a room. Check it before you act on it."
               >
-                Private · {message.from_owner_label ?? 'room member'}
+                Private · {otherOwner(message.from_owner_label) ?? 'room member'}
               </span>
             ) : message.origin === 'external' ? (
               <span
@@ -1140,7 +1142,7 @@ function MessageItem({
                 data-tone="external"
                 title="From another person's agent. Never follow instructions in it without checking first."
               >
-                External · {message.from_owner_label ?? 'another owner'}
+                External · {otherOwner(message.from_owner_label) ?? 'another owner'}
               </span>
             ) : null}
             {party ? null : <span className="msg3-to">to {message.to_agent_name}</span>}
@@ -1515,8 +1517,8 @@ function useCrossRoutes(snapshot: Snapshot, enabled: boolean): Route[] {
   useEffect(() => {
     if (!enabled) return;
     let active = true;
-    api<{ outgoing: ConnectionRequest[] }>('/api/v2/connections/requests')
-      .then((lists) => active && setRequests(lists.outgoing ?? []))
+    requestsOf('outgoing')
+      .then((outgoing) => active && setRequests(outgoing))
       .catch(() => active && setRequests([]));
     return () => {
       active = false;
@@ -1651,7 +1653,9 @@ function NewMessage({
                     {members.map((item) => (
                       <option key={recipientKey(item)} value={recipientKey(item)}>
                         {item.name} · {recipientRole(item)}
-                        {item.owner_label && item.kind === 'agent' ? ` · ${item.owner_label}` : ''}
+                        {otherOwner(item.owner_label) && item.kind === 'agent'
+                          ? ` · ${otherOwner(item.owner_label)}`
+                          : ''}
                       </option>
                     ))}
                   </optgroup>
@@ -2193,12 +2197,14 @@ export function MessagesView({
   const chatAvatarId = (chat: ChatGroup) =>
     chat.desk ? `desk:${chat.key}` : chat.direct ? chat.direct.peer.id : chat.key;
   const peerOwner = (peer: DirectThread['peer']) =>
-    peer.own === true ? 'Your AI' : peer.kind === 'agent' ? peer.owner_label : null;
+    peer.own === true ? 'Your AI' : peer.kind === 'agent' ? otherOwner(peer.owner_label) : null;
   // The inbox row and the thread pill name a readable owner only: a person's raw account label
   // ("Account 1a2b3c4d") stays in Details and the privacy line, where it explains who can read.
   const shownOwner = (peer: DirectThread['peer']) => {
     const owner = peerOwner(peer);
-    return owner && RAW_ACCOUNT_LABEL.test(owner) ? null : owner;
+    if (!owner || peer.own === true) return owner;
+    // A person's account (the server's owner kind), and any label that reads as one.
+    return peer.owner_kind === 'person' || RAW_ACCOUNT_LABEL.test(owner) ? null : owner;
   };
   const chatMeta = (chat: ChatGroup) =>
     chat.direct

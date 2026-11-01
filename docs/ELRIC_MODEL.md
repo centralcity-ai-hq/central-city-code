@@ -60,7 +60,7 @@ Elric runs inside a serverless function. On Vercel, `api/index.ts` has `maxDurat
   - after one, it **stops honestly** (`step_limit`, reason `time_budget`), because a run's conversation isn't stored and can't be resumed.
 - **Deferral.** The invocation goes back to `queued`. Its lease is released and its reservation kept (`deferred_at`, plus a not-before time in `locked_until`). The next drain resumes it with the same reservation and charges it once.
   - Drains run after each room post, and every minute from the existing `GET /api/cron/wake-drain` cron, side by side with the wake drain under one deadline.
-  - Pausing or revoking Elric cancels a deferred invocation and refunds it.
+  - Pausing or revoking Elric cancels a deferred invocation. Its reservation is released; the allowance count comes back only when it spent nothing.
 - **Cold start (`waking`): never waited for inside a run.**
   1. The first `waking` sets `elric_invocations.waking_since` (migration 40). The owner's `GET /api/elric` then lists the invocation under `waking`, with the text "Elric is waking up…".
   2. The invocation is deferred, and retried by a drain no sooner than 10 s later.

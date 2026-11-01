@@ -53,6 +53,9 @@ import './schema.js'; // migrations 28 public_stats and 59 counted_agent_ids (si
  * `base_agents` (optional): the Agent Explorer's "On Base now" total (server/stats/base-agents.ts),
  * shared through its own public_stats row under the same lease; left out until it is counted.
  *
+ * `arc_agents` (optional): the same count on the Arc chain (its own row, arc_agents_total), only
+ * while Arc is on (protocolArcChainIdFromEnv); the landing tile shows base_agents + arc_agents.
+ *
  * The count is shared through one `public_stats` row (migration 28). Every instance reads
  * the row (a primary-key lookup) at most once per TTL; when it is older than the TTL, exactly one
  * instance wins a short refresh lease (one conditional UPDATE), counts outside any transaction and
@@ -164,7 +167,11 @@ export interface PublicStatsStore {
 const DB_NOW_MS = `(extract(epoch from clock_timestamp()) * 1000)::bigint`;
 
 /** The SQL store. No statement runs inside a transaction, so no pool client is held while counting. */
-export function sqlPublicStatsStore(db: Pick<Database, 'query'>): PublicStatsStore {
+export type StatObserver = (key: string, value: number, at: number) => void;
+export function sqlPublicStatsStore(
+  db: Pick<Database, 'query'>,
+  observe?: StatObserver,
+): PublicStatsStore {
   return {
     async read(key) {
       const row = (
@@ -196,6 +203,7 @@ export function sqlPublicStatsStore(db: Pick<Database, 'query'>): PublicStatsSto
         'UPDATE public_stats SET value=$2, refreshed_at=$3, refreshing_until=0 WHERE key=$1 AND refreshed_at < $3 RETURNING key',
         [key, value, at],
       );
+      if (written.rows.length === 1) observe?.(key, value, at);
       return written.rows.length === 1;
     },
     async hold(key, forMs) {
@@ -220,21 +228,23 @@ export async function writeStatParts(
   db: Pick<Database, 'query'>,
   parts: ReadonlyArray<readonly [key: string, value: number]>,
   at: number,
+  observe?: StatObserver,
 ): Promise<void> {
   for (const [key] of parts)
     if (!STAT_KEY.test(key)) throw new Error(`Not a public_stats key: ${key}`);
   if (parts.length === 0) return;
-  await db.query(
+  const written = await db.query<{ key: string; value: string }>(
     `INSERT INTO public_stats(key, value, refreshed_at)
      SELECT * FROM unnest($1::text[], $2::bigint[], $3::bigint[])
      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, refreshed_at = EXCLUDED.refreshed_at
-       WHERE public_stats.refreshed_at < EXCLUDED.refreshed_at`,
+       WHERE public_stats.refreshed_at < EXCLUDED.refreshed_at RETURNING key,value`,
     [
       parts.map(([key]) => key),
       parts.map(([, value]) => Math.max(0, Math.trunc(value))),
       parts.map(() => at),
     ],
   );
+  for (const row of written.rows) observe?.(row.key, Number(row.value), at);
 }
 
 /** The stored values of `keys` (writeStatParts); a key never written is absent. */
@@ -463,6 +473,7 @@ function ratesOf(
     updated_at: string;
     paid_calls?: { total: number; as_of: string; value_settled_raw?: string };
     base_agents?: { total: number; as_of: string };
+    arc_agents?: { total: number; as_of: string };
   },
 ): Record<string, number> | null {
   rates.observe('ai_agents', body.ai_agents_total, Date.parse(body.updated_at));
@@ -474,8 +485,10 @@ function ratesOf(
   }
   if (body.base_agents)
     rates.observe('base_agents', body.base_agents.total, Date.parse(body.base_agents.as_of));
+  if (body.arc_agents)
+    rates.observe('arc_agents', body.arc_agents.total, Date.parse(body.arc_agents.as_of));
   const out: Record<string, number> = {};
-  for (const key of ['ai_agents', 'paid_calls', 'base_agents', 'value_settled_raw']) {
+  for (const key of ['ai_agents', 'paid_calls', 'base_agents', 'arc_agents', 'value_settled_raw']) {
     const rate = rates.rate(key, now);
     if (rate !== null) out[key] = Math.round(rate * 1000) / 1000;
   }
@@ -498,6 +511,8 @@ export function registerPublicStatsRoutes(
     baseAgents?: BaseAgentsReader;
     /** How long the response waits for it (default BASE_AGENTS_READ_BUDGET_MS). */
     baseAgentsBudgetMs?: number;
+    /** The Arc agents count (createArcAgentsReader); without it (Arc off) the field is never sent. */
+    arcAgents?: BaseAgentsReader;
     /** Where growth rates are tracked (default: one tracker for this app's routes). */
     rates?: RateTracker;
   },
@@ -529,6 +544,15 @@ export function registerPublicStatsRoutes(
       deps.baseAgentsBudgetMs,
       late,
     );
+    // Then the Arc agents number, only while Arc is on (no reader: no read, no field).
+    const arcAgents = deps.arcAgents
+      ? await baseAgentsForResponse(
+          deps.arcAgents,
+          deps.clock ?? Date.now,
+          deps.baseAgentsBudgetMs,
+          late,
+        )
+      : null;
     // Only the numbers, their times and how fast they grow; nothing about agents, owners, payers,
     // services or amounts.
     const body = {
@@ -536,6 +560,7 @@ export function registerPublicStatsRoutes(
       updated_at: stats.updated_at,
       ...(paid ? { paid_calls: paid } : {}),
       ...(baseAgents ? { base_agents: baseAgents } : {}),
+      ...(arcAgents ? { arc_agents: arcAgents } : {}),
     };
     const rates = ratesOf(tracker, (deps.clock ?? Date.now)(), body);
     return reply

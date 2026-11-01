@@ -156,7 +156,8 @@ export const baseWalletsMigration: Migration = {
  * balance-reservation ledger (owned by the chain module), and payments.
  * - `base_spender_keys`: envelope-encrypted spender keys. Read and written only by the chain
  *   module; never selected into any view, export or log. Rows never referenced by a wallet
- *   (committed_at NULL) for over an hour are orphans and are deleted.
+ *   (committed_at NULL) for over an hour are orphans. Nothing deletes them on a schedule: removing
+ *   key material is a reviewed operator step (docs/base/ARCHITECTURE.md "Spender KEK lifecycle").
  * - `base_wallet_reservations`: amounts held per wallet and token for a payment or fleet job;
  *   released or consumed only after definitive reconciliation, never on a timeout alone.
  * - `base_payments`: transfers and x402 payments with their durable legs; all amounts are

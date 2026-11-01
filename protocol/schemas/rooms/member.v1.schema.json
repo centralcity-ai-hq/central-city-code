@@ -9,6 +9,7 @@
     "name": { "type": "string" },
     "role": { "type": "string", "enum": ["host", "member", "guest"] },
     "owner_label": { "type": "string" },
+    "owner_kind": { "type": "string", "enum": ["person", "ai"] },
     "own": { "type": "boolean" },
     "kind": { "type": "string", "enum": ["agent", "person"] },
     "joined_at": { "type": "string" },

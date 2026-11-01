@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createApp } from '../server/app.js';
 import { rpcResult } from './oauth-helpers.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 // Invited guests (joined by invite link) work on their own room's tasks with the member rules.
 process.env.CITY_INVITE_FLOW = '1';
@@ -42,7 +43,7 @@ async function fixture(t: { after(fn: () => Promise<unknown>): void }) {
   });
   assert.equal(registered.statusCode, 201, registered.body);
   const host = {
-    cookie: `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`,
+    cookie: sessionPair(registered.cookies),
   };
   const agent = await post(
     '/api/agents',
@@ -131,6 +132,71 @@ test('an invited guest creates, claims and completes a task in its own room', as
   const events = await f.invoke(guest.credential, 'city_room_task_events', { task_id: task.id });
   assert.equal(events.statusCode, 200, events.body);
   assert.ok(events.json().events.length >= 4);
+});
+
+test('a result can be a plain summary, with or without non-code evidence', async (t) => {
+  const f = await fixture(t);
+  const roomId = await f.makeRoom('Guest summary room');
+  const guest = await f.join(roomId, '203.0.113.22');
+  const newTask = async (title: string) => {
+    const created = await f.invoke(guest.credential, 'city_room_task_create', {
+      title,
+      idempotency_key: randomUUID(),
+    });
+    const task = created.json().task;
+    assert.match(created.json().next_actions[0], /claim it with city_room_task_claim/);
+    const claimed = await f.invoke(guest.credential, 'city_room_task_claim', {
+      task_id: task.id,
+      idempotency_key: randomUUID(),
+    });
+    assert.match(claimed.json().next_actions.join(' '), /Keep claim_token privately/);
+    return { task, token: claimed.json().claim_token as string };
+  };
+  const submit = (task: { id: string }, token: string, extra: object) =>
+    f.invoke(guest.credential, 'city_room_task_result', {
+      task_id: task.id,
+      claim_token: token,
+      ...extra,
+    });
+  // Neither summary nor evidence: refused, naming the field.
+  const a = await newTask('Recount the totals');
+  const empty = await submit(a.task, a.token, {});
+  assert.equal(empty.statusCode, 400, empty.body);
+  assert.match(empty.body, /summary/);
+  // Code evidence still needs its revision.
+  const noRevision = await submit(a.task, a.token, { evidence: { kind: 'proposal', ref: 'p-1' } });
+  assert.equal(noRevision.statusCode, 400, noRevision.body);
+  assert.match(noRevision.body, /revision/);
+  // A credential in the summary is refused, never echoed.
+  const leaked = await submit(a.task, a.token, {
+    summary: `Use crc_${'A'.repeat(43)} to read it.`,
+  });
+  assert.equal(leaked.statusCode, 400, leaked.body);
+  assert.ok(!leaked.body.includes('A'.repeat(43)));
+  // A summary alone is a result.
+  // idempotency_key is accepted (and ignored) like on create and claim.
+  const plain = await submit(a.task, a.token, {
+    summary: 'Row 14 was counted twice; the corrected total is 1,204.',
+    idempotency_key: randomUUID(),
+  });
+  assert.equal(plain.statusCode, 200, plain.body);
+  assert.equal(plain.json().task.status, 'in_review');
+  assert.deepEqual(plain.json().task.result, {
+    summary: 'Row 14 was counted twice; the corrected total is 1,204.',
+  });
+  // A summary with a message as evidence (no revision needed).
+  const b = await newTask('Write the brief');
+  const cited = await submit(b.task, b.token, {
+    summary: 'Brief posted.',
+    evidence: { kind: 'message', ref: '#3' },
+  });
+  assert.equal(cited.statusCode, 200, cited.body);
+  const got = await f.invoke(guest.credential, 'city_room_task_get', { task_id: b.task.id });
+  assert.deepEqual(got.json().task.result, {
+    kind: 'message',
+    ref: '#3',
+    summary: 'Brief posted.',
+  });
 });
 
 test('a guest cannot reach another room or its tasks', async (t) => {

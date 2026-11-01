@@ -45,351 +45,284 @@ const allowedLinks = [
 ];
 const statusLabel = { released: 'Released', review: 'In development', planned: 'Planned' };
 
+type Repo = { name: string; title: string; url: string; version: string | null };
+const repos: Repo[] = data.public_repositories;
+
 /*
  * /downtown is a client route. Vercel rewrites it to index.html; the local test server
- * (server/index.ts) only does that for its CLIENT_ROUTES allowlist, which does not list
- * /downtown yet. Until it does, each test answers the hard navigation with the same index.html
- * the server returns for "/", which is exactly what the production rewrite serves. App.tsx then
- * chooses the page from window.location.pathname, so no test hook is needed in the app.
+ * (server/index.ts) only does that for its CLIENT_ROUTES allowlist. Each test answers the hard
+ * navigation with the same app.html the production rewrite serves. The live code count
+ * (GET /api/public/code) is answered with a fixed count unless a test says otherwise.
  */
-async function openDowntown(page: Page, path = '/downtown') {
+const CODE_COUNT = {
+  total: 553591,
+  code: 293624,
+  tests: 259967,
+  files: 1738,
+  skipped_files: 0,
+  counted_at: '2026-10-24T20:28:19.410Z',
+  repos: [
+    {
+      name: 'central-city-code',
+      commit: '0a560397be2d766b519b0bba0036559921270890',
+      code: 286346,
+      tests: 257428,
+      files: 1674,
+      skipped: 0,
+    },
+  ],
+};
+async function openDowntown(page: Page, path = '/downtown', code: object | null = CODE_COUNT) {
   await page.route(/\/downtown\/?$/, async (route) => {
     const response = await route.fetch({
       url: new URL('/app.html', route.request().url()).toString(),
     });
     await route.fulfill({ response });
   });
+  await page.route('**/api/public/code', (route) =>
+    code
+      ? route.fulfill({ json: code })
+      : route.fulfill({ status: 503, json: { error: 'not_counted_yet' } }),
+  );
   await page.goto(path);
-  await expect(page.getByRole('heading', { level: 1, name: 'Downtown' })).toBeVisible();
-  await expect(page.locator('#districts .dt-item-row').first()).toBeVisible();
+  await expect(
+    page.getByRole('heading', { level: 1, name: 'Downtown', exact: true }),
+  ).toBeVisible();
+  await expect(page.locator('#districts details.dt-row').first()).toBeVisible();
 }
 
-type Repo = { name: string; title: string; url: string; version: string | null };
-const repos: Repo[] = data.public_repositories;
-/** The overview's rows: one per public repository, Elric's code and the security policy. */
-const rowCount = repos.length + (ELRIC_CODE_PUBLISHED ? 1 : 0) + 1;
+/** A district's row, and its summary line (the part that opens and closes it). */
+const row = (page: Page, id: string) => page.locator(`#districts details#district-${id}`);
+const summary = (page: Page, id: string) => row(page, id).locator(':scope > summary');
 
-test('downtown shows the exact copy and only actions with working destinations', async ({
+const ordered = () => {
+  const rank = new Map(data.categories.map((c: { id: string }, i: number) => [c.id, i]));
+  return districts
+    .map((d, i) => ({ d, i }))
+    .sort(
+      (a, b) =>
+        ((rank.get(a.d.category) as number) ?? 99) - ((rank.get(b.d.category) as number) ?? 99) ||
+        a.i - b.i,
+    )
+    .map(({ d }) => d);
+};
+
+test('downtown shows the approved sections, and only links the data allows', async ({ page }) => {
+  await openDowntown(page);
+  const main = page.locator('main');
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Downtown');
+  await expect(page.locator('.dt-headline')).toHaveText(/The whole city,\s*open source\./);
+  for (const title of [
+    `${data.districts.length === 18 ? 'Eighteen' : data.districts.length} districts.`,
+    'Build today.',
+    'Contribute.',
+    'Released in phases.',
+    'Reading this as an AI?',
+  ])
+    await expect(main.getByRole('heading', { level: 2, name: title })).toBeVisible();
+
+  // Every repository has its row, with its version; Elric's folder sits right after the app.
+  const repoRows = page.locator('#repositories .dt-repo');
+  await expect(repoRows).toHaveCount(repos.length + (ELRIC_CODE_PUBLISHED ? 1 : 0));
+  for (const repo of repos) {
+    const row = page.locator(`#repositories a.dt-repo[href="${repo.url}"]`);
+    await expect(row).toHaveCount(1);
+    if (repo.version) await expect(row).toContainText(repo.version);
+  }
+  if (ELRIC_CODE_PUBLISHED)
+    await expect(page.locator(`#repositories a[href="${ELRIC_CODE_URL}"]`)).toHaveText(/Elric/);
+
+  // The facts come from the data and the code count, never from the page.
+  const facts = page.getByRole('complementary', { name: 'Downtown in numbers' });
+  await expect(facts).toContainText('553,591');
+  await expect(facts).toContainText('293,624 product code');
+  await expect(facts).toContainText('259,967 tests');
+  await expect(facts).toContainText(`public repositories${repos.length}`);
+  await expect(facts).toContainText(`districts${districts.length}`);
+  // Live, with when it was counted; public repositories only: "all of it public".
+  await expect(facts.locator('.dt-live')).toHaveText('Live');
+  await expect(facts).toContainText(/Updated (just now|\d+ (min|h) ago|\d+ days ago)/);
+  await expect(facts).toContainText('lines of code, all of it public');
+
+  // Contribute: the five steps from the data, and the guide.
+  await expect(page.locator('#contribute li > span:last-child')).toHaveText(
+    data.contribute.process,
+  );
+  await expect(page.locator('#contribute a', { hasText: 'CONTRIBUTING.md' })).toHaveAttribute(
+    'href',
+    data.contribute.guide,
+  );
+  await expect(page.locator('#roadmap li.dt-phase')).toHaveCount(
+    data.roadmap.length + 1, // plus the latest central-city-code release
+  );
+
+  // Links: every GitHub link is one the data names (repositories, sources, changelogs, guide,
+  // the app repository's commit of the count).
+  const hrefs = await page
+    .locator('a[href]')
+    .evaluateAll((links) => links.map((a) => (a as HTMLAnchorElement).href));
+  const github = [...new Set(hrefs.filter((href) => /github\.com/i.test(href)))];
+  const allowed = (href: string) =>
+    allowedLinks.includes(href) || href.startsWith(`${org}/central-city-code/commit/`);
+  expect(github.filter((href) => !allowed(href))).toEqual([]);
+  for (const path of ['/downtown.json', '/downtown.md'])
+    await expect(page.locator(`#for-ais a[href="${path}"]`)).toBeVisible();
+});
+
+test('the code count: hidden until counted, and a partial count says so', async ({ page }) => {
+  await openDowntown(page, '/downtown', null);
+  const facts = page.getByRole('complementary', { name: 'Downtown in numbers' });
+  await expect(facts).toContainText(`districts${districts.length}`);
+  await expect(facts.locator('.dt-loc')).toHaveCount(0);
+  await expect(facts).not.toContainText('lines of code');
+  await expect(facts).toContainText('Line count not available right now');
+  await expect(facts.locator('.dt-live')).toHaveCount(0);
+
+  await page.unrouteAll({ behavior: 'ignoreErrors' });
+  await openDowntown(page, '/downtown', { ...CODE_COUNT, skipped_files: 2 });
+  await expect(facts.locator('.dt-loc-partial')).toHaveText('2 files over 2 MB are not counted.');
+});
+
+test('the districts: one row per district in its group, and a row opens where it is', async ({
   page,
 }) => {
-  const errors: string[] = [];
-  page.on('pageerror', (error) => errors.push(error.message));
   await openDowntown(page);
-  await expect(page).toHaveTitle('Downtown · Central City');
-  const hero = page.getByRole('region', { name: 'Downtown', exact: true });
-  await expect(
-    hero.getByText(
-      'The public part of Central City: code, protocol schemas, test suites and documentation, organized into numbered districts.',
-      { exact: true },
-    ),
-  ).toBeVisible();
+  const rows = page.locator('#districts details.dt-row');
+  await expect(rows).toHaveCount(districts.length);
+  const order = ordered();
+  // In group order, numbered 01, 02, … ; every row starts closed.
+  await expect(rows.locator('.dt-row-name')).toHaveText(order.map((d) => d.name));
+  await expect(rows.first().locator('.dt-row-no')).toHaveText('01');
+  await expect(page.locator('#districts details.dt-row[open]')).toHaveCount(0);
+  // Each group is labelled by its name.
+  for (const category of data.categories as Array<{ id: string; name: string }>)
+    if (districts.some((d) => d.category === category.id))
+      await expect(page.getByRole('group', { name: category.name })).toBeVisible();
 
-  // Meta line: the synced date and repository count from the data, and the live agent count.
-  await expect(hero).toContainText(`Synced ${data.sync.last_synced}`);
-  await expect(hero).toContainText(`${repos.length} public repositories`);
-  const verify = hero.getByRole('link', { name: /^Verify the agent count( \([\d,]+\))?$/ });
-  await expect(verify).toHaveAttribute('href', '/downtown/verify');
-  // The live count, never a sample number.
-  await expect(verify).not.toContainText('8,412');
-  await expect(verify).not.toContainText('2,847');
+  // The closed row already says its version and status.
+  const target = order.find((d) => d.source && d.source.includes('/tree/')) ?? order[1];
+  await expect(summary(page, target.id)).toContainText(target.version ?? '–');
+  await expect(summary(page, target.id)).toContainText(statusLabel[target.status]);
 
-  // Chips: the GitHub organization and the start steps.
-  const chips = hero.locator('.dt-chip');
-  await expect(chips).toHaveCount(2);
-  await expect(chips.nth(0)).toHaveText('github.com/centralcity-ai-hq');
-  await expect(chips.nth(0)).toHaveAttribute('href', org);
-  await expect(chips.nth(1)).toHaveText('Start building');
-  await expect(chips.nth(1)).toHaveAttribute('href', '#start');
-
-  await expect(page.getByRole('button', { name: /contribute/i })).toHaveCount(0);
-  const contribute = page.locator('#contribute');
-  await expect(contribute).toContainText('Contribute to the toolkit.');
-  await expect(contribute).not.toContainText('nothing to fork');
-  await expect(contribute.getByRole('link')).toHaveCount(1);
-  await expect(contribute.getByRole('link', { name: 'Read CONTRIBUTING.md' })).toHaveAttribute(
-    'href',
-    `${toolkit}/blob/main/CONTRIBUTING.md`,
-  );
-  // The shared public footer (src/shell), not a page-specific one.
-  await expect(page.locator('footer')).toContainText('Our code is open source (Apache-2.0)');
-
-  // GitHub links: only public repositories, released sources, changelogs and the guide. (The
-  // header's menus and the footer link GitHub too; shell.spec.ts and footer.spec.ts check those.)
-  const hrefs = await page
-    .locator('main a[href]')
-    .evaluateAll((links) => links.map((link) => link.getAttribute('href')!));
-  const github = [...new Set(hrefs.filter((href) => /github\.com/i.test(href)))];
-  expect(github.filter((href) => !allowedLinks.includes(href))).toEqual([]);
-  for (const href of github)
-    expect(href).toMatch(/^https:\/\/github\.com\/centralcity-ai-hq(\/|$)/);
-  // No city visuals: no map, no markers, no looping animation.
-  await expect(page.locator('.dt-map, .dt-marker, svg.dt-skyline')).toHaveCount(0);
-  expect(
-    await page.evaluate(
-      () =>
-        document.getAnimations().filter((a) => a.effect?.getTiming().iterations === Infinity)
-          .length,
-    ),
-  ).toBe(0);
-
-  // The overview: one real table, one row per public repository, Elric's code and the security
-  // policy.
-  const table = page.locator('#districts table');
-  await expect(table).toHaveCount(1);
-  for (const name of ['Category', 'Repository', 'Role', 'License', 'Status'])
-    await expect(table.getByRole('columnheader', { name, exact: true })).toHaveCount(1);
-  const rows = table.locator('.dt-item-row');
-  await expect(rows).toHaveCount(rowCount);
-  for (const repo of repos) {
-    const row = rows.filter({ has: page.getByRole('link', { name: `${repo.title} on GitHub` }) });
-    await expect(row).toHaveCount(1);
-    await expect(row.getByRole('link', { name: `${repo.title} on GitHub` })).toHaveAttribute(
+  // Click: the row opens in place, with the whole purpose, where it lives and its GitHub link.
+  await summary(page, target.id).click();
+  await expect(row(page, target.id)).toHaveAttribute('open', '');
+  const body = row(page, target.id).locator('.dt-row-body');
+  await expect(body).toBeInViewport();
+  await expect(body.locator('.dt-row-purpose')).toHaveText(target.purpose);
+  if (target.source)
+    await expect(body.getByRole('link', { name: `${target.name} on GitHub` })).toHaveAttribute(
       'href',
-      repo.url,
+      target.source,
     );
-    // The repository name is a disclosure button for the row's details.
-    const button = row.getByRole('button', { name: repo.name.split('/').pop()!, exact: true });
-    await expect(button).toHaveAttribute('aria-expanded', 'false');
-    const planned = districts
-      .filter((d) => d.repository === repo.url)
-      .every((d) => d.status === 'planned');
-    await expect(row.locator('.dt-pill')).toHaveText(
-      repo.version ? `v${repo.version} Released` : planned ? 'Planned' : 'In development',
-    );
-    // Opening the row shows its version, sync date and changelog in a row beneath it.
-    await button.click();
-    await expect(button).toHaveAttribute('aria-expanded', 'true');
-    const details = page.locator(`[id="${await button.getAttribute('aria-controls')}"]`);
-    await expect(details).toBeVisible();
-    if (repo.version) {
-      await expect(details).toContainText(`Version ${repo.version}`);
-      await expect(
-        details.locator('.dt-detail-meta').getByRole('link', { name: `${repo.title} changelog` }),
-      ).toBeVisible();
-    }
-    await button.click();
-    await expect(details).toBeHidden();
-  }
-  await expect(rows.last().getByRole('link', { name: 'Security overview' })).toHaveAttribute(
-    'href',
-    '/security',
-  );
-  // Elric (the product owner, 15 Oct): its own row under Repository, right after the application
-  // repository its code is in, linking that folder on GitHub; plain words, no arrow beside it.
-  if (ELRIC_CODE_PUBLISHED) {
-    const elric = rows.nth(1);
-    await expect(elric.locator('th.dt-col-repo')).toHaveText('Elric');
-    await expect(elric.locator('.dt-tag')).toHaveText('Platform');
-    await expect(elric.getByRole('link', { name: 'Elric on GitHub' })).toHaveAttribute(
-      'href',
-      ELRIC_CODE_URL,
-    );
-    await expect(elric.getByRole('link', { name: 'Elric on GitHub' })).toHaveText('GitHub');
-    await expect(elric.locator('.dt-col-action svg')).toHaveCount(0);
-    expect(await elric.innerText()).not.toMatch(/[\u2192\u2197\u203a]/);
-    const button = elric.getByRole('button', { name: 'Elric', exact: true });
-    await button.click();
-    const details = page.locator('#repo-elric-details');
-    await expect(details).toBeVisible();
-    // The folder, and the repository's changelog named as the repository's: no version of its own.
-    await expect(details.locator('.dt-slug')).toHaveText(
-      'centralcity-ai-hq/central-city-code/server/elric',
-    );
-    await expect(details).not.toContainText('Version');
-    await expect(elric.locator('.dt-col-status')).toHaveText('Released');
-    await expect(
-      details.getByRole('link', { name: 'central-city-code changelog' }),
-    ).toHaveAttribute(
-      'href',
-      'https://github.com/centralcity-ai-hq/central-city-code/blob/main/CHANGELOG.md',
-    );
-    await expect(details.getByRole('link', { name: /Elric changelog/ })).toHaveCount(0);
-    // The short role in the row, a different sentence in the details.
-    const role = (await elric.locator('.dt-col-desc').innerText()).trim();
-    expect(role).toBe("Central City's built-in AI assistant.");
-    await expect(details.locator('.dt-detail-purpose')).not.toHaveText(role);
-    await button.click();
-    await expect(details).toBeHidden();
-  }
+  const last = target.source?.split('/').pop();
+  if (last) await expect(body.locator('.dt-row-path')).toContainText(last);
+  // Only that row opened.
+  await expect(page.locator('#districts details.dt-row[open]')).toHaveCount(1);
 
-  // The seven numbered districts keep their anchors (#district-1 to #district-7) on their rows.
-  await page.getByRole('button', { name: 'Expand all details' }).click();
-  for (let index = 1; index <= 7; index++)
-    await expect(page.locator(`#district-${index}-details`)).toContainText(`District ${index}`);
-  await expect(
-    page.locator('#district-5-details').getByRole('link', { name: 'Verify the count' }),
-  ).toHaveAttribute('href', '/downtown/verify');
-  await expect(
-    page.locator('#district-6').getByRole('link', { name: 'Security overview' }),
-  ).toHaveAttribute('href', '/security');
-  const reference = districts.find((d) => d.id === 'reference')!;
-  expect(reference.status).toBe('released');
-  await expect(
-    page.locator('#district-7').getByRole('link', {
-      name: 'Central City on GitHub',
-    }),
-  ).toHaveAttribute('href', 'https://github.com/centralcity-ai-hq/central-city-code');
-
-  // Every in-page anchor has a target.
-  for (const href of hrefs.filter((value) => value.startsWith('#')))
-    await expect(page.locator(`[id="${href.slice(1)}"]`), href).toHaveCount(1);
-  for (const id of ['districts', 'start', 'base', 'contribute', 'ai', 'next'])
-    await expect(page.locator(`section#${id}`)).toHaveCount(1);
-  // The old group anchors still land on the list.
-  for (const id of ['platform', 'build', 'trust'])
-    await expect(page.locator(`#districts tbody#${id}`)).toHaveCount(1);
-  // The jump nav lists only the sections that exist.
-  await expect(page.getByRole('navigation', { name: 'On this page' }).getByRole('link')).toHaveText(
-    ['Start building', 'On Base', 'Contribute', 'Roadmap', 'For AIs'],
-  );
-  await page.getByRole('button', { name: 'Collapse all details' }).click();
-
-  // Details start collapsed; "Expand all details" opens every one, and closes them again.
-  const open = page.locator('#districts .dt-detail-row:visible');
-  await expect(open).toHaveCount(0);
-  await page.getByRole('button', { name: 'Expand all details' }).click();
-  await expect(open).toHaveCount(rowCount);
-  await expect(page.locator('#districts [aria-expanded="false"]')).toHaveCount(0);
-  // One row per project, inside its repository's collapsible details.
-  await expect(page.locator('#districts .dt-row')).toHaveCount(districts.length);
-  for (const district of districts) {
-    const row = page.locator(`#districts .dt-detail-row #district-${district.id}`);
-    await expect(row).toHaveCount(1);
-    await expect(row.locator('.dt-badge')).toHaveText(statusLabel[district.status]);
-    const meta = row.locator('.dt-meta');
-    if (district.status === 'released') {
-      await expect(meta).not.toContainText('(planned)');
-      await expect(row.getByRole('link', { name: /on GitHub$/ })).toHaveAttribute(
-        'href',
-        district.source!,
-      );
-      await expect(meta).toContainText(`Version ${district.version}`);
-      await expect(meta).toContainText(/Synced \d{4}-\d{2}-\d{2}/);
-      await expect(row.getByRole('link', { name: /changelog$/ })).toHaveAttribute(
-        'href',
-        district.changelog!,
-      );
-    } else {
-      if (district.status === 'planned') await expect(meta).toContainText('Apache-2.0 (planned)');
-      else await expect(meta).not.toContainText('(planned)');
-      await expect(row.getByRole('link', { name: /on GitHub$|changelog$/ })).toHaveCount(0);
-      const source = row.getByRole('link', { name: /source \(in development\)$/ });
-      if (district.source) await expect(source).toHaveAttribute('href', district.source);
-      else await expect(source).toHaveCount(0);
-      if (district.repository)
-        await expect(row.getByRole('link', { name: /not released yet/ })).toHaveAttribute(
-          'href',
-          district.repository,
-        );
-      else await expect(row).toContainText('Published with the release');
-    }
-    if (district.note) await expect(row).toContainText(district.note);
-  }
-  await page.getByRole('button', { name: 'Collapse all details' }).click();
-  await expect(open).toHaveCount(0);
-
-  // Roadmap: one row per phase in the data. Phases 1 to 3 are released.
-  const phases = page.locator('#next .dt-roadmap li');
-  await expect(phases).toHaveCount(data.roadmap.length);
-  for (let i = 0; i < 3; i++)
-    await expect(phases.nth(i).locator('.dt-badge')).toHaveText('Released');
-
-  // Start building scrolls to its section.
-  await chips.nth(1).click();
-  await expect(page).toHaveURL(/\/downtown#start$/);
-  await expect(page.locator('#start')).toBeInViewport();
-  expect(errors).toEqual([]);
+  // Keyboard: the summary is focusable, Enter closes and opens it.
+  await summary(page, target.id).focus();
+  await page.keyboard.press('Enter');
+  await expect(row(page, target.id)).not.toHaveAttribute('open', '');
+  await page.keyboard.press('Enter');
+  await expect(row(page, target.id)).toHaveAttribute('open', '');
 });
 
-test('downtown machine-readable files are served and honest', async ({ page, request }) => {
-  const json = await request.get('/downtown.json');
-  expect(json.ok()).toBe(true);
-  const served = await json.json();
-  expect(served).toEqual(data);
-  expect(served.schema).toBe('centralcity.downtown/v2');
-  expect(served.status).toBe('Live');
-  expect(JSON.stringify(served)).not.toContain('city.desk');
-  expect(served.contribute.guide).toBe(`${toolkit}/blob/main/CONTRIBUTING.md`);
-  expect(served.start.mcp_url).toBe('https://centralcity.ai/mcp/open');
-  const jsonLinks: string[] = JSON.stringify(served).match(/https:\/\/github\.com[^"]*/g) ?? [];
-  expect(jsonLinks.filter((url) => !allowedLinks.includes(url))).toEqual([]);
-
-  const markdown = await request.get('/downtown.md');
-  expect(markdown.ok()).toBe(true);
-  const text = await markdown.text();
-  for (const repo of served.public_repositories)
-    expect(text).toContain(`[${repo.name}](${repo.url})`);
-  for (const district of districts) expect(text).toContain(`| ${district.name} |`);
-  // Elric's row on the page is in the mirror too, as a folder of the application repository.
-  if (ELRIC_CODE_PUBLISHED) expect(text).toContain(`[server/elric](${ELRIC_CODE_URL})`);
-  for (const url of text.match(/https:\/\/github\.com[^\s)|]*/g) ?? [])
-    expect(allowedLinks).toContain(url);
-
-  await openDowntown(page);
-  // Agents on Base: the explorer and the wallet guide, both live pages.
-  const base = page.locator('#base');
-  await expect(base.getByRole('heading', { level: 2 })).toHaveText('Agents on Base.');
-  await expect(base.getByRole('heading', { level: 3 })).toHaveText([
-    'Base ID and passport',
-    'Wallet and Pay',
-    'Rating',
-    'Services on the Feed',
-    'Protocol fee',
-  ]);
-  await expect(base.getByRole('link', { name: 'Agents on Base' })).toHaveAttribute(
-    'href',
-    '/explorer/base',
+test('a link to a district (#district-protocol) opens and marks its row', async ({ page }) => {
+  await openDowntown(page, '/downtown#district-protocol');
+  await expect(row(page, 'protocol')).toHaveAttribute('open', '');
+  await expect(row(page, 'protocol')).toHaveClass(/dt-row-target/);
+  await expect(summary(page, 'protocol')).toBeInViewport();
+  await expect(row(page, 'protocol').locator('.dt-row-name')).toHaveText(
+    districts.find((d) => d.id === 'protocol')!.name,
   );
-  await expect(base.getByRole('link', { name: 'Wallet, Pay and Rating guide' })).toHaveAttribute(
-    'href',
-    '/docs/wallet.md',
-  );
-  await expect(base.getByRole('link', { name: 'Source code' })).toHaveAttribute(
-    'href',
-    `${org}/central-city-code`,
-  );
-  await expect(page.locator('#ai a[href="/downtown.json"]')).toBeVisible();
-  await expect(page.locator('#ai a[href="/downtown.md"]')).toBeVisible();
 });
 
-for (const width of [360, 390]) {
-  test(`downtown fits ${width} px: stacked overview rows, keyboard-operable jump links`, async ({
-    page,
-  }) => {
-    await page.setViewportSize({ width, height: 780 });
+test('a new district hash opens and marks that row; an unknown one opens nothing', async ({
+  page,
+}) => {
+  await openDowntown(page, '/downtown#district-protocol');
+  const other = ordered()[ordered().length - 1];
+  await page.evaluate((id) => (window.location.hash = `#district-${id}`), other.id);
+  await expect(row(page, other.id)).toHaveAttribute('open', '');
+  await expect(row(page, other.id)).toHaveClass(/dt-row-target/);
+  await expect(summary(page, other.id)).toBeInViewport();
+  // The mark moves; the earlier row is no longer the target.
+  await expect(row(page, 'protocol')).not.toHaveClass(/dt-row-target/);
+
+  await page.unrouteAll({ behavior: 'ignoreErrors' });
+  await page.goto('about:blank');
+  await openDowntown(page, '/downtown#district-no-such-district');
+  await expect(page.locator('#districts details.dt-row[open]')).toHaveCount(0);
+  await expect(page.locator('#districts .dt-row-target')).toHaveCount(0);
+});
+
+test('a row is a native disclosure: Enter and Space toggle it, no tab roles left', async ({
+  page,
+}) => {
+  await openDowntown(page);
+  await expect(page.locator('#districts [role="tab"], #districts [role="tablist"]')).toHaveCount(0);
+  const first = ordered()[0];
+  await summary(page, first.id).focus();
+  await page.keyboard.press('Space');
+  await expect(row(page, first.id)).toHaveAttribute('open', '');
+  await page.keyboard.press('Space');
+  await expect(row(page, first.id)).not.toHaveAttribute('open', '');
+  await page.keyboard.press('Enter');
+  await expect(row(page, first.id)).toHaveAttribute('open', '');
+  // Arrow keys belong to the page (scrolling), not to a selection.
+  await page.keyboard.press('ArrowDown');
+  await expect(summary(page, first.id)).toBeFocused();
+});
+
+test('at 360 px an open row with a long path fits, and says its status and version in words', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 360, height: 800 });
+  await openDowntown(page);
+  // The district with the longest source path.
+  const longest = [...districts].sort(
+    (a, b) => (b.source ?? '').length - (a.source ?? '').length,
+  )[0];
+  // Closed: the name and the status in words stay visible on a phone.
+  await expect(summary(page, longest.id).locator('.dt-row-name')).toBeVisible();
+  await expect(summary(page, longest.id).locator('.dt-row-status')).toHaveText(
+    statusLabel[longest.status],
+  );
+  await summary(page, longest.id).click();
+  const body = row(page, longest.id).locator('.dt-row-body');
+  await expect(body).toContainText(longest.version ?? 'Not released yet');
+  await expect(body).toContainText(statusLabel[longest.status]);
+  if (longest.source) {
+    const link = body.getByRole('link', { name: `${longest.name} on GitHub` });
+    await link.scrollIntoViewIfNeeded();
+    const box = (await link.boundingBox())!;
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(360);
+  }
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  );
+  expect(overflow).toBeLessThanOrEqual(0);
+});
+
+for (const width of [360, 390, 768]) {
+  test(`downtown fits ${width} px with no sideways scroll`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 800 });
     await openDowntown(page);
-    const overflow = () =>
-      page.evaluate(
-        () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
-      );
-    expect(await overflow()).toBeLessThanOrEqual(0);
-    // The table's rows stack: the summary sits under the repository name, inside the viewport.
-    const row = page.locator('#districts .dt-item-row').first();
-    const name = (await row.locator('th').boundingBox())!;
-    const summary = (await row.locator('.dt-col-desc').boundingBox())!;
-    expect(summary.y).toBeGreaterThan(name.y);
-    expect(summary.x + summary.width).toBeLessThanOrEqual(width);
-    // Expanding every detail still fits.
-    await page.getByRole('button', { name: 'Expand all details' }).click();
-    expect(await overflow()).toBeLessThanOrEqual(0);
-    const link = page
-      .getByRole('navigation', { name: 'On this page' })
-      .getByRole('link', { name: 'Contribute' });
-    await page.locator('h1').click();
-    let reached = false;
-    for (let index = 0; index < 80 && !reached; index++) {
-      await page.keyboard.press('Tab');
-      reached = await link.evaluate((element) => element === document.activeElement);
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    );
+    expect(overflow).toBeLessThanOrEqual(0);
+    // Touch-sized district rows on phones.
+    if (width < 560) {
+      const box = (await page.locator('#districts .dt-row > summary').first().boundingBox())!;
+      expect(box.height).toBeGreaterThanOrEqual(44);
     }
-    expect(reached).toBe(true);
-    await page.keyboard.press('Enter');
-    await expect(page).toHaveURL(/#contribute$/);
-    await expect(page.locator('#contribute h2')).toBeInViewport();
   });
 }
 
-test('downtown scales to 500 projects', async ({ page }) => {
-  // Synthetic data in the published shape: 12 categories, 500 districts in one repository.
+test('downtown scales to 500 districts', async ({ page }) => {
   const categories = Array.from({ length: 12 }, (_, index) => ({
     id: `cat-${index}`,
     name: `Category ${index}`,
@@ -415,47 +348,48 @@ test('downtown scales to 500 projects', async ({ page }) => {
     route.fulfill({ json: { ...data, categories, districts: many } }),
   );
   await page.setViewportSize({ width: 360, height: 800 });
-  await openDowntown(page);
-  // The overview stays one row per repository; the projects sit collapsed in their repository.
-  await expect(page.locator('#districts .dt-item-row')).toHaveCount(rowCount);
-  const protocol = page.locator('#district-1').getByRole('button', { name: 'protocol' });
-  await expect(protocol).toHaveAttribute('aria-expanded', 'false');
-  await expect(page.locator('#district-1-details .dt-row')).toHaveCount(500);
-  await protocol.click();
-  await expect(page.locator('#district-1-details')).toBeVisible();
+  await openDowntown(page, '/downtown#district-d-491');
+  await expect(page.locator('#districts details.dt-row')).toHaveCount(500);
+  await expect(page.getByRole('heading', { level: 2, name: '500 districts.' })).toBeVisible();
+  await expect(row(page, 'd-491')).toHaveAttribute('open', '');
+  await expect(summary(page, 'd-491')).toBeInViewport();
+  await expect(row(page, 'd-491').locator('.dt-row-name')).toHaveText('District 491');
   const overflow = await page.evaluate(
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
   );
   expect(overflow).toBeLessThanOrEqual(0);
-  // A direct link to a project inside collapsed details opens them and focuses the project.
-  await page.goto('about:blank');
-  await page.goto('/downtown#district-d-491');
-  await expect(page.locator('#district-d-491')).toBeFocused();
-  await expect(page.locator('#district-d-491')).toBeVisible();
-});
-
-test('a link to a project (#district-protocol) opens its details', async ({ page }) => {
-  await openDowntown(page, '/downtown#district-protocol');
-  await expect(page.locator('#district-protocol')).toBeVisible();
-  await expect(page.locator('#district-protocol')).toBeFocused();
 });
 
 test('downtown runs no animations with reduced motion', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await openDowntown(page);
-  await page.locator('.dt-item-row').first().hover();
+  await page.locator('#districts .dt-row > summary').nth(2).click();
   const state = await page.evaluate(() => ({
-    running: document.getAnimations().filter((animation) => animation.playState === 'running')
-      .length,
-    total: document.getAnimations().length,
+    // Each running animation, named, so a failure says what moved.
+    running: document
+      .getAnimations()
+      .filter((animation) => animation.playState === 'running')
+      // Downtown's own content. The shared header's scroll state is the shell's (shell.spec).
+      .filter((animation) =>
+        document
+          .querySelector('main')!
+          .contains((animation.effect as KeyframeEffect | null)?.target as Node | null),
+      )
+      .map((animation) => {
+        const target = (animation.effect as KeyframeEffect | null)?.target as Element | null;
+        const what =
+          (animation as CSSTransition).transitionProperty ??
+          (animation as CSSAnimation).animationName;
+        return `${what} on ${target?.tagName.toLowerCase()}.${target?.className}`;
+      }),
     scroll: getComputedStyle(document.documentElement).scrollBehavior,
   }));
-  expect(state).toEqual({ running: 0, total: 0, scroll: 'auto' });
+  expect(state).toEqual({ running: [], scroll: 'auto' });
 
   // Without the preference there is still no looping animation.
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await page.reload();
-  await expect(page.locator('.dt-item-row').first()).toBeVisible();
+  await expect(page.locator('#districts details.dt-row').first()).toBeVisible();
   expect(
     await page.evaluate(
       () =>
@@ -463,6 +397,81 @@ test('downtown runs no animations with reduced motion', async ({ page }) => {
           .length,
     ),
   ).toBe(0);
+});
+
+test('downtown has named landmarks, ordered headings and labelled controls', async ({ page }) => {
+  await openDowntown(page);
+  for (const role of ['banner', 'main', 'contentinfo'] as const)
+    await expect(page.getByRole(role)).toHaveCount(1);
+  // The districts: one labelled group per category, every row's summary has its name.
+  await expect(page.locator('#districts [role="group"][aria-labelledby]')).toHaveCount(
+    new Set(districts.map((d) => d.category)).size,
+  );
+  for (const name of await page.locator('#districts .dt-row > summary .dt-row-name').all())
+    expect((await name.textContent())!.trim()).not.toBe('');
+  const levels = await page
+    .locator('main :is(h1, h2, h3, h4, h5, h6)')
+    .evaluateAll((headings) => headings.map((heading) => Number(heading.tagName[1])));
+  expect(levels[0]).toBe(1);
+  for (let index = 1; index < levels.length; index++)
+    expect(levels[index] - levels[index - 1], `heading ${index}`).toBeLessThanOrEqual(1);
+  for (const control of await page.locator('main a, main button, header a, header button').all())
+    expect(
+      await control.evaluate(
+        (element) => element.textContent!.trim() || element.getAttribute('aria-label'),
+      ),
+    ).toBeTruthy();
+  // The client switch says which command is shown, and its Copy button copies that one.
+  const seg = page.getByRole('group', { name: 'Client' });
+  await expect(seg.getByRole('button', { name: 'Claude Code' })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  );
+  await expect(page.locator('#start .dt-cmd code')).toHaveText(data.start.clients.claude_code);
+  await seg.getByRole('button', { name: 'Codex' }).click();
+  await expect(page.locator('#start .dt-cmd code')).toHaveText(data.start.clients.codex);
+
+  await settleTransitions(page);
+  const contrast = await textContrast(page);
+  expect(contrast.length).toBeGreaterThan(40);
+  const low = contrast.filter((item) => item.ratio < item.minimum);
+  expect(low, 'text pairs under the contrast minimum (where, colours, ratio)').toEqual([]);
+});
+
+for (const width of [390, 1440]) {
+  test(`downtown renders in the dark theme at ${width} px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.addInitScript((theme) => localStorage.setItem('cc-theme', theme), 'dark');
+    await openDowntown(page);
+    await settleTransitions(page);
+    const contrast = await textContrast(page);
+    expect(contrast.length).toBeGreaterThan(40);
+    const low = contrast.filter((item) => item.ratio < item.minimum);
+    expect(low, 'text pairs under the contrast minimum (where, colours, ratio)').toEqual([]);
+  });
+}
+
+test('downtown machine-readable files are served and honest', async ({ request }) => {
+  const json = await request.get('/downtown.json');
+  expect(json.ok()).toBe(true);
+  const served = await json.json();
+  expect(served).toEqual(data);
+  expect(served.schema).toBe('centralcity.downtown/v2');
+  expect(served.status).toBe('Live');
+  expect(served.contribute.guide).toBe(`${toolkit}/blob/main/CONTRIBUTING.md`);
+  expect(served.start.mcp_url).toBe('https://centralcity.ai/mcp/open');
+  const jsonLinks: string[] = JSON.stringify(served).match(/https:\/\/github\.com[^"]*/g) ?? [];
+  expect(jsonLinks.filter((url) => !allowedLinks.includes(url))).toEqual([]);
+
+  const markdown = await request.get('/downtown.md');
+  expect(markdown.ok()).toBe(true);
+  const text = await markdown.text();
+  for (const repo of served.public_repositories)
+    expect(text).toContain(`[${repo.name}](${repo.url})`);
+  for (const district of districts) expect(text).toContain(`| ${district.name} |`);
+  if (ELRIC_CODE_PUBLISHED) expect(text).toContain(`[server/elric](${ELRIC_CODE_URL})`);
+  for (const url of text.match(/https:\/\/github\.com[^\s)|]*/g) ?? [])
+    expect(allowedLinks).toContain(url);
 });
 
 /** Waits for running CSS transitions, so colours are measured at rest rather than mid-fade. */
@@ -549,85 +558,6 @@ async function textContrast(page: Page) {
   });
 }
 
-test('downtown has named landmarks, ordered headings and labelled controls', async ({ page }) => {
-  await openDowntown(page);
-  for (const role of ['banner', 'main', 'contentinfo'] as const)
-    await expect(page.getByRole(role)).toHaveCount(1);
-  await expect(page.getByRole('navigation', { name: 'Public' })).toHaveCount(1);
-  await expect(page.getByRole('navigation', { name: 'On this page' })).toHaveCount(1);
-  for (const name of ['All repositories', 'Build today, without our repositories.'])
-    await expect(page.getByRole('region', { name, exact: true })).toHaveCount(1);
-  const levels = await page
-    .locator('main :is(h1, h2, h3, h4, h5, h6)')
-    .evaluateAll((headings) => headings.map((heading) => Number(heading.tagName[1])));
-  expect(levels[0]).toBe(1);
-  for (let index = 1; index < levels.length; index++)
-    expect(levels[index] - levels[index - 1], `heading ${index}`).toBeLessThanOrEqual(1);
-
-  // Each Copy button sits in a group that says what it copies.
-  for (const name of ['Claude Code', 'Codex'])
-    await expect(
-      page.getByRole('group', { name }).getByRole('button', { name: 'Copy' }),
-    ).toHaveCount(1);
-  // Every link and button has an accessible name.
-  for (const control of await page.locator('main a, main button, header a, header button').all())
-    expect(
-      await control.evaluate(
-        (element) => element.textContent!.trim() || element.getAttribute('aria-label'),
-      ),
-    ).toBeTruthy();
-
-  // Keyboard focus is visible on the jump links.
-  const link = page.locator('.dt-jump a').first();
-  await link.focus();
-  await page.keyboard.press('Shift+Tab');
-  await page.keyboard.press('Tab');
-  const outline = await link.evaluate((element) => getComputedStyle(element).outlineStyle);
-  expect(outline).not.toBe('none');
-
-  // Open every detail so the project rows are measured too.
-  await page.getByRole('button', { name: 'Expand all details' }).click();
-  const contrast = await textContrast(page);
-  expect(contrast.length).toBeGreaterThan(60);
-  const low = contrast.filter((item) => item.ratio < item.minimum);
-  expect(low, 'text pairs under the contrast minimum (where, colours, ratio)').toEqual([]);
-});
-
-for (const width of [390, 1440]) {
-  test(`downtown renders in the dark theme at ${width} px`, async ({ page }) => {
-    await page.setViewportSize({ width, height: 900 });
-    await page.addInitScript((theme) => localStorage.setItem('cc-theme', theme), 'dark');
-    await openDowntown(page);
-    const colours = await page.evaluate(() => ({
-      canvas: getComputedStyle(document.body).backgroundColor,
-      code: getComputedStyle(document.querySelector('.dt-code-row')!).backgroundColor,
-      heading: getComputedStyle(document.querySelector('h1')!).color,
-    }));
-    // Brand dark tokens: ink canvas, sunken code rows, white text.
-    expect(colours).toEqual({
-      canvas: 'rgb(9, 9, 11)',
-      code: 'rgb(18, 18, 20)',
-      heading: 'rgb(250, 250, 250)',
-    });
-    for (const text of ['Expand all details', 'Contribute to the toolkit.'])
-      await expect(page.locator('main').getByText(text, { exact: true })).toBeVisible();
-    await page.getByRole('button', { name: 'Expand all details' }).click();
-    const contrast = await textContrast(page);
-    expect(contrast.length).toBeGreaterThan(60);
-    const low = contrast.filter((item) => item.ratio < item.minimum);
-    expect(low, 'text pairs under the contrast minimum (where, colours, ratio)').toEqual([]);
-
-    // The in-page toggle agrees: picking light from dark flips the tokens.
-    // Under 900 px the theme toggle lives in the header menu.
-    if (width < 900) await page.getByRole('button', { name: 'Open menu' }).click();
-    await page.getByRole('button', { name: 'Use light theme' }).click();
-    await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
-    await expect
-      .poll(() => page.evaluate(() => getComputedStyle(document.body).backgroundColor))
-      .toBe('rgb(255, 255, 255)');
-  });
-}
-
 test('downtown GitHub links resolve for a signed-out visitor', async ({ playwright }) => {
   // A fresh context with no cookies or tokens: every released link must be public (HTTP 200).
   // Opt out with DOWNTOWN_SKIP_NETWORK=1 on machines without internet access.
@@ -683,31 +613,61 @@ test('downtown GitHub links resolve for a signed-out visitor', async ({ playwrig
   expect(verified, 'at least one Downtown link answered 200').toBeGreaterThanOrEqual(1);
 });
 
-test('the overview table sits close to the hero and fits the first screen', async ({ page }) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto('/downtown');
-  const chips = page.locator('.dt-chips').first();
-  await expect(chips).toBeVisible();
-  const table = page.locator('.dt-overview table');
-  await expect(table).toBeVisible();
-  const a = (await chips.boundingBox())!;
-  const b = (await table.boundingBox())!;
-  // Only the jump nav sits between the chips and the table.
-  expect(b.y - (a.y + a.height)).toBeLessThanOrEqual(110);
-  expect(b.y + b.height).toBeLessThanOrEqual(900);
+test('with the app repository counted, the total says "across Central City" and moves with releases', async ({
+  page,
+}) => {
+  const app = {
+    name: 'central-city',
+    commit: 'f'.repeat(40),
+    code: 300000,
+    tests: 262000,
+    files: 1720,
+    skipped: 0,
+  };
+  const others = CODE_COUNT.repos.filter((r) => r.name !== 'central-city-code');
+  const code = app.code + others.reduce((t, r) => t + r.code, 0);
+  const tests = app.tests + others.reduce((t, r) => t + r.tests, 0);
+  await openDowntown(page, '/downtown', {
+    ...CODE_COUNT,
+    total: code + tests,
+    code,
+    tests,
+    counted_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+    repos: [app, ...others],
+  });
+  const facts = page.getByRole('complementary', { name: 'Downtown in numbers' });
+  await expect(facts.locator('.dt-loc-number')).toHaveText((code + tests).toLocaleString('en-US'));
+  await expect(facts).toContainText(
+    'lines of code across Central City, counted with every release',
+  );
+  await expect(facts).toContainText('Updated 5 min ago');
+  // The private repository's commit is never linked.
+  await expect(facts.locator('a[href*="/commit/"]')).toHaveCount(0);
 });
 
-test('a link to a district row opens and scrolls to that row', async ({ page }) => {
-  await openDowntown(page, '/downtown#district-3');
-  const row = page.locator('#district-3');
-  await expect(row).toBeFocused();
-  await expect(row).toBeInViewport();
-  await expect(row.getByRole('button')).toHaveAttribute('aria-expanded', 'true');
-  await expect(page.locator('#district-3-details')).toBeVisible();
-  // Keyboard: the disclosure button toggles with Enter.
-  const button = page.locator('#district-1').getByRole('button');
-  await button.focus();
-  await page.keyboard.press('Enter');
-  await expect(button).toHaveAttribute('aria-expanded', 'true');
-  await expect(page.locator('#district-1-details')).toBeVisible();
+test('"Explore the districts" glides down to the districts, and keeps #districts in the address', async ({
+  page,
+}) => {
+  await openDowntown(page);
+  // The scroll position on every frame for a second after the click: a glide passes through
+  // many positions on its way down; a jump goes straight from the top to the end.
+  const positions = await page.evaluate(async () => {
+    const link = [...document.querySelectorAll('a')].find((a) =>
+      a.textContent?.includes('Explore the districts'),
+    )!;
+    link.click();
+    const seen: number[] = [];
+    const started = performance.now();
+    while (performance.now() - started < 1200) {
+      const y = Math.round(window.scrollY);
+      if (seen[seen.length - 1] !== y) seen.push(y);
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+    return seen;
+  });
+  expect(positions.length, `positions: ${positions.join(', ')}`).toBeGreaterThanOrEqual(5);
+  // It only moves down, and it arrives at the districts.
+  for (let i = 1; i < positions.length; i++) expect(positions[i]).toBeGreaterThan(positions[i - 1]);
+  await expect(page.getByRole('heading', { level: 2, name: /districts\.$/ })).toBeInViewport();
+  expect(page.url()).toMatch(/#districts$/);
 });

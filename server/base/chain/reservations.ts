@@ -8,7 +8,10 @@
  *
  * reserve() runs inside the caller's transaction and fails closed: the wallet row is locked
  * (SELECT … FOR UPDATE) so concurrent reserves serialize, then on-chain balance minus everything
- * still held must cover the amount. The same holder reserving again is idempotent; a different
+ * still held must cover the amount. Callers read the balance before their transaction
+ * (readBalance) and pass it in, so no network call is made while the row is locked; a read made
+ * before the lock is safe for the same reason a lagging one is (holds and not yet debited spends
+ * are counted against the read's block). The same holder reserving again is idempotent; a different
  * amount or intent for the same holder is refused. Nothing is ever released on a timeout alone.
  *
  * Bulk provisioning reserves per batch, not per job: holder ref `<jobId>:<batchNo>` (immutable);
@@ -150,6 +153,21 @@ export interface ReserveInput {
   amount: bigint;
   holder: { kind: HolderKind; ref: string };
   intentHash: string;
+  /**
+   * The wallet's balance of `token`, read before the caller's transaction (readBalance). Given,
+   * reserve() makes no network call under the wallet row lock; absent, it reads there. A read that
+   * failed is passed as `{ error }`: an existing reservation of the holder is still answered as
+   * without it, and a new one fails with that error, as a read under the lock would have.
+   */
+  read?: BalanceRead | { error: unknown };
+}
+
+/** A balance read of one wallet address in one token, with the block it was read at. */
+export interface BalanceRead {
+  address: Address;
+  token: Address;
+  balance: bigint;
+  blockNumber: bigint;
 }
 
 export function createReservationLedger(deps: ReservationDeps) {
@@ -165,6 +183,19 @@ export function createReservationLedger(deps: ReservationDeps) {
   }
 
   return {
+    /**
+     * The balance read reserve() needs, made outside any transaction (pass it as `read`). Never
+     * throws: a failed read is answered as `{ error }` for reserve() to decide.
+     */
+    async readBalance(address: Address, token: Address): Promise<BalanceRead | { error: unknown }> {
+      try {
+        const { balance, blockNumber } = await deps.balanceOf(address, token);
+        return { address, token, balance, blockNumber };
+      } catch (error) {
+        return { error };
+      }
+    },
+
     /**
      * Holds `amount` for the holder, or returns its existing identical reservation while it is still
      * held. A consumed or released reservation is never handed back as if it were new: that refuses
@@ -205,11 +236,17 @@ export function createReservationLedger(deps: ReservationDeps) {
         return view(row);
       }
 
-      // Read the balance first, then subtract what is unavailable at that read.
-      const { balance, blockNumber } = await deps.balanceOf(
-        wallet.rows[0].address as Address,
-        input.token,
-      );
+      // The balance read (made before the transaction when the caller passed it), then what is
+      // unavailable at that read is subtracted.
+      const address = wallet.rows[0].address as Address;
+      const read = input.read;
+      if (read && 'error' in read) throw read.error;
+      if (
+        read &&
+        (read.address.toLowerCase() !== address.toLowerCase() || read.token.toLowerCase() !== token)
+      )
+        throw new ReservationError('WALLET_NOT_FOUND', 'The balance read is of another wallet.');
+      const { balance, blockNumber } = read ?? (await deps.balanceOf(address, input.token));
       const held = await unavailableAmount(tx, {
         walletId: input.walletId,
         token: input.token,

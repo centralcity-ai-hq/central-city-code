@@ -33,7 +33,7 @@ import { Resolver } from 'node:dns/promises';
 import { request as httpRequest, type IncomingMessage } from 'node:http';
 import { connect as netConnect, isIP, type Socket } from 'node:net';
 import { connect as tlsConnect } from 'node:tls';
-import { isPublicAddress } from '../../oauth/clients.js';
+import { isPublicAddress, localOnlyHostName } from '../../oauth/clients.js';
 
 export interface ResolvedAddress {
   address: string;
@@ -181,9 +181,6 @@ const MINUTE_MS = 60_000;
 
 const PORTS = new Set(['', '80', '443']);
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
-/** Names that only mean something inside a network; refused without a lookup. */
-const LOCAL_SUFFIX =
-  /(?:^|\.)(?:localhost|local|internal|intranet|lan|home|corp|arpa|test|invalid)$/i;
 
 /** The host of a URL without IPv6 brackets or trailing dots ("localhost." is localhost). */
 export function bareHost(url: URL): string {
@@ -226,8 +223,9 @@ export function publicUrlProblem(
     if (!isPublicAddress(host)) return { kind: 'not_public', reason: 'must name a public host' };
     return { kind: 'bad_url', reason: 'must name the host by its DNS name, not an IP address' };
   }
-  if (!host.includes('.') || LOCAL_SUFFIX.test(host))
-    return { kind: 'not_public', reason: 'must name a public host' };
+  // Names that only mean something inside a network, refused without a lookup: the one static
+  // host rule of every outbound guard (CCA-632, oauth/clients.ts localOnlyHostName).
+  if (localOnlyHostName(host)) return { kind: 'not_public', reason: 'must name a public host' };
   return null;
 }
 
@@ -245,14 +243,18 @@ export function createSystemResolve(
   options: { servers?: readonly string[]; tryTimeoutMs?: number } = {},
 ): ResolveHost {
   return async (hostname, signal) => {
+    // Already cancelled (the deadline passed first): no query is started at all.
+    if (signal?.aborted)
+      throw Object.assign(new Error('The host name lookup was cancelled.'), {
+        code: 'ECANCELLED',
+      });
     const resolver = new Resolver({
       timeout: options.tryTimeoutMs ?? DNS_TRY_TIMEOUT_MS,
       tries: 1,
     });
     if (options.servers) resolver.setServers([...options.servers]);
     const cancel = () => resolver.cancel();
-    if (signal?.aborted) cancel();
-    else signal?.addEventListener('abort', cancel, { once: true });
+    signal?.addEventListener('abort', cancel, { once: true });
     try {
       const [v4, v6] = await Promise.allSettled([
         resolver.resolve4(hostname),

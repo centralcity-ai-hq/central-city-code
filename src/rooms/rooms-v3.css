@@ -1452,6 +1452,19 @@
     padding: 0 calc(16 * var(--ws-px));
     box-shadow: none;
   }
+  /* The narrowest phones: tighter chips, so a full strip still fits and Invite is not cut off. */
+  @media (max-width: 400px) {
+    .rm-app[data-rooms='v2'] .rm3 .rm3-topbar[data-compact] .rm3-chips {
+      gap: calc(4 * var(--ws-px));
+    }
+    .rm-app[data-rooms='v2'] .rm3 .rm3-chip {
+      gap: calc(3 * var(--ws-px));
+      padding: 0 calc(6 * var(--ws-px));
+    }
+    .rm-app[data-rooms='v2'] .rm3 .rm3-invite {
+      padding: 0 calc(8 * var(--ws-px));
+    }
+  }
   .rm-app[data-rooms='v2'] .rm3 .rv2-needs-pop {
     position: fixed;
     top: auto;

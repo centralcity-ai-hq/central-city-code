@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { RUNTIME_CREDENTIAL_PREFIX } from './credential-prefixes.js';
 import type { Transaction as Tx } from './database.js';
 import { closeAgentChat } from './rooms/private.js';
 import { resetPresence } from './presence.js';
@@ -189,7 +190,11 @@ export async function issueRuntimeCredential(
   time: number,
   reason: 'rotated' | 'enrolled',
 ): Promise<string> {
-  const token = randomBytes(32).toString('base64url');
+  const token = `${RUNTIME_CREDENTIAL_PREFIX}${randomBytes(32).toString('base64url')}`;
+  // An unused enrollment code from before this credential must not be able to replace it.
+  await tx.query('DELETE FROM runtime_enrollments WHERE agent_id=$1 AND used_at IS NULL', [
+    agent.id,
+  ]);
   // The legacy table permits exactly one credential per stable agent identity.
   await tx.query('DELETE FROM credentials WHERE agent_id=$1 AND operator_id=$2', [
     agent.id,

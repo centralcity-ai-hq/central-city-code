@@ -23,6 +23,9 @@ import {
 import { registerAgentPayRoutes } from '../server/base/wallet/agent-pay-routes.js';
 import { BASE_NETWORKS } from '../shared/base/chains.js';
 import { WALLET_CHAIN_ID as CHAIN_ID } from '../shared/base/wallet-network.js';
+import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
+import { agentPayConsentTypedData } from '../shared/base/agent-pay-consent.js';
+import { agentPayConsentSignatureMigration } from '../server/base/wallet/agent-pay-consent-schema.js';
 
 /*
  * Base Pay P2b: the owner's consent that one agent may pay on its own. Bound to exactly one chain,
@@ -42,7 +45,7 @@ const WIDE = 'central-city-agents-and-feed-services';
 
 async function setup(
   t: { after: (fn: () => Promise<unknown>) => void },
-  options: { recipientsMigration?: boolean } = {},
+  options: { recipientsMigration?: boolean; signatureMigration?: boolean; clock?: number } = {},
 ) {
   const pg = await PGlite.create('memory://');
   t.after(() => pg.close());
@@ -54,19 +57,33 @@ async function setup(
   await pg.exec(BASE_WALLET_LIMITS_SQL);
   await pg.exec(BASE_AGENT_PAY_CONSENTS_SQL);
   if (options.recipientsMigration !== false) await pg.exec(BASE_AGENT_PAY_CONSENT_RECIPIENTS_SQL);
+  if (options.signatureMigration !== false && options.recipientsMigration !== false)
+    await pg.exec(agentPayConsentSignatureMigration.sql);
   const db: Database = {
     query: (sql, params) => pg.query(sql, params) as never,
     exec: (sql) => pg.exec(sql),
     transaction: (action) => pg.transaction((tx) => action(tx as never)),
     close: () => pg.close(),
   };
+  // Each wallet's owner key (CCA-113: a consent is signed by it).
+  const ownerKeys = new Map([
+    [AGENT, generatePrivateKey()],
+    [OTHER_AGENT, generatePrivateKey()],
+  ]);
   const wallet = async (id: string, agent: string, account: string, n: string) =>
     pg.query(
       `INSERT INTO base_wallets (wallet_id, agent_id, operator_id, chain_id, address, owner_address,
          spender_address, spender_key_ref, derivation, state, created_at, updated_at,
          owner_account_id)
        VALUES ($1,$2,$3,${CHAIN_ID},$4,$5,$6,'v1:k','{}','derived',0,0,$3)`,
-      [id, agent, account, `0x${n.repeat(40)}`, `0x${'e'.repeat(40)}`, `0x${'f'.repeat(40)}`],
+      [
+        id,
+        agent,
+        account,
+        `0x${n.repeat(40)}`,
+        privateKeyToAccount(ownerKeys.get(agent)!).address,
+        `0x${'f'.repeat(40)}`,
+      ],
     );
   await wallet('w-1', AGENT, 'person-1', '1');
   await wallet('w-2', OTHER_AGENT, 'person-2', '2');
@@ -78,15 +95,39 @@ async function setup(
        VALUES ($1,$2,${CHAIN_ID},'{}','\\x00',$3,$4,$5,'day',10000000,'half',0,0,$6)`,
       [id, walletId, state, USDC, hash, state === 'revoked' ? 1 : null],
     );
-  let clock = 1_000;
+  let clock = options.clock ?? 1_000;
   // The flags as the service reads them per request: Feed pay off unless a test switches it on.
   const env: Record<string, string | undefined> = { CITY_FEED_PAY: '0' };
-  const service = createAgentPayConsentService({
+  const unsigned = createAgentPayConsentService({
     db,
     chainId: CHAIN_ID,
     now: () => ++clock,
     env,
   });
+  /** The body the owner's screen sends: signed by the agent wallet's owner key (or `key`). */
+  const sign = async (agentId: string, body: unknown, key?: `0x${string}`, age = 0) => {
+    const b = (body ?? {}) as Record<string, unknown>;
+    if (typeof b.permissionHash !== 'string') return body;
+    const nonce = `0x${Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('hex')}`;
+    const issuedAt = clock + age;
+    const signature = await privateKeyToAccount(key ?? ownerKeys.get(agentId)!).signTypedData(
+      agentPayConsentTypedData({
+        chainId: CHAIN_ID,
+        wallet: `0x${(agentId === AGENT ? '1' : '2').repeat(40)}`,
+        token: USDC,
+        permissionHash: b.permissionHash,
+        recipients: typeof b.recipients === 'string' ? b.recipients : AGENTS,
+        nonce,
+        issuedAt,
+      }),
+    );
+    return { ...b, signature, nonce, issuedAt };
+  };
+  const service = {
+    ...unsigned,
+    grant: async (accountId: string, agentId: string, body: unknown) =>
+      unsigned.grant(accountId, agentId, await sign(agentId, body)),
+  };
   const covered = (
     permissionId: string,
     permissionHash: string,
@@ -136,7 +177,20 @@ async function setup(
         'SELECT kind, detail FROM base_audit_events ORDER BY event_id',
       )
       .then((res) => res.rows.map((row) => [row.kind, row.detail.recipients ?? null]));
-  return { pg, db, env, service, limit, covered, feedServiceRefusal, consents, audits };
+  return {
+    pg,
+    db,
+    env,
+    service,
+    unsigned,
+    sign,
+    ownerKeys,
+    limit,
+    covered,
+    feedServiceRefusal,
+    consents,
+    audits,
+  };
 }
 
 const refused = (code: string) => (e: unknown) =>
@@ -257,15 +311,17 @@ test('the routes exist only with wallets on and only for a signed-in person', as
       const who = request.headers['x-test-person'];
       return typeof who === 'string' ? { ok: true, accountId: who } : { ok: false, code: 401 };
     },
-    service: s.service,
+    service: s.unsigned,
   });
   const url = `/api/base/agents/${AGENT}/wallet/agent-pay`;
-  const call = (method: 'GET' | 'PUT' | 'DELETE', person?: string, payload?: object) =>
+  const call = async (method: 'GET' | 'PUT' | 'DELETE', person?: string, payload?: object) =>
     app.inject({
       method,
       url,
       headers: person ? { 'x-test-person': person } : {},
-      ...(payload ? { payload } : {}),
+      ...(payload
+        ? { payload: method === 'PUT' ? ((await s.sign(AGENT, payload)) as object) : payload }
+        : {}),
     });
   assert.equal((await call('GET', 'person-1')).statusCode, 404, 'wallets off');
   on = true;
@@ -293,7 +349,7 @@ test('the consents table is a recognized Base table (recovery never exports it)'
 // --- recipients (migration 118) ----------------------------------------------------------------
 
 test('migration 118: existing consents read Central City agents only; cheap DDL, no backfill', async (t) => {
-  const s = await setup(t, { recipientsMigration: false });
+  const s = await setup(t, { recipientsMigration: false, signatureMigration: false });
   await s.limit('p-a', 'w-1', HASH_A);
   // A consent as the code before migration 118 stored it.
   await s.pg.query(
@@ -303,6 +359,8 @@ test('migration 118: existing consents read Central City agents only; cheap DDL,
     [AGENT, USDC, HASH_A],
   );
   await s.pg.exec(BASE_AGENT_PAY_CONSENT_RECIPIENTS_SQL);
+  // Then migration 300: a consent from before signatures keeps working.
+  await s.pg.exec(agentPayConsentSignatureMigration.sql);
   assert.deepEqual(await s.consents(), [{ recipients: AGENTS, live: true }]);
   // It still lets the agent pay Central City agents, and never a Feed service.
   assert.equal(await s.covered('p-a', HASH_A), true);
@@ -476,4 +534,116 @@ test('the route takes the recipients the screen showed and answers scope_changed
   assert.equal(given.statusCode, 200, given.body);
   assert.equal(given.json().consent.recipients, WIDE);
   assert.equal(given.json().scope.recipients, WIDE);
+});
+
+// --- bound to the owner key (CCA-113, migration 300) --------------------------------------------
+
+test('CCA-113: a consent needs the wallet owner key’s signature; the console session alone is refused', async (t) => {
+  const s = await setup(t);
+  await s.limit('p-a', 'w-1', HASH_A);
+  // A stolen console session without the owner key: no signature, or another key's.
+  await assert.rejects(
+    s.unsigned.grant('person-1', AGENT, { permissionHash: HASH_A }),
+    refused('invalid_body'),
+  );
+  await assert.rejects(
+    s.unsigned.grant(
+      'person-1',
+      AGENT,
+      await s.sign(AGENT, { permissionHash: HASH_A }, generatePrivateKey()),
+    ),
+    refused('signature_mismatch'),
+  );
+  // The owner key's signature for something else: another limit, or wider recipients.
+  const forB = (await s.sign(AGENT, { permissionHash: HASH_B })) as Record<string, unknown>;
+  await assert.rejects(
+    s.unsigned.grant('person-1', AGENT, { ...forB, permissionHash: HASH_A }),
+    refused('signature_mismatch'),
+  );
+  s.env.CITY_FEED_PAY = undefined;
+  const agentsOnly = (await s.sign(AGENT, { permissionHash: HASH_A })) as Record<string, unknown>;
+  await assert.rejects(
+    s.unsigned.grant('person-1', AGENT, { ...agentsOnly, recipients: WIDE }),
+    refused('signature_mismatch'),
+  );
+  // The other agent's owner key never signs for this wallet.
+  await assert.rejects(
+    s.unsigned.grant(
+      'person-1',
+      AGENT,
+      await s.sign(AGENT, { permissionHash: HASH_A }, s.ownerKeys.get(OTHER_AGENT)),
+    ),
+    refused('signature_mismatch'),
+  );
+  assert.equal(await s.covered('p-a', HASH_A), false);
+  assert.deepEqual(await s.consents(), []);
+  // Signed: given, with the signature and nonce stored.
+  const given = await s.unsigned.grant('person-1', AGENT, agentsOnly);
+  assert.equal(given.mayPay, true);
+  const row = await s.pg.query<{ owner_signature: string; consent_nonce: string }>(
+    'SELECT owner_signature, consent_nonce FROM base_agent_pay_consents',
+  );
+  assert.equal(row.rows[0]!.owner_signature, (agentsOnly.signature as string).toLowerCase());
+  assert.equal(row.rows[0]!.consent_nonce, agentsOnly.nonce);
+  assert.equal(await s.covered('p-a', HASH_A), true);
+});
+
+test('CCA-113: a signature is used once and only while fresh', async (t) => {
+  const s = await setup(t, { clock: 1_800_000_000_000 });
+  await s.limit('p-a', 'w-1', HASH_A);
+  const body = (await s.sign(AGENT, { permissionHash: HASH_A })) as Record<string, unknown>;
+  await s.unsigned.grant('person-1', AGENT, body);
+  // The same request again while it is the live consent: a replay, nothing new.
+  await s.unsigned.grant('person-1', AGENT, body);
+  assert.equal((await s.consents()).length, 1);
+  // After a withdrawal the old signature cannot give it back.
+  await s.service.revoke('person-1', AGENT);
+  await assert.rejects(s.unsigned.grant('person-1', AGENT, body), refused('nonce_used'));
+  assert.equal(await s.covered('p-a', HASH_A), false);
+  // A signature older than ten minutes is refused, however well signed.
+  const stale = await s.sign(AGENT, { permissionHash: HASH_A }, undefined, -11 * 60_000);
+  await assert.rejects(s.unsigned.grant('person-1', AGENT, stale), refused('consent_expired'));
+  const fresh = await s.sign(AGENT, { permissionHash: HASH_A }, undefined, -9 * 60_000);
+  assert.equal((await s.unsigned.grant('person-1', AGENT, fresh)).mayPay, true);
+});
+
+test('CCA-113, migration 300: consents from before signatures keep working; a later unsigned row (an older instance) never pays', async (t) => {
+  const s = await setup(t, { signatureMigration: false });
+  await s.limit('p-a', 'w-1', HASH_A);
+  await s.limit('p-b', 'w-2', HASH_B);
+  const insert = (
+    id: string,
+    walletId: string,
+    agent: string,
+    permission: string,
+    hash: string,
+    by: string,
+  ) =>
+    s.pg.query(
+      `INSERT INTO base_agent_pay_consents (consent_id, chain_id, wallet_id, agent_id, token,
+         permission_id, permission_hash, granted_by, granted_at, recipients)
+       VALUES ($1, ${CHAIN_ID}, $2, $3, $4, $5, $6, $7, 1, 'central-city-agents')`,
+      [id, walletId, agent, USDC, permission, hash, by],
+    );
+  // Given by the console before migration 300 (the insert the older build makes).
+  await insert('c-before', 'w-1', AGENT, 'p-a', HASH_A, 'person-1');
+  await s.pg.exec(agentPayConsentSignatureMigration.sql);
+  assert.equal(await s.covered('p-a', HASH_A), true, 'kept');
+  assert.equal((await s.service.view('person-1', AGENT)).mayPay, true);
+  // The same insert by an older instance after the migration: stored, but never lets it pay.
+  await insert('c-after', 'w-2', OTHER_AGENT, 'p-b', HASH_B, 'person-2');
+  assert.equal(await s.covered('p-b', HASH_B, 'w-2'), false);
+  const view = await s.service.view('person-2', OTHER_AGENT);
+  assert.equal(view.mayPay, false);
+  assert.equal(view.consent?.coversCurrentLimit, false);
+  // Confirming again with the owner key replaces it.
+  assert.equal(
+    (await s.service.grant('person-2', OTHER_AGENT, { permissionHash: HASH_B })).mayPay,
+    true,
+  );
+  assert.equal(await s.covered('p-b', HASH_B, 'w-2'), true);
+  // Applied again: nothing changes.
+  await s.pg.exec(agentPayConsentSignatureMigration.sql);
+  assert.equal(await s.covered('p-b', HASH_B, 'w-2'), true);
+  assert.doesNotMatch(agentPayConsentSignatureMigration.sql, /DROP|DELETE|TRUNCATE|RENAME/i);
 });

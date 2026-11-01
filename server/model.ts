@@ -165,6 +165,8 @@ export function event(
 export function hasPermission(
   workspace: Workspace,
   job: Pick<Job, 'requesterId' | 'providerId'>,
+  /** A paused agent counts as present: a pause stops work, it does not end a connection. */
+  options: { pausedOk?: boolean } = {},
 ): boolean {
   // A requester in another workspace needs a current accepted cross-workspace connection; its own
   // liveness is enforced where it acts (its workspace), and revoking it revokes the connection.
@@ -175,7 +177,8 @@ export function hasPermission(
     )
   )
     return workspace.agents.some(
-      (agent) => agent.id === job.providerId && !agent.revokedAt && !agent.pausedAt,
+      (agent) =>
+        agent.id === job.providerId && !agent.revokedAt && (options.pausedOk || !agent.pausedAt),
     );
   return (
     workspace.connections.some(
@@ -183,7 +186,9 @@ export function hasPermission(
         connection.fromAgentId === job.requesterId && connection.toAgentId === job.providerId,
     ) &&
     [job.requesterId, job.providerId].every((id) =>
-      workspace.agents.some((agent) => agent.id === id && !agent.revokedAt && !agent.pausedAt),
+      workspace.agents.some(
+        (agent) => agent.id === id && !agent.revokedAt && (options.pausedOk || !agent.pausedAt),
+      ),
     )
   );
 }
@@ -227,14 +232,22 @@ export function syncWorkflows(workspace: Workspace, time: number): void {
       status = 'failed';
       error = 'A linked workflow job is missing.';
     } else if (
-      !hasPermission(workspace, {
-        requesterId: workflow.requesterId,
-        providerId: workflow.researcherId,
-      }) ||
-      !hasPermission(workspace, {
-        requesterId: workflow.researcherId,
-        providerId: workflow.reviewerId,
-      })
+      !hasPermission(
+        workspace,
+        {
+          requesterId: workflow.requesterId,
+          providerId: workflow.researcherId,
+        },
+        { pausedOk: true },
+      ) ||
+      !hasPermission(
+        workspace,
+        {
+          requesterId: workflow.researcherId,
+          providerId: workflow.reviewerId,
+        },
+        { pausedOk: true },
+      )
     ) {
       status = 'canceled';
       error = 'Workflow stopped because an agent or directional connection was revoked.';

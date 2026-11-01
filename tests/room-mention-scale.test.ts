@@ -5,6 +5,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { createApp } from '../server/app.js';
 import { ROOM_LIMITS } from '../server/rooms/contract.js';
 import { findMentions, textOf } from '../server/wake/mentions.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 /**
  * @mentions in a big room (server/wake/hooks.ts roomPosted, migration 62). The mentions recorded
@@ -83,7 +84,7 @@ test(`@mentions in a room of ${MEMBERS} members: same mentions as resolving over
       remoteAddress: `203.0.113.${address}`,
     });
     assert.equal(registered.statusCode, 201, registered.body);
-    const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+    const cookie = sessionPair(registered.cookies);
     const agent = await call('POST', '/api/agents', cookie, {
       name: `${name} agent`,
       capability: 'research',

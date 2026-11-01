@@ -9,9 +9,16 @@ import type { Guard, Messaging } from '../messaging/service.js';
 import { ROOM_LIMITS, roomRefSchema, type RoomMessage } from '../rooms/contract.js';
 import type { RoomPrincipal, Rooms } from '../rooms/service.js';
 import type { Workspace } from '../model.js';
-import { WAKE_LIMITS, WAKE_EVENTS, waitQuery, type MentionPage } from './contract.js';
+import {
+  WAKE_LIMITS,
+  WAKE_EVENTS,
+  streamPreview,
+  waitQuery,
+  type MentionPage,
+} from './contract.js';
 import type { WakeKey } from './hub.js';
 import { clientAddressKey } from '../rate-limit.js';
+import { disconnectSignal, keepSocket } from './socket.js';
 import { WakeError, idleKeys, type Wake, type WakeGuard, type WakePrincipal } from './service.js';
 import { registerWakeCron } from './cron.js';
 import { sweepLapsedTasks } from '../rooms/tasks-service.js';
@@ -80,21 +87,6 @@ const webhookBody = z
   })
   .strict();
 
-/** Aborts when the client's connection closes (a long-poll or stream nobody reads any more). */
-function disconnectSignal(request: FastifyRequest): { signal: AbortSignal; done(): void } {
-  const controller = new AbortController();
-  const socket = request.raw.socket;
-  const abort = () => controller.abort();
-  socket?.once?.('close', abort);
-  return { signal: controller.signal, done: () => socket?.off?.('close', abort) };
-}
-/**
- * Node's idle-socket timeout (Fastify connectionTimeout 15 s) must outlast a 25 s wait. Called
- * only after authentication and only for a real wait, so unauthenticated sockets keep 15 s.
- */
-function keepSocket(request: FastifyRequest, ms: number): void {
-  request.raw.socket?.setTimeout?.(ms);
-}
 /** Per-source key of the shared limiter (IPv4 address or IPv6 /64). */
 const sourceOf = (request: FastifyRequest) => clientAddressKey(request.ip);
 /**
@@ -368,7 +360,7 @@ export function registerWakeRoutes(app: FastifyInstance, d: WakeRouteDependencie
             clientId: access.clientId,
           };
         }
-      } else if (/^[A-Za-z0-9_-]{43}$/.test(token)) {
+      } else if (/^(?:ccag_)?[A-Za-z0-9_-]{43}$/.test(token)) {
         const grant = (
           await d.db.query<{ id: string; operator_id: string }>(
             'SELECT id,operator_id FROM assistant_grants WHERE token_hash=$1',
@@ -545,7 +537,7 @@ export function registerWakeRoutes(app: FastifyInstance, d: WakeRouteDependencie
         );
         for (const message of page.messages as AgentMessage[]) {
           cursor.i = message.seq;
-          await send('message', message);
+          await send('message', streamPreview(message));
         }
         more ||= page.has_more;
         keys.push({ kind: 'inbox', id: agentId, after: cursor.i });
@@ -595,7 +587,8 @@ export function registerWakeRoutes(app: FastifyInstance, d: WakeRouteDependencie
             for (const message of page.messages) {
               cursor.r[row.id] = message.seq;
               // The agent's own posts do not wake it.
-              if (message.sender_agent_id !== agentId) await send('room_post', message);
+              if (message.sender_agent_id !== agentId)
+                await send('room_post', streamPreview(message));
             }
             if (!page.messages.length)
               cursor.r[row.id] = Math.max(cursor.r[row.id]!, page.next_since);

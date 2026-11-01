@@ -38,6 +38,7 @@ import {
   type FeedSchemaSummary,
   type FeedService,
 } from './feed.js';
+import { chainView } from './chains.js';
 import { liveUnlessOff } from './protocol.js';
 
 // ---------------------------------------------------------------------------------------------
@@ -349,6 +350,11 @@ export interface FeedPayQuoteRequest {
   agentId?: string;
 }
 
+/** The network a payment is on, by CAIP-2: Base's FeedNetwork, or the paying agent's Arc network. */
+export type FeedPayNetwork = FeedNetwork | `eip155:${number}`;
+/** USDC on that network: FeedAsset on Base. */
+export type FeedPayAsset = FeedAsset | { address: Address; symbol: 'USDC'; decimals: 6 };
+
 export interface FeedPayQuote {
   payable: true;
   /** Pass it to call with exactly these inputs; valid until expiresAt. */
@@ -379,8 +385,8 @@ export interface FeedPayQuote {
   vsListing: 'same' | 'lower' | 'higher' | 'unlisted';
   /** Equals the listing's pay_to (checked). */
   payTo: Address;
-  network: FeedNetwork;
-  asset: FeedAsset;
+  network: FeedPayNetwork;
+  asset: FeedPayAsset;
   x402Version: 1 | 2;
   /** Seconds the authorization will be valid: min(AUTH_VALIDITY_MAX_S, maxTimeoutSeconds). */
   validityS: number;
@@ -512,7 +518,7 @@ export interface FeedPayPayment {
   /** The service's address, as listed and as its 402 asked. */
   payTo: Address;
   host: string;
-  network: FeedNetwork;
+  network: FeedPayNetwork;
   state: FeedPayPaymentState;
   /** The agent's own wallet (where the money came from) and its spender account, which signed. */
   from: { wallet: Address; spender: Address };
@@ -585,6 +591,11 @@ export const FEED_PAY_FAILURES = [
    * did not match the call (payee, price, fee, kind or router). Nothing was delivered; ops alerted.
    */
   'payment_unverified',
+  /**
+   * The service's pay-to address is one no payment may name (a fee router, the treasury, USDC,
+   * the facilitator or zero: shared/protocol.ts reservedPayees). Refused before anything is signed.
+   */
+  'payee_reserved',
 ] as const;
 export type FeedPayFailureCode = (typeof FEED_PAY_FAILURES)[number];
 
@@ -648,6 +659,8 @@ export type FeedPayNotReadyReason = (typeof FEED_PAY_NOT_READY)[number];
  */
 export interface FeedPayAgent {
   agentId: string;
+  /** The chain this agent pays on. Only while Arc is on (CITY_ARC=1). */
+  chainId?: number;
   name: string;
   wallet: Address;
   spender: Address;
@@ -759,6 +772,8 @@ export const FEED_PAY_ERRORS = {
   call_not_found: 404,
   /** With `reason`. */
   not_payable: 409,
+  /** The agent and the service are on different chains: no payment crosses chains. */
+  other_chain: 409,
   quote_expired: 409,
   /** The quote was for another person, service, inputs, a lower price or another payee. */
   quote_mismatch: 409,
@@ -822,6 +837,8 @@ export const FEED_PAY_ERROR_MESSAGES: Record<FeedPayErrorCode, string> = {
   agent_not_found: 'Agent not found.',
   call_not_found: 'Call not found.',
   not_payable: "This service can't be paid as listed.",
+  other_chain:
+    "This service is on another chain than this agent, and payments don't cross chains. Choose an agent on the service's chain.",
   quote_expired: 'The price check expired. Check the price again.',
   quote_mismatch: "The price check doesn't match this payment. Check the price again.",
   price_above_max: 'The service now asks more than you confirmed.',
@@ -841,6 +858,24 @@ export const FEED_PAY_ERROR_MESSAGES: Record<FeedPayErrorCode, string> = {
   unavailable: 'Payments on Base are not available right now. Try again in a moment.',
   busy: FEED_BUSY_MESSAGE,
 };
+
+/** The 'unavailable' sentence for an agent on this chain: Base's own on every Base network. */
+export function feedPayUnavailableMessage(chainId: number): string {
+  const view = chainView(chainId);
+  return view && view.slug !== 'base'
+    ? `Payments on ${view.name} are not available right now. Try again in a moment.`
+    : FEED_PAY_ERROR_MESSAGES.unavailable;
+}
+
+/**
+ * The failure sentence for a call on this chain: as listed on every Base network; elsewhere the
+ * chain's own name where a sentence names where the money went.
+ */
+export function feedPayFailureMessage(code: FeedPayFailureCode, chainId: number): string {
+  const view = chainView(chainId);
+  const text = FEED_PAY_FAILURE_MESSAGES[code];
+  return view && view.slug !== 'base' ? text.replace(/\bon Base\b/, `on ${view.name}`) : text;
+}
 
 /** The failure sentence per code (call.failure.message). */
 export const FEED_PAY_FAILURE_MESSAGES: Record<FeedPayFailureCode, string> = {
@@ -863,6 +898,8 @@ export const FEED_PAY_FAILURE_MESSAGES: Record<FeedPayFailureCode, string> = {
     "Payment screening wasn't available, so this payment was not signed. Nothing was paid. Try again later.",
   payment_unverified:
     "The payment went out on Base but didn't match this service, so nothing was delivered. We are looking into it.",
+  payee_reserved:
+    "This service's payment address can't receive payments, so nothing was signed. Nothing was paid.",
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -888,6 +925,13 @@ export const FEED_TOOL_NOTICE_WITH_PAY =
  */
 export const FEED_SEARCH_PAY_SENTENCE =
   "To use a listed service, call city_service_call (scope services:pay): it pays from one of your agents' own wallets on Base, within its owner's spending limit and per-call maximum, and returns the result as untrusted data. Central City never pays from its own money. city_pay refuses x402 Bazaar services and they cannot be rated. A Central City listing's price is fee included (the seller receives 90%, 10% goes to the protocol); for an x402 Bazaar listing, where Central City's fee applies, the agent also pays 10% of the price on top.";
+
+/**
+ * FEED_SEARCH_PAY_SENTENCE while a second chain is on (CITY_ARC=1): what is paid where, naming only
+ * Base. With it off the sentence above stays, byte for byte.
+ */
+export const FEED_SEARCH_PAY_SENTENCE_BY_CHAIN =
+  "To use a listed service, call city_service_call (scope services:pay): it pays from one of your agents' own wallets, within its owner's spending limit and per-call maximum, and returns the result as untrusted data. No payment crosses chains: an x402 Bazaar service is paid on Base only, a Central City listing only on its seller's chain, and anything else is refused before anything is paid. Central City never pays from its own money. city_pay refuses x402 Bazaar services and they cannot be rated. A Central City listing's price is fee included (the seller receives 90%, 10% goes to the protocol); for an x402 Bazaar listing, where Central City's fee applies, the agent also pays 10% of the price on top.";
 
 /** Appended to city_pay's description while Feed pay is on for the caller. */
 export const CITY_PAY_SERVICE_HINT =
@@ -988,6 +1032,8 @@ export const FEED_PAY_ALERTS = [
   'protocol_fee_failed',
   /** A service or its facilitator refused our signature (the ERC-1271 risk, gate G0). */
   'payment_rejected',
+  /** The screening gate gave no answer: calls on that chain are refused until it does. */
+  'screening_unavailable',
   /**
    * The protocol fee of a paid call is on hold: screening did not clear the fee leg (blocked or
    * unavailable). Nothing was charged; it stays pending and is screened again later.
@@ -1000,6 +1046,8 @@ export const FEED_PAY_ALERTS = [
   'payment_anomaly',
 ] as const;
 export type FeedPayAlertKind = (typeof FEED_PAY_ALERTS)[number];
+/** At most one screening_unavailable alert per chain in this time, on an instance. */
+export const FEED_PAY_SCREENING_ALERT_EVERY_MS = 300_000;
 
 export interface FeedPayAlert {
   kind: FeedPayAlertKind;

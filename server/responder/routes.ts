@@ -53,7 +53,9 @@ export function registerResponderRoutes(
   app.post('/api/agents/:id/responder/key', async (request) => {
     // The key is taken out of the parsed body at once and handled as a Buffer; the body field is
     // blanked. Validation errors name fields and constraints only, never values.
-    const body = (request.body ?? {}) as Record<string, unknown>;
+    const body = (
+      typeof request.body === 'object' && request.body !== null ? request.body : {}
+    ) as Record<string, unknown>;
     const raw = body.key;
     body.key = '';
     const operator = await d.owner(request);

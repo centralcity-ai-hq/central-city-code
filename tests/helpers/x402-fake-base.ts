@@ -65,7 +65,14 @@ export class FakeBase {
   sends: Hex[] = [];
   receipts = new Map<
     Hex,
-    { status: 'success' | 'reverted'; blockNumber: bigint; blockHash: Hex }
+    {
+      status: 'success' | 'reverted';
+      blockNumber: bigint;
+      blockHash: Hex;
+      gasUsed?: bigint;
+      effectiveGasPrice?: bigint;
+      l1Fee?: bigint;
+    }
   >();
   minedCount = 0;
   /** The account's transaction count at the finalized block (null: same as latest). */
@@ -77,10 +84,16 @@ export class FakeBase {
   l1Fee = 0n;
   l1Asked: Hex[] = [];
 
-  mine(hash: Hex, blockNumber: bigint, status: 'success' | 'reverted' = 'success') {
+  /** `gas`: the receipt's gas fields (left out: none, as before). */
+  mine(
+    hash: Hex,
+    blockNumber: bigint,
+    status: 'success' | 'reverted' = 'success',
+    gas?: { gasUsed: bigint; effectiveGasPrice: bigint; l1Fee?: bigint },
+  ) {
     const blockHash = keccak256(`0x${blockNumber.toString(16).padStart(8, '0')}aa` as Hex);
     this.blocks.set(blockNumber, blockHash);
-    this.receipts.set(hash, { status, blockNumber, blockHash });
+    this.receipts.set(hash, { status, blockNumber, blockHash, ...gas });
     const nonce = parseTransaction(this.known.get(hash)!).nonce!;
     this.minedCount = Math.max(this.minedCount, nonce + 1);
   }
@@ -169,6 +182,12 @@ export async function setup(
     l1FeeWei?: (unsignedTx: Hex) => Promise<bigint>;
     batch?: FacilitatorBatchConfig;
     foreignReadOnly?: boolean;
+    /** The facilitator's target (default: router 3); the public settle uses USDC. */
+    router?: Hex;
+    /** USDC units per ETH for the economics watch (CCA-754). */
+    usdcPerEth?: bigint;
+    /** No log dep: the facilitator's own default sink (the console). */
+    noLog?: boolean;
   } = {},
 ) {
   const pg = await PGlite.create('memory://');
@@ -190,10 +209,10 @@ export async function setup(
     client: base.client,
     keystore: { withSigner: async (_ref, use) => use(account) },
     keyRef: `v1:${'0'.repeat(8)}-0000-4000-8000-${'0'.repeat(12)}`,
-    router: ROUTER,
+    router: options.router ?? ROUTER,
     chainId: CHAIN_ID,
     now: () => clock.now,
-    log: (line) => lines.push(line),
+    ...(options.noLog ? {} : { log: (line: string) => void lines.push(line) }),
     l1FeeWei: async () => 0n,
     ...options,
   });

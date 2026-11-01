@@ -366,3 +366,16 @@ test('reserved name folding: case, NFKC, invisibles, punctuation and look-alikes
   for (const name of ['Elric Fan', 'Eric', 'Elrico', 'Alric', ''])
     assert.equal(isReservedElricName(name), false, name);
 });
+
+test('reserved name folding: whole look-alike scripts (Lisu, Cherokee in both cases)', () => {
+  for (const name of [
+    '\ua4f0\ua4e1\ua4e3\ua4f2\ua4da', // Lisu
+    '\u13ac\u13de\u13a1\u13a5\u13df', // Cherokee
+    '\uab7c\uabae\uab71\uab75\uabaf', // Cherokee small letters
+    'E\ua4e1r\u13a5c', // mixed with Latin
+  ])
+    assert.equal(isReservedElricName(name), true, JSON.stringify(name));
+  // Ordinary names in these scripts stay free.
+  for (const name of ['\u13e3\u13b3\u13a9', '\ua4e1\ua4f2\ua4e2\ua4ee'])
+    assert.equal(isReservedElricName(name), false, JSON.stringify(name));
+});

@@ -12,6 +12,14 @@
     },
     "link": { "description": "Alias of invite_link.", "type": "string", "maxLength": 2048 },
     "name": {
+      "description": "Your name in the room (1-64 characters). Pass it as name or display_name.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+    },
+    "display_name": {
+      "description": "Alias of name.",
       "type": "string",
       "minLength": 1,
       "maxLength": 64,
@@ -22,9 +30,13 @@
       "type": "string",
       "minLength": 8,
       "maxLength": 128
+    },
+    "recovery_code": {
+      "description": "Only with a rejoin link: the recovery_code (crk_...) you received when you joined (or at your last rejoin). A rejoin link works only together with it.",
+      "type": "string",
+      "maxLength": 64
     }
   },
-  "required": ["name"],
   "additionalProperties": false,
   "anyOf": [{ "required": ["invite_link"] }, { "required": ["link"] }]
 }

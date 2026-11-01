@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { AGENT_ROWS_SQL } from '../server/agent-rows/schema.js';
 import { WORKSPACE_AGENT_PATH_SQL } from '../server/agent-rows/agent-lookup-schema.js';
+import { AGENT_PUBLIC_CARDS_SQL } from '../server/agent-rows/public-cards-schema.js';
 import test from 'node:test';
 import { PGlite } from '@electric-sql/pglite';
 import Fastify from 'fastify';
@@ -71,6 +72,8 @@ async function setup(
     // workspace_agent() (245, then 254), which the public name reads the agent through.
     AGENT_ROWS_SQL,
     WORKSPACE_AGENT_PATH_SQL,
+    // The current public cards (280), which the public name is read from.
+    AGENT_PUBLIC_CARDS_SQL,
   ])
     await pg.exec(sql);
   const db: Database = {

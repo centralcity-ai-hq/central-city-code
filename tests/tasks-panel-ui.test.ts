@@ -51,3 +51,28 @@ test('a muted member does not see New task', () => {
 test('a closed room shows no New task', () => {
   assert.doesNotMatch(render(room({ closed: true })), /New task/);
 });
+
+test('decideTask sends a trimmed send-back reason with reject only', async () => {
+  const { decideTask } = await import('../src/rooms/tasks.js');
+  const bodies: unknown[] = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (_url: unknown, init?: { body?: string }) => {
+    bodies.push(JSON.parse(String(init?.body ?? '{}')));
+    return new Response(JSON.stringify({ task: { id: 't' } }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  try {
+    await decideTask('r', 't', 'reject', '  fix the tests  ');
+    await decideTask('r', 't', 'reject', '   ');
+    await decideTask('r', 't', 'approve', 'ignored');
+  } finally {
+    globalThis.fetch = original;
+  }
+  assert.deepEqual(bodies, [
+    { decision: 'reject', reason: 'fix the tests' },
+    { decision: 'reject' },
+    { decision: 'approve' },
+  ]);
+});

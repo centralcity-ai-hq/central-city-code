@@ -242,6 +242,7 @@ export function createRoomApply(d: RepoDependencies): RoomApply {
   async function apply(p: RoomPrincipal, body: unknown) {
     const input = applyInput.parse(body);
     const pre = await d.db.transaction(async (tx) => {
+      if (p.guard) await p.guard(tx, d.clock());
       const g = await gate(
         tx,
         p,
@@ -336,6 +337,7 @@ export function createRoomApply(d: RepoDependencies): RoomApply {
 
     // 3. Names for the commit trailers and the PR body (untrusted labels, quoted).
     const names = await d.db.transaction(async (tx) => {
+      if (p.guard) await p.guard(tx, d.clock());
       const labels = (
         await tx.query<{ agent_id: string; owner_label: string; name: string | null }>(
           `SELECT m.agent_id, m.owner_label, a->>'name' AS name FROM room_members m
@@ -387,6 +389,7 @@ export function createRoomApply(d: RepoDependencies): RoomApply {
     //    when its commit sits directly on the base with exactly that tree:
     //    anything else (a planted or pushed commit) is 409 branch_conflict, and nothing is adopted.
     await d.db.transaction(async (tx) => {
+      if (p.guard) await p.guard(tx, d.clock());
       const current = await access.requireBinding(tx, room.id);
       if (String(current.repo_id) !== String(binding.repo_id))
         refuse(
@@ -495,6 +498,7 @@ export function createRoomApply(d: RepoDependencies): RoomApply {
     // 5. Record and announce, rechecking the gate under the room lock.
     const time = d.clock();
     return d.db.transaction(async (tx) => {
+      if (p.guard) await p.guard(tx, d.clock());
       const again = await gate(
         tx,
         p,
@@ -557,6 +561,7 @@ export function createRoomApply(d: RepoDependencies): RoomApply {
   async function evidence(p: RoomPrincipal, body: unknown) {
     const input = evidenceInput.parse(body);
     const pre = await d.db.transaction(async (tx) => {
+      if (p.guard) await p.guard(tx, d.clock());
       const { room } = await access.membership(tx, input.room_id, p.operatorId);
       const binding = await access.requireBinding(tx, room.id);
       const row = await findProposal(tx, room.id, input.proposal);
@@ -648,6 +653,7 @@ export function createRoomApply(d: RepoDependencies): RoomApply {
     const time = d.clock();
     const prState = pr.merged ? 'merged' : pr.state === 'closed' ? 'closed' : 'open';
     await d.db.transaction(async (tx) => {
+      if (p.guard) await p.guard(tx, d.clock());
       await access.membership(tx, room.id, p.operatorId);
       await tx.query(
         `INSERT INTO room_evidence(proposal_id,revision,head_sha,checks,required,state,read_at)

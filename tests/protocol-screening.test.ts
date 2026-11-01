@@ -126,6 +126,27 @@ test('switched off (0): no screening at all, the call is paid exactly as before'
   assert.deepEqual(await decisions(f), []);
 });
 
+for (const [name, reserved] of [
+  ['fee router 3', PROTOCOL_BASE_MAINNET.feeRouter3],
+  ['the treasury', PROTOCOL_BASE_MAINNET.treasury],
+  ['USDC', PROTOCOL_BASE_MAINNET.usdc],
+] as const)
+  test(`a service paying to ${name} is refused payee_reserved before anything is signed, screening off or on`, async (t) => {
+    const f = await setup(t, { env: { CITY_PROTOCOL_SCREENING: '0' } });
+    await f.list({ payTo: reserved });
+    await f.limit();
+    const paid = await f.pay();
+    assert.equal(paid.statusCode, 200, paid.body);
+    const call = await f.settled(paid.json().callId);
+    assert.equal(call.state, 'refused', JSON.stringify(call));
+    assert.equal(call.failure?.code, 'payee_reserved');
+    assert.match(call.failure!.message, /Nothing was paid/);
+    assert.equal(call.moneyMoved, 'no');
+    assert.equal(f.base.state.signatures, 0, 'nothing was signed');
+    assert.equal(f.base.state.sends.length, 0, 'no top-up, no operation');
+    assert.equal(f.base.balanceOf(reserved), 0n);
+  });
+
 test('a blocked payee is refused before anything is signed or sent', async (t) => {
   const { f, fake } = await screened(t);
   fake.state.listed.add(PAY_TO.toLowerCase());
@@ -151,7 +172,8 @@ test('a blocked payee is refused before anything is signed or sent', async (t) =
 
 test('the static denylist blocks even when the provider clears the address', async (t) => {
   const { f } = await screened(t, {
-    CITY_PROTOCOL_SCREENING_DENY: ` ${PAY_TO.toLowerCase()} ,junk`,
+    // An entry that is not an address now fails closed (CCA-136; tested with the gate below).
+    CITY_PROTOCOL_SCREENING_DENY: ` ${PAY_TO.toLowerCase()} ,`,
   });
   const paid = await f.pay();
   const call = await f.settled(paid.json().callId);
@@ -462,6 +484,36 @@ test('gate: an expired decision is not reused, and a policy change (denylist) in
   assert.deepEqual([denied.allowed, denied.reason, denied.reused], [false, 'denylisted', false]);
 });
 
+test('gate: a denylist in newline, semicolon or space form blocks; an entry that is not an address fails closed (CCA-136)', async (t) => {
+  const { gate, env } = await gateFixture(t);
+  for (const list of [`${C}\n${B}`, `${C};${B}`, `${C} ${B}`, ` ${B} ,${C}, `]) {
+    env.CITY_PROTOCOL_SCREENING_DENY = list;
+    const denied = await gate.screen(request());
+    assert.deepEqual([denied.allowed, denied.reason], [false, 'denylisted'], JSON.stringify(list));
+  }
+  // A clearance made with no denylist is never reused once the setting holds an unreadable entry.
+  env.CITY_PROTOCOL_SCREENING_DENY = undefined;
+  assert.equal((await gate.screen(request())).allowed, true);
+  const lines: string[] = [];
+  t.mock.method(console, 'warn', (line: unknown) => lines.push(String(line)));
+  for (const list of [`"${B}"`, `${C},0xnot-an-address`, `'${C}'`]) {
+    env.CITY_PROTOCOL_SCREENING_DENY = list;
+    const refused = await gate.screen(request());
+    assert.deepEqual(
+      [refused.allowed, refused.outcome, refused.reason, refused.reused],
+      [false, 'unavailable', 'invalid_setting', false],
+      list,
+    );
+  }
+  assert.ok(lines.length >= 3);
+  for (const line of lines) {
+    assert.deepEqual(JSON.parse(line), {
+      event: 'protocol.setting_invalid',
+      setting: 'CITY_PROTOCOL_SCREENING_DENY',
+    });
+  }
+});
+
 test('gate: outage, timeout, malformed, stale, unknown chain, no provider and bad input fail closed', async (t) => {
   const { gate, fake, setProvider, f } = await gateFixture(t, { timeoutMs: 20 });
   const expectClosed = async (reason: string, req = request()) => {
@@ -555,6 +607,57 @@ test('gate: the oracle provider reads isSanctioned per address (a fake client, n
   });
   assert.deepEqual(answer.listed, { [A.toLowerCase()]: true, [B.toLowerCase()]: false });
   assert.deepEqual(reads, ['isSanctioned', 'isSanctioned']);
+});
+
+test('gate over the real oracle adapter: an oracle that cannot be read fails closed, and nothing is cached or stored (CCA-756)', async (t) => {
+  const { gate, setProvider, f } = await gateFixture(t);
+  const mode = { client: 'ok' as 'ok' | 'throws', read: 'throws' as 'throws' | 'answer' | 'odd' };
+  let reads = 0;
+  setProvider(
+    sanctionsOracleProvider({
+      chainId: CHAIN_ID,
+      oracle: PROTOCOL_BASE_MAINNET.sanctionsOracle,
+      sleep: async () => {},
+      client: async () => {
+        if (mode.client === 'throws') throw new Error('chain not configured');
+        return {
+          readContract: (async () => {
+            reads++;
+            if (mode.read === 'throws') throw new Error('execution reverted');
+            return mode.read === 'odd' ? 'yes' : false;
+          }) as never,
+        };
+      },
+    }),
+  );
+  const closed = async (reason: string, req = request()) => {
+    const d = await gate.screen(req);
+    assert.deepEqual(
+      [d.allowed, d.outcome, d.decisionId, d.reason],
+      [false, 'unavailable', null, reason],
+      reason,
+    );
+  };
+  // Every read throws: three tries per address, then the gate refuses (never clear).
+  await closed('provider_unavailable');
+  assert.equal(reads, 6);
+  // The read client itself cannot be made.
+  mode.client = 'throws';
+  await closed('provider_unavailable');
+  // An answer that is not a boolean (another party, so its cached answer stays out of the way).
+  mode.client = 'ok';
+  mode.read = 'odd';
+  await closed('malformed', request({ parties: [{ role: 'payee', address: C }] }));
+  const [stored] = await f.sql<{ n: number }>(
+    'SELECT count(*)::int AS n FROM protocol_screening_decisions',
+  );
+  assert.equal(stored?.n, 0, 'no decision is stored for an unreadable oracle');
+  // Once the oracle answers, the next screening reads it afresh: no failure was cached as clear.
+  mode.read = 'answer';
+  reads = 0;
+  const clear = await gate.screen(request());
+  assert.deepEqual([clear.allowed, clear.outcome, clear.reused], [true, 'allowed', false]);
+  assert.equal(reads, 2);
 });
 
 test("screening off: a fee on top still needs the router's binding (its treasury and USDC); a right one is charged", async (t) => {
@@ -706,4 +809,38 @@ test('sanctions oracle: an address read within ORACLE_CACHE_MS is not read again
   const third = await check([a, b]);
   assert.deepEqual(reads, [a, b, a]);
   assert.equal(third.observedAt, 1_030_000);
+});
+
+test('Arc has no oracle: it is screened by the one on Base mainnet, and refused if that fails', async () => {
+  const signal = new AbortController().signal;
+  const seller = '0x00000000000000000000000000000000000000a1';
+  const reads: string[] = [];
+  const provider = sanctionsOracleFor(
+    {},
+    5042,
+    async () =>
+      ({
+        readContract: async (input: { address: string }) => {
+          reads.push(input.address);
+          return false;
+        },
+      }) as never,
+  )!;
+  assert.ok(provider.supports(5042));
+  assert.equal(provider.supports(8453), false);
+  const answer = await provider.check({ chainId: 5042, addresses: [seller], signal });
+  assert.equal(answer.listed[seller], false);
+  assert.equal(reads[0], PROTOCOL_BASE_MAINNET.sanctionsOracle);
+  // An env setting never names another oracle for Arc.
+  const pinned = sanctionsOracleFor(
+    { CITY_PROTOCOL_SCREENING_ORACLE: seller },
+    5042,
+    async () => ({}) as never,
+  )!;
+  assert.ok(pinned.ref.includes(PROTOCOL_BASE_MAINNET.sanctionsOracle.toLowerCase()));
+  // No read client: the check throws, and the gate refuses (no answer is no permission).
+  const down = sanctionsOracleFor({}, 5042, async () => {
+    throw new Error('no client');
+  })!;
+  await assert.rejects(down.check({ chainId: 5042, addresses: [seller], signal }));
 });

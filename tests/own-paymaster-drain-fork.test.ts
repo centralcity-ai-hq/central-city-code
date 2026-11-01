@@ -27,7 +27,10 @@ import {
   type OwnBundlerUpkeep,
 } from '../server/base/chain/direct-bundler.js';
 import {
+  OWN_PAYMASTER_ATTRIBUTION_SQL,
+  OWN_PAYMASTER_BUDGET_CHAIN_SQL,
   OWN_PAYMASTER_BUDGET_SQL,
+  OWN_PAYMASTER_RESERVATIONS_CHAIN_SQL,
   ownPaymasterBudget,
 } from '../server/base/chain/own-paymaster-budget.js';
 import { OWN_PAYMASTER_KEYS_SQL } from '../server/base/chain/own-paymaster-keys.js';
@@ -70,6 +73,9 @@ async function database(t: { after: (fn: () => Promise<unknown>) => void }) {
   t.after(() => pg.close());
   await pg.exec(OWN_PAYMASTER_KEYS_SQL);
   await pg.exec(OWN_PAYMASTER_BUDGET_SQL);
+  await pg.exec(OWN_PAYMASTER_ATTRIBUTION_SQL);
+  await pg.exec(OWN_PAYMASTER_BUDGET_CHAIN_SQL);
+  await pg.exec(OWN_PAYMASTER_RESERVATIONS_CHAIN_SQL);
   await pg.exec(DIRECT_BUNDLER_SQL);
   await pg.exec(DIRECT_BUNDLER_FINALITY_SQL);
   return {

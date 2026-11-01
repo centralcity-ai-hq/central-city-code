@@ -10,6 +10,7 @@ import { createApp } from '../server/app.js';
 import { publicAgent, type Workspace } from '../server/model.js';
 import { signedHeaders } from '../connector/signing.js';
 import type { Agent, Job, Snapshot } from '../shared/types.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 // Hosted apps refuse to start without a shared secret; this one is synthetic and test-only.
 process.env.CITY_RATE_LIMIT_KEY ??= 'synthetic-test-only-rate-limit-secret-0000';
@@ -38,7 +39,7 @@ async function api(app: App, cookie: string, url: string, body?: unknown) {
 async function account(app: App, name = 'Credential owner') {
   const response = await api(app, '', '/api/auth/register', { name, password });
   assert.equal(response.statusCode, 201, response.body);
-  return `cc_session=${response.cookies.find((entry) => entry.name === 'cc_session')!.value}`;
+  return sessionPair(response.cookies);
 }
 async function register(app: App, cookie: string, name: string, mode = 'external') {
   const response = await api(app, cookie, '/api/agents', {
@@ -442,7 +443,7 @@ test('the legacy credential schema remains usable and rotation survives persiste
     app = await createApp({ dataDir, now: () => now, startWorkers: false });
     const login = await api(app, '', '/api/auth/login', { name: 'Legacy owner', password });
     assert.equal(login.statusCode, 200, login.body);
-    const cookie = `cc_session=${login.cookies.find((entry) => entry.name === 'cc_session')!.value}`;
+    const cookie = sessionPair(login.cookies);
     await heartbeat(app, token, 9);
     const rotated = await rotate(app, cookie, agentId);
     await app.close();
@@ -461,4 +462,42 @@ test('the legacy credential schema remains usable and rotation survives persiste
     if (app) await app.close();
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('CCA-634: a runtime request whose body is not application/json is refused before its signature counts', async (t) => {
+  const f = await fixture(t);
+  const body = JSON.stringify({ sequence: 11 });
+  const nonce = randomBytes(18).toString('hex');
+  // Signed over the empty body, as the server used to hash a body it did not capture.
+  const signed = signedHeaders(
+    f.external.token,
+    'POST',
+    '/api/runtime/heartbeat',
+    '',
+    String(now),
+    nonce,
+  );
+  const { 'Content-Type': _json, ...rest } = signed;
+  const refused = await f.app.inject({
+    method: 'POST',
+    url: '/api/runtime/heartbeat',
+    headers: { ...rest, 'content-type': 'text/plain' },
+    payload: body,
+  });
+  assert.equal(refused.statusCode, 415, refused.body);
+  // Its nonce was not used: the same nonce still works for a properly signed JSON request.
+  const accepted = await f.app.inject({
+    method: 'POST',
+    url: '/api/runtime/heartbeat',
+    headers: signedHeaders(
+      f.external.token,
+      'POST',
+      '/api/runtime/heartbeat',
+      body,
+      String(now),
+      nonce,
+    ),
+    payload: body,
+  });
+  assert.equal(accepted.statusCode, 200, accepted.body);
 });

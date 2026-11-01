@@ -140,6 +140,8 @@ async function mock(page: Page, roomId: string) {
       id: 'elric-agent',
       name: 'Elric',
       kind: 'agent',
+      owner_label: 'Elric',
+      owner_kind: 'ai',
       role: 'member',
       own: true,
       joined_at: minutesAgo(200),

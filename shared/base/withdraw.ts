@@ -6,7 +6,9 @@
  * hash from the operation it was given (`ownerOperationHash`) and decodes its one call
  * (`decodeOwnerCall`), so the owner signs exactly the withdrawal on screen and nothing else.
  *
- * One network: the wallet network (wallet-network.ts; Base, chain 8453), EntryPoint v0.6.
+ * The wallet network (wallet-network.ts; Base, chain 8453) unless a function is given another chain
+ * (OwnerOperationChain; EntryPoint v0.6 either way). The hash names the chain, so an operation signed
+ * for one chain is never valid on another, also with the wallet and EntryPoint at the same addresses.
  */
 import {
   decodeFunctionData,
@@ -24,6 +26,23 @@ import { WALLET_CHAIN_ID } from './wallet-network.js';
 export const WITHDRAWAL_CHAIN_ID = WALLET_CHAIN_ID;
 const NETWORK = BASE_NETWORKS[WITHDRAWAL_CHAIN_ID];
 export const WITHDRAWAL_ENTRY_POINT = NETWORK.contracts.entryPointV06;
+
+/** The chain an owner operation is for: what its hash binds and what its one call may do. */
+export interface OwnerOperationChain {
+  chainId: number;
+  entryPoint: Address;
+  usdc: Address;
+  /** Whether the native token is an asset of its own. On Arc it is USDC's gas, never withdrawn. */
+  nativeWithdrawals: boolean;
+}
+
+/** The wallet network, what every function here means without a chain. */
+export const WITHDRAWAL_CHAIN: OwnerOperationChain = {
+  chainId: WITHDRAWAL_CHAIN_ID,
+  entryPoint: WITHDRAWAL_ENTRY_POINT,
+  usdc: NETWORK.tokens.USDC.address,
+  nativeWithdrawals: true,
+};
 
 /** How long an unsigned withdrawal (or cancel) can still be signed. A signed one never expires. */
 export const WITHDRAWAL_SIGNATURE_TTL_MS = 10 * 60_000;
@@ -122,11 +141,14 @@ export function userOperationFromRpc(value: unknown): UserOperation<'0.6'> {
   return op as unknown as UserOperation<'0.6'>;
 }
 
-/** The hash the owner key signs, raw (no prefix): the wallet network, EntryPoint v0.6. */
-export function ownerOperationHash(op: UserOperation<'0.6'>): Hex {
+/** The hash the owner key signs, raw (no prefix): the chain's, EntryPoint v0.6. */
+export function ownerOperationHash(
+  op: UserOperation<'0.6'>,
+  chain: OwnerOperationChain = WITHDRAWAL_CHAIN,
+): Hex {
   return getUserOperationHash({
-    chainId: WITHDRAWAL_CHAIN_ID,
-    entryPointAddress: WITHDRAWAL_ENTRY_POINT,
+    chainId: chain.chainId,
+    entryPointAddress: chain.entryPoint,
     entryPointVersion: '0.6',
     userOperation: op,
   });
@@ -150,13 +172,15 @@ export function withdrawalCall(
   token: WithdrawalToken,
   to: Address,
   amount: bigint,
+  chain: OwnerOperationChain = WITHDRAWAL_CHAIN,
 ): OwnerCallEncoding {
   if (token === 'USDC')
     return {
-      target: NETWORK.tokens.USDC.address,
+      target: chain.usdc,
       value: 0n,
       data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [to, amount] }),
     };
+  if (!chain.nativeWithdrawals) throw new Error('This chain withdraws USDC only.');
   return { target: getAddress(to), value: amount, data: '0x' };
 }
 
@@ -174,9 +198,14 @@ export type OwnerCall =
 /**
  * What an owner operation's callData does, or null when it is anything but exactly one of: a USDC
  * transfer, a plain ETH send to another address, or the wallet's own no-op. The browser refuses to
- * sign an operation this does not decode to what the owner asked for.
+ * sign an operation this does not decode to what the owner asked for. On a chain without native
+ * withdrawals (Arc) a plain send is anything but: it would move USDC as gas.
  */
-export function decodeOwnerCall(callData: Hex, wallet: Address): OwnerCall | null {
+export function decodeOwnerCall(
+  callData: Hex,
+  wallet: Address,
+  chain: OwnerOperationChain = WITHDRAWAL_CHAIN,
+): OwnerCall | null {
   let decoded;
   try {
     decoded = decodeFunctionData({ abi: walletAbi, data: callData });
@@ -193,7 +222,7 @@ export function decodeOwnerCall(callData: Hex, wallet: Address): OwnerCall | nul
     return null;
   const self = getAddress(wallet);
   if (getAddress(target) === self) return value === 0n && data === '0x' ? { kind: 'noop' } : null;
-  if (getAddress(target) === NETWORK.tokens.USDC.address) {
+  if (getAddress(target) === getAddress(chain.usdc)) {
     if (value !== 0n) return null;
     try {
       const transfer = decodeFunctionData({ abi: erc20Abi, data });
@@ -209,6 +238,6 @@ export function decodeOwnerCall(callData: Hex, wallet: Address): OwnerCall | nul
       return null;
     }
   }
-  if (data !== '0x' || value <= 0n) return null;
+  if (data !== '0x' || value <= 0n || !chain.nativeWithdrawals) return null;
   return { kind: 'withdraw', token: 'ETH', to: getAddress(target), amount: value };
 }

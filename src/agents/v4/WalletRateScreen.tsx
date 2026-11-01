@@ -30,6 +30,12 @@ import {
 } from '../../base/wallet/withdraw';
 import { RATE_STARS } from '../../../shared/base/rate';
 import {
+  chainWords,
+  NOT_ON_ARC_YET,
+  walletChain,
+  type ChainWords,
+} from '../../../shared/base/wallet-chains';
+import {
   DETAILS_CHANGED,
   LOOK_AGAIN,
   rateFailure,
@@ -87,14 +93,17 @@ type Phase =
     };
 
 /** The agent's public name, or its Base ID while its card isn't public. */
-const who = (target: RateTarget) => target.agent.name.trim() || `Base ID ${target.agent.baseId}`;
+const who = (target: RateTarget, words: ChainWords) =>
+  target.agent.name.trim() || `${words.id} ${target.agent.baseId}`;
 
 function AgentCard({
   target,
+  words,
   from,
   checked = false,
 }: {
   target: RateTarget;
+  words: ChainWords;
   /** The rating agent, on the stars step. */
   from?: string;
   /** The find step: what was checked. */
@@ -104,21 +113,21 @@ function AgentCard({
     <div className="w4-vcard w4-rate-agent" role="group" aria-label="Agent to rate">
       <div className="w4-vmain">
         <span className="w4-av w4-av-lg" aria-hidden="true">
-          {who(target).charAt(0).toUpperCase()}
+          {who(target, words).charAt(0).toUpperCase()}
         </span>
         <span className="w4-who">
-          <b>{who(target)}</b>
+          <b>{who(target, words)}</b>
           <small>
-            Base ID {target.agent.baseId} · Passport {target.agent.short}
+            {words.id} {target.agent.baseId} · Passport {target.agent.short}
             {from ? ` · from ${from}` : ''}
           </small>
         </span>
       </div>
       {checked ? (
         <div className="w4-chips">
-          <span className="w4-chip">✓ Base ID and passport match</span>
+          <span className="w4-chip">✓ {words.id} and passport match</span>
           {/* What this browser read on Base itself: the Base ID's passport (rate.ts). */}
-          <span className="w4-chip">✓ Passport read from Base</span>
+          <span className="w4-chip">✓ Passport read from {words.on}</span>
         </div>
       ) : null}
     </div>
@@ -170,6 +179,7 @@ function StarPicker({
  */
 function RateStatus({
   agentId,
+  words,
   withdrawalId,
   initial,
   name,
@@ -179,6 +189,7 @@ function RateStatus({
   onDone,
 }: {
   agentId: string;
+  words: ChainWords;
   withdrawalId: string;
   initial: RatingView | null;
   name: string;
@@ -221,13 +232,15 @@ function RateStatus({
           <div className="w4-rate-card w4-rate-going" role="status">
             <span className="v4s-spin" aria-hidden="true" />
             <span className="w4-rate-text">
-              <b>Rating… on its way to Base</b>
+              <b>Rating… on its way to {words.on}</b>
               <small>
                 <Stars value={stars} /> for {name}, from {rater}
               </small>
             </span>
           </div>
-          <p className="w4-hint">You can leave this screen. The rating carries on, on Base.</p>
+          <p className="w4-hint">
+            You can leave this screen. The rating carries on, on {words.on}.
+          </p>
         </>
       ) : rated ? (
         <div className="w4-rate-card w4-rate-done" role="status">
@@ -247,13 +260,15 @@ function RateStatus({
           ) : (
             <span className="v4s-spin" aria-hidden="true" />
           )}
-          <b className="w4-rate-title">{stage === 'final' ? GIVEN_FINAL : GIVEN_ON_BASE}</b>
+          <b className="w4-rate-title">
+            {words.say(stage === 'final' ? GIVEN_FINAL : GIVEN_ON_BASE)}
+          </b>
           <span className="w4-rate-for">
             <Stars value={stars} size={18} /> for {name}
           </span>
           {view?.explorerUrl ? (
             <a className="w4-link" href={view.explorerUrl} target="_blank" rel="noreferrer">
-              View on Basescan
+              View on {words.explorer}
             </a>
           ) : null}
         </div>
@@ -330,12 +345,14 @@ export function WalletRateScreen({ agent, onBack, backLabel }: AgentScreenProps)
     setPhase({ k: 'loading' });
     if (ratingsOff()) return setPhase({ k: 'off' });
     try {
-      const [read, self] = await Promise.all([readWallet(agent.id), readRater(agent.id)]);
+      const read = await readWallet(agent.id);
       if (read.kind === 'off') return setPhase({ k: 'off' });
       if (read.kind !== 'wallet' || !read.wallet.address)
         return setPhase({ k: 'error', message: 'This wallet can’t rate yet.' });
-      if (!self) return setPhase({ k: 'not_rater' });
       setWallet(read.wallet);
+      // The chain comes from the wallet view: the agent rates from its registration on that chain.
+      const self = await readRater(agent.id, read.wallet.chainId);
+      if (!self) return setPhase({ k: 'not_rater' });
       setRater(self);
       setPhase({ k: 'find' });
     } catch (err) {
@@ -353,12 +370,13 @@ export function WalletRateScreen({ agent, onBack, backLabel }: AgentScreenProps)
     setPhase({ k: 'off' });
   };
 
+  const raterChain = wallet?.chainId;
   const find = useCallback(
     async (typed: { baseId: string; passport: string }) => {
       const ticket = ++lookup.current;
       setFound({ k: 'checking' });
       try {
-        const target = await lookupRateTarget(agent.id, typed);
+        const target = await lookupRateTarget(agent.id, typed, { chainId: raterChain });
         if (ticket !== lookup.current) return;
         setFound({ k: 'found', target });
       } catch (err) {
@@ -368,10 +386,13 @@ export function WalletRateScreen({ agent, onBack, backLabel }: AgentScreenProps)
           markRatingsOff();
           return setPhase({ k: 'off' });
         }
-        setFound({ k: 'refused', message: rateFailure(err, agent.name, signingFailure) });
+        setFound({
+          k: 'refused',
+          message: rateFailure(err, agent.name, signingFailure, raterChain),
+        });
       }
     },
-    [agent.id, agent.name],
+    [agent.id, agent.name, raterChain],
   );
 
   // Look the agent up once both are typed in their right form and the owner stops typing.
@@ -379,7 +400,7 @@ export function WalletRateScreen({ agent, onBack, backLabel }: AgentScreenProps)
     // Whatever was found was for the values before: it goes at once, never shown for new ones.
     lookup.current += 1;
     try {
-      rateLookup({ baseId, passport });
+      rateLookup({ baseId, passport }, raterChain);
     } catch {
       // Not complete yet: Continue says what is missing.
       setFound({ k: 'idle' });
@@ -388,7 +409,7 @@ export function WalletRateScreen({ agent, onBack, backLabel }: AgentScreenProps)
     setFound({ k: 'checking' });
     const timer = window.setTimeout(() => void find({ baseId, passport }), LOOKUP_DELAY_MS);
     return () => window.clearTimeout(timer);
-  }, [baseId, passport, find]);
+  }, [baseId, passport, find, raterChain]);
 
   function proceed(event: FormEvent) {
     event.preventDefault();
@@ -399,7 +420,7 @@ export function WalletRateScreen({ agent, onBack, backLabel }: AgentScreenProps)
     }
     if (found.k === 'checking') return;
     try {
-      rateLookup({ baseId, passport });
+      rateLookup({ baseId, passport }, raterChain);
     } catch (err) {
       return setFound({
         k: 'refused',
@@ -444,7 +465,11 @@ export function WalletRateScreen({ agent, onBack, backLabel }: AgentScreenProps)
       // The rating carries the check the owner saw. Past its expiry the agent is checked again
       // and shown, and the owner rates that one: nothing is sent on a check they didn't see.
       if (target.expiresAt <= Date.now()) {
-        target = await lookupRateTarget(agent.id, { baseId, passport });
+        target = await lookupRateTarget(
+          agent.id,
+          { baseId, passport },
+          { chainId: wallet.chainId },
+        );
         if (!current()) return;
         setFound({ k: 'found', target });
         setPhase({ k: 'stars', target });
@@ -464,6 +489,7 @@ export function WalletRateScreen({ agent, onBack, backLabel }: AgentScreenProps)
       // Checked here before signing: exactly this one rating, of this agent, with these stars.
       const hash = checkRateOperation({
         request,
+        agentChainId: wallet.chainId,
         wallet: wallet.address,
         owner: wallet.ownerAddress,
         agentId: agent.id,
@@ -474,7 +500,7 @@ export function WalletRateScreen({ agent, onBack, backLabel }: AgentScreenProps)
       });
       checked = { withdrawalId: request.withdrawalId, userOpHash: hash };
       // Once more, right before signing: Base still has that passport at that Base ID.
-      await confirmRateTargetOnBase(target);
+      await confirmRateTargetOnBase(target, { chainId: wallet.chainId });
       if (!current()) return;
       // With lanes on, its sponsorship still valid within the server's fixed deadline (as Pay).
       checkRatingWindow(request);
@@ -532,7 +558,7 @@ export function WalletRateScreen({ agent, onBack, backLabel }: AgentScreenProps)
             ? RATING_WINDOW_CLOSED
             : dropped === 'expired'
               ? RATING_EXPIRED
-              : rateFailure(err, agent.name, signingFailure),
+              : rateFailure(err, agent.name, signingFailure, raterChain),
         );
         return;
       }
@@ -544,7 +570,7 @@ export function WalletRateScreen({ agent, onBack, backLabel }: AgentScreenProps)
         setPhase({ k: 'find' });
         return;
       }
-      setError(rateFailure(err, agent.name, signingFailure));
+      setError(rateFailure(err, agent.name, signingFailure, raterChain));
     } finally {
       if (current()) {
         setBusy(false);
@@ -554,15 +580,18 @@ export function WalletRateScreen({ agent, onBack, backLabel }: AgentScreenProps)
   }
 
   const target = phase.k === 'stars' || phase.k === 'status' ? phase.target : null;
+  const words = chainWords(raterChain);
+  // Arc mainnet: not until it is recorded (shared/base/wallet-chains.ts).
+  const notYet = walletChain(raterChain)?.manager === null;
   return (
     <SettingsFrame
       backLabel={phase.k === 'stars' ? 'Rate an agent' : (backLabel ?? 'Wallet')}
       onBack={phase.k === 'stars' ? backToFind : onBack}
       backDisabled={sending}
-      title={target ? `Rate ${who(target)}` : 'Rate an agent'}
+      title={target ? `Rate ${who(target, words)}` : 'Rate an agent'}
       sub={
         phase.k === 'find'
-          ? `Rate another Central City agent on Base, from ${agent.name}. Type its Base ID and its passport number: both must belong to the same Central City agent.`
+          ? `Rate another Central City agent on ${words.on}, from ${agent.name}. Type its ${words.id} and its passport number: both must belong to the same Central City agent.`
           : undefined
       }
     >
@@ -576,13 +605,15 @@ export function WalletRateScreen({ agent, onBack, backLabel }: AgentScreenProps)
         </SettingsEmpty>
       ) : phase.k === 'not_rater' ? (
         <SettingsEmpty title="Not available for this agent">
-          Only a Central City agent on Base, with a final Base ID and a passport, can rate others.
+          {notYet
+            ? NOT_ON_ARC_YET
+            : `Only a Central City agent on ${words.on}, with a final ${words.id} and a passport, can rate others.`}
         </SettingsEmpty>
       ) : phase.k === 'find' ? (
         <form className="w4-steps" onSubmit={proceed} noValidate>
           <div className="w4-pair">
             <label className="w4-field">
-              <span>Base ID</span>
+              <span>{words.id}</span>
               <input
                 inputMode="numeric"
                 autoComplete="off"
@@ -612,9 +643,9 @@ export function WalletRateScreen({ agent, onBack, backLabel }: AgentScreenProps)
           </p>
           <div className="w4-slot" aria-live="polite">
             {found.k === 'checking' ? (
-              <p className="w4-hint">Checking on Base…</p>
+              <p className="w4-hint">Checking on {words.on}…</p>
             ) : found.k === 'found' ? (
-              <AgentCard target={found.target} checked />
+              <AgentCard target={found.target} words={words} checked />
             ) : found.k === 'refused' ? (
               <p className="w4-refusal" role="alert">
                 {found.message}
@@ -632,6 +663,7 @@ export function WalletRateScreen({ agent, onBack, backLabel }: AgentScreenProps)
           {/* The agents rated so far: tap one to fill in its details and rate it again. */}
           <RatingsGiven
             agentId={agent.id}
+            chainId={raterChain}
             onPick={(rating) => {
               setBaseId(rating.baseId);
               setPassport(rating.short);
@@ -640,9 +672,9 @@ export function WalletRateScreen({ agent, onBack, backLabel }: AgentScreenProps)
         </form>
       ) : phase.k === 'stars' ? (
         <form className="w4-steps" onSubmit={(event) => void rate(event)}>
-          <AgentCard target={phase.target} from={agent.name} />
+          <AgentCard target={phase.target} words={words} from={agent.name} />
           <StarPicker
-            name={who(phase.target)}
+            name={who(phase.target, words)}
             value={stars}
             disabled={busy}
             onChange={(next) => {
@@ -653,8 +685,8 @@ export function WalletRateScreen({ agent, onBack, backLabel }: AgentScreenProps)
           {/* Signing always opens the wallet key with its password: the key is never kept. */}
           <PasswordField value={password} onChange={setPassword} />
           <p className="w4-rate-note">
-            Public on Base and stays there. Free: the fee is covered. One rating per agent counts,
-            your latest.
+            Public on {words.on} and stays there. Free: the fee is covered. One rating per agent
+            counts, your latest.
           </p>
           <ErrorLine message={error} />
           <button
@@ -663,15 +695,16 @@ export function WalletRateScreen({ agent, onBack, backLabel }: AgentScreenProps)
             disabled={busy || stars === null || !password}
             aria-busy={busy}
           >
-            {busy ? 'Signing…' : `Rate ${who(phase.target)}`}
+            {busy ? 'Signing…' : `Rate ${who(phase.target, words)}`}
           </button>
         </form>
       ) : phase.k === 'status' && rater ? (
         <RateStatus
           agentId={agent.id}
+          words={words}
           withdrawalId={phase.withdrawalId}
           initial={phase.initial}
-          name={who(phase.target)}
+          name={who(phase.target, words)}
           rater={agent.name}
           stars={phase.stars}
           onAnother={another}

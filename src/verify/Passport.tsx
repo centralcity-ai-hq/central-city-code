@@ -27,6 +27,7 @@ import {
   verifyOnBase,
   type Passport as PassportData,
 } from './onBaseData';
+import { arcPassportPage } from './passportChain';
 import './verify.css';
 import './on-base.css';
 
@@ -542,6 +543,12 @@ export function Passport({ id }: { id: string }) {
       try {
         const baseId = await baseIdOf(id);
         const loaded = baseId === null ? null : await loadPassport(baseId);
+        // Not on Base: it may be an Arc agent's link, which has its page on Arc's Explorer.
+        const arcPage = loaded ? null : await arcPassportPage(id);
+        if (arcPage) {
+          window.location.replace(arcPage);
+          return;
+        }
         // An unknown id (404) is null: "No agent with Base ID …".
         if (!loaded) {
           if (!quiet) setLoad({ kind: 'missing' });

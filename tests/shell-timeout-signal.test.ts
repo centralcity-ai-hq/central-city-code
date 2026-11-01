@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 import { timeoutSignal } from '../src/shell/timeoutSignal.js';
 
@@ -46,4 +46,24 @@ test('console polls avoid AbortSignal.any, and sidebar badges skip hidden tabs',
   );
   assert.match(nav, /setInterval\(\(\) => \{\s*if \(pageVisible\(\)\) void load\(\);/);
   assert.match(nav, /addEventListener\('visibilitychange', shown\)/);
+});
+
+/** R5-11: the same Safari < 17.4 failure came back in later screens; no client file may use it. */
+test('no client source calls AbortSignal.any (Safari before 17.4 lacks it)', () => {
+  const root = new URL('../src/', import.meta.url);
+  const offenders: string[] = [];
+  const walk = (dir: URL) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const url = new URL(entry.name + (entry.isDirectory() ? '/' : ''), dir);
+      if (entry.isDirectory()) walk(url);
+      else if (/\.(tsx?|jsx?|mjs)$/.test(entry.name)) {
+        const code = readFileSync(url, 'utf8')
+          .replace(/\/\*[\s\S]*?\*\//g, '')
+          .replace(/^\s*\/\/.*$/gm, '');
+        if (/AbortSignal\.any\s*\(/.test(code)) offenders.push(url.pathname.split('/src/')[1]!);
+      }
+    }
+  };
+  walk(root);
+  assert.deepEqual(offenders, []);
 });

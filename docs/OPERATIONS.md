@@ -10,9 +10,17 @@ Before release:
 
 1. Confirm exact-head review and required CI; inspect failures rather than treating a rerun as proof a defect was fixed.
 2. Run the relevant tests plus `pnpm build`, `pnpm check:boundaries` and `pnpm format:check`. Use the repository-pinned package manager. Changes to authentication, storage or routing require their focused regression tests.
-3. Inspect migration compatibility. Do not edit an applied migration. A build that does not recognize an already-applied version can refuse startup; an older code deployment is not automatically a safe rollback.
+3. Inspect migration compatibility. Do not edit an applied migration. A build that does not recognize an already-applied version can refuse startup; an older code deployment is not automatically a safe rollback. Each migration commits in its own transaction with its own limits (`MIGRATION_TIMEOUTS`: 60 s per statement, 5 s lock wait, overridable per migration), so a failure leaves the earlier ones applied and the next start continues from the failing one; the failure is logged as `schema.migration_failed` with its version and SQLSTATE. `CREATE INDEX CONCURRENTLY` still cannot run inside a migration: build such an index by hand first and keep `IF NOT EXISTS` in the migration.
 4. Verify environment identity and database isolation. A protected preview can still write production data if it shares credentials. Do not send synthetic load to a preview until its database is independently verified as disposable.
 5. Deploy through the configured release owner/workflow. Verify the resulting deployment ID and SHA, then verify the production alias separately. This document does not change deployment protection or authorize public release of internal records.
+
+### Database connections during a deploy (CCA-768)
+
+Each function instance holds at most `CITY_DB_POOL_MAX` connections (default 10, accepted 3 to 50; `server/database.ts`). During a deploy the old and the new instances run at the same time, so the database briefly sees both sets of pools. Keep `instances × CITY_DB_POOL_MAX` for old and new together below the endpoint's connection limit, and raise the pool size only with that sum in mind.
+
+**Open residual (not done):** letting old instances drain before new ones take full traffic is a hosting setting, not code, and it is not configured yet. Until it is, a promotion can still briefly exhaust the pool. The intended setting is the platform's gradual rollout (rolling release) for production promotions, so traffic shifts in steps instead of all at once. Idle connections close after 10 s, so a drained instance gives its connections back quickly.
+
+Every database-busy refusal (503 `busy`) logs one `{"event":"db.busy.alert","level":"ALERT"}` line per instance at once, then at most one a minute with the number of refusals since and the pool size. The per-route `db.busy` and `feed.busy` lines carry the route and failure code. The line being emitted does not prove that anyone is told: route these lines to the operator alert channel (log drain and monitor) and verify that delivery separately. A burst right after a promotion means the deploy window exhausted the pool.
 
 ## Verification after deployment
 
@@ -39,7 +47,7 @@ If the alert channel is unavailable, retain the incident locally and use another
 
 First determine whether the problem is code, configuration, data or an external service. Compare the previous build's schema support with current migrations. Prefer a forward repair when rollback would restore weaker authorization or reject the schema.
 
-For a code-only compatible rollback, use the existing deployment controls to select a reviewed known-good deployment and confirm its alias/commit after promotion. Do not revert database contents as an incidental rollback step. A restore can resurrect credentials, grants, invitations or stale work; it is a separate recovery operation needing an isolated drill and authority reconciliation.
+For a code-only compatible rollback, use the existing deployment controls to select a reviewed known-good deployment and confirm its alias/commit after promotion. Do not revert database contents as an incidental rollback step. A restore can resurrect credentials, grants, invitations or stale work; it is a separate recovery operation needing an isolated drill and authority reconciliation. It can also bring back erased accounts: after any restore, reapply the account erasure ledger before the app serves traffic ([ACCOUNT_ERASURE.md](ACCOUNT_ERASURE.md)).
 
 After rollback, repeat the affected authenticated flow, public doctor and negative authorization checks. Preserve the failed release evidence.
 
@@ -49,7 +57,74 @@ Use the owner credential-rotation action described in [CREDENTIALS.md](CREDENTIA
 
 Application runtime credentials, OAuth grants, database credentials, rate-limit keys and Agent Card signing keys are different secrets with different consumers. Inventory consumers and revocation/overlap behavior before rotating each class. Do not assume the agent rotation endpoint rotates other secrets. Never place a server secret under a VITE_ variable or in browser assets.
 
-A signing-key change needs verification of published JWKS and existing-card validity policy. A rate-limit-key change may change counter identity. A database credential change must cover every authorized deployment environment without accidentally linking preview to production. Record identifiers and timestamps, never secret values.
+A signing-key change needs verification of published JWKS and existing-card validity policy.
+
+`CITY_RATE_LIMIT_KEY` is more than a rate-limit key, and it has no previous-key setting yet, so changing it takes effect everywhere at once. Each use is domain-separated, but all of them change together:
+
+- Ends at once: every room link token (`crr_`), every default join code and its `/j/` short code, every invite short code, every rejoin link, and the idempotent re-derivation of guest room credentials (`crc_`) for a retried join (credentials already issued stay valid: they are stored as hashes).
+- Resets: every rate-limit counter, the known-device cookies (owners lose the account-wide lockout exemption until their next sign-in), the Google relink cooldowns, the Feed request, newsletter recipient and invite address hashes, and the anonymous creation and AI workspace source buckets.
+- Changes: the wake webhook secrets when `CITY_WAKE_SECRET` is not set.
+
+Rotate it only for a suspected leak, announce that room links and join codes must be shared again, and expect a burst of fresh counters. A separate secret for link tokens with a previous-key window is not built yet. A database credential change must cover every authorized deployment environment without accidentally linking preview to production. Record identifiers and timestamps, never secret values.
+
+### The rate-limit root key (`CITY_RATE_LIMIT_KEY`)
+
+`CITY_RATE_LIMIT_KEY` is more than a rate-limit key. Every consumer derives its own sub-key, but
+all of them share this one root, and there is no `_PREVIOUS` overlap for it yet:
+
+| Consumer                                                                    | What a rotation does                                                                                            |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Rate-limit counters, source/site/network/region buckets, known-device ids   | Counters and buckets start fresh.                                                                               |
+| Room link tokens (`crr_`), default join codes and short codes, rejoin links | Every open room link, `/j/` link, short code and rejoin link stops working at once; hosts must share new links. |
+| Idempotent guest credentials (`crc_`, derived, not stored)                  | The same join returns a different credential; existing guest credentials are stored hashed and keep working.    |
+| Google relink cooldowns                                                     | Every open cooldown ends at once.                                                                               |
+| Feed request and newsletter address hashes                                  | Duplicate and budget checks start fresh.                                                                        |
+| Wake webhook root (only while `CITY_WAKE_SECRET` is unset)                  | Every webhook signing secret changes; receivers reject deliveries until updated.                                |
+
+So rotate it only for a suspected leak, and treat it as an incident:
+
+1. Set `CITY_WAKE_SECRET` first (its own rotation has an overlap), so webhooks do not depend on the
+   root.
+2. Choose a quiet time, announce that open room and join links must be shared again, and record the
+   time.
+3. Set the new value (32+ characters) for every hosted environment at once, then redeploy all of
+   them; instances with different values derive different links.
+4. Verify a new room link and short code work, and an old one is refused. Never log either value.
+
+**Planned separation (needs its own review).** A dedicated secret for credential-bearing tokens
+(room links, join and short codes, rejoin links, guest credentials), with per-purpose HKDF sub-keys
+and a `_PREVIOUS` value that the room, invite and short-code verifiers also accept during an
+overlap. The rate-limit root would then only key counters, and either secret could rotate without
+breaking the other's consumers.
+
+## Operations secrets
+
+The `/api/ops/` routes and the platform metrics route take `Authorization: Bearer <secret>` (32+ characters; 404 otherwise). Each capability has its own setting, so one leaked secret does not open unrelated powers (`server/elric/ops.ts`, `opsAuthorizedFor`). Setting names only; values live in the deployment environment and are never logged, printed or written into documents.
+
+| Capability | Setting                   | Routes                                                                    |
+| ---------- | ------------------------- | ------------------------------------------------------------------------- |
+| `keys`     | `CITY_OPS_KEYS_SECRET`    | paymaster keys, SFP sponsor key, x402 facilitator keys (key provisioning) |
+| `elric`    | `CITY_OPS_ELRIC_SECRET`   | Elric kill switch, usage and cost report                                  |
+| `review`   | `CITY_OPS_REVIEW_SECRET`  | Feed requests review queue and decisions                                  |
+| `metrics`  | `CITY_OPS_METRICS_SECRET` | `/api/metrics/agents`, `/api/ops/sfp/stats` (read-only numbers)           |
+| `email`    | `CITY_OPS_EMAIL_SECRET`   | newsletter subscriber list (personal data)                                |
+
+- **Takes effect only once set.** The split exists in code, but it revokes nothing by itself: until the owner sets a capability's own setting in the deployment environment, `CITY_OPS_SECRET` still opens that capability exactly as before. The narrower access starts per capability only when its setting is set and the deployment is redeployed.
+- **Fallback.** While a capability's own setting is unset, the legacy `CITY_OPS_SECRET` opens it, as before. Once its own setting is set, `CITY_OPS_SECRET` no longer opens that capability. Split one capability at a time, starting with `keys` and `email`.
+- **Rotation with overlap.** Each setting (and `CITY_OPS_SECRET`) accepts `<SETTING>_PREVIOUS` next to it: set the new value as the setting and the old value as `<SETTING>_PREVIOUS`, redeploy, move every caller to the new value, then remove `<SETTING>_PREVIOUS` and redeploy to end the overlap. A `_PREVIOUS` value alone, without its current setting, opens nothing.
+- Verify old-value rejection (404) and new-value operation after each change, without logging either value.
+
+## Owner-run database steps
+
+Some schema work cannot run inside a migration (every migration runs in a transaction, under short statement and lock timeouts). These steps are run by the owner, at a quiet hour, on a **direct** (unpooled) connection to the production database. Each one has a dry run, and changes something only with `--confirm`.
+
+- **Room-purge indexes (migration 301).** `CITY_DIRECT_DATABASE_URL=... npx tsx scripts/room-purge-indexes.ts`, then again with `--confirm`. It builds `mentions_room`, `room_task_comments_room`, `room_join_receipts_room` and `elric_catch_ups_room` with `CREATE INDEX CONCURRENTLY` (reads and writes go on; only VACUUM and other DDL on the same table wait), one at a time, and drops and rebuilds an index a failed build left invalid. Migration 301 builds them itself only on tables of at most 10,000 rows and never fails, so this can run before or after its deploy; until it runs, room deletes cost what they cost before. The runtime log line `room_purge_indexes` says how many it left for this script (`left_for_script`).
+
+- **Stored room names and topics (CCA-628).** `CITY_HOSTED=1 DATABASE_URL=... node --import tsx scripts/clean-room-labels.ts`, then again with `--confirm`. It cleans each room's name and topic with the cleaner room creation and renaming use (invisible control, format and separator characters removed, whitespace collapsed), in batches of 200 rooms, each batch its own short transaction; it writes one `room.labels_cleaned` audit row per changed room (which field changed, never the text) and no line in the room. A name that was only invisible characters becomes "Untitled room". A name or topic that holds a credential is only counted. It prints counts only. Run it again until the dry run reports `"changed":0`, and once more after a release that makes the cleaner stricter.
+
+- **Conversation summaries (migration 302).** `CITY_HOSTED=1 DATABASE_URL=... node --import tsx scripts/backfill-conversation-summaries.ts`, then again with `--confirm`, at a quiet hour (it reads every direct message once). It recounts each thread's summary row exactly, one short transaction per thread and owner, while sends go on, then marks the summaries complete; from then on the conversation list reads only the summary rows. Until it has run, the list works as before. It prints counts only; run it again until it reports `"backfilled":true` and `"failed":0`, and again after a pair-thread remediation.
+
+- **Look-up indexes (migrations 304 and 305).** `CITY_DIRECT_DATABASE_URL=... npx tsx scripts/lookup-indexes.ts`, then again with `--confirm`. It builds `base_wallet_reservations_wallet_token_created` (the reservation sums taken under the wallet row lock: balance holds, calendar and period limits), `base_audit_events_payment` (the agent-pay audit look-ups by payment) and `messages_sender_owner_context` (the conversation list's threads the owner sent into) with `CREATE INDEX CONCURRENTLY`, one at a time, exactly like the room-purge indexes above. Migrations 304 and 305 build them themselves only on tables of at most 10,000 rows and never fail; until the script runs, those reads cost what they cost before, and the conversation list (before the summaries backfill) reads the owner's sent rows in one grouped pass instead of walking the index. The runtime log lines `reservation_audit_lookup_indexes` and `messages_sender_owner_context` say how many each left for this script.
 
 ## Recovery and evidence gaps
 

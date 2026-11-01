@@ -296,11 +296,11 @@ export interface Feed {
 }
 
 /**
- * The page cursor is the last entry's sequence number only: it carries no time. The server looks
- * up that entry's place in the creation order.
+ * The page cursor is the last entry's fingerprint: already on the page, so it tells nothing new
+ * (no time, no sequence number). The server looks up that entry's place in the creation order.
  */
-function parseCursor(raw: string | undefined): number | null {
-  return raw !== undefined && /^\d{1,18}$/.test(raw) ? Number(raw) : null;
+function parseCursor(raw: string | undefined): Buffer | null {
+  return raw !== undefined && /^[0-9a-f]{64}$/.test(raw) ? Buffer.from(raw, 'hex') : null;
 }
 
 /**
@@ -384,15 +384,17 @@ export async function pendingFeed(
       )
     ).rows[0]?.n ?? 0,
   );
-  const cursorSeq = parseCursor(options.before);
+  const cursorHash = parseCursor(options.before);
+  // A cursor resolves only to a row the feed itself shows: the fingerprint of a row left out of
+  // the public counts reads exactly like an unknown one (an empty page).
   const cursor =
-    cursorSeq === null
+    cursorHash === null
       ? null
       : ((
           await db.query<{ minute: string; ms: string | number; seq: string | number }>(
             `SELECT created_minute AS minute, COALESCE(created_ms, -1) AS ms, seq
-               FROM count_log_pending WHERE seq = $1`,
-            [cursorSeq],
+               FROM count_log_pending WHERE leaf_hash = $1 AND NOT (operator_id = ANY($2::text[]))`,
+            [cursorHash, excluded],
           )
         ).rows[0] ?? null);
   const rows = (
@@ -421,7 +423,7 @@ export async function pendingFeed(
       [
         excluded,
         // An unknown cursor matches nothing (an empty page), never the first page again.
-        cursor?.minute ?? (cursorSeq === null ? null : ''),
+        cursor?.minute ?? (options.before === undefined ? null : ''),
         cursor === null ? null : Number(cursor.ms),
         cursor === null ? null : Number(cursor.seq),
         limit + 1,
@@ -456,7 +458,7 @@ export async function pendingFeed(
   });
   return {
     entries,
-    next: rows.length > limit ? String(page.at(-1)!.seq) : null,
+    next: rows.length > limit ? Buffer.from(page.at(-1)!.leaf_hash).toString('hex') : null,
     latest_checkpoint: latest?.date ?? null,
     total_now: (latest ? latest.tree_size - latest.withdrawn : 0) + pendingCount,
     stability:

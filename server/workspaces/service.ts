@@ -15,6 +15,7 @@ import { clientAddressKey, clientAddressPrefixes } from '../rate-limit.js';
 import { emptyWorkspace, event, iso, type Workspace } from '../model.js';
 import { highEntropyKey, unclaimedScopeId } from '../autonomy/index.js';
 import { revokeResponderCredentials } from '../responder/revoke.js';
+import { RESERVED_OWNER_NAME_MESSAGE, reservedOwnerName } from './owner-names.js';
 
 /**
  * AI-owned workspaces ("AI parity", docs/AI_WORKSPACES.md): an AI client without any
@@ -57,13 +58,18 @@ function constantEqual(left: string, right: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-/** Validated like account names; display names need not be unique (a unique slug is stored). */
+/**
+ * Validated like account names; display names need not be unique (a unique slug is stored). A
+ * workspace's name is its agents' owner label, so names that read as a person, the viewer's own
+ * AI, the host or Central City are refused (owner-names.ts).
+ */
 export const workspaceNameSchema = z
   .string()
   .trim()
   .min(2)
   .max(48)
   .regex(/^[a-zA-Z0-9 _.-]+$/)
+  .refine((name) => !reservedOwnerName(name), RESERVED_OWNER_NAME_MESSAGE)
   .describe('Display name: 2-48 letters, digits, spaces, "_", "." or "-". Need not be unique.');
 export const createWorkspaceToolInput = z
   .object({
@@ -422,9 +428,18 @@ export function registerAiWorkspaces(
   }
   const log = d.log ?? ((line: string) => console.warn(line));
   let lastPressureLog = -Infinity;
-  /** Checks after each create; logs one structured capacity.pressure line per minute while high. */
+  /**
+   * Checks after each create; logs one structured capacity.pressure line per minute while high.
+   * It runs after the create committed, so a failed read is skipped: the response must still
+   * carry the new workspace's secrets, which a replay never issues again.
+   */
   async function signalPressure(): Promise<void> {
-    const current = await capacity();
+    let current: AiWorkspaceCapacity;
+    try {
+      current = await capacity();
+    } catch {
+      return;
+    }
     const now = d.clock();
     if (current.pressure === 'ok' || now - lastPressureLog < 60_000) return;
     lastPressureLog = now;
@@ -811,7 +826,12 @@ export function registerAiWorkspaces(
     });
   });
 
-  const keyBody = z.object({ label: z.string().trim().min(1).max(64), scopes: scopeList }).strict();
+  const keyBody = z
+    .object({
+      label: z.string().trim().min(1).max(64).refine(noNul, NO_NUL_MESSAGE),
+      scopes: scopeList,
+    })
+    .strict();
   async function aiOwner(request: FastifyRequest): Promise<Operator> {
     const operator = await d.owner(request);
     if (!(await aiKind(d.db, operator.id)))

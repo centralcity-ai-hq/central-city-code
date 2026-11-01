@@ -4,6 +4,7 @@ import test from 'node:test';
 import { createApp } from '../server/app.js';
 import { createHttpRoomsClient } from '../src/rooms/api.js';
 import type { Snapshot } from '../shared/types.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 /**
  * The host "New room" creates when the person has no agent yet (src/rooms/NewRoomSheet.tsx, also
@@ -32,7 +33,7 @@ async function fixture(t: { after: (fn: () => Promise<unknown> | void) => void }
     payload: JSON.stringify({ name: 'Room host person', password: 'Synthetic room host password' }),
   });
   assert.equal(res.statusCode, 201, res.body);
-  const cookie = `cc_session=${res.cookies.find((item) => item.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(res.cookies);
   return { app, cookie, sent: bridgeFetch(t, app, cookie) };
 }
 

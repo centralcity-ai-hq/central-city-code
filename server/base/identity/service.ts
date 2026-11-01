@@ -32,10 +32,10 @@
  * Every write is fenced on the attempt (`op_id`) and the evidence (`evidence_rev`) it observed.
  */
 import type { Database } from '../../database.js';
-import type { BaseChainId } from '../../../shared/base/chains.js';
-import { baseNetwork } from '../../../shared/base/chains.js';
+import { chainNetwork, type ChainId } from '../../../shared/chains.js';
 import { shortAgentUri } from '../../../shared/base/short-id.js';
 import { transientChainError } from '../chain/transient.js';
+import { protocolArcChainIdFromEnv } from '../../protocol/fees/cron.js';
 import { ensureShortId } from './short-links.js';
 
 export type IdentityState = 'pending' | 'submitted' | 'confirmed' | 'failed';
@@ -117,13 +117,18 @@ export interface IdentityChainPort {
    */
   register(input: {
     operationKey: string;
-    chainId: BaseChainId;
+    chainId: ChainId;
     spenderKeyRef: string;
     spender: string;
     uri: string;
+    /**
+     * The agent's workspace, whose sponsorship budget the operation counts against (the service
+     * always names it; absent: none, as for the platform's own).
+     */
+    accountId?: string;
   }): Promise<IdentityOp>;
   /** The id minted by a final registration for this URI (read from that operation's receipt). */
-  registeredId(op: IdentityOp, chainId: BaseChainId, uri: string): Promise<bigint>;
+  registeredId(op: IdentityOp, chainId: ChainId, uri: string): Promise<bigint>;
   /**
    * Checks before sending that the spender holds `id` (ownerOf == spender; refused otherwise, e.g.
    * IDENTITY_NOT_HELD). Reports blockNumber, blockHash and `reverted` for included, final and
@@ -131,11 +136,13 @@ export interface IdentityChainPort {
    */
   transfer(input: {
     operationKey: string;
-    chainId: BaseChainId;
+    chainId: ChainId;
     spenderKeyRef: string;
     spender: string;
     id: bigint;
     to: string;
+    /** As for register. */
+    accountId?: string;
   }): Promise<IdentityOp>;
   /**
    * Fast path: the evidence of the register operation stored under `operationKey` or of any
@@ -145,7 +152,7 @@ export interface IdentityChainPort {
    */
   mintEvidence?(input: {
     operationKey: string;
-    chainId: BaseChainId;
+    chainId: ChainId;
     uri: string;
   }): Promise<MintObservation>;
   /**
@@ -153,7 +160,7 @@ export interface IdentityChainPort {
    * with that block's number and hash. Read-only.
    */
   identityAt?(input: {
-    chainId: BaseChainId;
+    chainId: ChainId;
     id: bigint;
     blockTag: 'finalized';
   }): Promise<IdentitySnapshot>;
@@ -162,7 +169,7 @@ export interface IdentityChainPort {
    * when unknown. Possibly shared for a while or read from another node: never evidence, only
    * "nothing can have settled yet". Without it every settling advance reads the chain in full.
    */
-  settledHeads?(chainId: BaseChainId): Promise<{ safe: bigint | null; finalized: bigint | null }>;
+  settledHeads?(chainId: ChainId): Promise<{ safe: bigint | null; finalized: bigint | null }>;
 }
 
 /** One JSON line per event; never keys, signatures or secrets. */
@@ -191,8 +198,10 @@ export interface IdentityServiceDeps {
 
 export class IdentityServiceError extends Error {
   constructor(
-    readonly code: 'network_unavailable' | 'wallet_missing' | 'wallet_frozen',
+    readonly code: 'network_unavailable' | 'wallet_missing' | 'wallet_frozen' | 'other_chain',
     message: string,
+    /** With other_chain: the chain the agent is on. */
+    readonly chainId?: number,
   ) {
     super(message);
   }
@@ -840,10 +849,10 @@ export function createIdentityService(deps: IdentityServiceDeps) {
     /** Moves the agent's registration one step forward; safe to call any number of times. */
     async advance(
       agentId: string,
-      chainId: BaseChainId,
+      chainId: ChainId,
       options: { retry?: boolean } = {},
     ): Promise<IdentityView> {
-      const network = baseNetwork(chainId, deps.env);
+      const network = chainNetwork(chainId, deps.env);
       if (!network?.contracts.identityRegistry)
         throw new IdentityServiceError('network_unavailable', 'Network not available.');
       const wallets = await deps.db.query<{
@@ -863,20 +872,42 @@ export function createIdentityService(deps: IdentityServiceDeps) {
         throw new IdentityServiceError('wallet_frozen', 'The wallet is frozen or closed.');
 
       const uri = shortAgentUri(await ensureShortId(deps.db, agentId, now()));
-      await deps.db.query(
-        `INSERT INTO base_identities (agent_id, chain_id, operator_id, registry_address,
-           agent_card_uri, owner_of_identity, state, updated_at, started_at)
-         VALUES ($1,$2,$3,$4,$5,$6,'pending',$7,$7) ON CONFLICT (agent_id, chain_id) DO NOTHING`,
-        [
-          agentId,
-          chainId,
-          wallet.operator_id,
-          network.contracts.identityRegistry,
-          uri,
-          wallet.spender_address,
-          now(),
-        ],
-      );
+      const open = (db: Pick<Database, 'query'>) =>
+        db.query(
+          `INSERT INTO base_identities (agent_id, chain_id, operator_id, registry_address,
+             agent_card_uri, owner_of_identity, state, updated_at, started_at)
+           VALUES ($1,$2,$3,$4,$5,$6,'pending',$7,$7) ON CONFLICT (agent_id, chain_id) DO NOTHING`,
+          [
+            agentId,
+            chainId,
+            wallet.operator_id,
+            network.contracts.identityRegistry,
+            uri,
+            wallet.spender_address,
+            now(),
+          ],
+        );
+      // One chain per agent, also for two calls at once on different chains: while Arc is on, the
+      // check and the insert hold one lock per agent. Arc off: as before, no extra query.
+      if (protocolArcChainIdFromEnv(deps.env ?? {}) === null) await open(deps.db);
+      else
+        await deps.db.transaction(async (tx) => {
+          await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+            `identity-chain:${agentId}`,
+          ]);
+          const { rows } = await tx.query<{ chain_id: number }>(
+            `SELECT chain_id FROM base_identities
+             WHERE agent_id = $1 AND chain_id <> $2 AND state <> 'failed' LIMIT 1`,
+            [agentId, chainId],
+          );
+          if (rows[0])
+            throw new IdentityServiceError(
+              'other_chain',
+              'This agent is already on another chain.',
+              rows[0].chain_id,
+            );
+          await open(tx);
+        });
       const read = async (): Promise<IdentityRow> => {
         const { rows } = await deps.db.query<IdentityRow>(
           `SELECT ${IDENTITY_COLUMNS} FROM base_identities WHERE agent_id = $1 AND chain_id = $2`,
@@ -1000,7 +1031,11 @@ export function createIdentityService(deps: IdentityServiceDeps) {
         S = await read();
       }
       if (!isOpen(S.state)) return view(S);
-      const spender = { spenderKeyRef: wallet.spender_key_ref, spender: wallet.spender_address };
+      const spender = {
+        spenderKeyRef: wallet.spender_key_ref,
+        spender: wallet.spender_address,
+        accountId: wallet.operator_id,
+      };
 
       // F. Register stage: only while no register operation is pinned as evidence.
       if (S.mint_op_id === null && S.erc8004_agent_id === null) {

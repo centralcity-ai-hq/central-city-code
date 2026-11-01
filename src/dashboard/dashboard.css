@@ -1,0 +1,875 @@
+/*
+ * The Agent Dashboard (/dashboard; approved design 30 Oct 2026). Light: ink #0f172a on white (the owner, 30 Oct),
+ * accent #2563eb, white cards with a 1px #e2e8f0 border and 14px radius; a white hero. Dark
+ * mode follows the site tokens (tokens.css, html[data-theme='dark']).
+ */
+.ccd {
+  --ccd-ink: #0f172a;
+  --ccd-muted: #64748b;
+  --ccd-ground: #ffffff;
+  --ccd-soft: #f1f4f8;
+  --ccd-card: #ffffff;
+  --ccd-line: #e2e8f0;
+  --ccd-accent: #2563eb;
+  --ccd-accent-soft: rgba(37, 99, 235, 0.14);
+  --ccd-amber: #f59e0b;
+  --ccd-teal: #0d9488;
+  --ccd-violet: #7c3aed;
+  --ccd-green: #16a34a;
+  --ccd-up: #15803d;
+  --ccd-up-bg: rgba(22, 163, 74, 0.16);
+  --ccd-down: #b91c1c;
+  --ccd-down-bg: rgba(220, 38, 38, 0.14);
+  --ccd-navy-a: #0a1328;
+  --ccd-navy-b: #0d1a38;
+  font-family: Inter, var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  color: var(--ccd-ink);
+  background: var(--ccd-ground);
+  min-height: 100vh;
+}
+[data-theme='dark'] .ccd {
+  --ccd-ink: var(--text-primary, #fafafa);
+  --ccd-muted: var(--text-secondary, #a1a1aa);
+  --ccd-ground: var(--bg-page, #09090b);
+  --ccd-card: var(--bg-surface-elevated, #18181b);
+  --ccd-line: var(--border, #27272a);
+  --ccd-accent: #3b82f6;
+  --ccd-accent-soft: rgba(59, 130, 246, 0.2);
+  --ccd-up: #4ade80;
+  --ccd-down: #f87171;
+  --ccd-navy-a: #050a18;
+  --ccd-navy-b: #08112a;
+  --ccd-soft: rgba(255, 255, 255, 0.06);
+}
+.ccd .ccd-num,
+.ccd .ccd-mono,
+.ccd .ccd-tick {
+  font-variant-numeric: tabular-nums;
+}
+.ccd-mono {
+  font-family: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+}
+.ccd-muted {
+  color: var(--ccd-muted);
+}
+.ccd-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+.ccd-inner {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 24px;
+  box-sizing: border-box;
+}
+
+/* Hero band */
+.ccd-hero {
+  /* White like the landing page (the owner, 30 Oct); dark mode keeps the site's dark ground. */
+  color: var(--ccd-ink);
+  background: var(--ccd-ground);
+  border-bottom: 1px solid var(--ccd-line);
+  padding: 36px 0 32px;
+}
+.ccd-eyebrow {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ccd-accent);
+}
+.ccd-hero h1 {
+  margin: 0;
+  font-size: 36px;
+  line-height: 1.15;
+  font-weight: 650;
+  color: var(--ccd-ink);
+}
+.ccd-lede {
+  max-width: 560px;
+  margin: 8px 0 0;
+  color: var(--ccd-muted);
+  font-size: 16px;
+}
+.ccd-hero-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.ccd-hero-controls {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+}
+.ccd-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ccd-muted);
+  font-variant-numeric: tabular-nums;
+}
+.ccd-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.25);
+}
+.ccd-live-off .ccd-live-dot {
+  background: #94a3b8;
+  box-shadow: none;
+}
+.ccd-seg {
+  position: relative;
+  isolation: isolate;
+}
+.ccd-seg button {
+  position: relative;
+  z-index: 1;
+  transition: color 300ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+/* The sliding pill under the chosen option. */
+.ccd-seg-pill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 0;
+  border-radius: 7px;
+  pointer-events: none;
+  transition:
+    transform 300ms cubic-bezier(0.22, 1, 0.36, 1),
+    width 300ms cubic-bezier(0.22, 1, 0.36, 1),
+    height 300ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.ccd-switches {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: flex-start;
+  gap: 8px;
+}
+.ccd-switch {
+  display: inline-flex;
+  flex-wrap: wrap;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--ccd-soft);
+  border: 1px solid var(--ccd-line);
+}
+.ccd-switch button {
+  border: 0;
+  background: transparent;
+  color: var(--ccd-muted);
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 11px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.ccd-switch .ccd-seg-pill {
+  background: var(--ccd-card);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
+}
+.ccd-switch .ccd-seg-on {
+  color: var(--ccd-ink);
+}
+.ccd-switch button:focus-visible,
+.ccd-toggle button:focus-visible,
+.ccd-copy:focus-visible,
+.ccd-outline:focus-visible {
+  outline: 2px solid var(--ccd-accent);
+  outline-offset: 2px;
+}
+.ccd-kpis {
+  margin-top: 24px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+.ccd-kpi {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+  min-height: 132px;
+  box-sizing: border-box;
+  padding: 16px;
+  border-radius: 14px;
+  background: var(--ccd-card);
+  border: 1px solid var(--ccd-line);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+.ccd-kpi-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.ccd-kpi-label {
+  font-size: 13px;
+  color: var(--ccd-muted);
+}
+.ccd-badge {
+  flex: none;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-variant-numeric: tabular-nums;
+  background: var(--ccd-soft);
+  color: var(--ccd-muted);
+}
+.ccd-badge-up {
+  background: var(--ccd-up-bg);
+  color: var(--ccd-up);
+}
+.ccd-badge-down {
+  background: var(--ccd-down-bg);
+  color: var(--ccd-down);
+}
+.ccd-kpi-value {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.ccd-kpi-value .ccd-num {
+  font-size: 28px;
+  font-weight: 650;
+  color: var(--ccd-ink);
+}
+.ccd-unit {
+  font-size: 14px;
+  color: var(--ccd-muted);
+}
+.ccd-spark {
+  margin-top: auto;
+  width: 100%;
+  height: 28px;
+}
+.ccd-spark-area {
+  fill: var(--ccd-accent-soft);
+}
+.ccd-spark-line {
+  fill: none;
+  stroke: var(--ccd-accent);
+  stroke-width: 1.5;
+}
+
+/* Body */
+.ccd-body {
+  padding-top: 32px;
+  padding-bottom: 72px;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+.ccd-card,
+.ccd-panel {
+  background: var(--ccd-card);
+  border: 1px solid var(--ccd-line);
+  border-radius: 14px;
+  padding: 22px;
+  box-sizing: border-box;
+  min-width: 0;
+}
+.ccd-card-title {
+  margin: 0 0 16px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.ccd-sub {
+  margin: 16px 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ccd-muted);
+}
+.ccd-row2 {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 20px;
+}
+/* Who trades and Most used services, side by side at equal width. */
+.ccd-row-market {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+.ccd-activity-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.ccd-total {
+  display: flex;
+  flex-direction: column;
+}
+.ccd-total .ccd-num {
+  font-size: 28px;
+  font-weight: 650;
+}
+.ccd-toggle {
+  display: inline-flex;
+  border-radius: 9px;
+  padding: 2px;
+  background: var(--ccd-ground);
+}
+.ccd-toggle button {
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ccd-muted);
+  padding: 5px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.ccd-toggle .ccd-seg-pill {
+  background: var(--ccd-card);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+.ccd-toggle .ccd-seg-on {
+  color: var(--ccd-accent);
+}
+.ccd-chart-wrap {
+  position: relative;
+}
+.ccd-chart {
+  width: 100%;
+  height: auto;
+  display: block;
+  touch-action: pan-y;
+}
+.ccd-chart-empty {
+  aspect-ratio: 640 / 220;
+}
+.ccd-grid {
+  stroke: var(--ccd-line);
+  stroke-width: 1;
+}
+.ccd-area {
+  fill: var(--ccd-accent-soft);
+}
+.ccd-line {
+  fill: none;
+  stroke: var(--ccd-accent);
+  stroke-width: 2;
+}
+.ccd-prev-cap {
+  stroke: var(--ccd-muted);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+.ccd-prev {
+  fill: none;
+  stroke: var(--ccd-muted);
+  stroke-width: 1.5;
+  stroke-dasharray: 5 4;
+  opacity: 0.7;
+}
+.ccd-tick,
+.ccd-clock-tick {
+  fill: var(--ccd-muted);
+  font-size: 11px;
+}
+.ccd-cross {
+  stroke: var(--ccd-muted);
+  stroke-width: 1;
+}
+.ccd-dot {
+  fill: var(--ccd-card);
+  stroke: var(--ccd-accent);
+  stroke-width: 2;
+}
+.ccd-readout {
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: var(--ccd-card);
+  border: 1px solid var(--ccd-line);
+}
+.ccd-key {
+  display: flex;
+  gap: 16px;
+  font-size: 12px;
+  color: var(--ccd-muted);
+  margin-top: 6px;
+}
+.ccd-key-line,
+.ccd-key-dash {
+  display: inline-block;
+  width: 18px;
+  vertical-align: middle;
+  border-top: 2px solid var(--ccd-accent);
+  margin-right: 4px;
+}
+.ccd-key-dash {
+  border-top: 2px dashed var(--ccd-muted);
+}
+
+/* Agent clock */
+.ccd-clock {
+  position: relative;
+  max-width: 260px;
+  margin: 0 auto;
+}
+.ccd-clock svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.ccd-clock-bar {
+  stroke: var(--ccd-accent);
+  stroke-width: 7;
+  stroke-linecap: round;
+  opacity: 0.75;
+}
+.ccd-clock-peak {
+  stroke: var(--ccd-amber);
+  opacity: 1;
+}
+.ccd-clock-centre {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  font-size: 11px;
+  text-align: center;
+}
+.ccd-clock-hour {
+  font-size: 22px;
+  font-weight: 650;
+  color: var(--ccd-amber);
+}
+
+.ccd-top,
+.ccd-legend,
+.ccd-endpoints {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.ccd-bar {
+  display: block;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--ccd-line);
+  overflow: hidden;
+}
+.ccd-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--ccd-accent);
+  border-radius: 3px;
+}
+
+/* Who trades */
+.ccd-donut {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.ccd-donut svg {
+  width: 120px;
+  flex: none;
+}
+.ccd-donut-track {
+  fill: none;
+  stroke: var(--ccd-line);
+  stroke-width: 14;
+}
+.ccd-donut-seg {
+  fill: none;
+  stroke-width: 14;
+}
+.ccd-donut-total {
+  fill: var(--ccd-ink);
+  font-size: 18px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.ccd-donut-sub {
+  fill: var(--ccd-muted);
+  font-size: 9px;
+}
+.ccd-legend li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  padding: 3px 0;
+}
+.ccd-legend-v {
+  margin-left: auto;
+  padding-left: 12px;
+}
+.ccd-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+}
+.ccd-tone-blue {
+  stroke: var(--ccd-accent);
+  background: var(--ccd-accent);
+}
+.ccd-tone-teal {
+  stroke: var(--ccd-teal);
+  background: var(--ccd-teal);
+}
+.ccd-tone-violet {
+  stroke: var(--ccd-violet);
+  background: var(--ccd-violet);
+}
+.ccd-tone-amber {
+  background: var(--ccd-amber);
+}
+.ccd-tone-green {
+  background: var(--ccd-green);
+}
+.ccd-cols {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  height: 120px;
+}
+.ccd-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.ccd-col-pct {
+  font-size: 11px;
+  color: var(--ccd-muted);
+}
+.ccd-col-bar {
+  flex: 1;
+  width: 100%;
+  display: flex;
+  align-items: flex-end;
+}
+.ccd-col-bar > span {
+  display: block;
+  width: 100%;
+  background: var(--ccd-accent);
+  border-radius: 4px 4px 0 0;
+}
+.ccd-col-label {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Most used services */
+.ccd-top {
+  min-height: 300px;
+}
+.ccd-top li {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  padding: 9px 0;
+}
+.ccd-top .ccd-rank,
+.ccd-top .ccd-top-calls {
+  line-height: 18px;
+}
+.ccd-rank {
+  font-weight: 650;
+  color: var(--ccd-muted);
+}
+.ccd-top-main {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.ccd-top-title {
+  font-size: 13px;
+  line-height: 18px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.ccd-top-calls {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* Contracts and wallets */
+.ccd-panel {
+  padding: 0;
+  overflow: hidden;
+}
+.ccd-panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 22px 22px 10px;
+  font-size: 13px;
+}
+.ccd-panel-head .ccd-card-title {
+  margin: 0;
+}
+.ccd-group-head {
+  padding: 14px 22px 6px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--ccd-muted);
+}
+.ccd-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2.4fr) minmax(0, 1.2fr) auto;
+  gap: 16px;
+  align-items: center;
+  padding: 12px 22px;
+  border-top: 1px solid var(--ccd-line);
+  font-size: 14px;
+}
+.ccd-group-head + .ccd-row {
+  border-top: 0;
+}
+.ccd-row-role {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.ccd-row-role > span:last-child {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.ccd-purpose {
+  font-size: 12px;
+}
+.ccd-mark {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+}
+.ccd-row-addr {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ccd-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--ccd-line);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.ccd-copy-icon {
+  padding: 5px;
+  color: var(--ccd-muted);
+}
+.ccd-outline {
+  display: inline-block;
+  padding: 6px 12px;
+  border: 1px solid var(--ccd-line);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--ccd-ink);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.ccd-outline:hover {
+  border-color: var(--ccd-accent);
+  color: var(--ccd-accent);
+}
+
+/* Track these numbers yourself */
+.ccd-track {
+  color: #e2e8f0;
+  background: linear-gradient(180deg, var(--ccd-navy-a), var(--ccd-navy-b));
+  border-radius: 14px;
+  padding: 24px;
+}
+.ccd-track h2 {
+  margin: 0;
+  color: #fff;
+  font-size: 20px;
+}
+.ccd-track p {
+  margin: 6px 0 16px;
+  color: #94a3b8;
+  font-size: 14px;
+}
+.ccd-endpoints li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 14px;
+}
+.ccd-endpoints code,
+.ccd-curl code {
+  color: #bfdbfe;
+  overflow-wrap: anywhere;
+}
+.ccd-track .ccd-copy {
+  border-color: rgba(255, 255, 255, 0.2);
+  color: #e2e8f0;
+}
+.ccd-curl {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 14px;
+  padding: 12px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.3);
+}
+.ccd-track-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  margin-top: 14px;
+}
+.ccd-track-link {
+  display: inline-block;
+  color: #93c5fd;
+  font-size: 14px;
+}
+.ccd-note {
+  font-size: 13px;
+}
+
+@media (max-width: 960px) {
+  .ccd-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .ccd-row2,
+  .ccd-row-market {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .ccd-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .ccd-row-role {
+    grid-column: 1 / -1;
+  }
+}
+@media (max-width: 640px) {
+  .ccd-inner {
+    padding: 0 16px;
+  }
+  .ccd-hero h1 {
+    font-size: 28px;
+  }
+  .ccd-hero-controls {
+    align-items: flex-start;
+  }
+  .ccd-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+  .ccd-endpoints li {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+  .ccd-endpoints .ccd-copy {
+    justify-self: start;
+  }
+}
+@media (max-width: 400px) {
+  .ccd-kpis {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .ccd-donut {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .ccd-donut svg {
+    align-self: center;
+  }
+}
+
+.ccd-history {
+  margin: 0 0 16px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  background: rgba(251, 191, 36, 0.12);
+  color: #fde68a;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+/* Soft changes: bars and columns grow to their new size; charts morph in script (motion.ts). */
+.ccd-bar > span,
+.ccd-col-bar > span {
+  transition:
+    width 500ms cubic-bezier(0.65, 0, 0.35, 1),
+    height 500ms cubic-bezier(0.65, 0, 0.35, 1);
+}
+.ccd-prev,
+.ccd-clock-bar {
+  transition:
+    opacity 400ms ease-in-out,
+    stroke 400ms ease-in-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ccd *,
+  .ccd *::before,
+  .ccd *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+/* Arc's own colour: near-black marks (a light ring keeps them visible in dark mode). */
+.ccd-tone-arc {
+  background: #0b0b0f;
+  color: #fff;
+}
+@media (prefers-color-scheme: dark) {
+  .ccd-tone-arc {
+    box-shadow: 0 0 0 1px rgb(255 255 255 / 45%);
+  }
+}
+:root[data-theme='dark'] .ccd-tone-arc {
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 45%);
+}

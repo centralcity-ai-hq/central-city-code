@@ -75,11 +75,14 @@ export const CLIENT_ROUTES: readonly ClientRoute[] = Object.freeze([
   // The newsletter email links (docs/EMAIL.md), public, no session, never indexed.
   route('/newsletter/confirm'),
   route('/newsletter/unsubscribe'),
+  // The owner's hidden one-click sponsor ETH move (server/feed/pay/sponsor-eth-sweep.ts), never indexed.
+  route('/owner/sponsor-eth'),
   route('/downtown'),
   // Trust pages (DESIGN_SYSTEM §2.2 Trust column), public, no session.
   route('/privacy'),
   route('/terms'),
   route('/security'),
+  route('/audit'),
   route('/support'),
   // Footer pages: help, policies and company, public, no session.
   route('/status'),
@@ -96,8 +99,20 @@ export const CLIENT_ROUTES: readonly ClientRoute[] = Object.freeze([
   route('/explorer'),
   // The Agent Explorer's On Base view: the agents with a Base ID, read from Base.
   route('/explorer/base'),
+  // The Agent Explorer's On Arc view (only while the server has Arc on) and its agent pages.
+  route('/explorer/arc'),
+  route('/explorer/arc/agents/:id'),
   // The Agent Explorer's Service calls view: every paid service call as its Base transaction.
   route('/explorer/calls'),
+  // Explorer v2 proof pages (design approved 24 Oct 2026): one page per number on the home.
+  route('/explorer/proof/agents'),
+  route('/explorer/proof/base'),
+  route('/explorer/proof/finalizing'),
+  route('/explorer/proof/calls'),
+  route('/explorer/proof/ratings'),
+  route('/explorer/agents/:id'),
+  // The public Analytics page (shared/dashboard.ts); /dashboard redirects here (308).
+  route('/analytics'),
   // The docs site.
   route('/docs'),
   route('/docs/start'),
@@ -171,10 +186,20 @@ export function withoutTrailingSlash(pathname: string): string | null {
  *
  * - /how → the landing's "How it works" section (/#how).
  * - /answers → the docs.
+ * - /dashboard → /analytics (308: the page was renamed; the API paths keep their names).
+ * - The withdrawn audit v1.0 PDF links (and their .sha256 files) → the audit page (/audit), which
+ *   links the current version.
  */
 export const CLIENT_REDIRECTS = Object.freeze([
   Object.freeze({ source: '/how', destination: '/#how', statusCode: 301 as const }),
   Object.freeze({ source: '/answers', destination: '/docs', statusCode: 301 as const }),
+  Object.freeze({ source: '/dashboard', destination: '/analytics', statusCode: 308 as const }),
+  ...[
+    '/audit/Central-City-Audit-2026-10.pdf',
+    '/audit/Central-City-Audit-2026-10.pdf.sha256',
+    '/audit/central-city-audit-2026-10-v1.0.pdf',
+    '/audit/central-city-audit-2026-10-v1.0.pdf.sha256',
+  ].map((source) => Object.freeze({ source, destination: '/audit', statusCode: 301 as const })),
 ]);
 
 /**
@@ -188,4 +213,10 @@ export function movedPath(url: string): string | null {
   if (!rest.length) return entry.destination;
   const [target, fragment] = entry.destination.split('#');
   return `${target}?${rest.join('?')}${fragment === undefined ? '' : `#${fragment}`}`;
+}
+
+/** The status of the redirect for `url` (301 or 308), 301 when it is not a retired path. */
+export function movedStatus(url: string): 301 | 308 {
+  const path = url.split('?')[0];
+  return CLIENT_REDIRECTS.find((item) => item.source === path)?.statusCode ?? 301;
 }

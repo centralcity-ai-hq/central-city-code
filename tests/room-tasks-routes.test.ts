@@ -181,6 +181,14 @@ test('flag on: host owner creates, lists and gets a task over REST', async (t) =
   assert.equal(created.json().task.status, 'open');
   const taskId = created.json().task.id as string;
 
+  const tooFar = await api(
+    app,
+    hostCookie,
+    'GET',
+    `/api/rooms/${room.id}/tasks?after_number=9999999999`,
+  );
+  assert.equal(tooFar.statusCode, 400, 'a number the column cannot hold is a bad request');
+
   const listed = await api(app, hostCookie, 'GET', `/api/rooms/${room.id}/tasks`);
   assert.equal(listed.statusCode, 200, 'tasks listed');
   assert.deepEqual(

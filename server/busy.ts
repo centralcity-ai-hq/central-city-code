@@ -9,6 +9,7 @@
  * Retry-After, so the caller checks before doing it again. Any other failure keeps the app's 500.
  */
 import type { FastifyReply } from 'fastify';
+import { dbPoolMax } from './database.js';
 
 /** Seconds a busy answer asks the caller to wait before trying again. */
 export const DATABASE_BUSY_RETRY_AFTER_S = 5;
@@ -20,13 +21,44 @@ export const DATABASE_BUSY_UNSURE_MESSAGE =
 /** At most one busy log line per route and failure code in this window (ms). */
 export const DATABASE_BUSY_LOG_EVERY_MS = 60_000;
 
+/**
+ * At most one ALERT line per instance in this window (ms). The first busy refusal alerts at once,
+ * so a deploy window that exhausts the pool is visible at once (CCA-768), not only per route.
+ */
+export const DATABASE_BUSY_ALERT_EVERY_MS = 60_000;
+
 const lastLogged = new Map<string, number>();
 const suppressed = new Map<string, number>();
+let alertedAt: number | null = null;
+let refusedSinceAlert = 0;
 
 /** Test hook: forget the log throttle. */
 export function forgetDatabaseBusyLog() {
   lastLogged.clear();
   suppressed.clear();
+  alertedAt = null;
+  refusedSinceAlert = 0;
+}
+
+/**
+ * Every busy refusal, the app's and the Feed's (server/feed/busy.ts): one ALERT line on the first,
+ * then at most one a minute per instance with the number of refusals since the last line and the
+ * instance's pool size. No route, address or message: the per-route lines carry the detail.
+ */
+export function alertDatabaseBusy(source: 'app' | 'feed', now: number = Date.now()) {
+  refusedSinceAlert += 1;
+  if (alertedAt !== null && now - alertedAt < DATABASE_BUSY_ALERT_EVERY_MS) return;
+  alertedAt = now;
+  console.error(
+    JSON.stringify({
+      event: 'db.busy.alert',
+      level: 'ALERT',
+      source,
+      refused: refusedSinceAlert,
+      poolMax: dbPoolMax(),
+    }),
+  );
+  refusedSinceAlert = 0;
 }
 
 /** A database code fit for the log: a SQLSTATE or a socket code, never the message. */
@@ -66,6 +98,7 @@ export function sendDatabaseBusy(reply: FastifyReply, error?: unknown) {
   const method = reply.request?.method;
   const retryable = method === 'GET' || method === 'HEAD';
   logBusy(reply, error, retryable);
+  alertDatabaseBusy('app');
   reply.code(503).removeHeader('Vercel-CDN-Cache-Control').header('Cache-Control', 'no-store');
   if (!retryable)
     // No Retry-After at all, even one a handler set before it failed: nothing says try again.

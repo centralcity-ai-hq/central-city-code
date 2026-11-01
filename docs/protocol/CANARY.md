@@ -34,6 +34,13 @@ is in flight finishes.
 
 ## Deployed
 
+To reproduce a router's bytecode: `ROUTER=<1|2|3> pnpm tsx scripts/protocol/build-deploy-kit.ts`
+compiles `contracts/<sourceUnit>` (`fees/CentralCityFeeRouter*.sol`; the unit name is part of the
+metadata, so it changes the hash) with the kit's recorded compiler and settings (solc 0.8.28,
+optimizer 10000 runs, cancun) and prints `bytecodeSha`. It must equal the kit's `bytecodeSha`, the
+deploy page's approved hash (`tests/deploy-kit.test.ts` checks both), and the hash of the creation
+transaction's input below without its trailing ABI-encoded constructor arguments.
+
 - CentralCityFeeRouter: `0xA5f89AE25c87C21a8E2B03aaBf398A880d9be81B` (Base, verified on Basescan)
 - Deploy transaction: `0x42afd4b53120290151f3f7f4cdbacae5fced336a180b6ea2102d03d75c29e01e`,
   block `52603696`

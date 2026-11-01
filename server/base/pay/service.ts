@@ -32,6 +32,10 @@
  *
  * Any other address is a payment only while CITY_BASE_PAY_ANY_ADDRESS is exactly '1' (default off:
  * 422 not_central_city_agent, use Withdraw). Names and notes are display only, never a binding.
+ *
+ * One service per chain, as for withdrawals: deps.network is an Arc network, or absent for the wallet
+ * network, exactly as before. Records, lookups, the registry, the reader and the payment rows are all
+ * that chain's, so a lookup made on one chain is unknown on the other: nothing pays across chains.
  */
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { formatUnits, getAddress, isAddress, type Hex } from 'viem';
@@ -51,8 +55,9 @@ import {
   type RecipientQuery,
 } from '../../../shared/base/pay.js';
 import { WALLET_CHAIN_ID } from '../../../shared/base/wallet-network.js';
+import { chainFamily, type ChainNetwork } from '../../../shared/chains.js';
 import {
-  TX_EXPLORER,
+  txExplorerOf,
   type FinalWithdrawal,
   type PaymentHooks,
   type WithdrawalService,
@@ -182,8 +187,10 @@ const unavailable = () =>
 export interface PayDeps {
   db: Database;
   withdrawals: WithdrawalService;
-  /** The wallet network's Base reader; absent when no endpoint is configured (verifying is 503). */
+  /** The chain's reader; absent when no endpoint is configured (verifying is 503). */
   chain?: PayChainReader;
+  /** The chain the payments are on (an Arc network); the wallet network without one. */
+  network?: ChainNetwork;
   /** Read per request: whether any address may be paid (CITY_BASE_PAY_ANY_ADDRESS, default off). */
   anyAddress: () => boolean;
   now?: () => number;
@@ -335,21 +342,24 @@ export type ResolvedRecipient =
  */
 export function createRecipientResolver(deps: {
   db: Pick<Transaction, 'query'>;
-  /** The wallet network's Base reader; absent when no endpoint is configured (verifying is 503). */
+  /** The chain's reader; absent when no endpoint is configured (verifying is 503). */
   chain?: PayChainReader;
+  /** The chain the records are read on (an Arc network); the wallet network without one. */
+  network?: ChainNetwork;
   now?: () => number;
 }) {
   const now = deps.now ?? Date.now;
-  const registry = NETWORK.contracts.identityRegistry;
+  const network = deps.network ?? NETWORK;
+  const registry = network.contracts.identityRegistry;
   if (!registry) throw new Error('The wallet network has no identity registry.');
   // A reader for another network or registry would verify against the wrong records.
   if (
     deps.chain &&
-    (deps.chain.chainId !== WALLET_CHAIN_ID ||
+    (deps.chain.chainId !== network.chainId ||
       deps.chain.registry.toLowerCase() !== registry.toLowerCase())
   )
     throw new Error('The Base reader is not the wallet network canonical registry.');
-  const store = createPayStore({ chainId: WALLET_CHAIN_ID, registry, network: NETWORK });
+  const store = createPayStore({ chainId: network.chainId, registry, network });
   const db = deps.db;
 
   /**
@@ -452,7 +462,14 @@ export type RecipientResolver = ReturnType<typeof createRecipientResolver>;
 export function createPayService(deps: PayDeps) {
   const now = deps.now ?? Date.now;
   const db = deps.db;
-  const recipients = createRecipientResolver({ db, chain: deps.chain, now });
+  const chainId = deps.network?.chainId ?? WALLET_CHAIN_ID;
+  const txExplorer = txExplorerOf(chainId);
+  const recipients = createRecipientResolver({
+    db,
+    chain: deps.chain,
+    ...(deps.network ? { network: deps.network } : {}),
+    now,
+  });
   const { registry, store, verify, agentByWallet } = recipients;
 
   const recipientJson = (
@@ -466,7 +483,7 @@ export function createPayService(deps: PayDeps) {
     name: record.name,
     wallet: getAddress(record.wallet),
     registry: registry!,
-    chainId: WALLET_CHAIN_ID,
+    chainId,
     verification: 'point_in_time',
     lookupId: lookup.lookupId,
     verified: {
@@ -566,7 +583,7 @@ export function createPayService(deps: PayDeps) {
     return { ...signing, payment: paymentJson(stored) };
   }
 
-  return {
+  const service = {
     /** Who a payment would go to, checked on Base at one block; the lookup is this account's. */
     async lookup(accountId: string, q: string): Promise<PayRecipient> {
       const found = await recipients.resolveRecipient(q, deps.anyAddress);
@@ -805,7 +822,7 @@ export function createPayService(deps: PayDeps) {
           note: state === 'final' ? row.note : null,
           text: noticeText(state, payer, payee, amount.display),
           txHash,
-          explorerUrl: txHash ? TX_EXPLORER + txHash : null,
+          explorerUrl: txHash ? txExplorer + txHash : null,
           sentAt: Number(row.sent_at),
           updatedAt: Number(row.updated_at),
           finalAt: state === 'final' && row.final_at !== null ? Number(row.final_at) : null,
@@ -834,6 +851,21 @@ export function createPayService(deps: PayDeps) {
     async finalized(tx: Transaction, final: FinalWithdrawal): Promise<void> {
       await store.markFinal(tx, final.withdrawalId, final.at, final.txHash);
     },
+  };
+  // The refusals above say 'Base' as they always did; on Arc they name Arc.
+  if (!deps.network || chainFamily(chainId) !== 'arc') return service;
+  const name = deps.network.name;
+  const named = <T>(run: () => Promise<T>) =>
+    run().catch((error: unknown) => {
+      if (error instanceof PayError)
+        error.message = error.message.replace(/\ba Base\b/g, 'an Base').replace(/\bBase\b/g, name);
+      throw error;
+    });
+  return {
+    ...service,
+    lookup: (accountId: string, q: string) => named(() => service.lookup(accountId, q)),
+    create: (accountId: string, agentId: string, input: unknown) =>
+      named(() => service.create(accountId, agentId, input)),
   };
 }
 

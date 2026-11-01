@@ -2,9 +2,9 @@ import { createHmac, hkdfSync, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Database, Transaction } from '../database.js';
-import { opsAuthorized } from '../elric/ops.js';
+import { opsAuthorizedFor } from '../elric/ops.js';
 import { cronAuthorized } from '../wake/cron.js';
-import { storedKeyHash } from '../rate-limit.js';
+import { clientAddressPrefixes, storedKeyHash } from '../rate-limit.js';
 import { NEWSLETTER_TEXT_VERSION, type NewsletterStatus } from '../../shared/newsletter.js';
 import { newsletterEmailSchema } from '../../shared/newsletter-schema.js';
 import {
@@ -61,8 +61,43 @@ export const NEWSLETTER_RATE = { perAccount: 5, perAddress: 20, windowMs: 60 * M
  * normalized address (CITY_RATE_LIMIT_KEY), never the address itself.
  */
 export const NEWSLETTER_RECIPIENT_RATE = { perRecipient: 3, windowMs: DAY } as const;
+/**
+ * CCA-527: confirmation emails for the whole deployment, whoever asks, on top of the per-recipient,
+ * per-account and per-address budgets, so many sources together cannot turn the newsletter into a
+ * mail cannon. CITY_LIMIT_NEWSLETTER_CONFIRMATIONS_PER_HOUR / _PER_DAY change the ceilings; when
+ * one is reached an alert line is logged (once per window per instance) and opt-ins are skipped
+ * (sign-up, onboarding) or answered 429 (Settings) until the window moves on.
+ */
+export const NEWSLETTER_GLOBAL_RATE = { perHour: 500, perDay: 5000 } as const;
+export function newsletterGlobalRate(env: Record<string, string | undefined>) {
+  const read = (name: string, fallback: number) => {
+    const value = Number(env[name]);
+    return Number.isInteger(value) && value > 0 ? value : fallback;
+  };
+  return {
+    perHour: read('CITY_LIMIT_NEWSLETTER_CONFIRMATIONS_PER_HOUR', NEWSLETTER_GLOBAL_RATE.perHour),
+    perDay: read('CITY_LIMIT_NEWSLETTER_CONFIRMATIONS_PER_DAY', NEWSLETTER_GLOBAL_RATE.perDay),
+  };
+}
 export const newsletterRecipientKey = (email: string) =>
-  `newsletter:recipient:${storedKeyHash(0, `newsletter-recipient\n${email.trim().toLowerCase()}`)}`;
+  `newsletter:recipient:${storedKeyHash(0, `newsletter-recipient\n${canonicalRecipient(email)}`)}`;
+/**
+ * R2-8: the inbox an address reaches, for the recipient budget only (mail still goes to the
+ * address as typed). A "+tag" is dropped from the local part, and for Gmail the dots too, with
+ * googlemail.com as gmail.com, so sub-addressed variants of one inbox share one budget.
+ */
+export function canonicalRecipient(email: string): string {
+  const address = email.trim().toLowerCase();
+  const at = address.lastIndexOf('@');
+  if (at <= 0) return address;
+  let local = address.slice(0, at);
+  let domain = address.slice(at + 1);
+  const plus = local.indexOf('+');
+  if (plus > 0) local = local.slice(0, plus);
+  if (domain === 'googlemail.com') domain = 'gmail.com';
+  if (domain === 'gmail.com') local = local.replace(/\./g, '') || local;
+  return `${local}@${domain}`;
+}
 
 export interface EmailOptions {
   /** The environment (CITY_EMAIL_*); defaults to process.env. */
@@ -71,6 +106,8 @@ export interface EmailOptions {
   transport?: EmailTransport;
   /** Drain right after a request queues an email (default true; tests drain explicitly). */
   autoDrain?: boolean;
+  /** Where structured audit and alert lines go (default the console). */
+  log?: (line: string) => void;
 }
 
 export interface EmailDeps {
@@ -147,6 +184,8 @@ export interface EmailService {
 
 export function registerEmail(app: FastifyInstance, d: EmailDeps): EmailService {
   const env = () => d.options?.env ?? process.env;
+  /** The window (hour or day slot) a global-ceiling alert was last logged for. */
+  const globalAlerted = new Map<string, number>();
   const config = () => emailConfig(env());
   const transport = d.options?.transport ?? fetchTransport;
   const provider = (): EmailProvider | null => {
@@ -274,6 +313,30 @@ export function registerEmail(app: FastifyInstance, d: EmailDeps): EmailService 
           NEWSLETTER_RECIPIENT_RATE.windowMs,
           'Too many confirmation emails to this address today. Try again tomorrow.',
         );
+        const global = newsletterGlobalRate(env());
+        for (const [window, max, ms] of [
+          ['hour', global.perHour, 60 * MINUTE],
+          ['day', global.perDay, DAY],
+        ] as const)
+          await d
+            .limit(
+              `newsletter:global:${window}`,
+              max,
+              ms,
+              'Newsletter confirmations are paused for a while. Try again later.',
+            )
+            .catch((error: unknown) => {
+              if ((error as { statusCode?: number }).statusCode === 429) {
+                const slot = Math.floor(d.clock() / ms);
+                if (globalAlerted.get(window) !== slot) {
+                  globalAlerted.set(window, slot);
+                  (d.options?.log ?? console.warn)(
+                    JSON.stringify({ event: 'newsletter.global_limited', window, max }),
+                  );
+                }
+              }
+              throw error;
+            });
       } catch (error) {
         // Sign-up and onboarding never fail on the newsletter: no consent row and no email.
         if (source !== 'settings' && (error as { statusCode?: number }).statusCode === 429)
@@ -610,9 +673,10 @@ export function registerEmail(app: FastifyInstance, d: EmailDeps): EmailService 
     return view(owner.id);
   });
 
-  // Ops only (CITY_OPS_SECRET; 404 otherwise): confirmed subscribers, with their unsubscribe link.
+  // Ops only (capability 'email': CITY_OPS_EMAIL_SECRET, else CITY_OPS_SECRET; 404 otherwise):
+  // confirmed subscribers, with their unsubscribe link.
   app.get('/api/ops/newsletter/subscribers', async (request, reply) => {
-    if (!opsAuthorized(request.headers.authorization, env().CITY_OPS_SECRET))
+    if (!opsAuthorizedFor(request.headers.authorization, env(), 'email'))
       return reply.code(404).send({ error: 'Not found.' });
     const origin = d.originOf(request);
     const rows = (
@@ -629,6 +693,16 @@ export function registerEmail(app: FastifyInstance, d: EmailDeps): EmailService 
       )
     ).rows;
     reply.header('Cache-Control', 'no-store');
+    // CCA-532: one audit line per export: when, how many rows, and the caller's network prefix
+    // (an IPv4 /24 or IPv6 /56), never an address or an email.
+    (d.options?.log ?? console.info)(
+      JSON.stringify({
+        event: 'newsletter.subscribers_exported',
+        at: new Date(d.clock()).toISOString(),
+        rows: rows.length,
+        caller_prefix: clientAddressPrefixes(request.ip).site,
+      }),
+    );
     return {
       subscribers: rows.map((row) => ({
         email: row.email,

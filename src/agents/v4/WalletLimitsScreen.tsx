@@ -8,7 +8,7 @@ import {
   type RefObject,
 } from 'react';
 import { ApiError } from '../../api';
-import { readWallet } from '../../base/wallet/api';
+import { chainRefusal, readWallet } from '../../base/wallet/api';
 import {
   askRevoke,
   capFromText,
@@ -32,6 +32,7 @@ import {
   readSpenderPin,
 } from '../../base/wallet/limits';
 import { VaultCryptoError } from '../../base/vault';
+import { chainWords } from '../../../shared/base/wallet-chains';
 import { AgentPayConsent } from './AgentPayConsent';
 import type { AgentScreenProps } from './screens';
 import { SettingsEmpty, SettingsError, SettingsFrame, SettingsLoading } from './settingsShared';
@@ -50,11 +51,6 @@ import './wallet-screen.css';
 
 const POLL_MS = 5_000;
 const PERIODS: readonly LimitPeriod[] = ['day', 'week', 'month'];
-const BASE_PERIOD: Record<LimitPeriod, string> = {
-  day: 'Base day',
-  week: 'Base week',
-  month: 'Base month',
-};
 const USED: Record<LimitPeriod, string> = {
   day: 'Used today',
   week: 'Used this week',
@@ -77,11 +73,12 @@ type Phase =
   | { k: 'review'; checked: CheckedLimit };
 
 const failure = (error: unknown) =>
-  error instanceof LimitCheckError
+  chainRefusal(error) ??
+  (error instanceof LimitCheckError
     ? `Not signed: ${error.message}`
     : error instanceof VaultCryptoError || error instanceof ApiError || error instanceof Error
       ? error.message
-      : 'Something went wrong. Try again.';
+      : 'Something went wrong. Try again.');
 
 const berlin = new Intl.DateTimeFormat('en-GB', {
   timeZone: 'Europe/Berlin',
@@ -103,38 +100,43 @@ const day = (seconds: number) => berlin.format(seconds * 1000);
 /** "Sun 11 Oct, 00:00" in Berlin, from unix seconds. */
 const moment = (seconds: number) => berlinTime.format(seconds * 1000);
 
-/** What Base enforces, in the owner's words: half the cap (no burst past it) or the full cap. */
+/**
+ * What the chain enforces, in the owner's words: half the cap (no burst past it) or the full cap.
+ * `on`: the chain's name (chainWords), built in here because these sentences hold the agent's name.
+ */
 function enforced(
   model: OnchainCapModel,
   allowance: bigint | string,
   cap: bigint | string,
   period: LimitPeriod,
   name: string,
+  on: string,
 ) {
-  const per = `${usdcText(allowance)} USDC per ${BASE_PERIOD[period]}`;
+  const per = `${usdcText(allowance)} USDC per ${on} ${period}`;
   return model === 'half'
-    ? `Base enforces ${per}, so even around ${period === 'day' ? 'midnight' : 'a reset'} ${name} stays within ${usdcText(cap)}.`
-    : `Base enforces ${per}; around a reset ${name} could spend up to ${usdcText(allowance)} just before and ${usdcText(allowance)} just after.`;
+    ? `${on} enforces ${per}, so even around ${period === 'day' ? 'midnight' : 'a reset'} ${name} stays within ${usdcText(cap)}.`
+    : `${on} enforces ${per}; around a reset ${name} could spend up to ${usdcText(allowance)} just before and ${usdcText(allowance)} just after.`;
 }
 
-/** When Base's periods start: fixed lengths from 00:00 Berlin on the day it is signed. */
-function baseStarts(period: LimitPeriod, start: number) {
-  if (period === 'day') return `Base days start at 00:00 Berlin time (${day(start)}).`;
+/** When the chain's periods start: fixed lengths from 00:00 Berlin on the day it is signed. */
+function baseStarts(period: LimitPeriod, start: number, on: string) {
+  if (period === 'day') return `${on} days start at 00:00 Berlin time (${day(start)}).`;
   if (period === 'week')
-    return `Base weeks start at 00:00 Berlin time (${day(start)}) and last 7 days.`;
-  return `Base months start at 00:00 Berlin time (${day(start)}) and last 31 days.`;
+    return `${on} weeks start at 00:00 Berlin time (${day(start)}) and last 7 days.`;
+  return `${on} months start at 00:00 Berlin time (${day(start)}) and last 31 days.`;
 }
 
-function stateLine(limit: LimitView, name: string) {
-  if (limit.state === 'signed') return 'Signed · waiting for its first use on Base.';
-  if (limit.state === 'approved') return 'Approved on Base.';
-  if (limit.state === 'revoked') return 'Revoked on Base.';
-  // Base itself says revoked once the revoke is in a block; "final" waits for Base's finality.
+function stateLine(limit: LimitView, name: string, on: string) {
+  if (limit.state === 'signed') return `Signed · waiting for its first use on ${on}.`;
+  if (limit.state === 'approved') return `Approved on ${on}.`;
+  if (limit.state === 'revoked') return `Revoked on ${on}.`;
+  // The chain itself says revoked once the revoke is in a block; "final" waits for its finality,
+  // and Arc is final once in a block.
   if (limit.revoke && ON_ITS_WAY.has(limit.revoke.state))
     return limit.onchain?.revoked
-      ? `Revoked on Base. ${name}’s spends are blocked; Base makes it final in about 15–20 minutes.`
-      : `Revoking… ${name}’s spends are blocked now; the revoke is on its way to Base.`;
-  return `${name}’s spends are blocked here. Sign the revoke so Base stops it too.`;
+      ? `Revoked on ${on}. ${name}’s spends are blocked; ${on === 'Base' ? 'Base makes it final in about 15–20 minutes' : 'it is final in a moment'}.`
+      : `Revoking… ${name}’s spends are blocked now; the revoke is on its way to ${on}.`;
+  return `${name}’s spends are blocked here. Sign the revoke so ${on} stops it too.`;
 }
 
 /** Whether the owner can (still) sign a revoke for this limit. */
@@ -154,10 +156,11 @@ function BasePeriod({
   onRetry: () => void;
 }) {
   const onchain = limit.onchain;
+  const { on } = chainWords(view.chainId);
   if (view.stale || !onchain)
     return (
       <p className="w4-caution" role="status" data-k="base-unread">
-        <b>Couldn’t read Base just now.</b>{' '}
+        <b>Couldn’t read {on} just now.</b>{' '}
         <button type="button" className="v4s-quiet" onClick={onRetry}>
           Try again
         </button>
@@ -170,14 +173,15 @@ function BasePeriod({
       {onchain.revoked ? (
         <div className="ap4-row v4s-still">
           <span className="ap4-k">
-            On Base<span className="w4-row-sub">{block}</span>
+            On {on}
+            <span className="w4-row-sub">{block}</span>
           </span>
           <span className="ap4-v">Revoked</span>
         </div>
       ) : onchain.phase === 'active' && onchain.currentPeriodEnd !== null ? (
         <div className="ap4-row v4s-still">
           <span className="ap4-k">
-            This {BASE_PERIOD[limit.period]}
+            This {on} {limit.period}
             <span className="w4-row-sub">
               Until {moment(onchain.currentPeriodEnd)} · {block}
             </span>
@@ -189,14 +193,15 @@ function BasePeriod({
       ) : onchain.phase === 'before_start' ? (
         <div className="ap4-row v4s-still">
           <span className="ap4-k">
-            Base starts counting<span className="w4-row-sub">{block}</span>
+            {on} starts counting<span className="w4-row-sub">{block}</span>
           </span>
           <span className="ap4-v">{moment(onchain.start)}</span>
         </div>
       ) : (
         <div className="ap4-row v4s-still">
           <span className="ap4-k">
-            On Base<span className="w4-row-sub">{block}</span>
+            On {on}
+            <span className="w4-row-sub">{block}</span>
           </span>
           <span className="ap4-v">Ended</span>
         </div>
@@ -223,6 +228,7 @@ function LimitCard({
   const cap = BigInt(limit.capRaw);
   const spent = BigInt(limit.calendar.spentRaw);
   const share = cap > 0n ? Math.min(100, Number((spent * 10_000n) / cap) / 100) : 0;
+  const { on } = chainWords(view.chainId);
   return (
     <>
       <div className="w4-limit" data-k="limit-card" data-state={limit.state}>
@@ -230,14 +236,14 @@ function LimitCard({
         <p className="w4-eyebrow">
           The most {name} may spend
           <span className={`w4-net${view.testnet ? '' : ' live'}`}>
-            {view.testnet ? 'Test network · no real money' : 'Base'}
+            {view.testnet ? 'Test network · no real money' : on}
           </span>
         </p>
         <p className="w4-limit-cap">
           <b>{usdcText(cap)}</b> USDC {PERIOD_WORDS[limit.period]}
         </p>
         <p className="w4-hint">
-          {enforced(limit.onchainModel, limit.allowanceRaw, cap, limit.period, name)}
+          {enforced(limit.onchainModel, limit.allowanceRaw, cap, limit.period, name, on)}
         </p>
         <p
           ref={stateRef}
@@ -247,7 +253,7 @@ function LimitCard({
           role="status"
           tabIndex={-1}
         >
-          {stateLine(limit, name)}
+          {stateLine(limit, name, on)}
         </p>
       </div>
       <div className="w4-usage" data-k="calendar">
@@ -276,6 +282,7 @@ export function WalletLimitsScreen({ agent, onBack, backLabel }: AgentScreenProp
   const [address, setAddress] = useState<string | null>(null);
   const [owner, setOwner] = useState('');
   const [spender, setSpender] = useState<string | null>(null);
+  const [chainId, setChainId] = useState<number | null>(null);
   const [newKeyOk, setNewKeyOk] = useState(false);
   const [cap, setCap] = useState('');
   const [period, setPeriod] = useState<LimitPeriod>('day');
@@ -371,24 +378,31 @@ export function WalletLimitsScreen({ agent, onBack, backLabel }: AgentScreenProp
   }, [refresh]);
 
   /** The agent's wallet address, the one the limit must be for. */
-  async function walletOf(): Promise<{ address: string; owner: string; spender: string | null }> {
-    if (address && owner) return { address, owner, spender };
+  async function walletOf(): Promise<{
+    address: string;
+    owner: string;
+    spender: string | null;
+    chainId: number;
+  }> {
+    if (address && owner && chainId !== null) return { address, owner, spender, chainId };
     const read = await readWallet(agent.id);
     if (read.kind !== 'wallet' || !read.wallet.address)
       throw new Error('The wallet can’t be read right now, so nothing can be checked. Try again.');
     setAddress(read.wallet.address);
     setOwner(read.wallet.ownerAddress);
     setSpender(read.wallet.spenderAddress ?? null);
+    setChainId(read.wallet.chainId);
     return {
       address: read.wallet.address,
       owner: read.wallet.ownerAddress,
       spender: read.wallet.spenderAddress ?? null,
+      chainId: read.wallet.chainId,
     };
   }
 
   /** The pinned key, when this limit's spender differs from it (else null). */
   const spenderChanged = (checked: CheckedLimit) => {
-    const pinned = readSpenderPin(checked.permission.account);
+    const pinned = readSpenderPin(checked.permission.account, checked.chainId);
     return pinned && pinned !== checked.permission.spender ? pinned : null;
   };
 
@@ -413,11 +427,17 @@ export function WalletLimitsScreen({ agent, onBack, backLabel }: AgentScreenProp
     if (!capRaw) return setError('Type an amount in USDC with up to 2 decimals, like 20.00.');
     setBusy(true);
     try {
-      const { address: wallet, owner: ownerKey, spender: spendingKey } = await walletOf();
+      const {
+        address: wallet,
+        owner: ownerKey,
+        spender: spendingKey,
+        chainId: agentChainId,
+      } = await walletOf();
       const prepared = await prepareLimit(agent.id, { capRaw, period });
       // Checked here, before the owner is even asked: the permission is exactly this limit.
       const checked = checkLimit({
         prepared,
+        agentChainId,
         wallet,
         owner: ownerKey,
         agentId: agent.id,
@@ -446,8 +466,9 @@ export function WalletLimitsScreen({ agent, onBack, backLabel }: AgentScreenProp
       // The owner saw this spending key and signs for it: it is kept (and read back) before the
       // signature leaves, so later limits here are held to it even if this answer is lost.
       const { account, spender: confirmed } = phase.checked.permission;
+      const onChain = phase.checked.chainId;
       await signLimit(agent.id, phase.checked, password, mark, ownerKey, () =>
-        pinSpender(account, confirmed),
+        pinSpender(account, confirmed, onChain),
       );
       setPassword('');
       setCap('');
@@ -468,12 +489,13 @@ export function WalletLimitsScreen({ agent, onBack, backLabel }: AgentScreenProp
     // Marked before anything else: if the password goes while the revoke is asked, nothing is sent.
     const mark = alive();
     try {
-      const { address: wallet, owner: ownerKey } = await walletOf();
+      const { address: wallet, owner: ownerKey, chainId: agentChainId } = await walletOf();
       // The server blocks the agent's spends now and answers the operation to sign.
       const asked = await askRevoke(agent.id, limit.permissionId);
       if (asked.revokeState === 'awaiting_signature') {
         const hash = checkRevoke({
           request: asked,
+          agentChainId,
           wallet,
           owner: ownerKey,
           agentId: agent.id,
@@ -516,6 +538,7 @@ export function WalletLimitsScreen({ agent, onBack, backLabel }: AgentScreenProp
     </p>
   ) : null;
   const last = view?.limits[0];
+  const { on } = chainWords(view?.chainId);
 
   return (
     <SettingsFrame
@@ -549,6 +572,7 @@ export function WalletLimitsScreen({ agent, onBack, backLabel }: AgentScreenProp
                   phase.checked.capRaw,
                   phase.checked.period,
                   agent.name,
+                  on,
                 )}
               </p>
             ) : (
@@ -559,6 +583,7 @@ export function WalletLimitsScreen({ agent, onBack, backLabel }: AgentScreenProp
                   phase.checked.capRaw,
                   phase.checked.period,
                   agent.name,
+                  on,
                 )}
               </p>
             )}
@@ -568,7 +593,7 @@ export function WalletLimitsScreen({ agent, onBack, backLabel }: AgentScreenProp
             {phase.checked.start * 1000 <= Date.now() ? (
               <li data-k="works-now">{agent.name} can use it as soon as you sign.</li>
             ) : null}
-            <li>{baseStarts(phase.checked.period, phase.checked.start)}</li>
+            <li>{baseStarts(phase.checked.period, phase.checked.start, on)}</li>
             <li>Central City’s counter resets {RESETS[phase.checked.period]}.</li>
             <li>
               {view.testnet ? `${view.network} · test network, no real money.` : view.network}
@@ -576,7 +601,7 @@ export function WalletLimitsScreen({ agent, onBack, backLabel }: AgentScreenProp
             <li data-k="spender">
               Only {agent.name}’s spending key can use it:{' '}
               <span className="w4-mono">{phase.checked.permission.spender}</span>
-              {readSpenderPin(phase.checked.permission.account)
+              {readSpenderPin(phase.checked.permission.account, phase.checked.chainId)
                 ? ''
                 : '. First limit in this browser: check it.'}
             </li>
@@ -656,8 +681,8 @@ export function WalletLimitsScreen({ agent, onBack, backLabel }: AgentScreenProp
               </h4>
               <p className="w4-hint">
                 {limit.state === 'revoke_pending'
-                  ? 'The revoke isn’t on Base yet. Sign it with your wallet password.'
-                  : `Revoking blocks ${agent.name}’s spends here at once; Base stops the limit once the revoke you sign lands.`}
+                  ? `The revoke isn’t on ${on} yet. Sign it with your wallet password.`
+                  : `Revoking blocks ${agent.name}’s spends here at once; ${on} stops the limit once the revoke you sign lands.`}
               </p>
               {passwordField}
               {errorLine}
@@ -678,12 +703,14 @@ export function WalletLimitsScreen({ agent, onBack, backLabel }: AgentScreenProp
         <form className="w4-steps" onSubmit={(event) => void prepare(event)}>
           {/* A limit alone doesn't let the agent pay on its own: that is a separate OK. */}
           <p ref={lead} className="w4-lead" tabIndex={-1} data-k="limit-lead">
-            Set the most {agent.name} may spend, in a limit you sign. Base holds it to that limit,
+            Set the most {agent.name} may spend, in a limit you sign. {on} holds it to that limit,
             and you can revoke it any time. Paying on its own needs your separate OK once the limit
             is set.
           </p>
           {last?.state === 'revoked' ? (
-            <p className="w4-hint">Your last limit, {limitText(last)}, is revoked on Base.</p>
+            <p className="w4-hint">
+              Your last limit, {limitText(last)}, is revoked on {on}.
+            </p>
           ) : null}
           <label className="w4-field">
             <span>Limit in USDC</span>

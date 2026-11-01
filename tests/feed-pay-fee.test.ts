@@ -69,6 +69,33 @@ test('fee on top: the seller is paid the price, then 10% goes to the treasury th
   assert.deepEqual(row, { fee_state: 'charged', fee_op_key: `feed-pay:fee:${call.callId}` });
 });
 
+test('the fee waits for the seller settlement to reach the safe block, and is never charged on one a reorg took (CCA-120)', async (t) => {
+  for (const reorg of [false, true]) {
+    const f = await feesOn(t);
+    f.base.state.settlementFinalAtOnce = false;
+    const paid = await f.pay();
+    assert.equal(paid.statusCode, 200, paid.body);
+    const callId = paid.json().callId as string;
+    // Settled, but above Base's safe block: the fee stays owed, nothing goes to the router.
+    let call = await settle(f, callId);
+    assert.equal(call.protocolFee.state, 'pending', JSON.stringify(call.protocolFee));
+    assert.equal(f.base.state.feeCharges.length, 0, 'no fee on an unsafe settlement');
+    if (reorg) {
+      // The settlement is reorged away before it became safe: Base no longer shows it used.
+      f.base.state.used.clear();
+    }
+    f.base.state.head += 10n;
+    call = await settle(f, callId);
+    if (reorg) {
+      assert.equal(call.protocolFee.state, 'pending');
+      assert.equal(f.base.state.feeCharges.length, 0, 'no fee on a settlement Base lost');
+    } else {
+      assert.equal(call.protocolFee.state, 'charged');
+      assert.equal(f.base.state.feeCharges.length, 1);
+    }
+  }
+});
+
 test('the caps hold for price + fee: a $0.095 service is refused with fees on ($0.1045 total)', async (t) => {
   const f = await feesOn(t);
   await f.list({ amount: '95000' });

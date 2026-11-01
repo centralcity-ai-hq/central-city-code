@@ -5,17 +5,20 @@
  * same transaction that commits them. Durably idempotent per purpose; a concurrent loser's key stays
  * uncommitted.
  *
- *   paymaster_signer      the VerifyingPaymaster's verifyingSigner (constructor argument);
- *                         CITY_BASE_PAYMASTER_SIGNER_KEY_REF
+ *   paymaster_signer      the VerifyingPaymaster's verifyingSigner (constructor argument)
  *   paymaster_submitter_1 the EOAs that call EntryPoint.handleOps (the contract's bundler
- *   paymaster_submitter_2 allowlist; beneficiary of their own batches);
- *                         CITY_BASE_SUBMITTER_KEY_REFS (comma-separated)
+ *   paymaster_submitter_2 allowlist; beneficiary of their own batches)
  *
- * The contract's owner (admin) key is NOT made here: it never reaches the app (it lives on the stress
- * server only). Behind the ops guard (Bearer CITY_OPS_SECRET); 404 otherwise. Refused (409) while
+ * The keys in use are always the recorded ones (own_paymaster_keys). The settings
+ * CITY_BASE_PAYMASTER_SIGNER_KEY_REF and CITY_BASE_SUBMITTER_KEY_REFS (comma-separated) do NOT
+ * select keys: when set, they assert which recorded keys are in use, and a mismatch fails closed
+ * (paymasterKeySettingsMismatch: our own bundler is not built, CDP keeps serving, one log line at
+ * start). Unset, nothing is asserted.
+ *
+ * The contract's owner (admin) key is NOT made here: it is owner-held and never on any server; it
+ * never reaches the app. Behind the ops guard (capability 'keys': CITY_OPS_KEYS_SECRET, else CITY_OPS_SECRET); 404 otherwise. Refused (409) while
  * CITY_BASE_PAYMASTER_SIGNER_KEY_REF is set, so a configured deployment never mints new keys.
- * Answers ONLY addresses and the opaque keyRefs (references into the keystore, not key material),
- * no-store.
+ * Answers ONLY public addresses (never keyRefs, never key material), no-store.
  *
  * Prepare mode (Operation Paymaster, no secret needed): with CITY_BASE_OWN_PAYMASTER set to
  * 'prepare' (or 'on'), the server provisions the same keys itself when it starts
@@ -24,16 +27,27 @@
  * contract and the EntryPoint. Never keyRefs, never a side effect, never an error text. Prepare mode
  * sponsors and submits nothing: it only makes the addresses the contract deploy and its bundler
  * allowlist need.
+ *
+ * Arc's paymaster has its own keys, never Base's (migration 351): the same three roles under arc_
+ * purposes, in the same table. A chain reads and provisions only its own purposes
+ * (paymasterKeyPurposes); the maps below are always keyed by Base's names, so what uses a key does
+ * not depend on the chain. Arc's runtime sees CITY_ARC_PAYMASTER_SIGNER_KEY_REF and
+ * CITY_ARC_SUBMITTER_KEY_REFS under Base's setting names (arc-env.ts), with the same meaning.
+ * POST /api/ops/paymaster/keys makes Base's only: Arc's come from prepare mode.
  */
 import type { FastifyInstance } from 'fastify';
+import { BASE_MAINNET } from '../../../shared/base/chains.js';
+import { chainFamily } from '../../../shared/chains.js';
 import type { Database } from '../../database.js';
 import { registerMigration, type Migration } from '../../migrations.js';
 import { createKeystore, parseKeks, parseKeyRef } from './keystore.js';
 import { pgSpenderKeyStore } from './stores.js';
-import { opsAuthorized } from '../../elric/ops.js';
+import { opsAuthorizedFor } from '../../elric/ops.js';
 
 export const PAYMASTER_KEYS_PATH = '/api/ops/paymaster/keys';
 export const PAYMASTER_PUBLIC_PATH = '/api/public/paymaster';
+/** Arc's view on a server that answers PAYMASTER_PUBLIC_PATH for Base; only while Arc is on. */
+export const PAYMASTER_ARC_PUBLIC_PATH = '/api/public/paymaster/arc';
 /** off (default) | prepare (keys + public addresses only) | on (sponsoring; later PRs). */
 export const OWN_PAYMASTER_SETTING = 'CITY_BASE_OWN_PAYMASTER';
 /** The deployed paymaster contract (public), once it is deployed. */
@@ -76,6 +90,20 @@ export const PAYMASTER_KEY_PURPOSES = [
   'paymaster_submitter_2',
 ] as const;
 export type PaymasterKeyPurpose = (typeof PAYMASTER_KEY_PURPOSES)[number];
+export const ARC_PAYMASTER_SIGNER_KEY_REF_SETTING = 'CITY_ARC_PAYMASTER_SIGNER_KEY_REF';
+export const ARC_SUBMITTER_KEY_REFS_SETTING = 'CITY_ARC_SUBMITTER_KEY_REFS';
+export const ARC_PAYMASTER_KEY_PURPOSES = [
+  'arc_paymaster_signer',
+  'arc_paymaster_submitter_1',
+  'arc_paymaster_submitter_2',
+] as const;
+
+/** A chain's own purposes, in the order of PAYMASTER_KEY_PURPOSES. */
+export function paymasterKeyPurposes(
+  chainId: number,
+): typeof PAYMASTER_KEY_PURPOSES | typeof ARC_PAYMASTER_KEY_PURPOSES {
+  return chainFamily(chainId) === 'arc' ? ARC_PAYMASTER_KEY_PURPOSES : PAYMASTER_KEY_PURPOSES;
+}
 
 /** Migration 256 `own_paymaster_keys`: one new table, one row per purpose; nothing else touched. */
 export const OWN_PAYMASTER_KEYS_SQL = `
@@ -92,23 +120,98 @@ export const ownPaymasterKeysMigration: Migration = {
   sql: OWN_PAYMASTER_KEYS_SQL,
 };
 
+/** Migration 351 `own_paymaster_keys_arc_purposes`: Arc's purposes; existing rows are untouched. */
+export const OWN_PAYMASTER_KEYS_ARC_PURPOSES_SQL = `
+SET LOCAL lock_timeout = '2s';
+ALTER TABLE own_paymaster_keys DROP CONSTRAINT IF EXISTS own_paymaster_keys_purpose_check;
+ALTER TABLE own_paymaster_keys ADD CONSTRAINT own_paymaster_keys_purpose_check CHECK (purpose IN ('paymaster_signer','paymaster_submitter_1','paymaster_submitter_2','arc_paymaster_signer','arc_paymaster_submitter_1','arc_paymaster_submitter_2')) NOT VALID;
+`;
+
+export const ownPaymasterKeysArcPurposesMigration: Migration = {
+  version: 351,
+  name: 'own_paymaster_keys_arc_purposes',
+  sql: OWN_PAYMASTER_KEYS_ARC_PURPOSES_SQL,
+};
+
 /** Idempotent; call before runMigrations (after the Base keystore's base_spender_keys). */
 export function registerOwnPaymasterKeysMigration(): void {
   registerMigration(ownPaymasterKeysMigration);
+  registerMigration(ownPaymasterKeysArcPurposesMigration);
 }
 
 type ProvisionedKey = { address: string; keyRef: string };
 
-/** The recorded keys by purpose (read-only). */
+/** One chain's recorded keys, by Base's name for the role (read-only). Default: Base. */
 export async function provisionedPaymasterKeys(
   db: Pick<Database, 'query'>,
+  chainId: number = BASE_MAINNET,
 ): Promise<Map<PaymasterKeyPurpose, ProvisionedKey>> {
   const { rows } = await db.query<{
-    purpose: PaymasterKeyPurpose;
+    purpose: string;
     key_ref: string;
     address: string;
   }>('SELECT purpose, key_ref, address FROM own_paymaster_keys');
-  return new Map(rows.map((row) => [row.purpose, { address: row.address, keyRef: row.key_ref }]));
+  const own: readonly string[] = paymasterKeyPurposes(chainId);
+  const keys = new Map<PaymasterKeyPurpose, ProvisionedKey>();
+  for (const row of rows) {
+    const role = PAYMASTER_KEY_PURPOSES[own.indexOf(row.purpose)];
+    if (role) keys.set(role, { address: row.address, keyRef: row.key_ref });
+  }
+  return keys;
+}
+
+/**
+ * The key settings checked against the recorded keys: the NAME of the first setting that does not
+ * match, or null (never a value). CITY_BASE_PAYMASTER_SIGNER_KEY_REF must be the recorded signer's
+ * keyRef; CITY_BASE_SUBMITTER_KEY_REFS must start with submitter 1's keyRef (the lane in use) and
+ * name only recorded submitters. A setting that is set while its keys are not recorded mismatches.
+ */
+export function paymasterKeySettingsMismatch(
+  env: Record<string, string | undefined>,
+  keys: Map<PaymasterKeyPurpose, ProvisionedKey>,
+): typeof PAYMASTER_SIGNER_KEY_REF_SETTING | typeof SUBMITTER_KEY_REFS_SETTING | null {
+  const signerRef = env[PAYMASTER_SIGNER_KEY_REF_SETTING]?.trim();
+  if (signerRef && signerRef !== keys.get('paymaster_signer')?.keyRef)
+    return PAYMASTER_SIGNER_KEY_REF_SETTING;
+  const submitterRefs = env[SUBMITTER_KEY_REFS_SETTING]?.trim();
+  if (submitterRefs) {
+    const listed = submitterRefs.split(',').map((ref) => ref.trim());
+    const first = keys.get('paymaster_submitter_1')?.keyRef;
+    const recorded = new Set(
+      (['paymaster_submitter_1', 'paymaster_submitter_2'] as const)
+        .map((purpose) => keys.get(purpose)?.keyRef)
+        .filter((ref): ref is string => !!ref),
+    );
+    if (!first || listed[0] !== first || !listed.every((ref) => recorded.has(ref)))
+      return SUBMITTER_KEY_REFS_SETTING;
+  }
+  return null;
+}
+
+/** The name the owner set: on Arc, Arc's name for a setting the runtime sees under Base's. */
+export function paymasterKeySettingName(
+  setting: typeof PAYMASTER_SIGNER_KEY_REF_SETTING | typeof SUBMITTER_KEY_REFS_SETTING,
+  chainId: number,
+): string {
+  if (chainFamily(chainId) !== 'arc') return setting;
+  return setting === PAYMASTER_SIGNER_KEY_REF_SETTING
+    ? ARC_PAYMASTER_SIGNER_KEY_REF_SETTING
+    : ARC_SUBMITTER_KEY_REFS_SETTING;
+}
+
+/**
+ * The one sanitized start line for a key-settings mismatch (CCA-716): the event, the state and the
+ * setting NAME only, never a value or a keyRef.
+ */
+export function paymasterKeysMismatchLogLine(
+  setting: typeof PAYMASTER_SIGNER_KEY_REF_SETTING | typeof SUBMITTER_KEY_REFS_SETTING,
+  chainId: number = BASE_MAINNET,
+): string {
+  return JSON.stringify({
+    event: 'own_paymaster_keys',
+    state: 'settings_mismatch',
+    setting: paymasterKeySettingName(setting, chainId),
+  });
 }
 
 export class KeystoreUnavailable extends Error {
@@ -121,15 +224,17 @@ export class KeystoreUnavailable extends Error {
  * Creates the missing keys (signer, submitter 1, submitter 2), idempotently per purpose: each new key
  * is stored uncommitted first and recorded + committed only if this call wins its purpose's row, so
  * concurrent callers (instances starting together) agree on one key per purpose. Throws
- * KeystoreUnavailable without a KEK.
+ * KeystoreUnavailable without a KEK. Only `chainId`'s keys (default: Base's) are read or made.
  */
 export async function provisionPaymasterKeys(deps: {
   db: Database;
   env: Record<string, string | undefined>;
   now?: () => number;
+  chainId?: number;
 }): Promise<Map<PaymasterKeyPurpose, ProvisionedKey>> {
   const now = deps.now ?? Date.now;
-  const existing = await provisionedPaymasterKeys(deps.db);
+  const chainId = deps.chainId ?? BASE_MAINNET;
+  const existing = await provisionedPaymasterKeys(deps.db, chainId);
   if (PAYMASTER_KEY_PURPOSES.every((purpose) => existing.has(purpose))) return existing;
   let keks;
   try {
@@ -138,8 +243,9 @@ export async function provisionPaymasterKeys(deps: {
     throw new KeystoreUnavailable();
   }
   const keystore = createKeystore({ store: pgSpenderKeyStore(deps.db), keks });
-  for (const purpose of PAYMASTER_KEY_PURPOSES) {
-    if (existing.has(purpose)) continue;
+  const purposes = paymasterKeyPurposes(chainId);
+  for (const [index, purpose] of purposes.entries()) {
+    if (existing.has(PAYMASTER_KEY_PURPOSES[index]!)) continue;
     const { signer, keyRef } = await keystore.createSpenderKey();
     await deps.db.transaction(async (tx) => {
       const at = now();
@@ -155,23 +261,36 @@ export async function provisionPaymasterKeys(deps: {
         );
     });
   }
-  return provisionedPaymasterKeys(deps.db);
+  return provisionedPaymasterKeys(deps.db, chainId);
 }
 
 /**
  * Prepare mode at server start: provisions the keys when CITY_BASE_OWN_PAYMASTER is 'prepare' or
- * 'on'. Never throws (a failure must never keep the site from starting); returns what happened, as
- * a code only, for one log line.
+ * 'on', then checks the key settings against them ('settings_mismatch': our own bundler refuses to
+ * be built, createDirectBundler). Never throws (a failure must never keep the site from starting);
+ * returns what happened, as a code only, for one log line.
  */
 export async function provisionPaymasterKeysAtStart(deps: {
   db: Database;
   env: Record<string, string | undefined>;
   now?: () => number;
-}): Promise<'off' | 'ready' | 'keystore_unavailable' | 'failed'> {
+  /** Whose keys, with `env` that chain's view of the settings (arc-env.ts). Default: Base's. */
+  chainId?: number;
+  /**
+   * Where the mismatch line goes (paymasterKeysMismatchLogLine). Default: the console, like the
+   * app's other ALERT lines: the app's Fastify logger is off in production, so app.log would drop it.
+   */
+  log?: (line: string) => void;
+}): Promise<'off' | 'ready' | 'settings_mismatch' | 'keystore_unavailable' | 'failed'> {
   if (ownPaymasterMode(deps.env) === 'off') return 'off';
   try {
-    await provisionPaymasterKeys(deps);
-    return 'ready';
+    const keys = await provisionPaymasterKeys(deps);
+    const mismatch = paymasterKeySettingsMismatch(deps.env, keys);
+    if (!mismatch) return 'ready';
+    (deps.log ?? ((line: string) => console.error(line)))(
+      paymasterKeysMismatchLogLine(mismatch, deps.chainId),
+    );
+    return 'settings_mismatch';
   } catch (error) {
     return error instanceof KeystoreUnavailable ? 'keystore_unavailable' : 'failed';
   }
@@ -184,7 +303,7 @@ export function registerOwnPaymasterKeysRoute(
   const now = deps.now ?? Date.now;
   app.post(PAYMASTER_KEYS_PATH, async (request, reply) => {
     reply.header('Cache-Control', 'no-store');
-    if (!opsAuthorized(request.headers.authorization, deps.env.CITY_OPS_SECRET))
+    if (!opsAuthorizedFor(request.headers.authorization, deps.env, 'keys'))
       return reply.code(404).send({ error: 'Not found.', code: 'not_found' });
     if (deps.env[PAYMASTER_SIGNER_KEY_REF_SETTING]?.trim())
       return reply.code(409).send({
@@ -200,24 +319,19 @@ export function registerOwnPaymasterKeysRoute(
         .code(503)
         .send({ error: 'The keystore is not configured.', code: 'keystore_unavailable' });
     }
-    const out = (purpose: PaymasterKeyPurpose) => keys.get(purpose)!;
+    // Public addresses only (CCA-716): keyRefs never leave the server.
+    const address = (purpose: PaymasterKeyPurpose) => ({ address: keys.get(purpose)!.address });
     return {
-      signer: out('paymaster_signer'),
-      submitters: [out('paymaster_submitter_1'), out('paymaster_submitter_2')],
-      // The env values for the canary: ONE submitter lane (submitter 1). Submitter 2 is listed for
-      // the full rollout only, never activated by this answer.
-      env: {
-        [PAYMASTER_SIGNER_KEY_REF_SETTING]: out('paymaster_signer').keyRef,
-        [SUBMITTER_KEY_REFS_SETTING]: out('paymaster_submitter_1').keyRef,
-      },
-      laterLaneKeyRef: out('paymaster_submitter_2').keyRef,
+      signer: address('paymaster_signer'),
+      // The canary runs ONE submitter lane (submitter 1); submitter 2 is for the full rollout.
+      submitters: [address('paymaster_submitter_1'), address('paymaster_submitter_2')],
     };
   });
 }
 
 /**
  * GET /api/public/paymaster: the read-only public projection (404 while the mode is off). Public
- * addresses only; never keyRefs; it creates nothing.
+ * addresses only, of `chainId`'s own keys; never keyRefs; it creates nothing.
  */
 export function registerPaymasterPublicRoute(
   app: FastifyInstance,
@@ -228,9 +342,10 @@ export function registerPaymasterPublicRoute(
     entryPoint: string;
     /** What the running bundler actually is, when ours is configured (direct-bundler.ts). */
     effective?: () => Promise<'direct' | 'cdp_fallback' | 'unknown' | undefined>;
+    path?: string;
   },
 ): void {
-  app.get(PAYMASTER_PUBLIC_PATH, async (_request, reply) => {
+  app.get(deps.path ?? PAYMASTER_PUBLIC_PATH, async (_request, reply) => {
     const mode = ownPaymasterMode(deps.env);
     if (mode === 'off') return reply.code(404).send({ error: 'Not found.', code: 'not_found' });
     reply.header('Cache-Control', 'public, max-age=0, s-maxage=30');
@@ -246,7 +361,7 @@ export function registerPaymasterPublicRoute(
     };
     let keys: Map<PaymasterKeyPurpose, ProvisionedKey>;
     try {
-      keys = await provisionedPaymasterKeys(deps.db);
+      keys = await provisionedPaymasterKeys(deps.db, deps.chainId);
     } catch {
       return reply.code(503).send({ error: 'Not available now.', code: 'unavailable' });
     }

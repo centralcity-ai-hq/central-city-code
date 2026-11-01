@@ -21,7 +21,14 @@ const DELAY_MS = 180;
 
 type State =
   | { phase: 'loading' }
-  | { phase: 'ready'; agents: DirectoryCard[]; source: 'directory' | 'registry'; query: string }
+  | {
+      phase: 'ready';
+      agents: DirectoryCard[];
+      source: 'directory' | 'registry';
+      query: string;
+      /** Why the registry answer may be incomplete or was not searched (shown, never hidden). */
+      note?: string;
+    }
   | { phase: 'error' };
 
 export default function AgentFinder({ onClose }: { onClose: () => void }) {
@@ -62,6 +69,7 @@ export default function AgentFinder({ onClose }: { onClose: () => void }) {
               query: text,
               source: found.source,
               agents: found.agents.slice(0, SHOWN),
+              ...(found.note ? { note: found.note } : {}),
             });
           },
           () => !controller.signal.aborted && setState({ phase: 'error' }),
@@ -132,7 +140,7 @@ export default function AgentFinder({ onClose }: { onClose: () => void }) {
         </div>
 
         {agents.length > 0 && state.phase === 'ready' && state.source === 'registry' ? (
-          <p className="af-caption">All agents on Base</p>
+          <p className="af-caption">All agents on Base{state.note ? ` · ${state.note}` : ''}</p>
         ) : null}
         {agents.length > 0 ? (
           <ul ref={list} id={listId} className="af-list" role="listbox" aria-label="Agents">
@@ -183,9 +191,11 @@ export default function AgentFinder({ onClose }: { onClose: () => void }) {
           <p className="af-note" role="status">
             {state.phase === 'error'
               ? "The directory couldn't be loaded. Try again in a moment."
-              : text.trim()
-                ? `No agent on Base matches “${text.trim()}”.`
-                : 'No agents on Base yet.'}
+              : state.note
+                ? state.note
+                : text.trim()
+                  ? `No agent on Base matches “${text.trim()}”.`
+                  : 'No agents on Base yet.'}
           </p>
         )}
 

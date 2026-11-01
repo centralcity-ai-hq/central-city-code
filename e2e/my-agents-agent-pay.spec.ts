@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
-import { formatUnits, getAddress, type Hex } from 'viem';
+import { formatUnits, getAddress, recoverTypedDataAddress, type Hex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import type { Agent, Snapshot } from '../shared/types';
 import type { SpendPermission } from '../shared/base/types';
@@ -15,6 +15,7 @@ import {
 } from '../shared/base/spend-limits';
 import { WALLET_CHAIN_ID } from '../shared/base/wallet-network';
 import { sealKey } from '../src/base/vault/crypto';
+import { agentPayConsentTypedData } from '../shared/base/agent-pay-consent';
 import { expectedWallet } from '../src/base/wallet/derive';
 
 /*
@@ -30,6 +31,11 @@ import { expectedWallet } from '../src/base/wallet/derive';
 
 const headers = { 'X-City-Request': '1' };
 const password = 'Local-test-only-passphrase-2026';
+/** Types the wallet password (it signs the permission with the owner key, CCA-113), then clicks. */
+async function signThen(page: Page, button: ReturnType<Page['locator']>) {
+  await page.locator('[data-k="agent-pay-password"]').fill(password);
+  await button.click();
+}
 const NOW = Date.now();
 const NETWORK = BASE_NETWORKS[WALLET_CHAIN_ID];
 const SPENDER = getAddress(`0x${'3c'.repeat(20)}`);
@@ -181,6 +187,8 @@ async function consentServer(page: Page, agent: Agent = scout) {
     failures: [] as Failure[],
     consent: null as Consent | null,
     requests: [] as Array<{ method: string; body: unknown; status: number }>,
+    /** Per PUT that reached the signature check: signed by the wallet's owner key (CCA-113). */
+    signed: [] as boolean[],
   };
 
   const display = (raw: bigint) => formatUnits(raw, 6);
@@ -297,6 +305,7 @@ async function consentServer(page: Page, agent: Agent = scout) {
           }
         : null,
       mayPay: covers,
+      signing: { wallet: WALLET, token: USDC, owner: OWNER },
       confirmRecipients: offer,
       reconfirmAddsFeedServices: allowed === AGENTS && offer === FEED,
     };
@@ -305,8 +314,17 @@ async function consentServer(page: Page, agent: Agent = scout) {
     const request = route.request();
     const method = request.method();
     const body = method === 'GET' ? undefined : (request.postDataJSON() as unknown);
+    // Recorded without the signature fields (checked below): what the screen showed.
+    const shown =
+      method === 'PUT' && body && typeof body === 'object'
+        ? Object.fromEntries(
+            Object.entries(body).filter(
+              ([key]) => key !== 'nonce' && key !== 'issuedAt' && key !== 'signature',
+            ),
+          )
+        : body;
     const answer = async (status: number, json: unknown) => {
-      state.requests.push({ method, body, status });
+      state.requests.push({ method, body: shown, status });
       return route.fulfill({ status, json });
     };
     if (state.off) return answer(404, { error: 'Not found.' });
@@ -321,6 +339,33 @@ async function consentServer(page: Page, agent: Agent = scout) {
         ...(each.code ? { code: each.code } : {}),
       });
     if (failure && !failure.stored) return failed(failure);
+    // CCA-113: as the server, a confirm must be signed by the wallet's owner key over what it sends.
+    if (method === 'PUT') {
+      const sent = body as Record<string, unknown>;
+      let signer: string | null = null;
+      try {
+        signer = await recoverTypedDataAddress({
+          ...agentPayConsentTypedData({
+            chainId: WALLET_CHAIN_ID,
+            wallet: WALLET,
+            token: USDC,
+            permissionHash: String(sent.permissionHash),
+            recipients: String(sent.recipients ?? AGENTS),
+            nonce: String(sent.nonce),
+            issuedAt: Number(sent.issuedAt),
+          }),
+          signature: sent.signature as Hex,
+        });
+      } catch {
+        signer = null;
+      }
+      state.signed.push(signer === OWNER);
+      if (signer !== OWNER)
+        return answer(422, {
+          error: 'Not signed by the owner key of this wallet.',
+          code: 'signature_mismatch',
+        });
+    }
     const [status, json] = respond(method, body);
     return failure ? failed(failure) : answer(status, json);
   });
@@ -331,7 +376,13 @@ async function consentServer(page: Page, agent: Agent = scout) {
       state.consent = null;
       return [200, agentPayView()];
     }
-    const sent = body as { permissionHash?: string; recipients?: Recipients };
+    const sent = body as {
+      permissionHash?: string;
+      recipients?: Recipients;
+      nonce?: string;
+      issuedAt?: number;
+      signature?: Hex;
+    };
     const recipients = sent.recipients ?? AGENTS;
     if (narrower(recipients, offered()) !== recipients)
       return [
@@ -480,7 +531,7 @@ test('allow it for Central City agents only: the exact limit and recipients go, 
   ).toEqual(['agent-pay', 'limit-revoke']);
   await shot(page, 'not-allowed-1440-light');
 
-  await section.getByRole('button', { name: 'Allow these payments' }).click();
+  await signThen(page, section.getByRole('button', { name: 'Allow these payments' }));
   const status = section.locator('[data-k="agent-pay-status"]');
   await expect(status).toHaveText(STATUS_ALLOWED);
   await expect(status).toBeFocused();
@@ -490,6 +541,10 @@ test('allow it for Central City agents only: the exact limit and recipients go, 
   expect(server.writes()).toEqual([
     { method: 'PUT', body: { permissionHash: LIMIT_HASH, recipients: AGENTS }, status: 200 },
   ]);
+  // CCA-113: signed by the wallet's owner key (the vault opened with the password), not the
+  // session alone; the password is cleared once used.
+  expect(server.signed).toEqual([true]);
+  await expect(section.locator('[data-k="agent-pay-password"]')).toHaveCount(0);
   await expect(section.getByRole('button', { name: 'Also allow Feed services' })).toHaveCount(0);
   await expect(section.getByRole('button', { name: WITHDRAW, exact: true })).toBeVisible();
   await expect(section.getByRole('button', { name: 'Allow these payments' })).toHaveCount(0);
@@ -527,7 +582,7 @@ test('allowed for agents only while Feed services are offered: "Also allow Feed 
   await expect(offer).toContainText('per-call maximum (0.10 USDC unless you set a lower one)');
   await shot(page, 'add-feed-1440-light');
 
-  await offer.getByRole('button', { name: 'Also allow Feed services' }).click();
+  await signThen(page, offer.getByRole('button', { name: 'Also allow Feed services' }));
   await expect(recipients).toHaveCount(2);
   await expect(recipients.nth(0)).toHaveText('Other Central City agents.');
   await expect(recipients.nth(1)).toHaveText(
@@ -566,7 +621,7 @@ test('409 scope_changed: nothing is saved, what it may pay is read again and sho
   const readsBefore = server.reads();
   // Paying Feed services goes off while the page is open.
   server.feedOn = false;
-  await section.getByRole('button', { name: 'Allow these payments' }).click();
+  await signThen(page, section.getByRole('button', { name: 'Allow these payments' }));
   const alert = section.locator('[data-k="agent-pay-error"]');
   await expect(alert).toHaveText(
     'What Research scout may pay changed while this page was open, so nothing was saved. Check it again, then confirm.',
@@ -579,7 +634,7 @@ test('409 scope_changed: nothing is saved, what it may pay is read again and sho
   expect(server.consent).toBeNull();
   await shot(page, 'scope-changed-1440-light');
   // Confirming now sends what is on screen now.
-  await section.getByRole('button', { name: 'Allow these payments' }).click();
+  await signThen(page, section.getByRole('button', { name: 'Allow these payments' }));
   await expect(section.locator('[data-k="agent-pay-status"]')).toHaveText(STATUS_ALLOWED);
   await expect(alert).toHaveCount(0);
   expect(server.writes()).toEqual([
@@ -602,7 +657,7 @@ test('409 limit_changed: nothing is saved, the section is read again for the new
   await expect(bounds).toContainText('20.00 USDC a day');
   // Another limit is set elsewhere while the page is open.
   server.raised = true;
-  await section.getByRole('button', { name: 'Allow these payments' }).click();
+  await signThen(page, section.getByRole('button', { name: 'Allow these payments' }));
   const alert = section.locator('[data-k="agent-pay-error"]');
   await expect(alert).toHaveText(LIMIT_CHANGED);
   await expect(alert).toBeFocused();
@@ -615,7 +670,7 @@ test('409 limit_changed: nothing is saved, the section is read again for the new
   expect(server.consent).toBeNull();
   await shot(page, 'limit-changed-1440-light');
   // Confirming now sends the new limit.
-  await section.getByRole('button', { name: 'Allow these payments' }).click();
+  await signThen(page, section.getByRole('button', { name: 'Allow these payments' }));
   await expect(section.locator('[data-k="agent-pay-status"]')).toHaveText(STATUS_ALLOWED);
   expect(server.writes()).toEqual([
     { method: 'PUT', body: { permissionHash: LIMIT_HASH, recipients: AGENTS }, status: 409 },
@@ -633,7 +688,7 @@ test('409 limit_changed while the limits can’t be read: the message has focus 
   await expect(section.locator('[data-k="agent-pay-status"]')).toHaveText(NOT_ALLOWED);
   server.raised = true;
   server.limitsDown = true;
-  await section.getByRole('button', { name: 'Allow these payments' }).click();
+  await signThen(page, section.getByRole('button', { name: 'Allow these payments' }));
   // The view is for another limit than the card: nothing to confirm, the message has focus.
   const mismatch = section.locator('[data-k="agent-pay-mismatch"]');
   await expect(mismatch).toContainText('The spending limit changed.');
@@ -651,7 +706,7 @@ test('409 limit_changed while the limits can’t be read: the message has focus 
   await expect(status).toHaveText(NOT_ALLOWED);
   await expect(status).toBeFocused();
   await expect(mismatch).toHaveCount(0);
-  await section.getByRole('button', { name: 'Allow these payments' }).click();
+  await signThen(page, section.getByRole('button', { name: 'Allow these payments' }));
   await expect(status).toHaveText(STATUS_ALLOWED);
   expect(server.writes()).toEqual([
     { method: 'PUT', body: { permissionHash: LIMIT_HASH, recipients: AGENTS }, status: 409 },
@@ -806,7 +861,7 @@ test('"Also allow Feed services" refused because they are no longer offered: it 
   await expect(offer).toBeVisible();
   // Paying Feed services goes off while the page is open.
   server.feedOn = false;
-  await offer.getByRole('button', { name: 'Also allow Feed services' }).click();
+  await signThen(page, offer.getByRole('button', { name: 'Also allow Feed services' }));
   const alert = section.locator('[data-k="agent-pay-error"]');
   // Nothing on screen to check and confirm again: the words say so instead of asking for it.
   await expect(alert).toHaveText('Feed services can’t be added right now, so nothing was changed.');
@@ -836,7 +891,7 @@ test('409 scope_changed while the limit changed too: the limit message, the card
   // scope_changed (it checks that first), and the view read again is for the new limit.
   server.feedOn = false;
   server.raised = true;
-  await section.getByRole('button', { name: 'Allow these payments' }).click();
+  await signThen(page, section.getByRole('button', { name: 'Allow these payments' }));
   const alert = section.locator('[data-k="agent-pay-error"]');
   await expect(alert).toHaveText(LIMIT_CHANGED);
   await expect(alert).toBeFocused();
@@ -846,7 +901,7 @@ test('409 scope_changed while the limit changed too: the limit message, the card
   await expect(section.locator('[data-k="agent-pay-mismatch"]')).toHaveCount(0);
   await expect(recipients).toHaveText(['Other Central City agents.']);
   await expect(alert).toBeFocused();
-  await section.getByRole('button', { name: 'Allow these payments' }).click();
+  await signThen(page, section.getByRole('button', { name: 'Allow these payments' }));
   await expect(section.locator('[data-k="agent-pay-status"]')).toHaveText(STATUS_ALLOWED);
   expect(server.writes()).toEqual([
     { method: 'PUT', body: { permissionHash: LIMIT_HASH, recipients: FEED }, status: 409 },
@@ -864,7 +919,7 @@ test('409 no_spending_limit (revoked elsewhere): the message stays until the car
   // Revoked in another tab while the limits can't be read here: the section keeps the message.
   server.limit = 'revoke_pending';
   server.limitsDown = true;
-  await section.getByRole('button', { name: 'Allow these payments' }).click();
+  await signThen(page, section.getByRole('button', { name: 'Allow these payments' }));
   const alert = section.locator('[data-k="agent-pay-error"]');
   await expect(alert).toHaveText(LIMIT_CHANGED);
   await expect(alert).toBeFocused();
@@ -893,7 +948,7 @@ test('409 no_spending_limit (revoked elsewhere): the message stays until the car
   const fresh = again.locator('[data-k="agent-pay"]');
   await expect(fresh.locator('[data-k="agent-pay-status"]')).toHaveText(NOT_ALLOWED);
   server.limit = 'revoke_pending';
-  await fresh.getByRole('button', { name: 'Allow these payments' }).click();
+  await signThen(page, fresh.getByRole('button', { name: 'Allow these payments' }));
   const card = again.locator('[data-k="limit-state"]');
   await expect(card).toHaveText(
     'Research scout’s spends are blocked here. Sign the revoke so Base stops it too.',
@@ -952,7 +1007,7 @@ test('allow fails: a refusal says why, a lost answer is read again, and an unkno
     error: 'The wallet is paused.',
   });
   let reads = server.reads();
-  await allow.click();
+  await signThen(page, allow);
   await expect(alert).toHaveText('The wallet is paused. Nothing was saved.');
   await expect(alert).toBeFocused();
   await expect(status).toHaveText(NOT_ALLOWED);
@@ -961,7 +1016,7 @@ test('allow fails: a refusal says why, a lost answer is read again, and an unkno
   // No clear answer, and nothing stored: read again, and it says so.
   server.failures.push({ method: 'PUT', status: 500 });
   reads = server.reads();
-  await allow.click();
+  await signThen(page, allow);
   await expect(alert).toHaveText(
     'No clear answer came back, so this page read it again: nothing was saved.',
   );
@@ -976,7 +1031,7 @@ test('allow fails: a refusal says why, a lost answer is read again, and an unkno
     { method: 'PUT', status: 500, stored: true },
     { method: 'GET', status: 503 },
   );
-  await allow.click();
+  await signThen(page, allow);
   const unsure = section.locator('[data-k="agent-pay-unsure"]');
   await expect(unsure).toHaveText(
     'Not sure it went through. No clear answer came back, so this page can’t tell whether Research scout may now pay on its own. Check again',
@@ -995,7 +1050,7 @@ test('allow fails: a refusal says why, a lost answer is read again, and an unkno
   await section.getByRole('button', { name: 'Yes, withdraw' }).click();
   await expect(status).toHaveText(NOT_ALLOWED);
   server.failures.push({ method: 'PUT', status: 502, stored: true });
-  await allow.click();
+  await signThen(page, allow);
   await expect(status).toHaveText(STATUS_ALLOWED);
   await expect(status).toBeFocused();
   await expect(alert).toHaveCount(0);
@@ -1040,4 +1095,29 @@ test('withdraw fails: the confirmation stays with why, focus stays on it, and it
     { method: 'DELETE', body: {}, status: 200 },
   ]);
   expect(server.consent).toBeNull();
+});
+
+test('CCA-113: without the wallet password, or with a wrong one, allowing sends nothing', async ({
+  page,
+}) => {
+  const server = await consentServer(page);
+  const panel = await openLimits(page);
+  const section = panel.locator('[data-k="agent-pay"]');
+  const allow = section.getByRole('button', { name: 'Allow these payments' });
+  const alert = section.locator('[data-k="agent-pay-error"]');
+  await allow.click();
+  await expect(alert).toHaveText(
+    'Type your wallet password: it signs this permission with your wallet key.',
+  );
+  await page.locator('[data-k="agent-pay-password"]').fill('not-the-wallet-password');
+  await allow.click();
+  await expect(alert).not.toHaveText(
+    'Type your wallet password: it signs this permission with your wallet key.',
+  );
+  await expect(alert).toBeVisible();
+  expect(server.writes()).toEqual([]);
+  expect(server.consent).toBeNull();
+  await signThen(page, allow);
+  await expect(section.locator('[data-k="agent-pay-status"]')).toHaveText(STATUS_ALLOWED);
+  expect(server.signed).toEqual([true]);
 });

@@ -1,6 +1,7 @@
 /*
  * Base Pay P2b over HTTP (service: agent-pay-consent.ts). Registered by the wallet routes, behind
- * the same CITY_BASE_WALLET flag (404 while off), on the wallet routes' one network.
+ * the same CITY_BASE_WALLET flag (404 while off), on the agent's chain (the service the wallet routes
+ * hand in picks it, agentChainOf).
  *
  *   GET    /api/base/agents/:agentId/wallet/agent-pay   200 the current limit's terms + the consent
  *   PUT    /api/base/agents/:agentId/wallet/agent-pay   200 consent for {permissionHash} (the limit seen)

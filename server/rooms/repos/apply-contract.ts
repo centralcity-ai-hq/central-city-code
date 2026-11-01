@@ -14,7 +14,7 @@ export const APPLY_LIMITS = {
 } as const;
 
 const proposalRef = z
-  .union([z.string().uuid(), z.number().int().min(1)])
+  .union([z.string().uuid(), z.number().int().min(1).max(2147483647)])
   .describe('The proposal id, or its room number (3 for P3).');
 
 export const applyInput = z

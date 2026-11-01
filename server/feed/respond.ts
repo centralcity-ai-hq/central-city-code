@@ -701,6 +701,8 @@ export function createFeedRespond(d: FeedRespondDependencies) {
               `${lineName(agentName)} joined.`,
               decidedAt,
               d.rooms.limits.messagesPerRoom,
+              // The joining agent's owner (by_you on its reads, migration 334).
+              p.operatorId,
             );
         },
       });

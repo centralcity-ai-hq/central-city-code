@@ -11,7 +11,7 @@
   "functions": {
     "api/index.js": {
       "maxDuration": 300,
-      "includeFiles": "api/_bundle/*.map"
+      "includeFiles": "api/_bundle/**"
     }
   },
   "crons": [
@@ -22,6 +22,10 @@
     {
       "path": "/api/cron/fast-count-check",
       "schedule": "30 12 * * *"
+    },
+    {
+      "path": "/api/cron/code-count",
+      "schedule": "17,47 * * * *"
     },
     {
       "path": "/api/cron/wake-drain",
@@ -48,6 +52,18 @@
       "schedule": "*/5 * * * *"
     },
     {
+      "path": "/api/cron/room-files-purge",
+      "schedule": "41 * * * *"
+    },
+    {
+      "path": "/api/cron/room-relabel",
+      "schedule": "23 * * * *"
+    },
+    {
+      "path": "/api/cron/dashboard-rollup",
+      "schedule": "*/2 * * * *"
+    },
+    {
       "path": "/api/cron/feed-sync",
       "schedule": "*/15 * * * *"
     },
@@ -60,7 +76,19 @@
       "schedule": "* * * * *"
     },
     {
+      "path": "/api/cron/x402-offer-work",
+      "schedule": "* * * * *"
+    },
+    {
       "path": "/api/cron/own-paymaster-maintain",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/public-cards",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/base-domain-file",
       "schedule": "* * * * *"
     }
   ],
@@ -78,6 +106,31 @@
     {
       "source": "/answers",
       "destination": "/docs",
+      "statusCode": 301
+    },
+    {
+      "source": "/dashboard",
+      "destination": "/analytics",
+      "statusCode": 308
+    },
+    {
+      "source": "/audit/Central-City-Audit-2026-10.pdf",
+      "destination": "/audit",
+      "statusCode": 301
+    },
+    {
+      "source": "/audit/Central-City-Audit-2026-10.pdf.sha256",
+      "destination": "/audit",
+      "statusCode": 301
+    },
+    {
+      "source": "/audit/central-city-audit-2026-10-v1.0.pdf",
+      "destination": "/audit",
+      "statusCode": 301
+    },
+    {
+      "source": "/audit/central-city-audit-2026-10-v1.0.pdf.sha256",
+      "destination": "/audit",
       "statusCode": 301
     }
   ],
@@ -131,6 +184,10 @@
       "destination": "/api"
     },
     {
+      "source": "/x402/:path*",
+      "destination": "/api"
+    },
+    {
       "source": "/a/([0-9A-Za-z]{6})",
       "has": [
         {
@@ -147,6 +204,10 @@
     },
     {
       "source": "/j/:path*",
+      "destination": "/api"
+    },
+    {
+      "source": "/dashboard.json",
       "destination": "/api"
     },
     {
@@ -254,6 +315,10 @@
       "destination": "/app.html"
     },
     {
+      "source": "/owner/sponsor-eth",
+      "destination": "/app.html"
+    },
+    {
       "source": "/downtown",
       "destination": "/share/downtown.html"
     },
@@ -268,6 +333,10 @@
     {
       "source": "/security",
       "destination": "/share/security.html"
+    },
+    {
+      "source": "/audit",
+      "destination": "/share/audit.html"
     },
     {
       "source": "/support",
@@ -313,10 +382,19 @@
       "source": "/explorer/base",
       "destination": "/share/explorer/base.html"
     },
+    { "source": "/explorer/arc", "destination": "/app.html" },
+    { "source": "/explorer/arc/agents/([A-Za-z0-9_-]{1,64})", "destination": "/app.html" },
     {
       "source": "/explorer/calls",
       "destination": "/share/explorer/calls.html"
     },
+    { "source": "/explorer/proof/agents", "destination": "/app.html" },
+    { "source": "/explorer/proof/base", "destination": "/app.html" },
+    { "source": "/explorer/proof/finalizing", "destination": "/app.html" },
+    { "source": "/explorer/proof/calls", "destination": "/app.html" },
+    { "source": "/explorer/proof/ratings", "destination": "/app.html" },
+    { "source": "/explorer/agents/([A-Za-z0-9_-]{1,64})", "destination": "/app.html" },
+    { "source": "/analytics", "destination": "/share/analytics.html" },
     {
       "source": "/docs",
       "destination": "/share/docs.html"
@@ -401,6 +479,15 @@
       ]
     },
     {
+      "source": "/audit/(.*)\\.pdf",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=3600"
+        }
+      ]
+    },
+    {
       "source": "/a/(.*)",
       "headers": [
         {
@@ -440,11 +527,19 @@
         },
         {
           "key": "Permissions-Policy",
-          "value": "camera=(), microphone=(), geolocation=()"
+          "value": "accelerometer=(), autoplay=(self), bluetooth=(), browsing-topics=(), camera=(), display-capture=(), encrypted-media=(), fullscreen=(self), gamepad=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), local-fonts=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), xr-spatial-tracking=()"
         },
         {
           "key": "Content-Security-Policy",
-          "value": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://mainnet.base.org; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+          "value": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://mainnet.base.org https://rpc.mainnet.arc.io https://rpc.testnet.arc.io https://vercel.com/api/blob/; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+        },
+        {
+          "key": "Strict-Transport-Security",
+          "value": "max-age=63072000"
+        },
+        {
+          "key": "Content-Security-Policy-Report-Only",
+          "value": "require-trusted-types-for 'script'"
         }
       ]
     },
@@ -454,6 +549,10 @@
         {
           "key": "Referrer-Policy",
           "value": "no-referrer"
+        },
+        {
+          "key": "Cross-Origin-Opener-Policy",
+          "value": "same-origin-allow-popups"
         }
       ]
     },
@@ -462,6 +561,15 @@
       "headers": [
         {
           "key": "Referrer-Policy",
+          "value": "same-origin"
+        }
+      ]
+    },
+    {
+      "source": "/api/((?!public/).*)",
+      "headers": [
+        {
+          "key": "Cross-Origin-Resource-Policy",
           "value": "same-origin"
         }
       ]
@@ -754,7 +862,7 @@
       ]
     },
     {
-      "source": "/(rooms|settings|agents|messages|feed|signin|r|results|share|newsletter)",
+      "source": "/(rooms|settings|agents|messages|feed|signin|r|results|share|newsletter|owner)",
       "headers": [
         {
           "key": "X-Robots-Tag",
@@ -763,7 +871,7 @@
       ]
     },
     {
-      "source": "/(rooms|settings|agents|messages|feed|signin|r|results|share|newsletter)/(.*)",
+      "source": "/(rooms|settings|agents|messages|feed|signin|r|results|share|newsletter|owner)/(.*)",
       "headers": [
         {
           "key": "X-Robots-Tag",

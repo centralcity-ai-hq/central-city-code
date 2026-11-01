@@ -1,0 +1,96 @@
+# x402 facilitator
+
+Central City runs a public x402 facilitator for Base. A service that charges with x402 can send its
+buyers' payments to it: the facilitator checks a payment and puts it on Base, paying the network
+fee itself. It never holds the money. The buyer's signature moves the USDC directly from the buyer
+to the service.
+
+**Status:** verification and settlement are live. Settlement can be paused at any time to protect
+the network fees Central City pays; it then answers `settlement_unavailable` and the money does not
+move, while verification keeps working.
+
+## Endpoints
+
+Base URL: `https://centralcity.ai/x402/facilitator`
+
+| Method | Path         | What it does                                                        |
+| ------ | ------------ | ------------------------------------------------------------------- |
+| GET    | `/supported` | The payments it accepts and the address that sends the settlements. |
+| POST   | `/verify`    | Says whether a payment would settle. Nothing is signed or sent.     |
+| POST   | `/settle`    | Puts the payment on Base. Central City sends it and pays the fee.   |
+
+Requests and answers follow x402 version 2: `/verify` and `/settle` take
+`{ x402Version: 2, paymentPayload, paymentRequirements }`. `/verify` answers
+`{ isValid, invalidReason?, payer? }`; `/settle` answers
+`{ success, transaction, network, payer?, errorReason? }`.
+
+## What it accepts
+
+- x402 version 2, scheme `exact`.
+- Network `eip155:8453` (Base mainnet).
+- USDC (`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`), paid with an EIP-3009
+  `transferWithAuthorization` signature. Permit2 is not accepted.
+- Buyers with a plain wallet or a deployed smart account (ERC-1271). Signatures up to 2 KB.
+- The authorization must pay exactly the requested amount to exactly the requested address, be
+  valid now, and stay valid for at least a few seconds more.
+- The payee must be someone else: a buyer paying itself is refused, and so are Central City's own
+  addresses (its treasury, its fee routers, its facilitators and other server accounts) and the
+  USDC contract.
+
+## How a payment is checked
+
+`/verify` asks the USDC contract itself, in a simulation that sends nothing: the same
+`transferWithAuthorization` the buyer signed, as it would run on Base now. USDC checks the
+signature, the validity window, whether the authorization was already used and the buyer's
+balance. A payment is valid only if USDC would accept it.
+
+`/settle` runs the same check first, so `/verify` and `/settle` never disagree, and once more right
+before it sends the transaction. It then sends exactly the transfer the buyer signed, from the
+address `/supported` lists. The answer is `success: true` with the transaction hash once the
+transaction is in a Base block. Sent but not in a block yet, it answers `settlement_pending` with the
+transaction hash: send the same request again to follow it. A repeated request always gets the same
+settlement back, never a second transaction.
+
+## Answers when a payment is refused
+
+| Reason                                                 | Meaning                                                               |
+| ------------------------------------------------------ | --------------------------------------------------------------------- |
+| `invalid_x402_version`                                 | Not x402 version 2.                                                   |
+| `unsupported_scheme`                                   | Not the `exact` scheme.                                               |
+| `invalid_network`                                      | Not Base mainnet.                                                     |
+| `invalid_payment_requirements`                         | Another asset or transfer method, a bad field, or a refused payee.    |
+| `invalid_payload`                                      | The signature or authorization is malformed.                          |
+| `invalid_exact_evm_payload_recipient_mismatch`         | The authorization pays someone else.                                  |
+| `invalid_exact_evm_payload_authorization_value`        | The authorization pays another amount, or less than 0.05 USDC.        |
+| `invalid_exact_evm_payload_authorization_valid_after`  | Not valid yet.                                                        |
+| `invalid_exact_evm_payload_authorization_valid_before` | Expired, too close to expiring, or valid too far ahead.               |
+| `invalid_exact_evm_payload_signature`                  | USDC does not accept the signature, or it is longer than 2 KB.        |
+| `invalid_transaction_state`                            | Already used or cancelled.                                            |
+| `insufficient_funds`                                   | The buyer does not have the USDC.                                     |
+| `unexpected_verify_error`                              | Base did not answer; try again. Never a refusal.                      |
+| `settlement_pending`                                   | Sent, not in a block yet; ask again with the same request.            |
+| `payer_settlement_in_flight`                           | The buyer's previous settlement is not in a block yet; try again.     |
+| `settlement_unavailable`                               | Settling is paused or over a limit right now; the money did not move. |
+
+## Limits
+
+Each IP address may call `/supported` 120 times, `/verify` 60 times and `/settle` 30 times a
+minute. Settlement protects the network fees Central City pays:
+
+- At least 0.05 USDC per payment (until 26 October 2026 the minimum was 0.01 USDC; payments from
+  0.01 up to 0.05 USDC are now refused with `invalid_exact_evm_payload_authorization_value`). When
+  it settles, the authorization must stay valid for at least 60 seconds more and for at most 15
+  minutes from now.
+- One settlement in flight per buyer: the next one is taken once the previous one is in a block.
+- New settlements are budgeted: 20 an hour per buyer, 100 a day per calling client, 100 a day per
+  payee and 500 a day in all, checked in that order.
+- A buyer whose settlement failed on Base gets no new settlement for up to an hour.
+- During a network fee spike, or while an earlier transaction waits unmined, new settlements wait.
+
+Over a limit, `/settle` answers `settlement_unavailable` and the money does not move; verification
+keeps working.
+
+The per-client cap counts per IP address (an IPv6 client by its /64), not per user:
+everyone behind one NAT, proxy or shared egress address shares the same 100 settlements a day.
+
+More docs: [https://centralcity.ai/docs/index.md](https://centralcity.ai/docs/index.md)

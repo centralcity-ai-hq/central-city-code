@@ -6,8 +6,8 @@ Status (18 Oct 2026):
 
 - Listed since 17 Oct 2026 (dimension-adapters #10236, fee router 1).
 - Fee router 2 added in dimension-adapters [#10256](https://github.com/DefiLlama/dimension-adapters/pull/10256) (merged 18 Oct 2026): the adapter reads both routers, and Central City's own totals (`GET /api/public/protocol/fees`) count them too.
-- Fee router 3 (x402 settlement, `docs/protocol/FEE_ROUTER_3.md`) emits the same `FeeCharged` event (kind 1, `gross` is the full price the two buyer authorizations move). Deployed on 19 Oct 2026 at `0xe807a76385ec3d76d17ab955091c12329d0a1403` (block 52804453). Since dimension-adapters [#10269](https://github.com/DefiLlama/dimension-adapters/pull/10269) (merged 19 Oct 2026) the fees adapter counts router 3. Central City's own totals count it as soon as `CITY_PROTOCOL_FEE_ROUTER3` and `CITY_PROTOCOL_FEE_ROUTER3_FROM_BLOCK` are set.
-- x402 listing: since dimension-adapters [#10270](https://github.com/DefiLlama/dimension-adapters/pull/10270) (merged 19 Oct 2026), Central City's own x402 facilitator `0xc8d6Bac2ff7182d22c4f316BffF9f713261A6cEC` is in `dexs/x402/facilitators.ts`, so router 3 settlements count in DefiLlama's x402 listing. The facilitator is an EOA that sends router 3 settlements and pays their gas in ETH; it never holds USDC.
+- Fee router 3 (x402 settlement, `docs/protocol/FEE_ROUTER_3.md`) emits the same `FeeCharged` event (kind 1, `gross` is the full price the two buyer authorizations move). Deployed on 19 Oct 2026 at `0xe807a76385ec3d76d17ab955091c12329d0a1403` (block 52804453). Since dimension-adapters [#10269](https://github.com/DefiLlama/dimension-adapters/pull/10269) (merged 19 Oct 2026) the fees adapter counts router 3. Central City's own totals count it from its deploy block; on Base mainnet its address and deploy block are fixed in code (`shared/protocol.ts`).
+- x402 listing: since dimension-adapters [#10270](https://github.com/DefiLlama/dimension-adapters/pull/10270) (merged 19 Oct 2026), Central City's own x402 facilitator `0xc8d6Bac2ff7182d22c4f316BffF9f713261A6cEC` is in `dexs/x402/facilitators.ts`, so router 3 settlements count in DefiLlama's x402 listing. The facilitator is an EOA that sends router 3 settlements and pays their gas in ETH; it never receives USDC from settlements.
 
 ## Metrics
 
@@ -28,6 +28,8 @@ The `FeeCharged` events of the immutable, ownerless fee routers on Base. All set
 | `CentralCityFeeRouter3` | `0xe807a76385ec3d76d17ab955091c12329d0a1403` | 52804453 (19 Oct 2026) | 0.05 to 100 USDC |
 
 Every fee counts in fees and revenue, including payments made by all agents created on Central City, counted under the same rules.
+
+**Scope of the numbers.** The adapter's totals are protocol-wide on-chain router events: every `FeeCharged` from the three routers, whoever called them. The routers are permissionless, so the totals include direct calls by anyone, self-dealing (a payer paying itself or an address it controls), purchases between agents of the same owner, and sponsored (first-purchase) and fleet traffic. Central City's own totals (`docs/protocol/FEES.md`, "What the totals are") are the same events less two kinds that are not sales: a fee the treasury pays itself, and a router 1 or 2 payment whose payer is its own payee (router 3 refuses those). The submitted adapter counts both, so its totals can be slightly higher than Central City's. Every fee is real USDC sent to the treasury; volume and payment counts can be raised by anyone at the cost of the 10% fee. Router 3 volume likewise includes any permissionless `settle`. The adapter code below is the submitted copy and does not repeat this note.
 
 ## The adapter (as submitted in #10256)
 

@@ -173,26 +173,28 @@ test('IPv6 clients are rate limited per /64 prefix', async (t) => {
   assert.equal(statuses.at(-2), 201);
 });
 
-test('unauthenticated pending authorizations are evicted, never refused, at the global bound', async (t) => {
+test('at the global bound the oldest unauthenticated pending requests past the dwell time are evicted', async (t) => {
   const { app } = await fixture(t);
   const client = await registerClient(app);
   const operator = (await app.city.db.query<{ id: string }>('SELECT id FROM operators')).rows[0]!;
-  const base = Date.now();
-  for (let i = 0; i < OAUTH_CAPS.pending; i++)
-    await app.city.db.query(
-      `INSERT INTO oauth_pending(id,form_hash,browser_hash,client_id,client_name,client_verified,
-       redirect_uri,code_challenge,resource,scopes,state,operator_id,created_at,expires_at)
-       VALUES($1,'x','x',$2,'n',false,$3,'c',$4,'["workspace:read"]',null,$5,$6,$7)`,
-      [
-        randomUUID(),
-        client.client_id,
-        REDIRECT,
-        RESOURCE,
-        i === 0 ? operator.id : null,
-        base - 60_000 + i,
-        base + 3_600_000,
-      ],
-    );
+  const base = Date.now() - OAUTH_CAPS.pendingMinDwellMs - 60_000;
+  // The oldest row is one an owner signed into; the rest are unauthenticated, all past the dwell.
+  await app.city.db.query(
+    `INSERT INTO oauth_pending(id,form_hash,browser_hash,client_id,client_name,client_verified,
+     redirect_uri,code_challenge,resource,scopes,state,operator_id,created_at,expires_at)
+     SELECT 'filler-' || i,'x','x',$1,'n',false,$2,'c',$3,'["workspace:read"]',null,
+       CASE WHEN i=0 THEN $4 END,$5::bigint + i,$6::bigint
+     FROM generate_series(0,$7::int - 1) AS i`,
+    [
+      client.client_id,
+      REDIRECT,
+      RESOURCE,
+      operator.id,
+      base,
+      Date.now() + 3_600_000,
+      OAUTH_CAPS.pending + 1,
+    ],
+  );
   const page = await openAuthorize(
     app,
     authorizeUrl({ client_id: client.client_id, code_challenge: pkce().challenge }),
@@ -203,21 +205,27 @@ test('unauthenticated pending authorizations are evicted, never refused, at the 
       'SELECT count(*) AS n, count(operator_id) AS signed FROM oauth_pending',
     )
   ).rows[0]!;
-  assert.equal(Number(counts.n), OAUTH_CAPS.pending);
+  // The signed-out requests stay at the bound; the owner-authenticated one is not counted.
+  assert.equal(Number(counts.n), OAUTH_CAPS.pending + 1);
   // The owner-authenticated request (the oldest row) survives eviction.
   assert.equal(Number(counts.signed), 1);
+  assert.equal(
+    (await app.city.db.query("SELECT 1 FROM oauth_pending WHERE id='filler-1'")).rows.length,
+    0,
+  );
 });
 
 test('dynamic registration evicts the oldest unused clients instead of refusing', async (t) => {
   const { app } = await fixture(t);
   const flow = await fullFlow(app);
-  const now = Date.now();
-  for (let i = 0; i < OAUTH_CAPS.clients - 1; i++)
+  // Unused fillers past the dwell time, a bound's worth of them.
+  const now = Date.now() - OAUTH_CAPS.clientMinDwellMs;
+  for (let i = 0; i < OAUTH_CAPS.clients; i++)
     await app.city.db.query(
       'INSERT INTO oauth_clients(client_id,client_name,redirect_uris,created_at) VALUES($1,$2,$3::jsonb,$4)',
       [`ccc_filler_${i}`, 'n', JSON.stringify([REDIRECT]), now - 1_000 + i],
     );
-  // The used client is the oldest row but is never evicted.
+  // The used client is the oldest row but is never evicted (nor counted toward the bound).
   await app.city.db.query('UPDATE oauth_clients SET created_at=0 WHERE client_id=$1', [
     flow.client.client_id,
   ]);
@@ -225,7 +233,7 @@ test('dynamic registration evicts the oldest unused clients instead of refusing'
   const ids = (
     await app.city.db.query<{ client_id: string }>('SELECT client_id FROM oauth_clients')
   ).rows.map((row) => row.client_id);
-  assert.equal(ids.length, OAUTH_CAPS.clients);
+  assert.equal(ids.length, OAUTH_CAPS.clients + 1);
   assert.ok(ids.includes(flow.client.client_id));
   assert.ok(ids.includes(fresh.client_id));
   assert.ok(!ids.includes('ccc_filler_0'));

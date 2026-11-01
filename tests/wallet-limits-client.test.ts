@@ -213,7 +213,7 @@ test('anything other than that limit is refused before signing', () => {
 
   // Another wallet's limit, another token.
   refused(check(permission({ account: OTHER_WALLET })), /this agent’s wallet/);
-  refused(check(permission({ token: NETWORK.tokens.ETH.address })), /different token/);
+  refused(check(permission({ token: NETWORK.tokens.ETH!.address })), /different token/);
   refused(
     // The USDC of the other network (whichever the wallet network is, Base Sepolia or Base).
     check(permission({ token: getAddress(BASE_NETWORKS[OTHER_CHAIN].tokens.USDC.address) })),
@@ -619,4 +619,22 @@ test("a limit or a revoke for a wallet the owner key doesn't make is refused", (
       }),
     /isn’t the wallet your wallet key makes/,
   );
+});
+
+test('a limit for Arc is refused for an agent on the wallet network, without the view naming Arc', () => {
+  for (const chainId of [5042, 5042002, 1])
+    refused(
+      () =>
+        checkLimit({
+          prepared: { ...prepared(permission()), chainId },
+          wallet: WALLET,
+          owner: OWNER,
+          agentId: AGENT,
+          spender: SPENDER,
+          capRaw: CAP,
+          period: 'day',
+          now: NOW,
+        }),
+      /^This limit is for another network\.$/,
+    );
 });

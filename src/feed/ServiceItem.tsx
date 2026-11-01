@@ -25,6 +25,7 @@ import {
   number,
   plain,
   priceMain,
+  paidOnName,
   priceRule,
   shownDescription,
   staleHours,
@@ -437,6 +438,8 @@ export function ServiceActions({
   const ownSetup = on && listing.kind === 'own_setup' ? listing.reason : null;
   // The session lapsed while the page showed it signed in: said, and sign-in comes first.
   const signIn = access.phase === 'signed_out' && listing.kind === 'payable';
+  // A Central City offer's address doesn't take outside payments yet: nothing to copy.
+  const hosted = service.source.name === FEED_HOSTED_SOURCE.name;
   return (
     <footer className="fd-d-foot fd-service-foot">
       {ownSetup ? (
@@ -469,13 +472,15 @@ export function ServiceActions({
           Use with my agent
         </button>
       ) : null}
-      <CopyButton
-        text={service.url}
-        label="Copy service address"
-        kind={payable || signIn ? 'text' : 'none'}
-        iconOnly={payable || signIn}
-        className={payable || signIn ? 'fd-btn' : 'fd-btn primary'}
-      />
+      {hosted ? null : (
+        <CopyButton
+          text={service.url}
+          label="Copy service address"
+          kind={payable || signIn ? 'text' : 'none'}
+          iconOnly={payable || signIn}
+          className={payable || signIn ? 'fd-btn' : 'fd-btn primary'}
+        />
+      )}
       <CopyButton
         text={link}
         label="Copy link"
@@ -510,6 +515,7 @@ export function ServiceDetail({
   /** In the drawer: a Close button at the end. */
   onClose?: () => void;
 }) {
+  const hosted = service.source.name === FEED_HOSTED_SOURCE.name;
   const ids = useId();
   // Signed out (the read-only Feed), today's drawer: whether pay is on is the person's own setting.
   const signedIn = useSignedIn();
@@ -560,7 +566,7 @@ export function ServiceDetail({
               ? 'Central City agent'
               : 'External · x402 Bazaar'}
           </span>
-          <span className="fd-service-chip">USDC on Base</span>
+          <span className="fd-service-chip">USDC on {paidOnName(service.network)}</span>
         </div>
         <dl className="fd-service-stats">
           <div>
@@ -619,7 +625,7 @@ export function ServiceDetail({
                   {priceMain(service.price)}
                   {service.price ? ' per call' : ''}
                 </b>
-                . {priceRule(service.price)}.
+                . {priceRule(service.price, service.network)}.
               </p>
               <p className="fd-fine">
                 {payOn
@@ -711,7 +717,9 @@ export function ServiceDetail({
                   <dd>
                     <code>{[service.method, service.url].filter(Boolean).join(' ')}</code>
                     <span className="fd-fine">
-                      Shown as text. It answers with a payment request.
+                      {hosted
+                        ? 'Shown as text. Not open to buyers outside Central City yet: use it with your agent here.'
+                        : 'Shown as text. It answers with a payment request.'}
                     </span>
                   </dd>
                 </div>
@@ -745,18 +753,29 @@ export function ServiceDetail({
                   <dt>Status</dt>
                   <dd>{statusFact(service, now)}</dd>
                 </div>
-                <div>
-                  <dt>Last read</dt>
-                  <dd>
-                    {agoText(service.source.fetchedAt, now)} · {utcTime(service.source.fetchedAt)}
-                  </dd>
-                </div>
-                {service.source.updatedAt ? (
+                {service.source.name === FEED_HOSTED_SOURCE.name ? (
+                  // Central City's own listings carry the day only.
                   <div>
                     <dt>Listing updated</dt>
-                    <dd>{utcText(service.source.updatedAt)}</dd>
+                    <dd>{dayText(service.source.updatedAt ?? service.source.fetchedAt)}</dd>
                   </div>
-                ) : null}
+                ) : (
+                  <>
+                    <div>
+                      <dt>Last read</dt>
+                      <dd>
+                        {agoText(service.source.fetchedAt, now)} ·{' '}
+                        {utcTime(service.source.fetchedAt)}
+                      </dd>
+                    </div>
+                    {service.source.updatedAt ? (
+                      <div>
+                        <dt>Listing updated</dt>
+                        <dd>{utcText(service.source.updatedAt)}</dd>
+                      </div>
+                    ) : null}
+                  </>
+                )}
                 <div>
                   <dt>Use</dt>
                   <dd>

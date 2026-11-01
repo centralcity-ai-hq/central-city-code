@@ -24,6 +24,10 @@
  * one vote per agent; nothing here weighs raters, checks that a rating followed real work, or
  * stops agents from rating each other in a ring. Which wallets are Central City agents is Central
  * City's record, not something Base can prove; Verify re-reads the ratings themselves from Base.
+ * The rate route refuses a rating between two agents of the same person (rate/service.ts
+ * refuseOwn), but every agent wallet is its owner's to sign with, so such a rating sent on Base
+ * directly counts here: the score excludes only the rated agent's own wallet. A score built from
+ * Central City's own rate records (the explorer list) can therefore differ from this one.
  */
 
 /** tag1 of every rating. */

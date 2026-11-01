@@ -141,9 +141,19 @@
 }
 
 /* Tables: open rows with hairlines, no frame. */
-.trust-table {
+.trust-table,
+.trust .docs-table {
   margin: 24px 0 32px;
   overflow-x: auto;
+}
+/* /audit: addresses and hashes stay on one line; the table box scrolls instead of breaking them. */
+.trust .docs-table code {
+  white-space: nowrap;
+}
+.trust-source {
+  margin: 0 0 16px;
+  font-size: 14px;
+  color: var(--text-muted);
 }
 .trust table {
   width: 100%;
@@ -509,6 +519,451 @@
 }
 .trust-status .button {
   margin-left: 0;
+}
+
+/* /audit: the report record above the report (version, notice, counts, PDF and its hash). */
+.audit-record {
+  margin: 0 0 56px;
+  padding: 28px 0 8px;
+  border-top: 1px solid var(--border-strong, var(--border));
+  border-bottom: 1px solid var(--border-subtle, var(--border));
+}
+.audit-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px 32px;
+  margin: 0 0 8px;
+}
+.audit-facts dt {
+  margin: 0 0 4px;
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.audit-facts dd {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--text-primary, var(--text));
+}
+.trust .audit-counts th,
+.trust .audit-counts td {
+  padding-top: 9px;
+  padding-bottom: 9px;
+  font-variant-numeric: tabular-nums;
+}
+.trust .audit-counts thead th:not(:first-child),
+.trust .audit-counts td {
+  text-align: right;
+}
+.trust .audit-counts th[scope='row'] {
+  width: auto;
+}
+.trust .audit-counts tfoot th,
+.trust .audit-counts tfoot td {
+  border-bottom: 0;
+  font-weight: 600;
+  color: var(--text-primary, var(--text));
+}
+/*
+ * Severity and status badges, in the PDF's colours (ops build.mjs: .sev-*, .st-fixed), each at
+ * least 4.5:1; dark theme: the same hues as tinted fills with light text.
+ */
+.trust-page-audit {
+  --audit-crit-fg: #ffffff;
+  --audit-crit-bg: #7f1d1d;
+  --audit-high-fg: #ffffff;
+  --audit-high-bg: #c81e1e;
+  --audit-med-fg: #78350f;
+  --audit-med-bg: #fde68a;
+  --audit-low-fg: #1e3a8a;
+  --audit-low-bg: #dbe6ff;
+  --audit-info-fg: #3f3f46;
+  --audit-info-bg: #e4e4e7;
+  --audit-fixed-fg: #14532d;
+  --audit-fixed-bg: #dcfce7;
+  --audit-fixed-border: #86efac;
+}
+:root[data-theme='dark'] .trust-page-audit {
+  --audit-crit-fg: #fecaca;
+  --audit-crit-bg: rgba(220, 38, 38, 0.32);
+  --audit-high-fg: #fca5a5;
+  --audit-high-bg: rgba(239, 68, 68, 0.2);
+  --audit-med-fg: #fcd34d;
+  --audit-med-bg: rgba(245, 158, 11, 0.16);
+  --audit-low-fg: #a5c4ff;
+  --audit-low-bg: rgba(59, 130, 246, 0.18);
+  --audit-info-fg: #d4d4d8;
+  --audit-info-bg: rgba(161, 161, 170, 0.16);
+  --audit-fixed-fg: #86efac;
+  --audit-fixed-bg: rgba(34, 197, 94, 0.12);
+  --audit-fixed-border: rgba(74, 222, 128, 0.32);
+}
+.audit-sev,
+.audit-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  color: var(--audit-info-fg);
+  background: var(--audit-info-bg);
+}
+.audit-sev-critical {
+  color: var(--audit-crit-fg);
+  background: var(--audit-crit-bg);
+}
+.audit-sev-high {
+  color: var(--audit-high-fg);
+  background: var(--audit-high-bg);
+}
+.audit-sev-medium {
+  color: var(--audit-med-fg);
+  background: var(--audit-med-bg);
+}
+.audit-sev-low {
+  color: var(--audit-low-fg);
+  background: var(--audit-low-bg);
+}
+.audit-status-fixed {
+  padding: 0 7px;
+  border: 1px solid var(--audit-fixed-border);
+  color: var(--audit-fixed-fg);
+  background: var(--audit-fixed-bg);
+}
+.audit-downloads {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 28px;
+  margin: 0 0 16px;
+  font-size: 15px;
+}
+.trust .audit-pdf {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--target, 44px);
+  padding: 0 18px;
+  border: 1px solid var(--border-strong, currentColor);
+  border-radius: 999px;
+  font-weight: 500;
+  text-decoration: none;
+}
+.trust .audit-pdf:hover {
+  border-color: var(--text-primary, currentColor);
+}
+.audit-hash {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 0 0 20px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.trust .audit-hash code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 12.5px;
+}
+
+@media (max-width: 960px) {
+  .trust-has-toc .trust-body > .audit-record {
+    order: 0;
+  }
+}
+
+@media (max-width: 600px) {
+  .audit-facts {
+    grid-template-columns: 1fr;
+  }
+  /* Six columns of counts fit a phone without sideways scrolling. */
+  .trust .audit-counts {
+    font-size: 13px;
+  }
+  .trust .audit-counts th,
+  .trust .audit-counts td {
+    padding-right: 8px;
+  }
+  .trust .audit-counts thead th {
+    font-size: 12px;
+  }
+}
+
+/*
+ * /audit, design audit-page-v2 (27 Oct 2026): the report reads calmer. Contract tables become
+ * cards (label and value rows), findings lists become rows with badges, a finding's fields a short
+ * list with its status as a green box. Hairlines stay light; no sideways scrolling at 320px.
+ */
+.trust-page-audit h2 {
+  margin-top: 88px;
+}
+.trust-page-audit h3 {
+  margin-top: 48px;
+}
+.trust-page-audit .trust-body > h2:first-child {
+  margin-top: 0;
+}
+/* Each finding opens with a hairline, so the long Findings section reads as separate entries. */
+.trust-page-audit h3[id^='cca-'] {
+  margin-top: 56px;
+  padding-top: 28px;
+  border-top: 1px solid var(--border-subtle, var(--border));
+}
+/* Hashes, addresses and long paths in the prose wrap instead of widening the page. */
+.trust-page-audit .trust-body {
+  overflow-wrap: break-word;
+}
+.trust-page-audit .trust-body a,
+.trust-page-audit .trust-body code {
+  overflow-wrap: anywhere;
+}
+.trust-page-audit .docs-table code {
+  white-space: normal;
+}
+.trust-page-audit thead th {
+  border-bottom-color: var(--border, var(--border-strong));
+}
+.trust-page-audit th,
+.trust-page-audit td {
+  border-bottom-color: var(--border-subtle, var(--border));
+}
+.trust-page-audit .audit-table td,
+.trust-page-audit .audit-table th {
+  padding-top: 11px;
+  padding-bottom: 11px;
+  overflow-wrap: anywhere;
+}
+.trust-page-audit .audit-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+/* Contract cards: the name, then label and value rows. Dependencies sit two to a row on wide screens. */
+.trust ul.audit-cards {
+  display: grid;
+  gap: 16px;
+  margin: 24px 0 36px;
+  padding: 0;
+  list-style: none;
+}
+.trust .audit-cards > li {
+  margin: 0;
+  padding: 0;
+}
+.audit-card {
+  container-type: inline-size;
+  min-width: 0;
+  padding: 18px 20px 8px;
+  border: 1px solid var(--border, var(--border-subtle));
+  border-radius: 12px;
+  background: var(--bg-page, transparent);
+}
+.trust .audit-card-title {
+  margin: 0 0 8px;
+  font-size: 1.0625rem;
+  line-height: 1.4;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-primary, var(--text));
+}
+.audit-card-note {
+  font-weight: 400;
+  color: var(--text-muted);
+}
+.trust .audit-kv {
+  margin: 0;
+  font-size: 14.5px;
+  line-height: 1.6;
+}
+.audit-kv > div {
+  display: grid;
+  grid-template-columns: 9rem minmax(0, 1fr);
+  gap: 2px 16px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border-subtle, var(--border));
+}
+.audit-kv dt {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+.audit-kv dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary, var(--text));
+}
+@container (max-width: 26rem) {
+  .audit-kv > div {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (min-width: 1100px) {
+  .trust ul.audit-cards-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* A shortened address: monospace, linked to BaseScan, with a copy button for the full value. */
+.audit-address {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  vertical-align: baseline;
+}
+.trust .audit-address code {
+  overflow-wrap: normal;
+  font-size: 13px;
+}
+.trust .audit-address a {
+  text-decoration-color: transparent;
+}
+.trust .audit-address a:hover {
+  text-decoration-color: currentColor;
+}
+.audit-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.audit-copy:hover {
+  border-color: var(--border, currentColor);
+  color: var(--text-primary, var(--text));
+}
+.audit-copy[data-copied] {
+  border-color: var(--audit-fixed-border);
+  color: var(--audit-fixed-fg);
+  background: var(--audit-fixed-bg);
+}
+.trust .audit-deploy {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Findings lists: ID, title (its note quieter), then the severity and the status. */
+.trust ul.audit-findings {
+  margin: 20px 0 36px;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--border, var(--border-subtle));
+}
+.trust .audit-finding {
+  display: grid;
+  grid-template-columns: 5.5rem minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 4px 16px;
+  margin: 0;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--border-subtle, var(--border));
+  font-size: 15px;
+  line-height: 1.55;
+}
+.audit-finding-id {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 13px;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+.audit-finding-title {
+  min-width: 0;
+  color: var(--text-primary, var(--text));
+}
+.audit-finding-note {
+  display: block;
+  margin-top: 2px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+.audit-finding-marks {
+  display: inline-flex;
+  gap: 6px;
+  justify-self: end;
+}
+
+/* A finding's fields; the status line is a green box. */
+.trust .audit-fields {
+  margin: 4px 0 28px;
+}
+.audit-fields > div:first-child {
+  border-top: 0;
+}
+.audit-fields > .audit-field-status {
+  align-items: center;
+  margin: 4px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border, currentColor);
+  border-radius: 8px;
+}
+.audit-fields > .audit-field-status + div {
+  border-top: 0;
+}
+.audit-fields > .audit-field-status.is-fixed {
+  border-color: var(--audit-fixed-border);
+  background: var(--audit-fixed-bg);
+}
+.audit-field-status.is-fixed dt,
+.audit-field-status.is-fixed dd {
+  color: var(--audit-fixed-fg);
+}
+.audit-field-status dd {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+
+/* A slightly wider reading column beside "On this page" on large screens. */
+@media (min-width: 1280px) {
+  .trust-page-audit.trust-has-toc .trust-layout {
+    grid-template-columns: minmax(0, 48rem) 220px;
+    gap: 56px;
+  }
+  .trust-page-audit .trust-body {
+    max-width: 48rem;
+  }
+}
+
+@media (max-width: 600px) {
+  .trust-page-audit h2 {
+    margin-top: 56px;
+  }
+  .trust .audit-finding {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      'id marks'
+      'title title';
+  }
+  .audit-finding-id {
+    grid-area: id;
+  }
+  .audit-finding-title {
+    grid-area: title;
+  }
+  .audit-finding-marks {
+    grid-area: marks;
+  }
+  .audit-card {
+    padding: 16px 16px 6px;
+  }
 }
 
 @media (max-width: 960px) {

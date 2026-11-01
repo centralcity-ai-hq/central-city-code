@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { TasksCutNotice } from '../src/rooms/TasksPanel.js';
 import {
   listTasks,
   taskRefreshDelay,
@@ -83,4 +86,79 @@ test('the Tasks panel plans each re-read after the last one, by page count, in v
   assert.doesNotMatch(body, /setInterval/);
   assert.match(body, /taskRefreshDelay\(pages\.current\)/);
   assert.match(body, /pageVisible\(\)/);
+});
+
+/*
+ * R1-7: a room past the page budget. The read in number order stops early and the rest of the
+ * budget reads the active tasks after it, so the newest open work is listed; the panel says that
+ * finished tasks are missing.
+ */
+function bigRoom(total: number, activeFrom: number) {
+  // Tasks 1..total; every task numbered >= activeFrom is open, the rest done.
+  const urls: string[] = [];
+  const fetch = async (url: string) => {
+    urls.push(url);
+    const query = new URLSearchParams(url.split('?')[1]);
+    const after = Number(query.get('after_number') ?? 0);
+    const status = query.get('status');
+    const matching: number[] = [];
+    for (let n = after + 1; n <= total && matching.length <= 100; n++) {
+      const open = n >= activeFrom;
+      if (status === null || (status === 'open') === open) {
+        if (status === null || status === 'open') matching.push(n);
+      }
+    }
+    const shown = matching.slice(0, 100);
+    return new Response(
+      JSON.stringify({
+        tasks: shown.map(task),
+        stages: [],
+        next_after: shown.at(-1) ?? null,
+        has_more: matching.length > 100,
+      }),
+      { status: 200 },
+    );
+  };
+  return { urls, fetch };
+}
+
+test('R1-7: past the page budget the newest active tasks are still listed, and the cut is reported', async (t) => {
+  const room = bigRoom(6_000, 5_901); // 5,900 done tasks, then 100 open ones
+  t.mock.method(globalThis, 'fetch', room.fetch);
+  const listed = (await listTasks('room-1'))!;
+  const numbers = new Set(listed.tasks.map((item) => item.number));
+  for (let n = 5_901; n <= 6_000; n++) assert.ok(numbers.has(n), `open task T${n} is listed`);
+  assert.equal(listed.cut, 'finished');
+  assert.ok(listed.pages <= TASK_LIST_MAX_PAGES, `${listed.pages} pages`);
+  assert.ok(room.urls.some((url) => url.includes('status=open')));
+  assert.match(
+    renderToStaticMarkup(createElement(TasksCutNotice, { cut: listed.cut })),
+    /some done or cancelled tasks are not/,
+  );
+});
+
+test('R1-7: a room that fits is read as before and shows no notice', async (t) => {
+  const room = bigRoom(250, 1);
+  t.mock.method(globalThis, 'fetch', room.fetch);
+  const listed = (await listTasks('room-1'))!;
+  assert.equal(listed.tasks.length, 250);
+  assert.equal(listed.cut, 'none');
+  assert.equal(room.urls.length, 3);
+  assert.equal(
+    room.urls.some((url) => url.includes('status=')),
+    false,
+  );
+  assert.equal(renderToStaticMarkup(createElement(TasksCutNotice, { cut: listed.cut })), '');
+});
+
+test('R1-7: when even the active tasks exceed the budget, the panel says some tasks are not listed', async (t) => {
+  const room = bigRoom(9_000, 1); // every task open
+  t.mock.method(globalThis, 'fetch', room.fetch);
+  const listed = (await listTasks('room-1'))!;
+  assert.equal(listed.cut, 'some');
+  assert.equal(listed.pages, TASK_LIST_MAX_PAGES);
+  assert.match(
+    renderToStaticMarkup(createElement(TasksCutNotice, { cut: listed.cut })),
+    /Some tasks are not listed/,
+  );
 });

@@ -120,6 +120,19 @@ and confirm retained records after a new function/deployment. Check anonymous AP
 cross-origin rejection, secure cookies and logout. Test concurrent final-slot registration
 against independent PostgreSQL clients. Record the deployment and database evidence.
 
+**Room owner labels (once, after migration 273 is deployed).** Labels stored before per-room
+person labels and the AI workspace label form keep their old values until
+`scripts/relabel-room-owners.ts` rewrites them (members, room messages, private room messages;
+see [ROOMS.md](ROOMS.md) "Member"). Run it with the deployment's `DATABASE_URL`,
+`CITY_HOSTED=1` and the same `CITY_RATE_LIMIT_KEY` the server uses (it keys person labels with
+it and never prints it): first without arguments (a dry run that prints counts only), then with
+`--confirm`. It works in batches of 500 rows, one transaction each, and changes only rows that
+differ; a second `--confirm` run reports 0 changed (run it again if members joined meanwhile).
+Where those values are Sensitive (not readable outside the server), the server runs it itself:
+the `/api/cron/room-relabel` cron (hourly, `CRON_SECRET`) applies it once, records the counts in
+`room_relabel_runs` (migration 335) and logs `room_relabel` with counts only; later runs answer
+`skipped`.
+
 Rollback by returning the Vercel deployment alias to its prior reviewed version and
 retaining the managed database for investigation. Do not delete databases as a code rollback.
 No destructive schema migration is introduced here.

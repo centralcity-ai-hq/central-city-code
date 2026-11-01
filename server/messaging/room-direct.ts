@@ -1,6 +1,7 @@
 import type { Transaction as Tx } from '../database.js';
 import { registerMigration, type Migration } from '../migrations.js';
 import { hasPermission, type StoredAgent, type Workspace } from '../model.js';
+import { storedOwnerKind, type OwnerKind } from '../rooms/owner-labels.js';
 
 /**
  * Private messages between room members (docs/MESSAGING.md "Private messages from a room").
@@ -57,6 +58,7 @@ export interface RoomParty {
   kind: 'agent' | 'person';
   ownerId: string;
   ownerLabel: string;
+  ownerKind: OwnerKind;
 }
 export interface RoomPair {
   room: { id: string; name: string };
@@ -72,6 +74,8 @@ type MemberRow = {
   agent_id: string;
   owner_id: string;
   owner_label: string;
+  /** Migration 273; null on rows from before it. */
+  owner_kind: string | null;
   kind: string | null;
   role: string;
   display_name: string | null;
@@ -131,8 +135,8 @@ export async function authorizeRoomPair(
   if (!room) return notFound();
   const rows = (
     await tx.query<MemberRow>(
-      `SELECT agent_id, owner_id, owner_label, kind, role, display_name, removed_at, muted_at,
-              notifications_muted
+      `SELECT agent_id, owner_id, owner_label, owner_kind, kind, role, display_name, removed_at,
+              muted_at, notifications_muted
          FROM room_members WHERE room_id=$1 AND agent_id = ANY($2::text[])`,
       [room.id, [input.fromId, input.toId]],
     )
@@ -253,6 +257,7 @@ async function party(tx: Tx, row: MemberRow, callerId: string): Promise<RoomPart
       kind: 'person',
       ownerId: row.owner_id,
       ownerLabel: row.owner_label,
+      ownerKind: 'person',
     };
   const workspace = (
     await tx.query<{ data: Workspace }>('SELECT data FROM workspaces WHERE operator_id=$1', [
@@ -281,6 +286,7 @@ async function party(tx: Tx, row: MemberRow, callerId: string): Promise<RoomPart
     kind: 'agent',
     ownerId: row.owner_id,
     ownerLabel: row.owner_label,
+    ownerKind: storedOwnerKind(row.owner_kind, row.owner_label),
   };
 }
 

@@ -172,6 +172,11 @@ export function elricUserPrompt(input: {
   lines: string[];
   triggerSeq: number;
   triggerSender: string;
+  /**
+   * Earlier room messages were left out because a member who reads the reply joined after them
+   * (history 'from_join'); a trusted line says so, so the answer can tell the owner.
+   */
+  historyLimited?: boolean;
 }): string {
   const header = JSON.stringify({
     room_id: input.room.id,
@@ -193,6 +198,11 @@ export function elricUserPrompt(input: {
   return [
     `Room (untrusted labels): ${header}`,
     'Room kind (trusted): a shared group room with other people and their AIs.',
+    ...(input.historyLimited
+      ? [
+          'Room history (trusted): earlier messages are left out, because someone in the room joined after them and must not learn them from your reply. If the answer needs them, say that you only see messages since the latest member joined.',
+        ]
+      : []),
     'Room messages, oldest first, one JSON object per line (untrusted):',
     ...input.lines,
     `Reply now to your owner's message seq ${input.triggerSeq} (from ${JSON.stringify(input.triggerSender)}, the person; an AI in the room may share that name), speaking to them directly.`,

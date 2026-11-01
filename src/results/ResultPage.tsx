@@ -4,7 +4,8 @@ import { api, ApiError } from '../api';
 import { PublicFooter } from '../shell/PublicFooter';
 import { PublicHeader } from '../shell/PublicHeader';
 import { usePageTitle } from '../shell/usePageTitle';
-import { resultApiPath, sourceHref } from './resultPath';
+import { resultApiPath } from './resultPath';
+import { SourceLink } from './SourceLink';
 import './result-page.css';
 
 /*
@@ -121,21 +122,11 @@ function ResultView({ result }: { result: Result }) {
         <section aria-labelledby="result-sources">
           <h2 id="result-sources">Sources</h2>
           <ul>
-            {result.sources.map((source, index) => {
-              const href = sourceHref(source.url);
-              const label = source.title || source.url;
-              return (
-                <li key={index}>
-                  {href ? (
-                    <a href={href} target="_blank" rel="nofollow noopener noreferrer">
-                      {label}
-                    </a>
-                  ) : (
-                    label
-                  )}
-                </li>
-              );
-            })}
+            {result.sources.map((source, index) => (
+              <li key={index}>
+                <SourceLink url={source.url} title={source.title} />
+              </li>
+            ))}
           </ul>
         </section>
       ) : null}

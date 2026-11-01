@@ -61,7 +61,15 @@ const loadApp = () => import('./App');
 const loadRooms = () => import('./RoomsShell');
 const loadTrust = () => import('./Trust');
 const loadLiveLog = () => import('./verify/LiveLog');
+const loadProofAgents = () => import('./explorer/ProofAgents');
+const loadProofOnBase = () => import('./explorer/ProofOnBase');
+const loadProofFinalizing = () => import('./explorer/ProofFinalizing');
+const loadProofCalls = () => import('./explorer/ProofCalls');
+const loadAgentDashboard = () => import('./dashboard/AgentDashboard');
+const loadProofRatings = () => import('./explorer/ProofRatings');
+const loadExplorerAgent = () => import('./explorer/ExplorerAgent');
 const loadOnBase = () => import('./verify/OnBase');
+const loadArcExplorer = () => import('./explorer/ArcHome');
 const loadServiceCalls = () => import('./verify/ServiceCalls');
 const loadPassportPage = () => import('./verify/Passport');
 const loadWorkflows = () => import('./WorkflowsPage');
@@ -80,9 +88,13 @@ const USE_CASE_PATH = new RegExp(
  */
 /** A passport: /a/<short id>, the address in its Base ID's tokenURI (6 of [0-9A-Za-z]). */
 const PASSPORT_PATH = /^\/a\/([0-9A-Za-z]{6})\/?$/;
+/** An agent on the Explorer: /explorer/agents/<Base ID>. */
+const EXPLORER_AGENT_PATH = /^\/explorer\/agents\/(0|[1-9][0-9]{0,19})\/?$/;
+/** An agent on the Explorer's On Arc view: /explorer/arc/agents/<Arc ID>. */
+const ARC_AGENT_PATH = /^\/explorer\/arc\/agents\/(0|[1-9][0-9]{0,19})\/?$/;
 /** The public trust and company pages (src/Trust.tsx); kept here so the entry chunk stays small. */
 const TRUST_PATH =
-  /^\/(privacy|privacy-choices|terms|acceptable-use|dpa|imprint|security|support|status|about|contact)\/?$/;
+  /^\/(privacy|privacy-choices|terms|acceptable-use|dpa|imprint|security|audit|support|status|about|contact)\/?$/;
 function trustPage(pathname: string) {
   return (TRUST_PATH.exec(pathname)?.[1] ?? null) as import('./Trust').TrustPageId | null;
 }
@@ -95,7 +107,28 @@ const DocsPage = lazy(() => loadDocs().then((module) => ({ default: module.DocsP
 const VerifyPage = lazy(() => loadVerify().then((module) => ({ default: module.VerifyPage })));
 // The Live log (/downtown/log): the count log's entries, newest first, with a proof per entry.
 const LiveLog = lazy(() => loadLiveLog().then((module) => ({ default: module.LiveLog })));
+const ProofAgents = lazy(() =>
+  loadProofAgents().then((module) => ({ default: module.ProofAgents })),
+);
+const ProofOnBase = lazy(() =>
+  loadProofOnBase().then((module) => ({ default: module.ProofOnBase })),
+);
+const ProofFinalizing = lazy(() =>
+  loadProofFinalizing().then((module) => ({ default: module.ProofFinalizing })),
+);
+const ProofCalls = lazy(() => loadProofCalls().then((module) => ({ default: module.ProofCalls })));
+const AgentDashboard = lazy(() =>
+  loadAgentDashboard().then((module) => ({ default: module.AgentDashboard })),
+);
+const ProofRatings = lazy(() =>
+  loadProofRatings().then((module) => ({ default: module.ProofRatings })),
+);
+const ExplorerAgent = lazy(() =>
+  loadExplorerAgent().then((module) => ({ default: module.ExplorerAgent })),
+);
 const OnBase = lazy(() => loadOnBase().then((module) => ({ default: module.OnBase })));
+const ArcHome = lazy(() => loadArcExplorer().then((module) => ({ default: module.ArcHome })));
+const ArcAgent = lazy(() => loadArcExplorer().then((module) => ({ default: module.ArcAgent })));
 const ServiceCalls = lazy(() =>
   loadServiceCalls().then((module) => ({ default: module.ServiceCalls })),
 );
@@ -106,6 +139,9 @@ const ConnectPage = lazy(() => loadConnect().then((module) => ({ default: module
 const Workspaces = lazy(() => loadApp().then((module) => ({ default: module.Workspaces })));
 // The Rooms experience (/rooms, /rooms/:id, /r/:slug) is its own chunk too.
 const RoomsShell = lazy(loadRooms);
+const SponsorEthPage = lazy(() =>
+  import('./owner/SponsorEth').then((module) => ({ default: module.SponsorEthPage })),
+);
 const NewsletterLinkPage = lazy(() =>
   import('./NewsletterLink').then((module) => ({ default: module.NewsletterLinkPage })),
 );
@@ -191,8 +227,18 @@ function inAppPage(pathname: string, sessionKnown: boolean, signedIn: boolean) {
   )
     return loadDocs;
   if (path === '/downtown/verify') return loadVerify;
-  if (path === '/downtown/log' || path === '/explorer') return loadLiveLog;
+  // 25 Oct (product decision): the Agent Explorer (the live log) is back at /explorer; v2 home retired.
+  if (path === '/explorer') return loadLiveLog;
+  if (path === '/explorer/proof/agents') return loadProofAgents;
+  if (path === '/explorer/proof/base') return loadProofOnBase;
+  if (path === '/explorer/proof/finalizing') return loadProofFinalizing;
+  if (path === '/explorer/proof/calls') return loadProofCalls;
+  if (path === '/analytics') return loadAgentDashboard;
+  if (path === '/explorer/proof/ratings') return loadProofRatings;
+  if (EXPLORER_AGENT_PATH.test(path)) return loadExplorerAgent;
+  if (path === '/downtown/log') return loadLiveLog;
   if (path === '/explorer/base') return loadOnBase;
+  if (path === '/explorer/arc' || ARC_AGENT_PATH.test(path)) return loadArcExplorer;
   if (path === '/explorer/calls') return loadServiceCalls;
   if (PASSPORT_PATH.test(path)) return loadPassportPage;
   if (path === '/' && sessionKnown) return signedIn ? loadApp : loadLanding;
@@ -224,7 +270,14 @@ const KNOWN_PATHS = new Set([
   '/downtown/log',
   '/explorer',
   '/explorer/base',
+  '/explorer/arc',
   '/explorer/calls',
+  '/explorer/proof/agents',
+  '/explorer/proof/base',
+  '/explorer/proof/finalizing',
+  '/explorer/proof/calls',
+  '/explorer/proof/ratings',
+  '/analytics',
   '/docs',
   '/docs/start',
   '/docs/rooms',
@@ -371,6 +424,8 @@ export function knownPath(pathname: string) {
   const path = pathname.length > 1 ? pathname.replace(/\/$/, '') : pathname;
   return (
     KNOWN_PATHS.has(path) ||
+    EXPLORER_AGENT_PATH.test(path) ||
+    ARC_AGENT_PATH.test(path) ||
     isRoomsPath(path) ||
     resultId(path) !== null ||
     consolePathView(path) !== null ||
@@ -580,8 +635,8 @@ export function Root() {
   if (statusesOf.current !== personId) {
     statusesOf.current = personId;
     forgetAllStatuses();
-    setSignedInPerson(personId);
   }
+  setSignedInPerson(personId, session?.operator?.name ?? null);
   const landing = workspaceLanding({
     enabled: workspaceV2 && initialEntry,
     consoleEntry:
@@ -755,6 +810,13 @@ export function Root() {
         <Downtown />
       </Screen>
     );
+  // The owner's hidden sponsor-ETH page: the server answers 404 to everyone else, so does the page.
+  if (/^\/owner\/sponsor-eth\/?$/.test(path))
+    return (
+      <Screen>
+        <SponsorEthPage />
+      </Screen>
+    );
   // The newsletter email links (confirm, unsubscribe): public, no session needed.
   const newsletterLink = /^\/newsletter\/(confirm|unsubscribe)\/?$/.exec(path);
   if (newsletterLink)
@@ -804,6 +866,20 @@ export function Root() {
         <OnBase />
       </Screen>
     );
+  // The Agent Explorer's On Arc view (only while the server has Arc on) and its agent pages.
+  if (/^\/explorer\/arc\/?$/.test(path))
+    return (
+      <Screen>
+        <ArcHome />
+      </Screen>
+    );
+  const arcAgent = ARC_AGENT_PATH.exec(path);
+  if (arcAgent)
+    return (
+      <Screen>
+        <ArcAgent key={arcAgent[1]} arcId={arcAgent[1]!} />
+      </Screen>
+    );
   // The Agent Explorer's Service calls view: every paid service call as its Base transaction.
   if (/^\/explorer\/calls\/?$/.test(path))
     return (
@@ -811,7 +887,52 @@ export function Root() {
         <ServiceCalls />
       </Screen>
     );
-  // The Agent Explorer: /explorer (its short address) and /downtown/log show the same page.
+  // Explorer v2 proof pages: one per number on the home.
+  if (/^\/explorer\/proof\/agents\/?$/.test(path))
+    return (
+      <Screen>
+        <ProofAgents />
+      </Screen>
+    );
+  if (/^\/explorer\/proof\/base\/?$/.test(path))
+    return (
+      <Screen>
+        <ProofOnBase />
+      </Screen>
+    );
+  if (/^\/explorer\/proof\/finalizing\/?$/.test(path))
+    return (
+      <Screen>
+        <ProofFinalizing />
+      </Screen>
+    );
+  if (/^\/explorer\/proof\/calls\/?$/.test(path))
+    return (
+      <Screen>
+        <ProofCalls />
+      </Screen>
+    );
+  if (/^\/analytics\/?$/.test(path))
+    return (
+      <Screen>
+        <AgentDashboard />
+      </Screen>
+    );
+  if (/^\/explorer\/proof\/ratings\/?$/.test(path))
+    return (
+      <Screen>
+        <ProofRatings />
+      </Screen>
+    );
+  const explorerAgent = EXPLORER_AGENT_PATH.exec(path);
+  if (explorerAgent)
+    return (
+      <Screen>
+        <ExplorerAgent key={explorerAgent[1]} baseId={explorerAgent[1]!} />
+      </Screen>
+    );
+  // The Agent Explorer: /explorer (its short address) and /downtown/log show the same page
+  // (25 Oct product decision: back from the v2 home, which was too complicated).
   if (/^\/(downtown\/log|explorer)\/?$/.test(path))
     return (
       <Screen>

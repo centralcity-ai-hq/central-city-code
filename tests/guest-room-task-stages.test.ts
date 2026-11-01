@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createApp } from '../server/app.js';
 import { createRoomTasks } from '../server/rooms/tasks-service.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 // Task stages and invited guests: a guest whose credential is revoked or expired is refused on
 // the stage tools, and the stage functions run the principal's credential re-check.
@@ -43,7 +44,7 @@ async function fixture(t: { after(fn: () => Promise<unknown>): void }) {
   });
   assert.equal(registered.statusCode, 201, registered.body);
   const host = {
-    cookie: `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`,
+    cookie: sessionPair(registered.cookies),
   };
   const agent = await post(
     '/api/agents',

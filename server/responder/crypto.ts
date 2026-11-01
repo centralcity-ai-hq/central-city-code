@@ -36,10 +36,15 @@ function open(key: Buffer, sealed: Buffer, aad: Buffer): Buffer {
   const decipher = createDecipheriv('aes-256-gcm', key, sealed.subarray(0, 12));
   decipher.setAAD(aad);
   decipher.setAuthTag(sealed.subarray(sealed.length - 16));
-  return Buffer.concat([
-    decipher.update(sealed.subarray(12, sealed.length - 16)),
-    decipher.final(),
-  ]);
+  // Intermediate plaintext chunks are zeroed once copied (CCA-719); the caller zeroes the result.
+  const parts: Buffer[] = [];
+  try {
+    parts.push(decipher.update(sealed.subarray(12, sealed.length - 16)));
+    parts.push(decipher.final());
+    return Buffer.concat(parts);
+  } finally {
+    for (const part of parts) part.fill(0);
+  }
 }
 
 export function encryptApiKey(

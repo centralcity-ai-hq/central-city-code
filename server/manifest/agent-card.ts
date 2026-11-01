@@ -11,6 +11,9 @@ import {
   type VerifyResult,
 } from './keys.js';
 
+/** How long an Agent Card signature stays valid after it is issued (CCA-617). */
+export const AGENT_CARD_SIGNATURE_TTL_SECONDS = 24 * 60 * 60;
+
 /**
  * A2A v1.0 Agent Card (JSON form of the pinned `AgentCard` protobuf message). Only fields the
  * platform can honour are emitted: JSON-RPC binding, no streaming or push notifications, and the
@@ -176,13 +179,20 @@ const unsigned = (card: AgentCard) => {
 /**
  * Adds a signature over the JCS form of the card without `signatures`. Existing signatures are
  * kept, so a card can carry signatures from both the outgoing and incoming key during rotation.
+ * The protected header carries `iat` (now) and `exp` (`iat` + 24 h, CCA-617), so a copy of a card
+ * stops verifying a day after it was served.
  */
 export function signAgentCard(
   card: AgentCard,
   key: SigningKey,
-  header: { jku?: string } = {},
+  header: { jku?: string; now?: number } = {},
 ): AgentCard {
-  const signature = signDetached(unsigned(card), key, header.jku ? { jku: header.jku } : {});
+  const iat = Math.floor((header.now ?? Date.now()) / 1000);
+  const signature = signDetached(unsigned(card), key, {
+    ...(header.jku ? { jku: header.jku } : {}),
+    iat,
+    exp: iat + AGENT_CARD_SIGNATURE_TTL_SECONDS,
+  });
   return {
     ...card,
     signatures: [...(card.signatures ?? []).filter((s) => !sameKid(s, key.kid)), signature],
@@ -197,12 +207,18 @@ function sameKid(signature: JwsSignature, kid: string): boolean {
   }
 }
 
-/** Valid when at least one signature verifies against a key in `jwks`; reports every result. */
+/**
+ * Valid when at least one signature verifies against a key in `jwks` and is inside its `iat`/`exp`
+ * window at `options.now` (a signature without them is refused, CCA-617); reports every result.
+ */
 export function verifyAgentCard(
   card: AgentCard,
   jwks: Jwks,
+  options: { now?: number } = {},
 ): { valid: boolean; results: VerifyResult[] } {
   const signatures = Array.isArray(card.signatures) ? card.signatures : [];
-  const results = signatures.map((signature) => verifyDetached(unsigned(card), signature, jwks));
+  const results = signatures.map((signature) =>
+    verifyDetached(unsigned(card), signature, jwks, { now: options.now, requireTimes: true }),
+  );
   return { valid: results.some((result) => result.valid), results };
 }

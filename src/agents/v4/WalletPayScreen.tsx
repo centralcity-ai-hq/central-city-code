@@ -46,6 +46,7 @@ import {
   type WithdrawalView,
 } from '../../base/wallet/withdraw';
 import { PAY_NOTE_MAX } from '../../../shared/base/pay';
+import { chainWords, type ChainWords } from '../../../shared/base/wallet-chains';
 import type { AgentScreenProps } from './screens';
 import { SettingsError, SettingsFrame, SettingsLoading } from './settingsShared';
 import { WalletHistory, type SignedNow } from './WalletHistory';
@@ -149,14 +150,16 @@ const clock = (at: number) =>
 function VerifiedCard({
   recipient,
   onChange,
+  words,
 }: {
   recipient: PayRecipientAgent;
   onChange: () => void;
+  words: ChainWords;
 }) {
   return (
     <div className="w4-vcard" role="group" aria-label="Recipient">
       <div className="w4-vtop">
-        <span>Verified on Base</span>
+        <span>Verified on {words.on}</span>
         <button type="button" className="w4-textbtn" onClick={onChange}>
           Change
         </button>
@@ -170,13 +173,13 @@ function VerifiedCard({
           <small className="w4-mono">{shortHex(recipient.wallet)}</small>
         </span>
         <span className="w4-vid">
-          <small>Base ID</small>
+          <small>{words.id}</small>
           <b>{recipient.baseId}</b>
         </span>
       </div>
       <p className="w4-hint">
-        Checked on Base at block {group(recipient.verified.block)}, {clock(recipient.verified.at)}.{' '}
-        {POINT_IN_TIME} The Base ID decides, not the name.
+        Checked on {words.on} at block {group(recipient.verified.block)},{' '}
+        {clock(recipient.verified.at)}. {POINT_IN_TIME} The {words.id} decides, not the name.
       </p>
     </div>
   );
@@ -243,28 +246,29 @@ export function WalletPayScreen({ agent, onBack, onOpen, backLabel }: AgentScree
   const find = useCallback(
     async (text: string) => {
       const ticket = ++lookup.current;
-      const problem = recipientProblem(text);
+      const problem = recipientProblem(text, wallet?.chainId);
       if (problem) return setRecipient({ k: 'refused', message: problem });
       setRecipient({ k: 'checking' });
       try {
-        const found = await lookupRecipient(text);
+        const found = await lookupRecipient(text, wallet?.chainId);
         if (ticket !== lookup.current) return;
         if (wallet?.address && found.wallet.toLowerCase() === wallet.address.toLowerCase())
           return setRecipient({ k: 'refused', message: `That’s ${agent.name}’s own wallet.` });
         setRecipient({ k: 'found', recipient: found });
       } catch (err) {
         if (ticket !== lookup.current) return;
+        const onlyAgents = chainWords(wallet?.chainId).say(ONLY_AGENTS);
         const notAgent =
-          (err instanceof RecipientError && err.message === ONLY_AGENTS) ||
+          (err instanceof RecipientError && err.message === onlyAgents) ||
           (err instanceof ApiError && err.code === 'not_central_city_agent');
         setRecipient({
           k: 'refused',
-          message: notAgent ? ONLY_AGENTS : signingFailure(err),
+          message: notAgent ? onlyAgents : signingFailure(err),
           withdraw: notAgent,
         });
       }
     },
-    [agent.name, wallet?.address],
+    [agent.name, wallet?.address, wallet?.chainId],
   );
 
   // Look the recipient up once the owner stops typing.
@@ -283,6 +287,7 @@ export function WalletPayScreen({ agent, onBack, onOpen, backLabel }: AgentScree
     return () => window.clearTimeout(timer);
   }, [to, find]);
 
+  const words = chainWords(wallet?.chainId);
   const available = wallet ? BigInt(wallet.usdc.raw) : 0n;
   let typed: bigint | null = null;
   try {
@@ -390,10 +395,10 @@ export function WalletPayScreen({ agent, onBack, onOpen, backLabel }: AgentScree
       // shown, and the owner confirms that one: nothing is sent on a check they didn't see.
       if (found.expiresAt <= Date.now()) {
         setRecipient({ k: 'checking' });
-        const again = await lookupRecipient(to);
+        const again = await lookupRecipient(to, wallet.chainId);
         setRecipient({ k: 'found', recipient: again });
         throw new RecipientError(
-          'The check on Base was over 5 minutes old, so it ran again. Check the recipient, then Review payment.',
+          `The check on ${words.on} was over 5 minutes old, so it ran again. Check the recipient, then Review payment.`,
         );
       }
       const target = found;
@@ -410,6 +415,7 @@ export function WalletPayScreen({ agent, onBack, onOpen, backLabel }: AgentScree
       // and with lanes on, in its own lane.
       const hash = checkPayment({
         request,
+        agentChainId: wallet.chainId,
         recipient: target,
         amount: raw,
         wallet: wallet.address,
@@ -420,13 +426,13 @@ export function WalletPayScreen({ agent, onBack, onOpen, backLabel }: AgentScree
       // The screen shows the operation's own values; a summary that differs signs nothing.
       const intent = checkedIntent(request, wallet.address);
       // And Base, read by this browser: the Base ID still belongs to that wallet.
-      const block = await confirmOnBase(target);
+      const block = await confirmOnBase(target, { chainId: wallet.chainId });
       setPhase({ k: 'review', request, hash, intent, recipient: target, block, note: text });
     } catch (err) {
       // Prepared but refused here: dropped, so a corrected payment isn't held behind it.
       if (prepared) await startOver(prepared);
       const held = laneRefusal(err, { noun: 'payment', token: 'USDC' }, lanes && !wallet.deployed);
-      if (held) setError(held);
+      if (held) setError(words.say(held));
       else if (err instanceof ApiError && err.code === 'operation_pending') {
         const anchor = readAnchor(agent.id);
         if (anchor)
@@ -463,7 +469,7 @@ export function WalletPayScreen({ agent, onBack, onOpen, backLabel }: AgentScree
     const flight: { record: LaneRecord | null } = { record: null };
     try {
       // Once more, right before signing: Base still has that wallet for that Base ID.
-      await confirmOnBase(phase.recipient);
+      await confirmOnBase(phase.recipient, { chainId: wallet.chainId });
       checkSigningWindow(phase.request);
       const payment = {
         name: phase.recipient.name,
@@ -521,7 +527,8 @@ export function WalletPayScreen({ agent, onBack, onOpen, backLabel }: AgentScree
       });
     } catch (err) {
       setPassword('');
-      const refusal = laneRefusal(err, { noun: 'payment', token: 'USDC' });
+      const held = laneRefusal(err, { noun: 'payment', token: 'USDC' });
+      const refusal = held && words.say(held);
       const record = flight.record;
       if (record && signatureRefused(err)) {
         // Refused before the server took it (funds moved meanwhile, say): nothing was sent. Its
@@ -565,7 +572,7 @@ export function WalletPayScreen({ agent, onBack, onOpen, backLabel }: AgentScree
       title={phase.k === 'review' ? 'Check and pay' : 'Pay'}
       sub={
         phase.k === 'form'
-          ? `From ${agent.name}’s wallet to another Central City agent on Base.`
+          ? `From ${agent.name}’s wallet to another Central City agent on ${words.on}.`
           : undefined
       }
     >
@@ -588,19 +595,22 @@ export function WalletPayScreen({ agent, onBack, onOpen, backLabel }: AgentScree
               autoComplete="off"
               spellCheck={false}
               autoCapitalize="off"
-              placeholder="Base ID or passport link"
+              placeholder={`${words.id} or passport link`}
               value={to}
               aria-invalid={recipient.k === 'refused' || undefined}
               onChange={(event) => setTo(event.target.value)}
             />
-            {recipient.k === 'refused' ? null : <small>Central City agents on Base only.</small>}
+            {recipient.k === 'refused' ? null : (
+              <small>Central City agents on {words.on} only.</small>
+            )}
           </label>
           <div className="w4-slot" aria-live="polite">
             {recipient.k === 'checking' ? (
-              <p className="w4-hint">Checking on Base…</p>
+              <p className="w4-hint">Checking on {words.on}…</p>
             ) : recipient.k === 'found' ? (
               <VerifiedCard
                 recipient={recipient.recipient}
+                words={words}
                 onChange={() => {
                   setTo('');
                   setError('');
@@ -651,7 +661,7 @@ export function WalletPayScreen({ agent, onBack, onOpen, backLabel }: AgentScree
               value={note}
               onChange={(event) => setNote(event.target.value)}
             />
-            <small>Both owners see it. It stays in Central City, not on Base.</small>
+            <small>Both owners see it. It stays in Central City, not on {words.on}.</small>
           </label>
           <div className="ap4-group">
             <div className="ap4-row v4s-still">
@@ -682,7 +692,7 @@ export function WalletPayScreen({ agent, onBack, onOpen, backLabel }: AgentScree
               <span className="w4-unit">USDC</span>
             </div>
             <p className="w4-sub">
-              to {who(phase.recipient)} · Base ID {phase.recipient.baseId}
+              to {who(phase.recipient)} · {words.id} {phase.recipient.baseId}
             </p>
           </div>
           <p className="w4-section">What you sign</p>
@@ -698,7 +708,7 @@ export function WalletPayScreen({ agent, onBack, onOpen, backLabel }: AgentScree
               </span>
             </div>
             <div className="ap4-row v4s-still">
-              <span className="ap4-k">Base ID</span>
+              <span className="ap4-k">{words.id}</span>
               <span className="ap4-v">
                 {phase.recipient.baseId} · {who(phase.recipient)}
               </span>
@@ -729,7 +739,9 @@ export function WalletPayScreen({ agent, onBack, onOpen, backLabel }: AgentScree
             </p>
           ) : null}
           {phase.intent.deploysWallet ? (
-            <p className="w4-hint">This also sets up {agent.name}’s wallet on Base.</p>
+            <p className="w4-hint">
+              This also sets up {agent.name}’s wallet on {words.on}.
+            </p>
           ) : null}
           <ul className="w4-checks" aria-label="Checked in this browser">
             <li>
@@ -737,8 +749,8 @@ export function WalletPayScreen({ agent, onBack, onOpen, backLabel }: AgentScree
               {shortHex(phase.intent.to)}, from this wallet. Nothing else.
             </li>
             <li>
-              <b>Checked on Base from your browser.</b> Base ID {phase.recipient.baseId} belongs to
-              that wallet at block {group(phase.block)}. {POINT_IN_TIME}
+              <b>Checked on {words.on} from your browser.</b> {words.id} {phase.recipient.baseId}{' '}
+              belongs to that wallet at block {group(phase.block)}. {POINT_IN_TIME}
             </li>
           </ul>
           <p className="w4-caution">
@@ -763,7 +775,7 @@ export function WalletPayScreen({ agent, onBack, onOpen, backLabel }: AgentScree
             <>
               <PasswordField value={password} onChange={setPassword} />
               <p className="w4-hint">
-                Just before it signs, your browser checks Base once more. If anything changed,
+                Just before it signs, your browser checks {words.on} once more. If anything changed,
                 nothing is signed.
               </p>
               {errorLine}
@@ -834,7 +846,7 @@ export function WalletPayScreen({ agent, onBack, onOpen, backLabel }: AgentScree
                   <div className="ap4-row v4s-still">
                     <span className="ap4-k">To</span>
                     <span className="ap4-v">
-                      {who(phase.paid.recipient)} · Base ID {phase.paid.recipient.baseId}
+                      {who(phase.paid.recipient)} · {words.id} {phase.paid.recipient.baseId}
                     </span>
                   </div>
                   <div className="ap4-row v4s-still">
@@ -858,7 +870,7 @@ export function WalletPayScreen({ agent, onBack, onOpen, backLabel }: AgentScree
                 </div>
               ) : view.state === 'submitted' || view.state === 'included' ? (
                 <p className="w4-hint">
-                  You can leave this screen. The payment carries on, on Base.
+                  You can leave this screen. The payment carries on, on {words.on}.
                 </p>
               ) : null
             }

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { privateKeyToAccount } from 'viem/accounts';
 import type { Hex } from 'viem';
-import type { FeedService } from '../shared/feed';
+import { FEED_HOSTED_SOURCE, type FeedService } from '../shared/feed';
 import {
   FEED_PAY_IDEMPOTENCY_KEY,
   FEED_PAY_LIMITS,
@@ -977,6 +977,43 @@ test('no agent with a wallet: where to make one, and nothing to check', async ({
   );
   await expect(drawer(page).getByRole('button', { name: /^Check price/ })).toHaveCount(0);
 });
+
+for (const { name, hosted, arcRated, line } of [
+  {
+    name: 'a Central City service, Arc on: no chain named',
+    hosted: true,
+    arcRated: 200,
+    line: 'You have no agent with a wallet yet.',
+  },
+  {
+    name: 'a Central City service, Arc off: as it was',
+    hosted: true,
+    arcRated: 404,
+    line: 'You have no agent with a wallet on Base yet.',
+  },
+  {
+    name: 'an outside service, Arc on: paid on Base only, so Base',
+    hosted: false,
+    arcRated: 200,
+    line: 'You have no agent with a wallet on Base yet.',
+  },
+]) {
+  test(`no agent with a wallet, ${name}`, async ({ page }) => {
+    const services = payServices().map((service) =>
+      hosted && service.id === WHOIS
+        ? { ...service, source: { ...service.source, ...FEED_HOSTED_SOURCE } }
+        : service,
+    );
+    await setup(page, { agents: [], services });
+    await page.route('**/api/public/arc/rated**', (route) =>
+      route.fulfill({ status: arcRated, json: arcRated === 200 ? { agents: [] } : {} }),
+    );
+    await openDrawer(page);
+    await useButton(page).click();
+    const group = drawer(page).getByRole('group', { name: 'Agent that pays' });
+    await expect(group.locator('.fp-none .fd-muted')).toHaveText(line);
+  });
+}
 
 test('a double click on Pay sends one call', async ({ page }) => {
   const pay = await setup(page, { agents: [payAgent()], callDelayMs: 600 });

@@ -23,7 +23,8 @@ import {
   type Hex,
 } from 'viem';
 import { getUserOperationHash } from 'viem/account-abstraction';
-import type { Address } from '../shared/base/chains.js';
+import { BASE_MAINNET, type Address } from '../shared/base/chains.js';
+import { SPONSOR_DATA_BYTES, SPONSOR_PAYMASTERS } from '../shared/base/paymasters.js';
 
 export const CDP_URL = 'https://cdp.test/rpc/test-token-0001';
 export const FALLBACK_URL = 'https://fallback.test/rpc';
@@ -46,7 +47,8 @@ const entryPointAbi = parseAbi([
 ]);
 
 const ZERO = '0x0000000000000000000000000000000000000000' as Address;
-const PAYMASTER = '0x00000000000000000000000000000000000000fa' as Address;
+/** The pinned sponsor: on Base mainnet the runtime refuses any other (CCA-138). */
+const PAYMASTER = SPONSOR_PAYMASTERS[BASE_MAINNET]![0]!;
 const BUNDLER_EOA = '0x00000000000000000000000000000000000000b0' as Address;
 const BASE_FEE = 10_000_000n;
 const BLOCK_MS = 2000;
@@ -379,7 +381,7 @@ export function fakeBaseNode(options: FakeNodeOptions) {
       }
       case 'pm_getPaymasterStubData':
       case 'pm_getPaymasterData':
-        return { paymasterAndData: `${PAYMASTER}${'00'.repeat(64)}` };
+        return { paymasterAndData: `${PAYMASTER}${'00'.repeat(SPONSOR_DATA_BYTES - 20)}` };
       case 'eth_estimateUserOperationGas':
         return {
           callGasLimit: '0x30000',

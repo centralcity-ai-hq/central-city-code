@@ -42,6 +42,9 @@ const PUBLIC_REPOS = new Set([
   // Public install sources that are not code repositories on Downtown: the published Gemini CLI
   // extension (gemini extensions install needs its own repository root).
   'centralcity-ai-hq/gemini-cli-extension',
+  // Third-party source the Central City Security Audit names as reviewed: our paymaster is Coinbase's
+  // unmodified VerifyingPaymaster, linked at the release it was deployed from.
+  'coinbase/verifying-paymaster',
 ]);
 
 const out = mkdtempSync(join(tmpdir(), 'cc-public-docs-'));
@@ -289,6 +292,31 @@ test('the rendered pages match the reviewed snapshot', () => {
   assert.deepEqual(committed.sort(), [...expected.keys()].sort(), `snapshot files differ: ${hint}`);
   for (const [file, text] of expected)
     assert.equal(readFileSync(join(dir, file), 'utf8'), text, `${file} changed: ${hint}`);
+});
+
+test('protocol fee docs say what the totals are and what the facilitator and routers really hold', () => {
+  const page = readFileSync(join(out, 'docs/protocol-fees.md'), 'utf8');
+  assert.match(page, /protocol-wide on-chain router events/);
+  assert.match(page, /self-dealing/);
+  assert.match(page, /same owner/);
+  assert.match(page, /never receives USDC from\s+settlements/);
+  for (const doc of ['docs/protocol/FEES.md', 'docs/protocol/DEFILLAMA_ADAPTER.md'])
+    assert.match(read(doc), /protocol-wide on-chain router events/, doc);
+  // The facilitator holds dust like any address: the claim is about settlements only.
+  for (const doc of [
+    'README.md',
+    'public/downtown.md',
+    'docs/PROTOCOL_FEES.md',
+    'docs/FEED_PAY.md',
+    'docs/ARCHITECTURE.md',
+    'docs/base/ARCHITECTURE.md',
+    'docs/protocol/FEES.md',
+    'docs/protocol/LIVE.md',
+    'docs/protocol/FEE_ROUTER_3.md',
+    'docs/protocol/DEFILLAMA_ADAPTER.md',
+  ])
+    assert.doesNotMatch(read(doc), /never holds USDC/, doc);
+  assert.doesNotMatch(read('docs/protocol/FEE_ROUTER_3.md'), /ownerless, never holds a balance\./);
 });
 
 test('Markdown pages are served as text/markdown; /docs links to them and works without JavaScript', () => {

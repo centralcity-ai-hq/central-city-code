@@ -27,7 +27,10 @@ import {
   ethAmountText,
   fullHistory,
   checkOwnWallet,
+  isArcNetwork,
   networkProblem,
+  NOT_ON_ARC_YET,
+  notOnArcYet,
   walletNetwork,
   type WalletNetwork,
   isSelfTransfer,
@@ -50,7 +53,10 @@ import { KeyReveal } from '../../base/wallet/visual/KeyReveal';
 import { Odometer } from '../../base/wallet/visual/Odometer';
 import type { AgentScreenProps } from './screens';
 import { SettingsEmpty, SettingsError, SettingsFrame, SettingsLoading } from './settingsShared';
+import { arcEnabled } from '../../explorer/chain';
+import { choseArc, rememberedChain } from '../../base/chosenChain';
 import { BASE_MAINNET } from '../../../shared/base/chains';
+import { chainWords } from '../../../shared/base/wallet-chains';
 import { WALLET_CHAIN_ID } from '../../../shared/base/wallet-network';
 import { AgentPayments } from './AgentPayments';
 import { IncomingPayments } from './IncomingPayments';
@@ -85,7 +91,10 @@ const ServiceCalls = lazy(() =>
 const MIN_PASSWORD = 12;
 const TEST_NETWORK = 'Test network · no real money';
 /** The network line of a checked network: the test network says so; Base itself doesn't. */
-const networkOf = (network: WalletNetwork) => (network.testnet ? TEST_NETWORK : 'Base');
+const networkOf = (network: WalletNetwork) =>
+  isArcNetwork(network) ? network.network : network.testnet ? TEST_NETWORK : 'Base';
+/** The chain's short name in sentences: "Arc" for both Arc networks, "Base" otherwise. */
+const chainOf = (network: WalletNetwork) => (isArcNetwork(network) ? 'Arc' : 'Base');
 /** The unlocked backup key is hidden again after this long without a key press or tap. */
 export const IDLE_LOCK_MS = 5 * 60_000;
 
@@ -97,8 +106,14 @@ type Step =
   | { k: 'finish' }
   | { k: 'backup'; privateKey: Hex }
   | { k: 'confirm'; privateKey: Hex; groups: [number, number] }
-  | { k: 'create' }
-  | { k: 'chain' }
+  /** `arcOn`: the server has Arc on, so the chain this wallet will be on isn't named. */
+  | { k: 'create'; arcOn: boolean }
+  /** The owner chose Arc: no wallet is made here, the Arc registration makes it. */
+  | { k: 'arc-register' }
+  /** Arc is offered and no chain is known for this agent: asked before any wallet is made. */
+  | { k: 'choose-chain' }
+  /** `on`: the chain that didn't answer. */
+  | { k: 'chain'; on: string }
   /** Registered on Base before wallets: its Base ID is in a wallet another key owns. */
   | { k: 'elsewhere'; address: string; owner: string }
   | {
@@ -112,9 +127,11 @@ type Step =
     };
 
 const failure = (error: unknown) =>
-  error instanceof VaultCryptoError || error instanceof ApiError || error instanceof Error
-    ? error.message
-    : 'Something went wrong. Try again.';
+  notOnArcYet(error)
+    ? NOT_ON_ARC_YET
+    : error instanceof VaultCryptoError || error instanceof ApiError || error instanceof Error
+      ? error.message
+      : 'Something went wrong. Try again.';
 
 /** Unlocked, yet this browser still holds no key for the person signed in: nothing is shown. */
 const NOT_HELD_HERE =
@@ -212,7 +229,7 @@ function KeySetup({
     } catch (err) {
       if (session.current !== started) return onStale();
       // Set up meanwhile (another tab, or a lock mid-way): unlock it to finish.
-      if (err instanceof ApiError && err.status === 409) return onStale();
+      if (err instanceof ApiError && err.status === 409 && !notOnArcYet(err)) return onStale();
       setError(failure(err));
     } finally {
       setBusy(false);
@@ -293,7 +310,10 @@ function KeySetup({
             onChange={(event) => setPassword(event.target.value)}
           />
           {step.k === 'setup' ? (
-            <small>At least {MIN_PASSWORD} characters. Central City never sees it.</small>
+            <small>
+              At least {MIN_PASSWORD} characters, not a common password or your account name.
+              Central City never sees it.
+            </small>
           ) : null}
         </label>
         {step.k === 'setup' ? (
@@ -425,7 +445,7 @@ function WalletView_({
   const current = usdcAmountText(wallet.usdc);
   const limitRow = useLimitRow(agentId);
   // Rate only from a Central City agent on Base itself (a final Base ID and a passport).
-  const rater = useRater(agentId);
+  const rater = useRater(agentId, wallet.chainId);
   const [scrub, setScrub] = useState<{ at: number; balance: number; label: string | null } | null>(
     null,
   );
@@ -474,9 +494,10 @@ function WalletView_({
             </span>
           ) : (
             <>
-              <span>{eth(wallet.eth.display)} ETH</span>
+              {/* On Arc, gas is paid in USDC: there is no ETH to show. */}
+              {isArcNetwork(network) ? null : <span>{eth(wallet.eth.display)} ETH</span>}
               <span className="w4-read">
-                {wallet.stale ? 'Last read from Base' : 'Read from Base'} · block{' '}
+                {wallet.stale ? 'Last read from' : 'Read from'} {chainOf(network)} · block{' '}
                 {wallet.readAtBlock.toLocaleString('en-US')} · {ago(now - wallet.readAt)}
               </span>
             </>
@@ -506,13 +527,14 @@ function WalletView_({
           <p className="w4-hint">No transfers in the last 24 hours.</p>
         ) : history ? (
           <p className="w4-hint">
-            Read from Base since {since} only, so the last 24 hours aren’t complete yet.
+            Read from {chainOf(network)} since {since} only, so the last 24 hours aren’t complete
+            yet.
           </p>
         ) : null}
       </div>
       {wallet.stale ? (
         <p className="w4-caution" role="status">
-          <b>Base isn’t answering right now.</b> This is the last balance read.
+          <b>{chainOf(network)} isn’t answering right now.</b> This is the last balance read.
         </p>
       ) : null}
       <div className="ap4-actions">
@@ -576,9 +598,20 @@ function WalletView_({
             <span className="ap4-k">
               Address
               <span className="w4-row-sub w4-mono">
-                {shortAddress(wallet.address)} · Base network only
+                {shortAddress(wallet.address)} · {chainOf(network)} network only
               </span>
             </span>
+            {isArcNetwork(network) ? (
+              <a
+                className="w4-textbtn"
+                href={`${network.explorerUrl}/address/${wallet.address}`}
+                target="_blank"
+                rel="noreferrer"
+                data-k="explorer"
+              >
+                Explorer
+              </a>
+            ) : null}
             <CopyButton text={wallet.address} />
           </div>
         ) : wallet.address ? (
@@ -628,8 +661,8 @@ function WalletView_({
             <p className="w4-hint">No transfers seen since {since}.</p>
           )}
           <p className="w4-hint">
-            Amounts in USDC. {full ? 'The line and the list are' : 'The list is'} read from Base
-            transfers to and from this address.
+            Amounts in USDC. {full ? 'The line and the list are' : 'The list is'} read from{' '}
+            {chainWords(wallet.chainId).on} transfers to and from this address.
           </p>
         </>
       ) : null}
@@ -702,8 +735,18 @@ export function WalletScreen({ agent, onBack, onOpen, backLabel }: AgentScreenPr
       const vault = await readVault();
       if (!vault.exists) return setStep({ k: 'setup' });
       if (vault.backupConfirmedAt === null) return setStep({ k: 'finish' });
-      if (read.kind === 'none') return setStep({ k: 'create' });
-      if (read.kind === 'chain_unavailable') return setStep({ k: 'chain' });
+      // An agent going to Arc gets no wallet here: its registration on Arc creates the Arc wallet
+      // (a wallet made here would be on Base, and Base would then be its chain).
+      if (read.kind === 'none') {
+        if (choseArc(agent.id)) return setStep({ k: 'arc-register' });
+        const arcOn = await arcEnabled();
+        // Arc is offered and this tab doesn't know a choice (closed since, or never asked): the
+        // chain is asked first, so a wallet is never made on Base by not having been asked.
+        if (arcOn && rememberedChain(agent.id) === undefined) return setStep({ k: 'choose-chain' });
+        return setStep({ k: 'create', arcOn });
+      }
+      if (read.kind === 'chain_unavailable')
+        return setStep({ k: 'chain', on: chainWords(read.chainId).on });
       // Only the two exact networks: anything else shows no wallet, address or QR.
       const network = walletNetwork(read.wallet);
       if (!network) return setStep({ k: 'error', message: networkProblem(read.wallet) });
@@ -758,6 +801,11 @@ export function WalletScreen({ agent, onBack, onOpen, backLabel }: AgentScreenPr
     setStep((current) =>
       current.k === 'wallet' ? { ...current, wallet: { ...current.wallet, stale: true } } : current,
     );
+  }
+  /** The key is ready: the wallet, unless its chain is Arc's or not known yet (load shows which). */
+  async function afterKey() {
+    const unasked = rememberedChain(agent.id) === undefined && (await arcEnabled());
+    return choseArc(agent.id) || unasked ? load() : create();
   }
   async function create() {
     setBusy(true);
@@ -850,14 +898,44 @@ export function WalletScreen({ agent, onBack, onOpen, backLabel }: AgentScreenPr
         </div>
       ) : step.k === 'chain' ? (
         <SettingsError
-          message="Base isn’t answering right now, so the balance can’t be read."
+          message={`${step.on} isn’t answering right now, so the balance can’t be read.`}
           onRetry={() => void load()}
         />
+      ) : step.k === 'arc-register' ? (
+        <div className="w4-steps" data-k="arc-register">
+          <p className="w4-lead">
+            Your wallet key is ready. Registering {agent.name} on Arc creates its Arc wallet.
+          </p>
+          <button
+            type="button"
+            className="ap4-btn w4-wide"
+            // Back to the Arc screen it came from; opened from the home, the Arc screen itself.
+            onClick={backLabel && backLabel !== agent.name ? onBack : () => onOpen('base')}
+          >
+            {`Register ${agent.name} on Arc`}
+          </button>
+        </div>
+      ) : step.k === 'choose-chain' ? (
+        <div className="w4-steps" data-k="choose-chain">
+          <p className="w4-lead">
+            Your wallet key is ready. Choose where {agent.name} registers: its wallet is made there.
+          </p>
+          <button
+            type="button"
+            className="ap4-btn w4-wide"
+            onClick={backLabel && backLabel !== agent.name ? onBack : () => onOpen('base')}
+          >
+            Choose Base or Arc
+          </button>
+        </div>
       ) : step.k === 'create' ? (
         <div className="w4-steps">
           <p className="w4-lead">
-            Your wallet key is ready. Create {agent.name}’s wallet{' '}
-            {WALLET_CHAIN_ID === BASE_MAINNET ? 'on Base' : 'on the test network'}.
+            Your wallet key is ready. Create {agent.name}’s wallet
+            {step.arcOn
+              ? ''
+              : ` ${WALLET_CHAIN_ID === BASE_MAINNET ? 'on Base' : 'on the test network'}`}
+            .
           </p>
           <button
             type="button"
@@ -881,10 +959,10 @@ export function WalletScreen({ agent, onBack, onOpen, backLabel }: AgentScreenPr
             against={step.against}
             onChangePassword={() => openAside('password')}
           />
-          <IncomingPayments agentId={agent.id} name={agent.name} />
-          <AgentPayments agentId={agent.id} name={agent.name} />
+          <IncomingPayments agentId={agent.id} name={agent.name} chainId={step.wallet.chainId} />
+          <AgentPayments agentId={agent.id} name={agent.name} chainId={step.wallet.chainId} />
           <Suspense fallback={null}>
-            <ServiceCalls agentId={agent.id} name={agent.name} />
+            <ServiceCalls agentId={agent.id} name={agent.name} chainId={step.wallet.chainId} />
           </Suspense>
         </>
       ) : (
@@ -900,7 +978,7 @@ export function WalletScreen({ agent, onBack, onOpen, backLabel }: AgentScreenPr
           }}
           onBusy={setKeyBusy}
           onStale={() => void load()}
-          onDone={() => void create()}
+          onDone={() => void afterKey()}
           onForgot={() => openAside('restore')}
         />
       )}
@@ -925,6 +1003,9 @@ export function WalletAddScreen({ agent, onBack, backLabel }: AgentScreenProps) 
   const [error, setError] = useState('');
   const [restoring, setRestoring] = useState(false);
   const [note, setNote] = useState('');
+  // The agent's chain before any key is unlocked: the wallet GET's own network, else the chain
+  // this browser remembers for the agent (chosenChain.ts). Arc agents never read "Base".
+  const [onArc, setOnArc] = useState(() => choseArc(agent.id));
   const load = useCallback(
     async (unlocked = false) => {
       setRead({ k: 'loading' });
@@ -934,6 +1015,7 @@ export function WalletAddScreen({ agent, onBack, backLabel }: AgentScreenProps) 
         // Only the two exact networks: anything else shows no address, QR or copy.
         const network = walletNetwork(wallet.wallet);
         if (!network) return setRead({ k: 'error', message: networkProblem(wallet.wallet) });
+        setOnArc(isArcNetwork(network));
         // The address to send funds to: only the one this person's key makes for this agent,
         // checked against that key as this browser held it.
         const vault = await readVault();
@@ -986,7 +1068,7 @@ export function WalletAddScreen({ agent, onBack, backLabel }: AgentScreenProps) 
       backLabel={backLabel ?? 'Wallet'}
       onBack={onBack}
       title="Add funds"
-      sub={`Send USDC to ${agent.name}’s address on the Base network.`}
+      sub={`Send USDC to ${agent.name}’s address on the ${read.k === 'ready' ? chainOf(read.network) : onArc ? 'Arc' : 'Base'} network.`}
     >
       {note ? (
         <p className="w4-done" role="status" data-k="key-note">
@@ -1047,11 +1129,34 @@ export function WalletAddScreen({ agent, onBack, backLabel }: AgentScreenProps) 
             <span className="w4-mono">{read.address}</span>
             <CopyButton text={read.address} />
           </div>
-          <p className="w4-caution">
-            <b>Base network only.</b> USDC or ETH sent on any other network, such as Ethereum or
-            Arbitrum, doesn’t arrive and can’t be recovered.
-          </p>
-          {read.network.testnet ? (
+          {isArcNetwork(read.network) ? (
+            <>
+              <p className="w4-caution">
+                <b>Arc network only.</b> USDC sent on any other network, such as Base or Ethereum,
+                doesn’t arrive and can’t be recovered.
+              </p>
+              <p className="w4-hint">
+                {read.network.testnet
+                  ? `${TEST_NETWORK}: use Arc Testnet USDC.`
+                  : 'This is real USDC on Arc. A payment can’t be undone.'}{' '}
+                Gas is paid in USDC.{' '}
+                <a
+                  className="w4-textbtn"
+                  href={`${read.network.explorerUrl}/address/${read.address}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Explorer
+                </a>
+              </p>
+            </>
+          ) : (
+            <p className="w4-caution">
+              <b>Base network only.</b> USDC or ETH sent on any other network, such as Ethereum or
+              Arbitrum, doesn’t arrive and can’t be recovered.
+            </p>
+          )}
+          {isArcNetwork(read.network) ? null : read.network.testnet ? (
             <p className="w4-hint">{TEST_NETWORK}: use Base Sepolia test USDC.</p>
           ) : (
             <p className="w4-hint">This is real USDC on Base. A payment can’t be undone.</p>

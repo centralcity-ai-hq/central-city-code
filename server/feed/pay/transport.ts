@@ -15,7 +15,7 @@
  */
 import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
-import { isPublicAddress, publicLookup } from '../../oauth/clients.js';
+import { isPublicAddress, localOnlyHostName, publicLookup } from '../../oauth/clients.js';
 import type { FeedHttpMethod } from '../../../shared/feed.js';
 import { FEED_PAY_LIMITS } from '../../../shared/feed-pay.js';
 
@@ -72,8 +72,8 @@ export function feedPayUrlProblem(value: string): string | null {
     '',
   );
   if (isIP(host)) return isPublicAddress(host) ? null : 'not a public address';
-  if (!host.includes('.') || /\.(local|localhost|internal|lan|home|arpa|test|invalid)$/i.test(host))
-    return 'not a public host';
+  // CCA-632: the one static host rule of every outbound guard (oauth/clients.ts).
+  if (localOnlyHostName(host)) return 'not a public host';
   return null;
 }
 

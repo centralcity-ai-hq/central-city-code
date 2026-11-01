@@ -1,5 +1,6 @@
 import type { Transaction as Tx } from '../database.js';
 import { partsContainCredential } from '../rooms/contract.js';
+import { emailAt } from '../wake/mentions.js';
 
 /**
  * What Elric may post (docs/ELRIC.md):
@@ -20,13 +21,18 @@ export function containsCredential(text: string): boolean {
 /**
  * "@Name" → "Name" wherever the room's mention parser would read a mention (not e-mail). The
  * text is NFKC-normalised first, the same folding the parser applies, so look-alikes such as
- * "＠" (U+FF20) and "﹫" (U+FE6B) become "@" and are stripped too.
+ * "＠" (U+FF20) and "﹫" (U+FE6B) become "@" and are stripped too. Each "@" is judged by the
+ * parser's own rule (wake/mentions.ts emailAt) on the character before it lower-cased, as the
+ * parser sees it: "İ" lower-cases to "i" plus a combining dot, which is not a letter, so "İ@Name"
+ * is a mention there and is stripped here. One pass over the result so far, so "@@Name" goes too.
  */
 export function stripMentions(text: string): string {
-  let out = text.normalize('NFKC');
-  for (let before = ''; before !== out;) {
-    before = out;
-    out = out.replace(/(^|[^\p{L}\p{N}_.+-])@+/gu, '$1');
+  let out = '';
+  let last = '';
+  for (const char of text.normalize('NFKC')) {
+    if (char === '@' && !emailAt(last.toLowerCase().slice(-1))) continue;
+    out += char;
+    last = char;
   }
   return out;
 }

@@ -9,8 +9,18 @@ export interface CityLimits {
    * overshoot it slightly). Per-address sign-up budgets are `registrationsPerWindow`.
    */
   operators: number;
-  /** Account registrations per client address (IPv6 /64) per 15-minute window. */
+  /**
+   * Account registrations per client address (IPv6 /64) per 15-minute window. The IPv6 /56 and
+   * /48 around it allow 2 and 4 times this (rate-limit.ts hitAddressScopes).
+   */
   registrationsPerWindow: number;
+  /**
+   * Account registrations per hour across the deployment: 0 (the default) means no ceiling. A
+   * positive value is an emergency brake, refused like a rate limit (429).
+   */
+  registrationsPerHourGlobal: number;
+  /** Registrations per hour across the deployment at which `signup.volume` is logged. */
+  registrationsAlertPerHour: number;
   /**
    * API requests per client address (IPv6 /64) per minute, across all /api routes. The e2e test
    * server raises it (every spec shares one address); deployments keep the default.
@@ -156,6 +166,8 @@ export interface CityLimits {
 export const DEFAULT_LIMITS: Readonly<CityLimits> = Object.freeze({
   operators: 0,
   registrationsPerWindow: 10,
+  registrationsPerHourGlobal: 0,
+  registrationsAlertPerHour: 1000,
   apiRequestsPerMinute: 600,
   assistantToolCallsPerMinute: 120,
   agentsPerWorkspace: 100,
@@ -231,6 +243,8 @@ export const DEFAULT_LIMITS: Readonly<CityLimits> = Object.freeze({
 export const LIMIT_ENV: Readonly<Record<keyof CityLimits, string>> = Object.freeze({
   operators: 'CITY_LIMIT_OPERATORS',
   registrationsPerWindow: 'CITY_LIMIT_REGISTRATIONS_PER_WINDOW',
+  registrationsPerHourGlobal: 'CITY_LIMIT_REGISTRATIONS_PER_HOUR_GLOBAL',
+  registrationsAlertPerHour: 'CITY_LIMIT_REGISTRATIONS_ALERT_PER_HOUR',
   apiRequestsPerMinute: 'CITY_LIMIT_API_REQUESTS_PER_MINUTE',
   assistantToolCallsPerMinute: 'CITY_LIMIT_ASSISTANT_TOOL_CALLS_PER_MINUTE',
   agentsPerWorkspace: 'CITY_LIMIT_AGENTS_PER_WORKSPACE',
@@ -296,8 +310,9 @@ export const LIMIT_ENV: Readonly<Record<keyof CityLimits, string>> = Object.free
   feedPayCallsInFlightPerWorkspace: 'CITY_LIMIT_FEED_PAY_CALLS_IN_FLIGHT_PER_WORKSPACE',
 });
 
-/** `operators` accepts 0 (no ceiling); every other limit is at least 1. */
-const minimum = (key: keyof CityLimits) => (key === 'operators' ? 0 : 1);
+/** `operators` and `registrationsPerHourGlobal` accept 0 (no ceiling); every other limit is at least 1. */
+const minimum = (key: keyof CityLimits) =>
+  key === 'operators' || key === 'registrationsPerHourGlobal' ? 0 : 1;
 
 /** Defaults, then environment overrides, then explicit overrides. Invalid values fail startup. */
 export function loadLimits(

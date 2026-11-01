@@ -10,6 +10,7 @@ import { dayOf, resetAt, ELRIC_CONFIG } from '../server/elric/config.js';
 import { ELRIC_WAKING_TEXT, elricLimitNotice } from '../server/elric/service.js';
 import { iso } from '../server/model.js';
 import { listMigrations, runMigrations } from '../server/migrations.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 /*
  * The signed-in polls (GET /api/snapshot, GET /api/elric) and the cold start read the database in
@@ -194,7 +195,7 @@ test('expired sessions are found by the expiry index, not a scan of every sessio
   assert.doesNotMatch(plan, /Seq Scan on sessions/);
 });
 
-test('hosted polls: snapshot in 2 reads plus rate limits, Elric status in 2, start-up in 2', async (t) => {
+test('hosted polls: snapshot in 2 reads plus rate limits, Elric status in 2, start-up in 3', async (t) => {
   process.env.CITY_RATE_LIMIT_KEY ??= 'synthetic-signed-in-queries-root-secret';
   const pglite = await PGlite.create('memory://', { extensions: { btree_gin } });
   const { db, counter } = counting(pglite as unknown as Database);
@@ -215,10 +216,12 @@ test('hosted polls: snapshot in 2 reads plus rate limits, Elric status in 2, sta
   const app = await createApp({ ...options, database: db });
   t.after(() => app.close());
   await app.ready();
-  // The schema check, then the agents-as-rows refusal (server/app.ts): one index probe.
+  // The schema check, the agents-as-rows refusal (server/app.ts): one index probe, and the key
+  // role check (CCA-714), which also covers provisioned paymaster keys while the mode is off.
   assert.deepEqual(counter.statements, [
     'SELECT version,name,checksum FROM schema_migrations',
     "SELECT EXISTS (SELECT 1 FROM workspace_storage WHERE mode = 'rows') AS found",
+    'SELECT purpose, address FROM own_paymaster_keys',
   ]);
 
   const headers = {
@@ -235,7 +238,7 @@ test('hosted polls: snapshot in 2 reads plus rate limits, Elric status in 2, sta
     remoteAddress: '203.0.113.9',
   });
   assert.equal(registered.statusCode, 201, registered.body);
-  const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(registered.cookies);
   const created = await app.inject({
     method: 'POST',
     url: '/api/agents',

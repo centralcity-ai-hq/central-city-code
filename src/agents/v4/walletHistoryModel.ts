@@ -1,4 +1,5 @@
 import { formatUnits } from 'viem';
+import { chainView } from '../../../shared/chains';
 import { usdcText } from '../../base/wallet/limits';
 import {
   sentStatus,
@@ -63,13 +64,22 @@ export const stateOf = (line: Pick<Line, 'payment' | 'view'>) =>
 /** Kept here, its signature's answer unclear, and the server still awaits it. */
 export const NOT_SENT_YET = 'Not sent yet';
 
-/** Basescan, and only Basescan, for an operation in a block. */
-export const explorerOf = (view: Pick<WithdrawalView, 'blockNumber' | 'explorerUrl'>) =>
-  view.blockNumber !== null &&
-  typeof view.explorerUrl === 'string' &&
-  /^https:\/\/(sepolia\.)?basescan\.org\/tx\/0x[0-9a-fA-F]{64}$/.test(view.explorerUrl)
+/**
+ * The explorer, and only that, for an operation in a block: Basescan, or for an operation on an Arc
+ * network that network's own explorer from this build's list (shared/chains.ts).
+ */
+export const explorerOf = (
+  view: Pick<WithdrawalView, 'blockNumber' | 'explorerUrl'> &
+    Partial<Pick<WithdrawalView, 'chainId'>>,
+) => {
+  if (view.blockNumber === null || typeof view.explorerUrl !== 'string') return null;
+  const arc = view.chainId === undefined ? null : chainView(view.chainId);
+  const tx = view.explorerUrl.match(/^(https:\/\/[^/]+)\/tx\/0x[0-9a-fA-F]{64}$/);
+  if (arc?.slug === 'arc') return tx?.[1] === arc.explorerUrl ? view.explorerUrl : null;
+  return /^https:\/\/(sepolia\.)?basescan\.org\/tx\/0x[0-9a-fA-F]{64}$/.test(view.explorerUrl)
     ? view.explorerUrl
     : null;
+};
 
 /**
  * A line, as read now: this browser's record binds only while its hash is the server's; the names

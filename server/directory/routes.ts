@@ -3,7 +3,9 @@
  * contract the browser and the AI tools use).
  *
  *   GET   /api/public/directory?q=&min_rating=&sort=&before=   DirectoryPage. Public (signed out
- *         too), rate limited per address like the explorer, cached as briefly as its list.
+ *         too), rate limited per address like the explorer (a text search per IPv6 /56 too),
+ *         cached as briefly as its list, bounded in the database like the explorer's search.
+ *         A search that cannot finish in time answers 503 busy.
  *   GET   /api/agents/:agentId/directory                       DirectorySettings
  *   PATCH /api/agents/:agentId/directory                       {listed?, invitations?} ->
  *         DirectorySettings. listed=true needs a final Base ID and a public card (409
@@ -16,11 +18,24 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { BASE_MAINNET, type BaseChainId } from '../../shared/base/chains.js';
-import { DIRECTORY_PATHS, readDirectoryQuery } from '../../shared/directory.js';
-import { clientAddressKey } from '../rate-limit.js';
+import {
+  canonicalDirectorySearch,
+  DIRECTORY_PATHS,
+  directoryQueryRefusal,
+  readDirectoryQuery,
+} from '../../shared/directory.js';
+import { registeredChainName } from '../base/identity/short-links.js';
+import { clientAddressKey, clientAddressPrefixes } from '../rate-limit.js';
 import type { Database } from '../database.js';
-import { ON_BASE_LIVE, ON_BASE_LIVE_EDGE, ON_BASE_RATE } from '../base/explorer/routes.js';
-import { createDirectoryStore } from './store.js';
+import {
+  ON_BASE_LIVE,
+  ON_BASE_LIVE_EDGE,
+  ON_BASE_RATE,
+  ON_BASE_SEARCH_SITE_RATE,
+  SEARCH_TIMEOUT_MS,
+  busyOnTimeout,
+} from '../base/explorer/routes.js';
+import { createDirectoryStore, offsetOf } from './store.js';
 
 export { DIRECTORY_PATHS };
 
@@ -69,16 +84,74 @@ export function registerDirectoryRoutes(app: FastifyInstance, deps: DirectoryRou
     return parsed.data.agentId;
   }
 
+  // Each search in one READ ONLY transaction with the explorer's SEARCH_TIMEOUT_MS; identical
+  // searches in flight share one read (nothing is kept after it: an owner's switch shows at once).
+  type Page = Awaited<ReturnType<typeof store.search>>;
+  const inflight = new Map<string, Promise<Page>>();
+  function search(query: ReturnType<typeof readDirectoryQuery>): Promise<Page> {
+    const key = JSON.stringify(query);
+    const shared = inflight.get(key);
+    if (shared) return shared;
+    const page = deps.db
+      .transaction(async (tx) => {
+        await tx.query('SET TRANSACTION READ ONLY');
+        await tx.query(`SET LOCAL statement_timeout = ${SEARCH_TIMEOUT_MS}`);
+        return createDirectoryStore(tx, {
+          chainId: deps.chainId ?? BASE_MAINNET,
+          uriOrigin: deps.uriOrigin,
+        }).search(query);
+      })
+      .finally(() => inflight.delete(key));
+    inflight.set(key, page);
+    return page;
+  }
+
   app.get(DIRECTORY_PATHS.search, async (request, reply) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    // The edge cache keys by the whole URL: a key or value the search does not take (a before it
+    // did not write among them) is refused before the limiter and the database, so a made-up one
+    // cannot skip the cache.
+    const refusal =
+      directoryQueryRefusal(query) ??
+      (query.before && offsetOf(query.before as string) === 0
+        ? 'before must be the next of an earlier page.'
+        : null);
+    if (refusal)
+      return reply
+        .code(400)
+        .header('Cache-Control', 'no-store')
+        .send({ error: refusal, code: 'invalid_request' });
+    // Any other spelling of the same search (another key order, spaces around q, an empty value, a
+    // stray '&' or '?') is sent on to its one canonical URL.
+    const canonical = canonicalDirectorySearch(query);
+    const mark = request.url.indexOf('?');
+    if ((mark < 0 ? '' : request.url.slice(mark)) !== canonical)
+      return reply
+        .code(307)
+        .header('Cache-Control', 'no-store')
+        .header('Location', `${mark < 0 ? request.url : request.url.slice(0, mark)}${canonical}`)
+        .send();
     await deps.limit?.(
       `ip:directory:${clientAddressKey(request.ip)}`,
       ON_BASE_RATE.max,
       ON_BASE_RATE.windowMs,
     );
-    // Never refused: anything unreadable in the query falls back to its default.
-    const page = await store.search(
-      readDirectoryQuery((request.query ?? {}) as Record<string, unknown>),
-    );
+    const parsed = readDirectoryQuery(query);
+    const { source, site } = clientAddressPrefixes(request.ip);
+    if (parsed.q && source.endsWith('::/64'))
+      await deps.limit?.(
+        `ip:directory-search:${site}`,
+        ON_BASE_SEARCH_SITE_RATE.max,
+        ON_BASE_SEARCH_SITE_RATE.windowMs,
+      );
+    // A search that cannot finish in time is busy (503); any other failure stays a 500.
+    const page = await search(parsed).catch(busyOnTimeout);
+    if (!page)
+      return reply
+        .code(503)
+        .header('Cache-Control', 'no-store')
+        .header('Retry-After', '10')
+        .send({ error: 'Search is busy right now. Try again shortly.', code: 'busy' });
     // As short-lived as the explorer's list: listing, scores and cards change within seconds.
     return reply
       .header('Cache-Control', ON_BASE_LIVE)
@@ -101,12 +174,16 @@ export function registerDirectoryRoutes(app: FastifyInstance, deps: DirectoryRou
         error: "Send {listed: true|false} and/or {invitations: 'ask'|'never'}.",
         code: 'invalid_request',
       });
-    if (body.data.listed === true && !(await store.eligible(agentId)))
+    if (body.data.listed === true && !(await store.eligible(agentId))) {
+      const chainName = await registeredChainName(deps.db, agentId);
       return reply.code(409).send({
         error:
-          'Only a Central City Base agent with a final Base ID and a public card can be listed.',
+          chainName === 'Base'
+            ? 'Only a Central City Base agent with a final Base ID and a public card can be listed.'
+            : `The directory lists agents on Base for now, and this agent is on ${chainName}.`,
         code: 'not_base_agent',
       });
+    }
     return reply.header('Cache-Control', 'no-store').send(await store.save(agentId, body.data));
   });
 }

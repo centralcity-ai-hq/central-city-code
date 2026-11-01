@@ -645,3 +645,22 @@ test('persistent restart and isolated recovery preserve workflow history and old
   );
   await rm(root, { recursive: true, force: true });
 });
+
+test('pausing an agent leaves a workflow with no running job as it is', async (t) => {
+  const f = await fixture(t);
+  const first = await f.create();
+  await finishHosted(f.app);
+  assert.equal(
+    (await detail(f.app, f.owner.cookie, first.workflow.id)).workflow.status,
+    'awaiting_review',
+  );
+  const agent = `/api/agents/${f.researcher.agent.id}`;
+  assert.equal((await api(f.app, f.owner.cookie, `${agent}/pause`, {})).statusCode, 200);
+  assert.equal(
+    (await detail(f.app, f.owner.cookie, first.workflow.id)).workflow.status,
+    'awaiting_review',
+  );
+  assert.equal((await api(f.app, f.owner.cookie, `${agent}/resume`, {})).statusCode, 200);
+  const checked = await api(f.app, f.owner.cookie, `/api/workflows/${first.workflow.id}/check`, {});
+  assert.equal(checked.statusCode, 200, checked.body);
+});

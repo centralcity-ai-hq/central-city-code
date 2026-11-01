@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runCanary } from '../scripts/canary/index.mjs';
+import { readFileSync } from 'node:fs';
 const config = {
   origin: 'https://centralcity.ai',
   cookie: 'cc_session=secret',
@@ -215,15 +216,31 @@ test('alert accepts SSE receipt and rejects mismatched or missing receipts', asy
 
 import { loginCanary } from '../scripts/canary/login.mjs';
 test('fresh login extracts only the session cookie and fails closed', async () => {
+  const login = (...setCookie: string[]) =>
+    loginCanary({ name: 'canary-test', password: 'fixture' }, async () => {
+      const headers = new Headers();
+      for (const value of setCookie) headers.append('set-cookie', value);
+      return new Response('{}', { headers });
+    });
+  // A hosted sign-in sets the __Host- name; the pair goes back under the name it arrived with.
   assert.equal(
-    await loginCanary(
-      { name: 'canary-test', password: 'fixture' },
-      async () =>
-        new Response('{}', { headers: { 'set-cookie': 'cc_session=example; HttpOnly; Secure' } }),
+    await login(
+      '__Host-cc_device=device; Path=/; HttpOnly; Secure',
+      '__Host-cc_session=example; Path=/; HttpOnly; Secure',
     ),
-    'cc_session=example',
+    '__Host-cc_session=example',
   );
-  for (const response of [new Response('{}'), new Response('private failure', { status: 401 })])
+  assert.equal(
+    await login('cc_session=; Path=/; Max-Age=0', '__Host-cc_session=example; Path=/; Secure'),
+    '__Host-cc_session=example',
+  );
+  // The name used before the prefix still works.
+  assert.equal(await login('cc_session=example; HttpOnly; Secure'), 'cc_session=example');
+  for (const response of [
+    new Response('{}'),
+    new Response('{}', { headers: { 'set-cookie': '__Host-cc_session=; Path=/; Secure' } }),
+    new Response('private failure', { status: 401 }),
+  ])
     await assert.rejects(
       loginCanary({ name: 'canary-test', password: 'fixture' }, async () => response),
       /Canary login failed/,
@@ -249,4 +266,45 @@ test('password mode refuses another origin before requesting a session', async (
     /canonical/,
   );
   assert.equal(calls, 0);
+});
+
+test('the canary workflow runs only from main, with its secrets in the canary environment (CCA-405)', () => {
+  const workflow = readFileSync(
+    new URL('../.github/workflows/canary.yml', import.meta.url),
+    'utf8',
+  ).replaceAll('\r\n', '\n');
+  const triggers = workflow.split('\non:\n')[1]!.split('\npermissions:')[0]!;
+  // deployment_status runs take the workflow file from the deployed commit, any branch included.
+  assert.doesNotMatch(triggers, /deployment_status|pull_request|push:/);
+  assert.match(triggers, /^ {2}schedule:$/m);
+  assert.match(triggers, /^ {2}workflow_dispatch:$/m);
+  const jobs = workflow.split('\njobs:\n')[1]!;
+  assert.deepEqual(
+    [...jobs.matchAll(/^ {2}([a-z-]+):$/gm)].map((match) => match[1]),
+    ['probe'],
+  );
+  assert.match(jobs, /^ {4}environment: canary$/m);
+  assert.match(
+    jobs,
+    /^ {4}if: vars\.CANARY_ENABLED == 'true' && github\.ref == 'refs\/heads\/main'$/m,
+  );
+  assert.match(jobs, /^ {10}ref: main$/m);
+  for (const secret of workflow.matchAll(/secrets\.([A-Z_]+)/g))
+    assert.ok(['CANARY_PASSWORD', 'CANARY_ALERT_TOKEN'].includes(secret[1]!), secret[1]);
+});
+
+test('docs/CANARY.md states the real schedule and run status (CCA-530)', () => {
+  const doc = readFileSync(new URL('../docs/CANARY.md', import.meta.url), 'utf8');
+  const workflow = readFileSync(
+    new URL('../.github/workflows/canary.yml', import.meta.url),
+    'utf8',
+  );
+  const cron = /cron: '([^']+)'/.exec(workflow)![1]!;
+  assert.equal(cron, '0 */2 * * *');
+  assert.ok(doc.includes(`\`cron: '${cron}'\``), 'the doc quotes the workflow schedule');
+  assert.match(doc, /every two hours/);
+  assert.doesNotMatch(doc, /every 30 minutes|not yet been enabled|Production deployment events/);
+  assert.match(doc, /^## Status$/m);
+  assert.match(doc, /Enabled \(CANARY_ENABLED=true\) since 2026-10-08/);
+  assert.match(doc, /independent uptime check/);
 });

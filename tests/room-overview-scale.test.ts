@@ -5,6 +5,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { createApp } from '../server/app.js';
 import { ROOM_LIMITS } from '../server/rooms/contract.js';
 import { ROOM_COUNTS_SCAN_SQL } from '../server/rooms/overview.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 /**
  * Room overview, members page, "Needs you" and posting in a room of ROOM_OVERVIEW_MEMBERS members
@@ -85,7 +86,7 @@ test(`room overview in a room of ${MEMBERS} members and 60 tasks: exact counts, 
     remoteAddress: '203.0.113.11',
   });
   assert.equal(registered.statusCode, 201, registered.body);
-  const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(registered.cookies);
   const hostAgent = await call('POST', '/api/agents', cookie, {
     name: 'Overview host agent',
     capability: 'research',

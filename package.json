@@ -1,6 +1,6 @@
 {
   "name": "central-city",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -15,7 +15,8 @@
     "dev": "vite --host 127.0.0.1",
     "dev:server": "tsx watch server/index.ts",
     "start": "tsx server/index.ts",
-    "build": "tsc --noEmit && vite build && node scripts/build-api.mjs",
+    "smoke:bundle": "node scripts/build-api.mjs && node scripts/bundle-request-smoke.mjs",
+    "build": "tsc --noEmit && vite build && node scripts/build-api.mjs && node scripts/sbom.mjs dist/sbom.cdx.json",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test --test-concurrency=1 --no-wasm-code-gc tests/*.test.ts",
     "test:files": "tsx --test --test-concurrency=1 --no-wasm-code-gc",
@@ -27,6 +28,7 @@
     "assistant:mcp": "tsx mcp/cli.ts",
     "recovery": "tsx scripts/recovery.ts",
     "unclaimed:admin": "tsx scripts/unclaimed-admin.ts",
+    "account:erase": "tsx scripts/account-erase.ts",
     "load:local": "tsx scripts/load/run.ts --target=local",
     "eval:elric": "tsx scripts/elric-reply-eval.ts",
     "format": "prettier --write src server api shared connector mcp protocol tests e2e scripts *.json *.ts index.html",
@@ -40,7 +42,8 @@
     "@fastify/static": "10.1.5",
     "@modelcontextprotocol/server": "2.3.1",
     "@noble/hashes": "1.8.0",
-    "fastify": "5.12.5",
+    "@vercel/blob": "2.8.2",
+    "fastify": "5.12.6",
     "highlight.js": "11.12.0",
     "lowlight": "3.3.0",
     "lucide-react": "1.53.0",
@@ -51,8 +54,9 @@
     "qrcode-generator": "1.4.4",
     "react": "19.3.0",
     "react-dom": "19.3.0",
+    "unpdf": "1.8.1",
     "viem": "2.57.4",
-    "zod": "4.6.5"
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "2.3.1",

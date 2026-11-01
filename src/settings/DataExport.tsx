@@ -8,6 +8,7 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { SettingsSectionHead } from './SettingsLayout';
+import { EXPORT_EXCLUDED } from '../../shared/data-export';
 import type { WorkspaceExport } from '../../shared/types';
 import { api, ApiError, selectedWorkspaceId } from '../api';
 import { PRIVACY_EMAIL } from '../trust/common';
@@ -160,10 +161,15 @@ export function DataExport({ operatorId }: DataExportProps) {
         ) : null}
       </div>
       <div className="account-data-card">
-        <h3>Messages and other data requests</h3>
+        <h3>Not in this file</h3>
+        <ul className="account-data-excluded">
+          {EXPORT_EXCLUDED.map((item) => (
+            <li key={item.key}>{item.label}</li>
+          ))}
+        </ul>
         <p>
-          Rooms and messages aren’t included in this file. For those records or an account deletion
-          request, contact our privacy team from a channel we can verify.
+          For a copy of any of these, or an account deletion request, contact our privacy team from
+          a channel we can verify.
         </p>
         <div className="account-data-actions">
           <a className="account-data-link" href={`mailto:${PRIVACY_EMAIL}`}>

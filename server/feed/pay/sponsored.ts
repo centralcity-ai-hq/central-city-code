@@ -24,6 +24,8 @@ import { randomBytes } from 'node:crypto';
 import { getAddress, keccak256, stringToHex, type Hex } from 'viem';
 import type { Database, Transaction } from '../../database.js';
 import type { FeedPayInputs } from '../../../shared/feed-pay.js';
+import { BASE_MAINNET } from '../../../shared/base/chains.js';
+import { chainParams } from '../../base/chain/chain-params.js';
 import type { FeedPayOp } from '../../base/chain/feed-pay-chain.js';
 import { feeRef } from '../../protocol/fees/fee-call.js';
 import { ROUTER3_VALIDITY_S, type BatchAuthorize, type Router3FacilitatorPort } from './router3.js';
@@ -104,7 +106,11 @@ export interface SponsoredCallView {
 export class SponsoredRefusal extends Error {
   constructor(
     readonly code:
-      'credit_unavailable' | 'agent_not_found' | 'idempotency_conflict' | 'unavailable',
+      | 'credit_unavailable'
+      | 'agent_not_found'
+      | 'idempotency_conflict'
+      | 'unavailable'
+      | 'other_chain',
     readonly reason: SponsorRefusal | null = null,
   ) {
     super(code === 'credit_unavailable' ? `No sponsored purchase: ${reason}.` : code);
@@ -114,7 +120,7 @@ export class SponsoredRefusal extends Error {
       ? 402
       : this.code === 'agent_not_found'
         ? 404
-        : this.code === 'idempotency_conflict'
+        : this.code === 'idempotency_conflict' || this.code === 'other_chain'
           ? 409
           : 503;
   }
@@ -151,6 +157,8 @@ export interface SponsoredDeps {
   env: Record<string, string | undefined>;
   now: () => number;
   chainId: number;
+  /** The chain an agent lives on (agentChainOf); absent: this chain, as with Arc off. */
+  agentChain?: (agentId: string) => Promise<number>;
   credits: SponsorCredits;
   /** The engine's hosted-offer helpers (engine.hostedForSponsor / engine.runHostedOffer). */
   hosted: {
@@ -175,6 +183,18 @@ export interface SponsoredDeps {
   };
   /** The sponsor's signer and its own facilitator; null while not configured (nothing is paid). */
   pay: () => Promise<SponsorPay | null>;
+  /**
+   * The pay engine's own checks before a router-3 signature (engine router3PreSign): reserved
+   * payee, screening of the payer, payee and fee recipient, router 3's readiness probe and its
+   * treasury against the one fixed in code. Null: clear; 'hold': ask again later; else refused.
+   */
+  preSign: (input: {
+    intentId: string;
+    payer: string;
+    payee: string;
+    grossRaw: bigint;
+    feeRaw: bigint;
+  }) => Promise<string | null>;
   /** A hosted offer's Feed service id (the offer store's serviceIdOf), for the credit view. */
   serviceIdOf?: (offerId: string) => string;
   log?: (line: string) => void;
@@ -191,18 +211,21 @@ export const sponsoredSendsViaFacilitator = (env: Record<string, string | undefi
  * With CITY_SFP_SEND_VIA_FACILITATOR the sponsored gas comes from the engine's facilitator EOA, so
  * first buys pause well above the facilitator's own floor (0.0005 ETH), leaving the rest to the
  * engine's paid calls (review S2). Wei, within 0.001 to 1 ETH; default (also when malformed or out
- * of bounds) 0.02 ETH.
+ * of bounds) 0.02 ETH. Another chain has its own setting, default and bounds, in its own gas asset
+ * (chain-params.ts): on Arc 5 USDC of gas, within 2 to 50, in native wei (18 decimals).
  */
-export const SFP_SENDER_MIN_ETH_SETTING = 'CITY_SFP_SENDER_MIN_ETH_WEI';
-export const SFP_SENDER_MIN_ETH_DEFAULT = 20_000_000_000_000_000n;
-const SFP_SENDER_MIN_ETH_BOUNDS = [1_000_000_000_000_000n, 1_000_000_000_000_000_000n] as const;
-export function sponsoredSenderMinEthWei(env: Record<string, string | undefined>): bigint {
-  const raw = env[SFP_SENDER_MIN_ETH_SETTING]?.trim();
-  if (!raw || !/^[1-9][0-9]{0,19}$/.test(raw)) return SFP_SENDER_MIN_ETH_DEFAULT;
+export const SFP_SENDER_MIN_ETH_SETTING = chainParams(BASE_MAINNET).settings.sponsoredSenderMin;
+export const SFP_SENDER_MIN_ETH_DEFAULT = chainParams(BASE_MAINNET).sponsoredSenderMinWei.fallback;
+export function sponsoredSenderMinEthWei(
+  env: Record<string, string | undefined>,
+  chainId: number = BASE_MAINNET,
+): bigint {
+  const params = chainParams(chainId);
+  const { fallback, min, max } = params.sponsoredSenderMinWei;
+  const raw = env[params.settings.sponsoredSenderMin]?.trim();
+  if (!raw || !/^[1-9][0-9]{0,19}$/.test(raw)) return fallback;
   const wei = BigInt(raw);
-  return wei >= SFP_SENDER_MIN_ETH_BOUNDS[0] && wei <= SFP_SENDER_MIN_ETH_BOUNDS[1]
-    ? wei
-    : SFP_SENDER_MIN_ETH_DEFAULT;
+  return wei >= min && wei <= max ? wei : fallback;
 }
 
 /**
@@ -260,6 +283,13 @@ const BALANCE_TTL_MS = 10_000;
 const STUCK_RESERVED_MS = 2 * ROUTER3_VALIDITY_S * 1000;
 /** Calls one cron pass steps at once (review S5). */
 const WORK_PARALLEL = 8;
+/**
+ * The stranded-credit sweep (review MPR-4): how far back (by the call's updated_at, its failure
+ * time) one pass looks for a failed call whose credit is still reserved, and how many it releases.
+ * Bounded so the every-minute pass stays one short range read of the updated_at index.
+ */
+const SWEEP_WINDOW_MS = 3_600_000;
+const SWEEP_MAX = 100;
 const COLUMNS = `call_id, owner_account_id, request_hash, operator_id, agent_id, service_id,
   offer_id, offer_kind, offer_version, pay_to, gross_raw::text AS gross_raw,
   fee_raw::text AS fee_raw, input, state, failure_code, op_key, valid_before::text AS valid_before,
@@ -278,9 +308,13 @@ export function createSponsoredCalls(deps: SponsoredDeps) {
     ).rows[0] ?? null;
 
   /** Moves a call from `from` to its next state (compare-and-set on state and updated_at). */
-  const move = async (row: Row, set: Record<string, unknown>): Promise<boolean> => {
+  const move = async (
+    row: Row,
+    set: Record<string, unknown>,
+    tx: Transaction = deps.db,
+  ): Promise<boolean> => {
     const keys = Object.keys(set);
-    const { rows } = await deps.db.query(
+    const { rows } = await tx.query(
       `UPDATE feed_pay_sponsored_calls SET ${keys.map((k, i) => `${k} = $${i + 3}`).join(', ')},
          updated_at = $${keys.length + 3}
        WHERE call_id = $1 AND updated_at = $2 RETURNING call_id`,
@@ -293,6 +327,19 @@ export function createSponsoredCalls(deps: SponsoredDeps) {
     );
     return rows.length > 0;
   };
+
+  /**
+   * Ends a call that never paid and gives its credit back in ONE transaction (review MPR-4): both
+   * commit or neither does, so a failed release write can never leave the credit reserved for a
+   * call that is already final. On a rollback the call keeps its open state and the next step
+   * decides again (its key is already fenced or its legs already proven unused, so that is safe).
+   */
+  const failAndRelease = (row: Row, set: Record<string, unknown>): Promise<boolean> =>
+    deps.db.transaction(async (tx) => {
+      if (!(await move(row, { state: 'failed', ...set }, tx))) return false;
+      await deps.credits.release(row.call_id, tx);
+      return true;
+    });
 
   const view = (row: Row, payer: string | null): SponsoredCallView => ({
     callId: row.call_id,
@@ -444,6 +491,10 @@ export function createSponsoredCalls(deps: SponsoredDeps) {
     );
     const agent = agents[0];
     if (!agent) throw new SponsoredRefusal('agent_not_found');
+    // Credits and sponsored rows are one chain's (the table names none): an agent that lives on
+    // another chain has no first purchase here, also with an old wallet row on this one.
+    if (deps.agentChain && (await deps.agentChain(input.agentId)) !== deps.chainId)
+      throw new SponsoredRefusal('other_chain');
     // The hosted offer as call() would sell it (its own refusals: not found, not payable, input).
     const offer = await deps.hosted.forSponsor(input.serviceId, input.inputs);
     if (offer.split.gross > input.maxAmountRaw)
@@ -460,65 +511,69 @@ export function createSponsoredCalls(deps: SponsoredDeps) {
     );
     const seller = sellers[0];
     if (!seller) throw new SponsoredRefusal('credit_unavailable', 'self_dealing');
+    const callId = newId();
+    const request = {
+      agentId: input.agentId,
+      chainId: deps.chainId,
+      operatorId: agent.operator_id,
+      ownerAccountId: accountId,
+      seller: {
+        operatorId: seller.operator_id,
+        ownerAccountId: seller.owner_account_id,
+        agentId: seller.agent_id,
+      },
+      offerId: offer.offerId,
+      priceRaw: offer.split.gross,
+      callId,
+    };
+    // The credit's database-only checks first (review MPR-4: verified and onboarded owner, agent
+    // eligible, credit unused, owner's day), so a request that can never hold a credit makes no
+    // Base read. reserve() runs them all again under its lock below.
+    const pre = await deps.credits.precheck(request);
+    if (!pre.ok) throw new SponsoredRefusal('credit_unavailable', pre.reason);
     // The sponsor must be able to pay this one on top of everything still in flight. Low ETH or
     // USDC pauses first buys (retryable, nothing reserved), never fails one halfway.
     const read = await sponsorBalance();
     if (!read) throw new SponsoredRefusal('unavailable');
-    const callId = newId();
     const at = deps.now();
     let conflict = false;
     // The credit and the call row commit together or not at all (review C2/S2), under the sponsor
     // lock where the balance check runs too (S6).
-    const credit = await deps.credits.reserve(
-      {
-        agentId: input.agentId,
-        chainId: deps.chainId,
-        operatorId: agent.operator_id,
-        ownerAccountId: accountId,
-        seller: {
-          operatorId: seller.operator_id,
-          ownerAccountId: seller.owner_account_id,
-          agentId: seller.agent_id,
-        },
-        offerId: offer.offerId,
-        priceRaw: offer.split.gross,
-        callId,
-      },
-      async (tx) => {
-        if (!(await fits(tx, read, offer.split.gross))) return 'paused';
-        // ON CONFLICT: a concurrent request with the same key won; this one writes nothing (and
-        // so takes no credit) and answers that call below.
-        const { rows } = await tx.query(
-          `INSERT INTO feed_pay_sponsored_calls (call_id, owner_account_id, idempotency_key,
+    const credit = await deps.credits.reserve(request, async (tx, kind) => {
+      if (!(await fits(tx, read, offer.split.gross))) return 'paused';
+      // ON CONFLICT: a concurrent request with the same key won; this one writes nothing (and
+      // so takes no credit) and answers that call below.
+      const { rows } = await tx.query(
+        `INSERT INTO feed_pay_sponsored_calls (call_id, owner_account_id, idempotency_key,
              request_hash, operator_id, agent_id, service_id, offer_id, offer_kind, offer_version,
-             pay_to, gross_raw, fee_raw, input, state, op_key, created_at, updated_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'reserved',$15,$16,$16)
+             pay_to, gross_raw, fee_raw, input, state, op_key, created_at, updated_at, fleet)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'reserved',$15,$16,$16,$17)
            ON CONFLICT (owner_account_id, idempotency_key) DO NOTHING RETURNING call_id`,
-          [
-            callId,
-            accountId,
-            input.idempotencyKey,
-            hash,
-            agent.operator_id,
-            input.agentId,
-            input.serviceId,
-            offer.offerId,
-            offer.kind,
-            offer.version,
-            getAddress(offer.payTo),
-            offer.split.gross.toString(10),
-            offer.split.fee.toString(10),
-            offer.input,
-            `${SPONSORED_KEY_PREFIX}${callId}`,
-            at,
-          ],
-        );
-        if (!rows.length) {
-          conflict = true;
-          return 'used';
-        }
-      },
-    );
+        [
+          callId,
+          accountId,
+          input.idempotencyKey,
+          hash,
+          agent.operator_id,
+          input.agentId,
+          input.serviceId,
+          offer.offerId,
+          offer.kind,
+          offer.version,
+          getAddress(offer.payTo),
+          offer.split.gross.toString(10),
+          offer.split.fee.toString(10),
+          offer.input,
+          `${SPONSORED_KEY_PREFIX}${callId}`,
+          at,
+          kind.fleet,
+        ],
+      );
+      if (!rows.length) {
+        conflict = true;
+        return 'used';
+      }
+    });
     if (conflict) {
       const again = (
         await deps.db.query<Row>(
@@ -558,6 +613,21 @@ export function createSponsoredCalls(deps: SponsoredDeps) {
     if (!pay) return false;
     const lane = await laneOf(pay, row.op_key);
     const gross = BigInt(row.gross_raw);
+    // Before the first signature, the engine's own pre-send checks (fail closed). A pair already
+    // stored is handed over unchanged: refusing it now would not unsign it (it is followed).
+    if (!(await pay.signer.stored(row.op_key))) {
+      const refusal = await deps
+        .preSign({
+          intentId: `sfp:${row.call_id}`,
+          payer: pay.signer.address,
+          payee: row.pay_to,
+          grossRaw: gross,
+          feeRaw: BigInt(row.fee_raw),
+        })
+        .catch(() => 'hold' as const);
+      if (refusal === 'hold') return false;
+      if (refusal) return refuseUnsigned(row, pay, refusal);
+    }
     const legs = await pay.signer.router3Legs({
       key: row.op_key,
       payee: getAddress(row.pay_to) as `0x${string}`,
@@ -592,6 +662,19 @@ export function createSponsoredCalls(deps: SponsoredDeps) {
       state: 'sent',
       valid_before: Number(legs.seller.authorization.validBefore),
     });
+  }
+
+  /**
+   * A reservation refused before anything was signed: its key is fenced at the facilitator (so
+   * nothing can ever be sent under it), then the call fails and its credit comes back.
+   */
+  async function refuseUnsigned(row: Row, pay: SponsorPay, code: string): Promise<boolean> {
+    const lane = await laneOf(pay, row.op_key);
+    if (!(await lane.facilitator.endUnsent(row.op_key, intentOf(row)).catch(() => false)))
+      return false;
+    if (!(await failAndRelease(row, { failure_code: code }))) return false;
+    log(JSON.stringify({ event: 'sfp.call_failed', callId: row.call_id, code }));
+    return true;
   }
 
   /** Follows a sent call on Base: paid once included without a revert; failed once it can't pay. */
@@ -648,14 +731,12 @@ export function createSponsoredCalls(deps: SponsoredDeps) {
     // Base itself, at a SAFE block at or past validBefore, shows BOTH legs' nonces unused.
     if (!op.neverSent && !(await unpaidForGood(pay, row))) return false;
     if (
-      !(await move(row, {
-        state: 'failed',
+      !(await failAndRelease(row, {
         failure_code: op.errorCode ?? 'not_paid',
         tx_hash: op.txHash,
       }))
     )
       return false;
-    await deps.credits.release(row.call_id);
     log(JSON.stringify({ event: 'sfp.call_failed', callId: row.call_id, code: op.errorCode }));
     return true;
   }
@@ -740,15 +821,15 @@ export function createSponsoredCalls(deps: SponsoredDeps) {
     }
     if (!(await lane.facilitator.endUnsent(row.op_key, intentOf(row)).catch(() => false)))
       return false;
-    if (!(await move(row, { state: 'failed', failure_code: 'not_sent' }))) return false;
-    await deps.credits.release(row.call_id);
+    if (!(await failAndRelease(row, { failure_code: 'not_sent' }))) return false;
     log(JSON.stringify({ event: 'sfp.call_failed', callId: row.call_id, code: 'not_sent' }));
     return true;
   }
 
   /**
    * The cron's pass (also the stale-reservation sweep, room #304): steps the open calls, oldest
-   * first, sends what the sponsored batch lanes hold, and keeps to its budget.
+   * first, gives back credits stranded on failed calls (sweepStranded), sends what the sponsored
+   * batch lanes hold, and keeps to its budget.
    */
   async function work(limits: { maxCalls: number; budgetMs: number }): Promise<number> {
     const started = deps.now();
@@ -768,6 +849,7 @@ export function createSponsoredCalls(deps: SponsoredDeps) {
       }
     };
     await Promise.all(Array.from({ length: WORK_PARALLEL }, runner));
+    if (deps.now() - started <= limits.budgetMs) moved += await sweepStranded(started);
     const pay = await deps.pay().catch(() => null);
     // Every lane where sponsored members may wait (the sending one, and a previous one still
     // holding some), each only for its sponsored batch group.
@@ -780,6 +862,42 @@ export function createSponsoredCalls(deps: SponsoredDeps) {
           .flushBatches?.(authorize, false, started + limits.budgetMs, lane.batch.group)
           .catch(() => {});
     return moved;
+  }
+
+  /**
+   * Gives back credits still 'reserved' for a call that already ended 'failed' (a release that
+   * did not commit before mark-failed and release were one transaction). A failed call is final
+   * and never paid, so its credit is owed back; each release is a compare-and-set by call id on a
+   * still-failed call and a still-reserved credit, so a used credit, or one whose call is paid or
+   * still open, is never touched, and running it twice changes nothing.
+   */
+  async function sweepStranded(at: number): Promise<number> {
+    const { rows } = await deps.db
+      .query<{ call_id: string }>(
+        `SELECT s.call_id FROM feed_pay_sponsored_calls s
+         JOIN feed_pay_sponsor_credits c ON c.call_id = s.call_id
+         WHERE s.updated_at >= $1 AND s.state = 'failed' AND c.state = 'reserved'
+         ORDER BY s.updated_at LIMIT $2`,
+        [at - SWEEP_WINDOW_MS, SWEEP_MAX],
+      )
+      .catch(() => ({ rows: [] as { call_id: string }[] }));
+    let released = 0;
+    for (const { call_id } of rows) {
+      const ok = await deps.db
+        .transaction(async (tx) => {
+          const still = await tx.query(
+            `SELECT 1 FROM feed_pay_sponsored_calls WHERE call_id = $1 AND state = 'failed'
+             FOR UPDATE`,
+            [call_id],
+          );
+          return still.rows.length > 0 && (await deps.credits.release(call_id, tx));
+        })
+        .catch(() => false);
+      if (!ok) continue;
+      released += 1;
+      log(JSON.stringify({ event: 'sfp.credit_swept', callId: call_id }));
+    }
+    return released;
   }
 
   /** The owner's own sponsored call, or null. */

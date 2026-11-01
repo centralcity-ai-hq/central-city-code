@@ -8,6 +8,8 @@ import { stageOf, type RegistrationRow } from '../../base/baseRegistrationModel'
 import { NOT_SAME_AGENT, passportUri, RateTargetError, type Stars } from '../../base/wallet/rate';
 import type { WithdrawalView } from '../../base/wallet/withdraw';
 import { BASE_MAINNET } from '../../../shared/base/chains';
+import { chainWords, walletChain } from '../../../shared/base/wallet-chains';
+import { chainFamily } from '../../../shared/chains';
 import { passportCode } from './baseScreenModel';
 
 /** The rater as Base knows it: its final Base ID and its passport number. */
@@ -22,10 +24,18 @@ const SHORT = /^[0-9A-Za-z]{6}$/;
 /**
  * The agent may rate only once it is itself a Central City agent on Base: a final Base ID, and a
  * passport at centralcity.ai/a/<passport number>. Anything less (still registering, an older card
- * address, another network) and there is no Rate at all.
+ * address, another network) and there is no Rate at all. An agent on Arc rates the same way, from
+ * its registration on that Arc network (`chainId`, from its wallet view); Arc mainnet has no Rate
+ * until it is recorded (shared/base/wallet-chains.ts).
  */
-export function raterOf(rows: readonly RegistrationRow[] | null | undefined): Rater | null {
-  const row = rows?.find((one) => one?.chainId === BASE_MAINNET);
+export function raterOf(
+  rows: readonly RegistrationRow[] | null | undefined,
+  chainId?: number,
+): Rater | null {
+  const chain = chainFamily(chainId ?? BASE_MAINNET) === 'arc' ? walletChain(chainId) : null;
+  if (chain && !chain.manager) return null;
+  const on = chain ? chain.chainId : BASE_MAINNET;
+  const row = rows?.find((one) => one?.chainId === on);
   if (!row || stageOf(row) !== 'confirmed') return null;
   if (row.finality != null && row.finality !== 'final') return null;
   const baseId = row.erc8004AgentId;
@@ -80,23 +90,25 @@ export const ratingsOffError = (error: unknown) =>
 
 /**
  * What the owner reads for a refusal, in plain words. `rater` is the rating agent's name;
- * `otherwise` words anything else (the wallet screens' signingFailure).
+ * `otherwise` words anything else (the wallet screens' signingFailure); `chainId` is the agent's.
  */
 export function rateFailure(
   error: unknown,
   rater: string,
   otherwise: (error: unknown) => string,
+  chainId?: number,
 ): string {
-  if (error instanceof RateTargetError && error.message === NOT_SAME_AGENT) return MISMATCH;
+  const { say } = chainWords(chainId);
+  if (error instanceof RateTargetError && error.message === NOT_SAME_AGENT) return say(MISMATCH);
   if (error instanceof ApiError)
     switch (error.code) {
       case 'lookup_mismatch':
-        return MISMATCH;
+        return say(MISMATCH);
       case 'lookup_expired':
       case 'lookup_changed':
         return DETAILS_CHANGED;
       case 'not_rateable':
-        return NOT_RATEABLE;
+        return say(NOT_RATEABLE);
       case 'same_person':
         return samePerson(rater);
       case 'rating_limit': {

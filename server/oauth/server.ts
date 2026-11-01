@@ -46,7 +46,7 @@ import {
   signingKeys,
   verifyAssertion,
 } from './client-auth.js';
-import { clientAddressKey } from '../rate-limit.js';
+import { clientAddressKey, hitAddressScopes } from '../rate-limit.js';
 
 export const OAUTH_LIFETIMES = {
   accessTokenMs: 60 * 60_000,
@@ -64,14 +64,46 @@ export const OAUTH_LIFETIMES = {
  */
 export const CLIENT_REGISTRATION_LOCK_KEY = '7161617788847809394';
 /**
- * Global table bounds. Unauthenticated state never refuses service at these bounds: the oldest
- * unauthenticated pending requests and never-used registrations are evicted instead.
+ * The advisory lock every authorization-page load takes around the pending-request bound, so
+ * the sweep, count, eviction and insert are one step across instances ("cc-oapnd").
+ */
+export const PENDING_REQUEST_LOCK_KEY = '7161617788848598628';
+/**
+ * Global table bounds. At these bounds the oldest unauthenticated pending requests (once they are
+ * `pendingMinDwellMs` old) and never-used registrations are evicted to make room; only when
+ * nothing may be evicted is a new one refused (a signed-out page load with 429, a client with
+ * 503). A page load that carries a session is never refused: it is bounded per owner instead.
  */
 export const OAUTH_CAPS = {
+  /**
+   * Dynamically registered clients not in use. A client in use (a token family, a code, or an
+   * open request an owner has signed into) is never evicted and not counted: each of those needs
+   * an account and is bounded per owner, so accounts cannot fill this bound for everyone.
+   */
   clients: 1000,
+  /**
+   * A registration is never evicted younger than this (twice the pending request lifetime), so
+   * the person who just registered a client can still sign in on it. A signed-out page load does
+   * not keep a client: anyone could keep reloading one.
+   */
+  clientMinDwellMs: 20 * 60_000,
   registrationsPerAddressPerDay: 50,
-  pending: 500,
-  /** Authorization-page loads per address (/64 for IPv6) in 15 minutes. */
+  /**
+   * Open signed-out requests. Rows are small and every address scope is held to its page-load
+   * budget (rows expire before the 15-minute window does), so filling this takes many scopes.
+   */
+  pending: 50_000,
+  /** Open requests per signed-in owner; beyond this the owner's own oldest ones make room. */
+  pendingPerOwner: 20,
+  /**
+   * A pending request is never evicted younger than this, so page loads by others cannot push
+   * out a request someone is still signing in on (it expires after OAUTH_LIFETIMES.pendingMs).
+   */
+  pendingMinDwellMs: 5 * 60_000,
+  /**
+   * Authorization-page loads per address in 15 minutes: per IPv4 address or IPv6 /64, and twice
+   * and four times that per IPv6 /56 and /48 (rate-limit.ts hitAddressScopes).
+   */
   authorizePerAddress: 60,
   cleanupBatch: 500,
   /**
@@ -103,7 +135,7 @@ export interface OAuthDependencies {
   authenticate(values: unknown, address: string, request: FastifyRequest): Promise<Operator>;
   /** Sets the known-device cookie after a successful sign-in. */
   rememberDevice(reply: FastifyReply, operatorId: string): void;
-  /** Starts a browser session (the `cc_session` cookie) for an owner who just signed in. */
+  /** Starts a browser session (server/session-cookie.ts) for an owner who just signed in. */
   startSession(reply: FastifyReply, operatorId: string): Promise<void>;
   hosted?: HostedConfig;
   secureCookies: boolean;
@@ -190,6 +222,18 @@ function familyOfRefreshToken(token: string): string | null {
   if (!/^ccr_[A-Za-z0-9_-]{43}$/.test(token) || bytes.length !== 32) return null;
   const hex = bytes.subarray(0, 16).toString('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+/**
+ * Keeps an owner's open requests to OAUTH_CAPS.pendingPerOwner: beyond that their own oldest
+ * ones (never `keep`, the request being shown now) make room.
+ */
+async function trimPendingForOwner(tx: Tx, operatorId: string, keep: string) {
+  await tx.query(
+    `DELETE FROM oauth_pending WHERE operator_id=$1 AND id<>$2 AND id NOT IN (
+       SELECT id FROM oauth_pending WHERE operator_id=$1 AND id<>$2
+       ORDER BY created_at DESC, id DESC LIMIT $3)`,
+    [operatorId, keep, OAUTH_CAPS.pendingPerOwner - 1],
+  );
 }
 function sameSecret(value: unknown, expectedHash: string): boolean {
   if (typeof value !== 'string' || value.length > 256) return false;
@@ -319,6 +363,20 @@ export async function registerOAuthRoutes(
 ): Promise<OAuthServer> {
   const fetchMetadata = d.fetchClientMetadata ?? fetchClientMetadataDocument;
   const origin = (request: FastifyRequest) => requestOrigin(request, d.hosted);
+  /** One budget per address scope (the source, and the IPv6 /56 and /48); a refusal is a 429. */
+  const limitAddress = (head: string, ip: string, max: number, windowMs: number) =>
+    hitAddressScopes(
+      {
+        hit: async (key, limit, window) => {
+          await d.limit(key, limit, window);
+          return { allowed: true, retryAfterMs: 0 };
+        },
+      },
+      head,
+      ip,
+      max,
+      windowMs,
+    );
 
   function cors(reply: FastifyReply): void {
     reply
@@ -383,10 +441,10 @@ export async function registerOAuthRoutes(
   app.post('/oauth/register', async (request, reply) => {
     cors(reply);
     origin(request);
-    const address = clientAddressKey(request.ip);
-    await d.limit(`oauth-register:${address}`, 20, 15 * 60_000);
-    await d.limit(
-      `oauth-register-day:${address}`,
+    await limitAddress('oauth-register', request.ip, 20, 15 * 60_000);
+    await limitAddress(
+      'oauth-register-day',
+      request.ip,
       OAUTH_CAPS.registrationsPerAddressPerDay,
       86_400_000,
     );
@@ -407,29 +465,41 @@ export async function registerOAuthRoutes(
       // Taken first: without it, concurrent registrations each count the table, see room and
       // insert, overrunning the bound. Under it the sweep, eviction and insert are one step.
       await tx.query('SELECT pg_advisory_xact_lock($1::bigint)', [CLIENT_REGISTRATION_LOCK_KEY]);
-      // Unused self-registrations are disposable; clients with tokens remain registered.
-      await tx.query(
-        `DELETE FROM oauth_clients c WHERE c.created_at<$1
-         AND NOT EXISTS (SELECT 1 FROM oauth_families f WHERE f.client_id=c.client_id)`,
-        [time - 86_400_000],
-      );
-      // At capacity, the oldest never-used registrations make room instead of refusing new
-      // clients, so filling the table cannot lock legitimate clients out.
-      const count = Number(
-        (await tx.query<{ count: string }>('SELECT count(*) FROM oauth_clients')).rows[0]?.count,
-      );
+      // A client is in use with a token family, a code or an open request an owner has signed
+      // into ($1 is now). One predicate for the day-old sweep and the bound, so they cannot drift.
+      const unused = `NOT EXISTS (SELECT 1 FROM oauth_families f WHERE f.client_id=c.client_id)
+        AND NOT EXISTS (SELECT 1 FROM oauth_codes o WHERE o.client_id=c.client_id)
+        AND NOT EXISTS (SELECT 1 FROM oauth_pending p WHERE p.client_id=c.client_id
+          AND p.operator_id IS NOT NULL AND p.expires_at>$1)`;
+      // Unused self-registrations older than a day are disposable; clients in use stay.
+      await tx.query(`DELETE FROM oauth_clients c WHERE ${unused} AND c.created_at<$2`, [
+        time,
+        time - 86_400_000,
+      ]);
+      // The bound counts clients not in use only (OAUTH_CAPS.clients): each in-use client needs
+      // an account and is bounded per owner, so accounts cannot pin the table for everyone. At the
+      // bound the oldest unused registrations past clientMinDwellMs make room; a younger one is
+      // kept so the person who just registered it can still sign in. Only when none may go is a
+      // registration refused.
+      const countUnused = async () =>
+        Number(
+          (
+            await tx.query<{ count: string }>(
+              `SELECT count(*) FROM oauth_clients c WHERE ${unused}`,
+              [time],
+            )
+          ).rows[0]?.count,
+        );
+      const count = await countUnused();
       if (count >= OAUTH_CAPS.clients)
         await tx.query(
           `DELETE FROM oauth_clients WHERE client_id IN (
              SELECT c.client_id FROM oauth_clients c
-             WHERE NOT EXISTS (SELECT 1 FROM oauth_families f WHERE f.client_id=c.client_id)
-               AND NOT EXISTS (SELECT 1 FROM oauth_codes o WHERE o.client_id=c.client_id)
-             ORDER BY c.created_at, c.client_id LIMIT $1)`,
-          [count - OAUTH_CAPS.clients + 1],
+             WHERE ${unused} AND c.created_at<=$3
+             ORDER BY c.created_at, c.client_id LIMIT $2)`,
+          [time, count - OAUTH_CAPS.clients + 1, time - OAUTH_CAPS.clientMinDwellMs],
         );
-      const remaining = Number(
-        (await tx.query<{ count: string }>('SELECT count(*) FROM oauth_clients')).rows[0]?.count,
-      );
+      const remaining = count >= OAUTH_CAPS.clients ? await countUnused() : count;
       if (remaining >= OAUTH_CAPS.clients)
         throw new OAuthFailure(
           503,
@@ -531,11 +601,7 @@ export async function registerOAuthRoutes(
   // ---- Authorization endpoint --------------------------------------------------------------
   app.get('/oauth/authorize', async (request, reply) => {
     const issuer = origin(request);
-    await d.limit(
-      `oauth-authorize:${clientAddressKey(request.ip)}`,
-      OAUTH_CAPS.authorizePerAddress,
-      15 * 60_000,
-    );
+    await limitAddress('oauth-authorize', request.ip, OAUTH_CAPS.authorizePerAddress, 15 * 60_000);
     const query = request.query as Record<string, unknown>;
     for (const [key, value] of Object.entries(query))
       if (typeof value !== 'string')
@@ -600,40 +666,69 @@ export async function registerOAuthRoutes(
     };
     const csrf = secret(),
       browser = secret();
-    await d.db.query('DELETE FROM oauth_pending WHERE expires_at<=$1', [time]);
-    // Unauthenticated requests never refuse service at the global bound: the oldest ones are
-    // evicted instead. Requests an owner has signed into are kept until they expire.
-    const open = Number(
-      (await d.db.query<{ count: string }>('SELECT count(*) FROM oauth_pending')).rows[0]?.count,
-    );
-    if (open >= OAUTH_CAPS.pending)
-      await d.db.query(
-        `DELETE FROM oauth_pending WHERE id IN (
-           SELECT id FROM oauth_pending WHERE operator_id IS NULL
-           ORDER BY created_at, id LIMIT $1)`,
-        [open - OAUTH_CAPS.pending + 1],
+    await d.db.transaction(async (tx) => {
+      // Taken first, as for client registration: without it, concurrent loads each count the
+      // table, see room and insert, overrunning the bound.
+      await tx.query('SELECT pg_advisory_xact_lock($1::bigint)', [PENDING_REQUEST_LOCK_KEY]);
+      await tx.query('DELETE FROM oauth_pending WHERE expires_at<=$1', [time]);
+      // At the bound the oldest signed-out requests make room, but only once they are
+      // pendingMinDwellMs old. A load that carries a session is never refused here: requests an
+      // owner has signed into are bounded per owner (trimPendingForOwner) and not counted.
+      if (!operator) {
+        const open = Number(
+          (
+            await tx.query<{ count: string }>(
+              'SELECT count(*) FROM oauth_pending WHERE operator_id IS NULL',
+            )
+          ).rows[0]?.count,
+        );
+        if (open >= OAUTH_CAPS.pending) {
+          await tx.query(
+            `DELETE FROM oauth_pending WHERE id IN (
+               SELECT id FROM oauth_pending WHERE operator_id IS NULL AND created_at<=$2
+               ORDER BY created_at, id LIMIT $1)`,
+            [open - OAUTH_CAPS.pending + 1, time - OAUTH_CAPS.pendingMinDwellMs],
+          );
+          const remaining = Number(
+            (
+              await tx.query<{ count: string }>(
+                'SELECT count(*) FROM oauth_pending WHERE operator_id IS NULL',
+              )
+            ).rows[0]?.count,
+          );
+          if (remaining >= OAUTH_CAPS.pending)
+            throw Object.assign(
+              new PageFailure(
+                429,
+                'Too many authorization requests are open right now. Try again in a few minutes.',
+              ),
+              { retryAfterMs: 60_000 },
+            );
+        }
+      }
+      await tx.query(
+        `INSERT INTO oauth_pending(id,form_hash,browser_hash,client_id,client_name,client_verified,
+         redirect_uri,code_challenge,resource,scopes,state,operator_id,created_at,expires_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14)`,
+        [
+          pending.id,
+          sha(csrf),
+          sha(browser),
+          pending.client_id,
+          pending.client_name,
+          pending.client_verified,
+          pending.redirect_uri,
+          pending.code_challenge,
+          pending.resource,
+          JSON.stringify(scopes),
+          pending.state,
+          pending.operator_id,
+          time,
+          pending.expires_at,
+        ],
       );
-    await d.db.query(
-      `INSERT INTO oauth_pending(id,form_hash,browser_hash,client_id,client_name,client_verified,
-       redirect_uri,code_challenge,resource,scopes,state,operator_id,created_at,expires_at)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14)`,
-      [
-        pending.id,
-        sha(csrf),
-        sha(browser),
-        pending.client_id,
-        pending.client_name,
-        pending.client_verified,
-        pending.redirect_uri,
-        pending.code_challenge,
-        pending.resource,
-        JSON.stringify(scopes),
-        pending.state,
-        pending.operator_id,
-        time,
-        pending.expires_at,
-      ],
-    );
+      if (operator) await trimPendingForOwner(tx, operator.id, pending.id);
+    });
     reply.setCookie(cookieName(pending.id), browser, {
       ...cookieOptions,
       maxAge: OAUTH_LIFETIMES.pendingMs / 1000,
@@ -649,11 +744,7 @@ export async function registerOAuthRoutes(
 
   app.post('/oauth/authorize', async (request, reply) => {
     const issuer = origin(request);
-    await d.limit(
-      `oauth-authorize:${clientAddressKey(request.ip)}`,
-      OAUTH_CAPS.authorizePerAddress,
-      15 * 60_000,
-    );
+    await limitAddress('oauth-authorize', request.ip, OAUTH_CAPS.authorizePerAddress, 15 * 60_000);
     // Browser form posts carry Origin. A foreign origin is refused. `Origin: null` (sent by some
     // browsers under strict referrer policies) is accepted only when the browser also attests
     // the request is same-origin with Sec-Fetch-Site; CSRF token and flow cookie still apply.
@@ -702,7 +793,8 @@ export async function registerOAuthRoutes(
       return finish({ error: 'access_denied', error_description: 'The owner denied access.' });
     }
     if (action === 'login') {
-      await d.limit(`login:${clientAddressKey(request.ip)}`, 20, 15 * 60_000);
+      // The sign-in page's budget (app.ts limitLogin): the same keys and address scopes.
+      await limitAddress('login', request.ip, 20, 15 * 60_000);
       let operator: Operator;
       try {
         operator = await d.authenticate(
@@ -737,6 +829,7 @@ export async function registerOAuthRoutes(
         requestId,
         operator.id,
       ]);
+      await trimPendingForOwner(d.db, operator.id, requestId);
       return sendPage(
         reply,
         200,
@@ -868,6 +961,31 @@ export async function registerOAuthRoutes(
           );
       });
     }
+  }
+  /**
+   * Housekeeping after a committed token or revocation transaction. It changes other owners'
+   * workspaces, so a failure there (a lock timeout behind a long workspace transaction) is
+   * logged and skipped: the code is already consumed or the refresh token rotated, and an error
+   * would make the client retry and trip reuse detection. A grant left unreleased is found again
+   * by the next token request's cleanup; one left unretired stays active until it expires or its
+   * owner revokes it.
+   */
+  async function afterCommit(retired: readonly string[], stale: readonly string[]): Promise<void> {
+    for (const [step, run] of [
+      ['retire_idle_grants', () => retireIdleGrants(retired)],
+      ['release_stale_grants', () => releaseStaleGrants(stale)],
+    ] as const)
+      try {
+        await run();
+      } catch {
+        console.warn(
+          JSON.stringify({
+            event: 'oauth.housekeeping_failed',
+            step,
+            at: new Date(d.clock()).toISOString(),
+          }),
+        );
+      }
   }
   /**
    * Revokes, with an audit event, the owner's grants whose authorization code expired without
@@ -1171,8 +1289,7 @@ export async function registerOAuthRoutes(
           scope: row.scopes.join(' '),
         };
       });
-      await retireIdleGrants(retired);
-      await releaseStaleGrants(stale);
+      await afterCommit(retired, stale);
       if (!result)
         throw new OAuthFailure(
           400,
@@ -1292,8 +1409,7 @@ export async function registerOAuthRoutes(
           scope: row.scopes.join(' '),
         };
       });
-      await retireIdleGrants(retired);
-      await releaseStaleGrants(stale);
+      await afterCommit(retired, stale);
       if (!result)
         throw new OAuthFailure(
           400,
@@ -1360,7 +1476,7 @@ export async function registerOAuthRoutes(
             [sha(token), time],
           );
       });
-      await retireIdleGrants(retired);
+      await afterCommit(retired, []);
     }
     return reply.code(200).send();
   });

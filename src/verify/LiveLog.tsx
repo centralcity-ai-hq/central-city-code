@@ -40,12 +40,9 @@ import './verify.css';
  */
 
 type Leaf = { idx: number; leaf_hash: string; day: string };
-type Page = { tree_size: number; leaves: Leaf[] };
 
-/** Entries per request (the leaves route serves up to 10,000). */
+/** Entries shown per step of the list (read through the route's aligned blocks). */
 const PAGE = 50;
-/** The leaves route's page limit, for scans (search and the inclusion check). */
-const SCAN = 10_000;
 
 /** Pinned source lines in the public code repository (permalinks to one published commit). */
 const CODE =
@@ -91,18 +88,9 @@ function inWords(ms: number) {
   return hours ? `${hours} h ${minutes % 60} min` : `${minutes} min`;
 }
 
-/** All leaves up to `size`, in order (pages of up to 10,000). */
-async function allLeaves(size: number, onProgress?: (n: number) => void): Promise<Leaf[]> {
-  const leaves: Leaf[] = [];
-  while (leaves.length < size) {
-    const page = await json<Page>(
-      `/api/public/count-log/leaves?from=${leaves.length}&to=${Math.min(size, leaves.length + SCAN)}`,
-    );
-    if (!page.leaves.length) break;
-    leaves.push(...page.leaves);
-    onProgress?.(leaves.length);
-  }
-  return leaves;
+/** All leaves up to `size`, in order (pages of 10,000). */
+function allLeaves(size: number, onProgress?: (n: number) => void): Promise<Leaf[]> {
+  return leavesBetween<Leaf>(0, size, json, onProgress);
 }
 
 function CopyButton({ text, label }: { text: string; label: string }) {
@@ -582,9 +570,7 @@ export function LiveLog() {
       // with a fixed range is cached as immutable, so its tree_size can be from an older visit.
       const total = loaded.checkpoints.at(-1)?.tree_size ?? 0;
       const from = Math.max(0, total - PAGE);
-      const page = total
-        ? await json<Page>(`/api/public/count-log/leaves?from=${from}&to=${total}`)
-        : { tree_size: 0, leaves: [] };
+      const page = { leaves: total ? await leavesBetween<Leaf>(from, total) : [] };
       setData(loaded);
       setSize(total);
       setLeaves([...page.leaves].reverse());
@@ -623,8 +609,8 @@ export function LiveLog() {
     setLoading(true);
     try {
       const from = Math.max(0, oldest - PAGE);
-      const page = await json<Page>(`/api/public/count-log/leaves?from=${from}&to=${oldest}`);
-      setLeaves((current) => [...current, ...[...page.leaves].reverse()]);
+      const older = await leavesBetween<Leaf>(from, oldest);
+      setLeaves((current) => [...current, ...older.reverse()]);
     } catch {
       setError(true);
     } finally {

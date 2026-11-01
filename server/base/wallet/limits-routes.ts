@@ -1,7 +1,7 @@
 /*
  * Operation Base Wallet W3: the owner's spending limits over HTTP (service: limits.ts). Registered
- * by the wallet routes, behind the same CITY_BASE_WALLET flag (404 while off), on the wallet
- * routes' one network.
+ * by the wallet routes, behind the same CITY_BASE_WALLET flag (404 while off), on the agent's chain
+ * (the service the wallet routes hand in picks it, agentChainOf).
  *
  *   GET  /api/base/agents/:agentId/wallet/limits                                    200 the limits
  *   POST /api/base/agents/:agentId/wallet/limits/prepare                            200 to sign
@@ -35,6 +35,16 @@ export interface LimitRouteDeps {
  * shared Base endpoint. The limits screen polls every 5 s while a revoke is on its way.
  */
 export const LIST_RATE = { prefix: 'wallet-limits-read', max: 30, windowMs: 60_000 } as const;
+/**
+ * Per person, each its own bucket, like a payment's: a prepare reads Base, a store and a revoke
+ * signature send to Base, and a revoke prepares a sponsored operation.
+ */
+export const LIMIT_WRITE_RATES = {
+  prepare: { prefix: 'wallet-limits-prepare', max: 20, windowMs: 60_000 },
+  store: { prefix: 'wallet-limits-store', max: 20, windowMs: 60_000 },
+  revoke: { prefix: 'wallet-limits-revoke', max: 20, windowMs: 60_000 },
+  revokeSignature: { prefix: 'wallet-limits-revoke-signature', max: 20, windowMs: 60_000 },
+} as const;
 
 const params = z.object({
   agentId: z.string().uuid(),
@@ -44,6 +54,10 @@ const params = z.object({
 export const LIMITS_PATH = '/api/base/agents/:agentId/wallet/limits';
 
 export function registerLimitRoutes(app: FastifyInstance, deps: LimitRouteDeps) {
+  const limited = (
+    rate: (typeof LIMIT_WRITE_RATES)[keyof typeof LIMIT_WRITE_RATES],
+    accountId: string,
+  ) => deps.limit?.(`${rate.prefix}:${accountId}`, rate.max, rate.windowMs);
   async function handle(
     request: FastifyRequest,
     reply: FastifyReply,
@@ -79,26 +93,30 @@ export function registerLimitRoutes(app: FastifyInstance, deps: LimitRouteDeps) 
   );
 
   app.post(`${LIMITS_PATH}/prepare`, (request, reply) =>
-    handle(request, reply, 200, (accountId, agentId) =>
-      deps.service.prepare(accountId, agentId, request.body ?? {}),
-    ),
+    handle(request, reply, 200, async (accountId, agentId) => {
+      await limited(LIMIT_WRITE_RATES.prepare, accountId);
+      return deps.service.prepare(accountId, agentId, request.body ?? {});
+    }),
   );
 
   app.post(LIMITS_PATH, (request, reply) =>
-    handle(request, reply, 201, (accountId, agentId) =>
-      deps.service.store(accountId, agentId, request.body ?? {}),
-    ),
+    handle(request, reply, 201, async (accountId, agentId) => {
+      await limited(LIMIT_WRITE_RATES.store, accountId);
+      return deps.service.store(accountId, agentId, request.body ?? {});
+    }),
   );
 
   app.post(`${LIMITS_PATH}/:permissionId/revoke`, (request, reply) =>
-    handle(request, reply, 200, (accountId, agentId, permissionId) =>
-      deps.service.revoke(accountId, agentId, permissionId, request.body ?? {}),
-    ),
+    handle(request, reply, 200, async (accountId, agentId, permissionId) => {
+      await limited(LIMIT_WRITE_RATES.revoke, accountId);
+      return deps.service.revoke(accountId, agentId, permissionId, request.body ?? {});
+    }),
   );
 
   app.post(`${LIMITS_PATH}/:permissionId/revoke/signature`, (request, reply) =>
-    handle(request, reply, 202, (accountId, agentId, permissionId) =>
-      deps.service.signRevoke(accountId, agentId, permissionId, request.body ?? {}),
-    ),
+    handle(request, reply, 202, async (accountId, agentId, permissionId) => {
+      await limited(LIMIT_WRITE_RATES.revokeSignature, accountId);
+      return deps.service.signRevoke(accountId, agentId, permissionId, request.body ?? {});
+    }),
   );
 }

@@ -59,7 +59,7 @@ export function freeCovers(priceRaw: string | null | undefined, creditMaxRaw: st
   return price > 0n && price <= BigInt(creditMaxRaw);
 }
 
-/** "Nova’s first service. 1.10 USDC: 0.99 to Edward, 0.11 fee." */
+/** "Nova’s first service. 1.10 USDC: 0.99 to Vemino, 0.11 fee." */
 export function doneLine(agentName: string, priceRaw: string, seller: string | null) {
   const split = sponsoredSplit(priceRaw);
   const first = `${possessive(agentName)} first service.`;
@@ -143,4 +143,3 @@ export function sponsoredResult(
     receivedAt,
   };
 }
-

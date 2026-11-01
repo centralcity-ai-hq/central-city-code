@@ -7,7 +7,7 @@
  *   - the Agent Explorer lists it (server/base/explorer/store.ts LISTED: our own registration on
  *     the canonical registry, seen on Base, the agent's own wallet and short id, our agent URI)
  *     with a FINAL Base ID (state 'confirmed'), never a finalizing one;
- *   - its card is public now (PUBLIC_MANIFEST: not revoked, current revision, visibility 'public')
+ *   - its card is public now (publicManifestsOf: not revoked, current revision, visibility 'public')
  *     with a display name.
  * Turning the card private or revoking the agent takes it out at once; the switch stays as the
  * owner left it.
@@ -38,9 +38,9 @@ import {
   BASE_ID,
   FROM,
   LISTED,
-  PUBLIC_MANIFEST,
   PUBLIC_NAME,
   createOnBaseStore,
+  publicManifestsOf,
   parseQuery,
 } from '../base/explorer/store.js';
 import { CAPABILITY_SKILLS } from '../manifest/agent-card.js';
@@ -207,14 +207,18 @@ export function createDirectoryStore(db: Queryable, options: DirectoryStoreOptio
           LEFT JOIN unnest(${ids}::text[], ${names}::text[]) AS cs(id, name) ON cs.id = c
           WHERE COALESCE(cs.name, c) ILIKE ${like})))`);
     }
+    // Every listed agent's current public card in one pass per workspace (publicManifestsOf),
+    // then the search: never a workspace read per candidate.
     const { rows } = await db.query<CandidateRow>(
-      `SELECT l.agent_id, l.base_id, l.short_id, l.agent_wallet, l.invitations, pm.manifest FROM (
+      `WITH l AS (
          SELECT i.agent_id, ${BASE_ID}::text AS base_id, s.short_id, w.address AS agent_wallet,
                 d.invitations
          ${FROM}
          JOIN agent_directory d ON d.agent_id = i.agent_id AND d.listed
-         WHERE ${LISTED} AND i.state = 'confirmed') l
-       ${PUBLIC_MANIFEST}
+         WHERE ${LISTED} AND i.state = 'confirmed'),
+       pm AS (${publicManifestsOf('SELECT agent_id FROM l')})
+       SELECT l.agent_id, l.base_id, l.short_id, l.agent_wallet, l.invitations, pm.manifest
+       FROM l JOIN pm ON pm.agent_id = l.agent_id
        WHERE ${where.join(' AND ')}
        ORDER BY l.base_id::numeric DESC, l.agent_id DESC
        LIMIT ${DIRECTORY_CANDIDATES_MAX}`,

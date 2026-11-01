@@ -18,7 +18,18 @@
  * 'half' (default) = floor(cap / 2), 'full' = cap. The calendar counter always uses the full cap.
  * Authorized by the wallet's owner account (base_wallets.owner_account_id), never by current agent
  * access (gate 3); anyone else gets 404. Audit events never carry a signature.
+ *
+ * One service serves one chain (routes.ts builds one per chain): "Base" above means that chain. On
+ * Arc the manager and USDC are Arc's. A permission's hash and the owner's signature both name the
+ * chain, so one signed for another chain never recovers to the owner here. A limit is USDC only, so
+ * native gas can't be limited: any other token fails the field-by-field comparison in `store`.
  */
+import {
+  chainFamily,
+  isRealMoneyChain,
+  type ChainId,
+  type ChainNetwork,
+} from '../../../shared/chains.js';
 import { randomBytes, randomUUID } from 'node:crypto';
 import {
   formatUnits,
@@ -54,7 +65,7 @@ import {
   type LimitPeriod,
   type OnchainCapModel,
 } from '../../../shared/base/spend-limits.js';
-import { sponsorshipEnding } from '../../../shared/base/paymasters.js';
+import { sponsoredValidUntil, sponsorshipEnding } from '../../../shared/base/paymasters.js';
 import { calendarSpent } from '../chain/calendar-limit.js';
 import { DERIVATION_VERSION, type DerivationRecipe } from '../chain/derive.js';
 import {
@@ -81,8 +92,10 @@ export class LimitError extends Error {
 
 export interface LimitServiceDeps {
   db: Database;
-  /** The wallet network (the wallet routes' one constant). */
-  chainId: BaseChainId;
+  /** The chain this service serves. */
+  chainId: ChainId;
+  /** That chain's network (chainNetwork); required on Arc, by default the listed one on Base. */
+  network?: ChainNetwork;
   /** The on-chain model for NEW limits; stored limits keep the model they were signed with. */
   model: OnchainCapModel;
   /** Base reads; absent when no endpoint is configured (views are then stale, never zeros). */
@@ -174,6 +187,20 @@ const revokeStateOf = (op: StoredOperation | null): RevokeState => {
   return 'submitted';
 };
 
+/**
+ * Until when a prepared revoke can be signed: its fixed deadline, or, when its bundler stops
+ * sending earlier than that (`sendMarginMs` before the sponsorship's validUntil: our own
+ * paymaster's), that point. Another sponsor's keeps the deadline; its signature is still refused
+ * near validUntil (sponsorshipEnding).
+ */
+const revokeSignableUntil = (
+  deadline: number,
+  paymasterAndData: string | undefined,
+  sendMarginMs: number,
+) => {
+  const until = sendMarginMs > 0 ? sponsoredValidUntil(paymasterAndData) : null;
+  return until === null ? deadline : Math.min(deadline, until - sendMarginMs);
+};
 /** The durable key of a revoke attempt; one attempt is one signed operation at most. */
 const revokeKey = (row: LimitRow) =>
   `base-wallet:limit-revoke:${row.permission_id}:${row.revoke_attempt}`;
@@ -183,7 +210,9 @@ const isUniqueViolation = (error: unknown) =>
 
 export function createLimitService(deps: LimitServiceDeps) {
   const now = deps.now ?? Date.now;
-  const network = BASE_NETWORKS[deps.chainId];
+  const network = deps.network ?? BASE_NETWORKS[deps.chainId as BaseChainId];
+  // How the owner's messages name the chain: Base's stay as they are on every Base network.
+  const chainName = chainFamily(deps.chainId) === 'arc' ? network.name : 'Base';
   const usdc = network.tokens.USDC;
   const display = (raw: bigint) => formatUnits(raw, usdc.decimals);
 
@@ -311,7 +340,7 @@ export function createLimitService(deps: LimitServiceDeps) {
       throw new LimitError(
         409,
         'limit_exists',
-        'This wallet already has a USDC limit. Revoke it first; a new one can be set once Base shows it revoked.',
+        `This wallet already has a USDC limit. Revoke it first; a new one can be set once ${chainName} shows it revoked.`,
         { permissionId: open.permission_id, state: apiState(open.state) },
       );
   }
@@ -344,7 +373,7 @@ export function createLimitService(deps: LimitServiceDeps) {
       throw new LimitError(
         400,
         'invalid_cap',
-        'The cap is too small: Base needs an allowance of at least one unit per period.',
+        `The cap is too small: ${chainName} needs an allowance of at least one unit per period.`,
       );
     return cap;
   }
@@ -429,7 +458,34 @@ export function createLimitService(deps: LimitServiceDeps) {
       if (!deps.operations) throw new Error('unconfigured');
       return await deps.operations();
     } catch {
-      throw new LimitError(503, 'network_unavailable', 'Base is not available right now.');
+      throw new LimitError(503, 'network_unavailable', `${chainName} is not available right now.`);
+    }
+  }
+
+  /**
+   * How long before its validUntil a revoke's bundler stops sending it (our own paymaster's: 120 s,
+   * OwnerRevokePort.sendMarginMs), in ms; 0 for another sponsor, none, or Base not available (the
+   * submit then refuses on its own).
+   */
+  async function revokeMarginMs(data: string | undefined): Promise<number> {
+    if (!data || data === '0x') return 0;
+    try {
+      return (await operations()).sendMarginMs?.(data) ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * A prepared revoke that will never be signed: its sponsorship is given back now instead of at its
+   * validUntil (OwnerRevokePort.release). Best effort: a failure leaves it to lapse by time.
+   */
+  async function releaseRevoke(userOpHash: string | null) {
+    if (!userOpHash) return;
+    try {
+      await (await operations()).release?.(userOpHash as Hex);
+    } catch {
+      // It lapses by time.
     }
   }
 
@@ -450,7 +506,7 @@ export function createLimitService(deps: LimitServiceDeps) {
       if (error.code === 'WALLET_MISMATCH')
         throw new LimitError(409, 'wallet_mismatch', 'This wallet cannot be operated here.');
     }
-    throw new LimitError(503, 'network_unavailable', 'Base is not available right now.');
+    throw new LimitError(503, 'network_unavailable', `${chainName} is not available right now.`);
   }
 
   async function refreshOp(key: string): Promise<StoredOperation | null> {
@@ -479,7 +535,7 @@ export function createLimitService(deps: LimitServiceDeps) {
       ),
       wallet: getAddress(wallet.address),
       recipe: recipeOf(wallet),
-      calls: [revokeCall(deps.chainId, stored(row))],
+      calls: [revokeCall(network, stored(row))],
       operation: fromJson(JSON.stringify(row.revoke_operation)),
       userOpHash,
       owner: getAddress(wallet.owner_address),
@@ -654,7 +710,7 @@ export function createLimitService(deps: LimitServiceDeps) {
       return {
         chainId: deps.chainId,
         network: network.name,
-        testnet: deps.chainId !== BASE_MAINNET,
+        testnet: !isRealMoneyChain(deps.chainId),
         // The model a new limit gets now; each limit carries the one it was signed with.
         onchainModel: deps.model,
         stale: rows.length > 0 && read === null,
@@ -682,7 +738,7 @@ export function createLimitService(deps: LimitServiceDeps) {
         BigInt(`0x${randomBytes(32).toString('hex')}`),
       );
       checkPermission(permission);
-      const hash = spendPermissionHash(deps.chainId, permission);
+      const hash = spendPermissionHash(network, permission);
       return {
         chainId: deps.chainId,
         token: 'USDC' as const,
@@ -737,7 +793,7 @@ export function createLimitService(deps: LimitServiceDeps) {
         );
       checkPermission(permission);
 
-      const hash = spendPermissionHash(deps.chainId, permission);
+      const hash = spendPermissionHash(network, permission);
       let signer: Address | null = null;
       try {
         signer = getAddress(
@@ -876,8 +932,10 @@ export function createLimitService(deps: LimitServiceDeps) {
         });
 
       // 2. Already revoked on Base (an earlier operation, or elsewhere): nothing to sign.
-      if ((await proveRevoked(wallet, [row], accountId)).has(row.permission_id))
+      if ((await proveRevoked(wallet, [row], accountId)).has(row.permission_id)) {
+        if (!row.revoke_op_key) await releaseRevoke(row.revoke_user_op_hash);
         return { ...limitSummary(await limitOf(wallet, permissionId)), revokeState: 'final' };
+      }
 
       // 3. A signed revoke still on its way (sent again if it never reached the chain module), or
       // an unsigned one still valid: no new operation.
@@ -885,9 +943,12 @@ export function createLimitService(deps: LimitServiceDeps) {
         const op = await follow(wallet, accountId, row);
         row = await limitOf(wallet, permissionId);
         if (row.revoke_op_key && op?.status !== 'failed')
-          throw new LimitError(409, 'revoke_in_progress', 'The revoke is on its way to Base.', {
-            revoke: revokeView(row, op),
-          });
+          throw new LimitError(
+            409,
+            'revoke_in_progress',
+            `The revoke is on its way to ${chainName}.`,
+            { revoke: revokeView(row, op) },
+          );
       }
       // (A linked one that failed on Base, its nonce used by another owner operation: a new attempt.)
       // An unsigned one whose sponsorship is ending is not handed out again: a new one is prepared.
@@ -896,7 +957,11 @@ export function createLimitService(deps: LimitServiceDeps) {
         row.revoke_operation &&
         row.revoke_expires_at !== null &&
         Number(row.revoke_expires_at) > now() &&
-        !sponsorshipEnding(revokeSponsorData(row), now())
+        !sponsorshipEnding(
+          revokeSponsorData(row),
+          now(),
+          await revokeMarginMs(revokeSponsorData(row)),
+        )
       )
         return signingRequest(wallet, row);
 
@@ -907,7 +972,8 @@ export function createLimitService(deps: LimitServiceDeps) {
         prepared = await ops.prepare({
           wallet: getAddress(wallet.address),
           recipe: recipeOf(wallet),
-          calls: [revokeCall(deps.chainId, stored(row))],
+          calls: [revokeCall(network, stored(row))],
+          accountId,
         });
       } catch (error) {
         chainFailure(error);
@@ -923,7 +989,11 @@ export function createLimitService(deps: LimitServiceDeps) {
             row.permission_id,
             JSON.stringify(opJson(prepared.operation)),
             prepared.userOpHash.toLowerCase(),
-            now() + LIMIT_SIGNATURE_TTL_MS,
+            revokeSignableUntil(
+              now() + LIMIT_SIGNATURE_TTL_MS,
+              prepared.operation.paymasterAndData,
+              ops.sendMarginMs?.(prepared.operation.paymasterAndData) ?? 0,
+            ),
             now(),
             row.revoke_attempt,
           ],
@@ -936,9 +1006,16 @@ export function createLimitService(deps: LimitServiceDeps) {
           });
         return rows[0] ?? null;
       });
-      // Another request prepared or signed one meanwhile.
-      if (!updated)
+      // Another request prepared or signed one meanwhile: this one is never handed out.
+      const preparedHash = prepared.userOpHash.toLowerCase();
+      if (!updated) {
+        if ((await limitOf(wallet, permissionId)).revoke_user_op_hash !== preparedHash)
+          await releaseRevoke(preparedHash);
         throw new LimitError(409, 'revoke_in_progress', 'A revoke was just prepared. Reload.');
+      }
+      // The unsigned one it replaces (expired, or its sponsorship ending) will never be signed now.
+      if (!row.revoke_op_key && row.revoke_user_op_hash !== preparedHash)
+        await releaseRevoke(row.revoke_user_op_hash);
       return signingRequest(wallet, updated);
     },
 
@@ -958,7 +1035,12 @@ export function createLimitService(deps: LimitServiceDeps) {
       const userOpHash = row.revoke_user_op_hash as Hex;
       if (
         row.revoke_op_key !== key &&
-        (Number(row.revoke_expires_at) <= now() || sponsorshipEnding(revokeSponsorData(row), now()))
+        (Number(row.revoke_expires_at) <= now() ||
+          sponsorshipEnding(
+            revokeSponsorData(row),
+            now(),
+            await revokeMarginMs(revokeSponsorData(row)),
+          ))
       )
         throw new LimitError(
           410,

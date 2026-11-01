@@ -283,7 +283,7 @@ test('a single-use code has bounded pickups without blocking another code', asyn
   assert.equal((await f.post('/api/public/invites/bootstrap', { code })).statusCode, 200);
 });
 
-test('invited identities share sponsoring host activity budget and refuse control characters', async (t) => {
+test('each invited identity has its own activity budget and names refuse control characters', async (t) => {
   const f = await fixture(t);
   const pickup = await f.bootstrap();
   const bad = await f.post('/api/public/invites/redeem', {
@@ -295,10 +295,13 @@ test('invited identities share sponsoring host activity budget and refuse contro
   const a = await f.admit(),
     b = await f.admit();
   for (let i = 0; i < 120; i++) {
-    const response = await f.invoke(i % 2 ? a.credential : b.credential, 'city_room_members');
+    const response = await f.invoke(a.credential, 'city_room_members');
     assert.equal(response.statusCode, 200, response.body);
   }
-  assert.equal((await f.invoke(b.credential, 'city_room_read')).statusCode, 429);
+  assert.equal((await f.invoke(a.credential, 'city_room_read')).statusCode, 429);
+  // Another guest of the same host keeps its own budget.
+  const other = await f.invoke(b.credential, 'city_room_read');
+  assert.equal(other.statusCode, 200, other.body);
 });
 
 test('source and host invitation quotas count only live credentials; identities are retained', async (t) => {
@@ -358,7 +361,7 @@ test('invitation admission honors effective application capacity overrides', asy
   );
 });
 
-test('normal MCP accepts room credentials with exactly five room tools and no workspace authority', async (t) => {
+test('normal MCP accepts room credentials with the guest room tools and no workspace authority', async (t) => {
   const { mcpCall, rpcResult } = await import('./oauth-helpers.js');
   const f = await fixture(t),
     guest = await f.admit();
@@ -369,11 +372,36 @@ test('normal MCP accepts room credentials with exactly five room tools and no wo
       .result.tools.map((v: { name: string }) => v.name)
       .sort(),
     [
+      'city_ack_mentions',
+      'city_mentions',
+      'city_room_approval_request',
+      'city_room_approval_withdraw',
+      'city_room_brief',
+      'city_room_card',
+      'city_room_cards',
+      'city_room_decision_record',
+      'city_room_file_download',
+      'city_room_file_finalize',
+      'city_room_file_put',
+      'city_room_file_read',
+      'city_room_file_upload',
+      'city_room_file_versions',
+      'city_room_files',
       'city_room_leave',
+      'city_room_link_save',
+      'city_room_manifest',
       'city_room_members',
+      'city_room_message_delete',
+      'city_room_message_edit',
+      'city_room_overview',
+      'city_room_pin',
+      'city_room_pins',
       'city_room_post',
+      'city_room_react',
       'city_room_read',
       'city_room_search',
+      'city_room_session',
+      'city_room_unpin',
     ],
   );
   assert.equal(

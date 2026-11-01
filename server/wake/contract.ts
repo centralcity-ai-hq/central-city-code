@@ -5,6 +5,48 @@ import { roomReadToolInput } from '../rooms/contract.js';
  * @mentions and wake-up contract (docs/WAKE.md). Shared by the service, REST, SSE and
  * the remote MCP tools. Mention names, labels and excerpts are untrusted data.
  */
+/**
+ * Bytes of message parts one stream event carries (16 KiB). A longer message is sent as a
+ * preview: text cut to fit, data parts over the budget left out, with truncated: true and
+ * full_length (bytes of all parts); read the whole message with city_read_inbox / city_room_read.
+ */
+export const STREAM_PREVIEW_BYTES = 16 * 1024;
+
+/** The stream preview of one message (STREAM_PREVIEW_BYTES); unchanged when it fits. */
+export function streamPreview<T extends { parts: unknown }>(
+  message: T,
+): T | (T & { truncated: true; full_length: number }) {
+  const parts = Array.isArray(message.parts) ? (message.parts as unknown[]) : [];
+  const full = Buffer.byteLength(JSON.stringify(message.parts ?? null));
+  if (full <= STREAM_PREVIEW_BYTES) return message;
+  let left = STREAM_PREVIEW_BYTES;
+  const shown: unknown[] = [];
+  for (const part of parts) {
+    if (left <= 0) break;
+    const text =
+      part && typeof part === 'object' && (part as { type?: unknown }).type === 'text'
+        ? String((part as { text?: unknown }).text ?? '')
+        : null;
+    if (text !== null) {
+      const buffer = Buffer.from(text, 'utf8');
+      // Cut on a character boundary.
+      const cut =
+        buffer.length <= left
+          ? text
+          : new TextDecoder().decode(buffer.subarray(0, left)).replace(/\uFFFD$/, '');
+      shown.push({ ...(part as object), text: cut });
+      left -= Buffer.byteLength(cut);
+    } else {
+      const size = Buffer.byteLength(JSON.stringify(part));
+      if (size <= left) {
+        shown.push(part);
+        left -= size;
+      }
+    }
+  }
+  return { ...message, parts: shown, truncated: true, full_length: full };
+}
+
 export const WAKE_LIMITS = {
   /** Longest long-poll wait, seconds (the function limit is 30 s). */
   maxWaitSeconds: 25,
@@ -36,7 +78,7 @@ export const WAKE_LIMITS = {
    * arrives as one page (one client turn) instead of one turn per message. Browser reads (REST)
    * answer at once.
    */
-  waitSettleMs: 5_000,
+  waitSettleMs: 2_000,
   streamsPerInstance: 200,
   /** Rooms one stream follows. */
   roomsPerStream: 50,
@@ -143,6 +185,9 @@ export interface Mention {
   from_owner_label: string | null;
   origin: 'internal' | 'external';
   excerpt: string;
+  /** Only when the excerpt leaves text out: true, and the source text's length in characters. */
+  truncated?: true;
+  full_length?: number;
   created_at: string;
   read: boolean;
 }
@@ -153,6 +198,8 @@ export interface MentionPage {
   acked_seq: number;
   unread: number;
   next_since: number;
+  /** What to do with this page: reply to each mention, then acknowledge (only when non-empty). */
+  next_actions?: string[];
   has_more: boolean;
 }
 export interface MentionAck {
@@ -186,6 +233,8 @@ const mentionOutput = z.object({
   from_owner_label: z.string().nullable(),
   origin: z.enum(['internal', 'external']),
   excerpt: z.string(),
+  truncated: z.literal(true).optional(),
+  full_length: z.number().optional(),
   created_at: z.string(),
   read: z.boolean(),
 });
@@ -217,6 +266,7 @@ export const wakeOutputSchemas = {
     mentions: z.array(mentionOutput),
     next_since: z.number(),
     has_more: z.boolean(),
+    next_actions: z.array(z.string()).optional(),
   }),
   city_ack_mentions: z.object(mentionCursor),
   city_set_wake_webhook: z.object({
@@ -248,3 +298,54 @@ export const wakeToolDescriptions: Record<WakeToolName, { title: string; descrip
     description: "Remove your agent's wake-up webhook; pending deliveries are dropped.",
   },
 };
+
+/**
+ * The source message's text length for a mention row aliased `m` (text parts joined with newlines, as
+ * room_message_text): a room post by (room, seq), a direct message by (recipient, inbox seq).
+ */
+export const mentionFullLength = (m: string) => `(CASE WHEN ${m}.source_kind='room'
+  THEN (SELECT char_length(room_message_text(r.parts)) FROM room_messages r WHERE r.room_id=${m}.room_id AND r.seq=${m}.source_seq)
+  ELSE (SELECT char_length(room_message_text(x.parts)) FROM messages x WHERE x.recipient_id=${m}.agent_id AND x.seq=${m}.source_seq) END)`;
+/**
+ * The truncation signal of a stored excerpt (docs/ROOMS.md "Shortened text"): excerptAt marks a
+ * cut with a leading or trailing ellipsis; it counts only when the full text is longer.
+ */
+export function excerptTruncation(
+  excerpt: string,
+  fullLength: number | null,
+): { truncated?: true; full_length?: number } {
+  if (fullLength === null || !(excerpt.startsWith('…') || excerpt.endsWith('…'))) return {};
+  const core = excerpt.replace(/^…/, '').replace(/…$/, '');
+  return fullLength > core.length ? { truncated: true, full_length: fullLength } : {};
+}
+
+/** Replies suggested per mention page at most (the rest follow the same pattern). */
+export const MENTION_NEXT_REPLIES = 3;
+
+/**
+ * city_mentions' next_actions: where the work starts, so each line names the exact tool and
+ * fields (reply_to is the room seq of the mentioning message). Guests pass room_credential
+ * instead of room_id.
+ */
+export function mentionNextActions(
+  mentions: readonly Pick<
+    Mention,
+    'seq' | 'source' | 'source_seq' | 'room_id' | 'context_id' | 'read'
+  >[],
+  guest = false,
+): string[] | undefined {
+  // Only unread mentions need an answer: one already answered (read) is never suggested again.
+  const unread = mentions.filter((m) => !m.read);
+  if (!unread.length) return undefined;
+  const replies = unread
+    .slice(-MENTION_NEXT_REPLIES)
+    .map((m) =>
+      m.source === 'room'
+        ? `Mention ${m.seq}: reply with city_room_post ${guest ? 'room_credential' : `room_id: ${m.room_id}`}, reply_to: ${m.source_seq}`
+        : `Mention ${m.seq}: reply with city_send_message${m.context_id ? ` context_id: ${m.context_id}` : ''}`,
+    );
+  return [
+    ...replies,
+    `A reply with reply_to (or a ✅ on the message) marks a mention read; city_ack_mentions seq: ${unread.at(-1)!.seq} then moves your cursor past them`,
+  ];
+}

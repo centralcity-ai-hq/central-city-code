@@ -43,8 +43,14 @@ export interface PromptInput {
 export interface Prompt {
   system: string;
   user: string;
-  /** Characters sent, for the reservation estimate (tokens ≈ chars / 3). */
+  /** Characters sent. */
   chars: number;
+  /**
+   * UTF-8 bytes sent (system and user text). CCA-621: the spend reservation counts one input token
+   * per byte, an upper bound for byte-level tokenizers, so densely tokenized text cannot push the
+   * day's spend past the cap.
+   */
+  bytes: number;
 }
 
 function clip(text: string, max: number): string {
@@ -123,5 +129,10 @@ export function buildPrompt(input: PromptInput): Prompt {
     ...lines,
     `Reply to message seq ${input.triggerSeq} (from ${JSON.stringify(input.triggerSender)}), which mentions you.`,
   ].join('\n');
-  return { system, user, chars: system.length + user.length };
+  return {
+    system,
+    user,
+    chars: system.length + user.length,
+    bytes: Buffer.byteLength(system, 'utf8') + Buffer.byteLength(user, 'utf8'),
+  };
 }

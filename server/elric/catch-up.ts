@@ -649,12 +649,10 @@ export function createCatchUp(d: CatchUpDependencies) {
         env(),
       );
       if (!reserved.ok) {
-        incomplete =
-          reserved.reason === 'owner_allowance' || reserved.reason === 'global_ceiling'
-            ? 'limit'
-            : 'unavailable';
-        if (reserved.reason === 'owner_allowance' || reserved.reason === 'global_ceiling') {
-          notice = elricLimitNotice(reserved.reason, 'summary');
+        const reason = reserved.reason;
+        incomplete = reason === 'kill' || reason === 'unavailable' ? 'unavailable' : 'limit';
+        if (reason !== 'kill' && reason !== 'unavailable') {
+          notice = elricLimitNotice(reason, 'summary');
           resetsAtValue = iso(resetAt(time));
         }
       } else {

@@ -16,6 +16,7 @@ import {
   stressTestOperators,
 } from '../server/stress-allowlist.js';
 import { windowClock } from './window-clock.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 process.env.CITY_INVITE_FLOW = '1';
 process.env.CITY_RATE_LIMIT_KEY ??= 'synthetic-stress-allowlist-test-secret-00';
@@ -106,7 +107,7 @@ async function setup(
       address,
     );
     assert.equal(registered.statusCode, 201, registered.body);
-    const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+    const cookie = sessionPair(registered.cookies);
     const agent = await post(
       '/api/agents',
       { name: `${name} agent`, capability: 'research', mode: 'hosted' },
@@ -373,7 +374,7 @@ test('live guests per address: stress guests never count; no per-room bound, a h
   assert.equal(new Set(scopes).size, 3, 'stress, invite and second-address site scopes');
 });
 
-test('guests of a stress-test host each get their own activity budget; others share one', async (t) => {
+test('every guest gets its own activity budget, for stress-test and other hosts alike', async (t) => {
   const { app, join, stress, other } = await setup(t);
   const credentials = async (code: string) => {
     const tokens: string[] = [];
@@ -394,11 +395,13 @@ test('guests of a stress-test host each get their own activity budget; others sh
       // Spread over addresses: only the host's guest activity budget is under test.
       remoteAddress: `198.51.100.${(address++ % 200) + 1}`,
     });
-  // Another host: 120 guest calls per minute across all its guests.
-  const shared = await credentials(other.main.code);
+  // Another host: 120 calls per minute for each guest; one guest at its limit never slows another.
+  const guests = await credentials(other.main.code);
   for (let i = 0; i < 120; i++)
-    assert.equal((await members(shared[i % 2]!)).statusCode, 200, `public call ${i + 1}`);
-  assert.equal((await members(shared[0]!)).statusCode, 429);
+    assert.equal((await members(guests[0]!)).statusCode, 200, `guest A call ${i + 1}`);
+  assert.equal((await members(guests[0]!)).statusCode, 429, 'guest A call 121');
+  for (let i = 0; i < 20; i++)
+    assert.equal((await members(guests[1]!)).statusCode, 200, `guest B call ${i + 1}`);
   // The stress host: 120 per minute for each guest, so two guests make 140 calls.
   const own = await credentials(stress.main.code);
   for (let i = 0; i < 140; i++)

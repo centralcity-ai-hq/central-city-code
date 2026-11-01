@@ -3,6 +3,11 @@ import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { createApp } from './app.js';
 import { loadHostedConfig } from './hosted.js';
+import { errorFacts, errorLine } from './error-log.js';
+
+// Re-exported so scripts/bundle-request-smoke.mjs can boot the built bundle against an
+// in-memory database; the deployed function only uses the default export.
+export { createApp };
 
 /** Rewrite prefixes in vercel.json whose `:path*` parameter the destination (`/api`) does not use. */
 const REWRITE_PREFIXES = [
@@ -43,7 +48,11 @@ export function withoutRewriteParameter(url: string): string {
       if (!pair.startsWith('path=')) return true;
       return decode(pair.slice('path='.length)) !== tail;
     });
-  return kept.length && kept.some(Boolean) ? `${pathname}?${kept.join('&')}` : pathname;
+  // Nothing but the rewrite parameter (and at most one empty segment beside it, as a bare '?' may
+  // arrive): the client's own URL had no query. More empty segments ('?&&') are the client's and are
+  // kept: the edge cache keys by them, so a route that takes no query must see them.
+  if (!kept.some(Boolean) && kept.length <= 1) return pathname;
+  return `${pathname}?${kept.join('&')}`;
 }
 
 /**
@@ -91,6 +100,7 @@ export function createHostedHandler(
       response.end();
       return;
     }
+    let starting = true;
     try {
       application ??= create()
         .then(async (app) => {
@@ -102,6 +112,7 @@ export function createHostedHandler(
           throw error;
         });
       const app = await application;
+      starting = false;
       phase('app_ready');
       // Await the response; no work relies on execution after the function returns.
       await new Promise<void>((resolve, reject) => {
@@ -111,8 +122,11 @@ export function createHostedHandler(
         app.server.emit('request', request, response);
       });
       phase('response_end');
-    } catch {
+    } catch (error) {
       phase('failed');
+      // One line per failed cold start (or a request that failed outside the app's own error
+      // handler): the error class and code, and its cause's, never the message (audit CCA-515).
+      log(errorLine(starting ? 'cold_start_failed' : 'hosted_request_failed', errorFacts(error)));
       if (!response.headersSent) {
         response.writeHead(503, {
           'Content-Type': 'application/json',
@@ -125,5 +139,22 @@ export function createHostedHandler(
     }
   };
 }
+
+/**
+ * A crash is recorded before Node ends the process: 'uncaughtExceptionMonitor' only observes
+ * (also for an unhandled rejection, origin 'unhandledRejection'), so Node's own behaviour is
+ * unchanged. Class and code only (audit CCA-515). Installed once per process.
+ */
+let crashMonitor: ((error: Error, origin: string) => void) | undefined;
+export function installCrashMonitor(
+  log: (line: string) => void = (line) => console.error(line),
+): void {
+  if (crashMonitor) return;
+  crashMonitor = (error, origin) =>
+    log(errorLine('process_crash', { origin: String(origin), ...errorFacts(error) }));
+  process.on('uncaughtExceptionMonitor', crashMonitor);
+}
+
+installCrashMonitor();
 
 export default createHostedHandler(() => createApp({ hosted: loadHostedConfig() }));

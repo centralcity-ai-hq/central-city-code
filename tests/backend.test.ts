@@ -160,6 +160,32 @@ test('each operator sees and mutates only their own workspace', async (t) => {
   assert.ok(!/password_hash|token_hash|session_hash/.test(serialized));
 });
 
+test('a runtime body the JSON parser did not read is refused before its signature is checked', async (t) => {
+  const f = await fixture(t);
+  const path = '/api/runtime/heartbeat';
+  const body = JSON.stringify({ sequence: 2 });
+  const nonce = randomBytes(18).toString('hex');
+  // Signed over the empty body, sent as text/plain: the body would not be covered.
+  const unbound = await f.app.inject({
+    method: 'POST',
+    url: path,
+    headers: {
+      ...signedHeaders(f.provider.token, 'POST', path, '', String(f.now()), nonce),
+      'Content-Type': 'text/plain',
+    },
+    payload: body,
+  });
+  assert.equal(unbound.statusCode, 415, unbound.body);
+  // The refusal used no nonce: the same nonce still signs the JSON request.
+  const accepted = await f.app.inject({
+    method: 'POST',
+    url: path,
+    headers: signedHeaders(f.provider.token, 'POST', path, body, String(f.now()), nonce),
+    payload: body,
+  });
+  assert.equal(accepted.statusCode, 200, accepted.body);
+});
+
 test('bad signature, expired timestamp, reused nonce and old sequence never extend presence', async (t) => {
   const f = await fixture(t);
   const path = '/api/runtime/heartbeat';
@@ -346,6 +372,9 @@ test('completion, result idempotency and explicit acceptance are separate', asyn
   assert.equal(complete.statusCode, 200, complete.body);
   assert.equal(complete.json().job.status, 'completed');
   assert.equal(complete.json().job.acceptance, 'pending');
+  // Finished: canceling it is refused rather than reported as done.
+  const lateCancel = await api(f.app, f.owner.cookie, 'POST', `/api/jobs/${id}/cancel`, {});
+  assert.equal(lateCancel.statusCode, 409, lateCancel.body);
   const duplicate = await runtime(
     f.app,
     f.provider.token,

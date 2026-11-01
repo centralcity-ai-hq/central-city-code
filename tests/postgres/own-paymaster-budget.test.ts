@@ -5,6 +5,7 @@ import { Pool } from 'pg';
 import { postgresDatabase } from '../../server/database.js';
 import {
   BudgetError,
+  ownPaymasterAttributionMigration,
   ownPaymasterBudget,
   ownPaymasterBudgetMigration,
 } from '../../server/base/chain/own-paymaster-budget.js';
@@ -46,6 +47,7 @@ async function fixture(t: { after(fn: () => Promise<unknown>): void }) {
     }
   });
   await a.query(ownPaymasterBudgetMigration.sql);
+  await a.query(ownPaymasterAttributionMigration.sql);
   return { a, b };
 }
 
@@ -67,6 +69,8 @@ test(
               flow: 'registration',
               maxCostWei: MILLI,
               validUntil: Math.floor(NOW / 1000) + 300,
+              sender: `0x${(i + 1).toString(16).padStart(40, '0')}`,
+              accountId: null,
             }),
           ),
         );

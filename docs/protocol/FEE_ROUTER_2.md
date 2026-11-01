@@ -10,7 +10,8 @@ All amounts are raw USDC units (6 decimals): `100_000` = 0.10 USDC, `100_000_000
 runtime bytecode equal to the audited source), deployed by the treasury. Production has
 `CITY_PROTOCOL_FEE_ROUTER2`, `CITY_PROTOCOL_FEE_ROUTER2_FROM_BLOCK=52767258` and
 `CITY_PROTOCOL_FEE_ROUTER2_ENABLED=1`; the paymaster policy allows it; the 1 USDC canary is in
-[CANARY.md](CANARY.md). DefiLlama: [DEFILLAMA_ADAPTER.md](DEFILLAMA_ADAPTER.md).
+[CANARY.md](CANARY.md), with the recipe that reproduces its bytecode hash from the source.
+DefiLlama: [DEFILLAMA_ADAPTER.md](DEFILLAMA_ADAPTER.md).
 
 ## 1. What changes and what does not
 
@@ -31,8 +32,8 @@ runtime bytecode equal to the audited source), deployed by the treasury. Product
 
 | Setting                                                                        | Meaning                                                                                                             |
 | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
-| `CITY_PROTOCOL_FEE_ROUTER2`                                                    | router 2 address (all networks)                                                                                     |
-| `CITY_PROTOCOL_FEE_ROUTER2_FROM_BLOCK`                                         | its deploy block; both are needed, else router 2 is not configured                                                  |
+| `CITY_PROTOCOL_FEE_ROUTER2`                                                    | router 2 address on a test network; ignored on Base mainnet, where it is fixed in `shared/protocol.ts`              |
+| `CITY_PROTOCOL_FEE_ROUTER2_FROM_BLOCK`                                         | its deploy block (test network); both are needed there, else router 2 is not configured                             |
 | `CITY_PROTOCOL_FEE_ROUTER2_ENABLED` (`FEE_ROUTER2_FLAG`, `shared/protocol.ts`) | exactly `1` routes new totals above 0.10 USDC to router 2; anything else (unset by default) keeps today's behaviour |
 
 One parser, `protocolRouter2FromEnv` (`server/protocol/fees/cron.ts`, ledger PR #484), serves

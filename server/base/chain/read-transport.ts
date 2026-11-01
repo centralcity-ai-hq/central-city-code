@@ -13,12 +13,17 @@
  *       eth_call, eth_getBalance, eth_getCode, eth_getStorageAt, eth_getTransactionCount PINNED to a
  *         block number or hash (the same pin the caller chose; never 'latest', 'safe', 'finalized'
  *         or 'pending', which stay on the configured endpoint: nonce and code reads that feed an
- *         operation, and guards like NONCE_MOVED, must see that node's current state);
+ *         operation, and guards like NONCE_MOVED, must see that node's current state), except the
+ *         calls in HOME_ONLY_SELECTORS (getNonce, authorizationState, isRevoked), whose answer
+ *         decides that something did not happen: those stay on the configured endpoint (CCA-109);
  *       eth_getTransactionReceipt / eth_getTransactionByHash;
  *       eth_getLogs over a closed numbered range or one block hash.
  *       eth_gasPrice and eth_maxPriorityFeePerGas: a fee quote, never a decision; the fee cap still
  *         bounds what is signed, and a low quote only waits longer (Audit 1: these were the reads the
- *         rate limit refused most).
+ *         rate limit refused most). A quote from the second endpoint is taken only up to
+ *         FALLBACK_QUOTE_FACTOR times the configured endpoint's last quote, and never above
+ *         FALLBACK_QUOTE_CEILING_WEI; a higher one is treated as absent (CCA-111), so an inflated
+ *         quote from a keyless node never reaches a price shown or charged.
  *     eth_blockNumber only where the caller opts in (`headNumberMayFallBack`): the standalone readers
  *     that pin their next read to that number. The chain runtime does not: its absence gates (a
  *     receipt declared gone up to a head, submit.ts) compare a bare head number with a search.
@@ -51,9 +56,9 @@
  *     check (and the settling gate's hints) at "not yet" forever.
  */
 import { http, type EIP1193RequestFn, type HttpTransportConfig, type Transport } from 'viem';
-import { countingFetch } from './rpc-count.js';
+import { chainParams } from './chain-params.js';
+import { chainCountKey, countingFetch } from './rpc-count.js';
 import { BASE_MAINNET, BASE_SEPOLIA } from '../../../shared/base/chains.js';
-import { PUBLIC_BASE_RPC } from '../../../shared/base/on-base.js';
 
 /**
  * preferSecond: the second endpoint's per-request timeout. A healthy public node answers in well
@@ -76,13 +81,29 @@ export const STALE_TAGGED_HEAD_MS: Readonly<Record<'safe' | 'finalized', number>
   finalized: 45 * 60_000,
 });
 
+/** The fee quotes the second endpoint may answer, bounded below (CCA-111). */
+const FEE_QUOTES = new Set(['eth_gasPrice', 'eth_maxPriorityFeePerGas']);
+
+/**
+ * A fee quote from the second endpoint may be at most this many times the configured endpoint's
+ * last quote of the same method (gas on Base rarely doubles between two reads of one process).
+ */
+export const FALLBACK_QUOTE_FACTOR = 2n;
+
+/**
+ * And never above this (1 gwei, many times Base's usual fee; per chain, chain-params.ts), whatever
+ * the configured endpoint said last or when it said nothing yet: a higher quote is asked of the
+ * configured endpoint only.
+ */
+export const FALLBACK_QUOTE_CEILING_WEI = chainParams(BASE_MAINNET).fallbackQuoteCeilingWei;
+
 /** The one setting for the second read endpoint of every Base read. */
 export const READ_FALLBACK_SETTING = 'CITY_BASE_READ_FALLBACK_RPC_URL';
 
 /** The keyless public RPC per network, used as the second read endpoint when hosted. */
 export const PUBLIC_READ_RPC: Readonly<Record<number, string>> = Object.freeze({
-  [BASE_MAINNET]: PUBLIC_BASE_RPC,
-  [BASE_SEPOLIA]: 'https://sepolia.base.org',
+  [BASE_MAINNET]: chainParams(BASE_MAINNET).publicReadRpc!,
+  [BASE_SEPOLIA]: chainParams(BASE_SEPOLIA).publicReadRpc!,
 });
 
 /**
@@ -96,10 +117,33 @@ export function baseReadUrls(
   options: { hosted?: boolean } = {},
 ): string[] {
   const first = primary?.trim();
-  if (!first) return [];
+  // An endpoint that is not https (CCA-140) is never read: no primary, no reads at all; a second
+  // one that is not, no second endpoint.
+  if (!first || !secureEndpoint(first, chainId)) return [];
+  const setting = env[READ_FALLBACK_SETTING]?.trim();
   const second =
-    env[READ_FALLBACK_SETTING]?.trim() || (options.hosted ? PUBLIC_READ_RPC[chainId] : undefined);
+    (setting && secureEndpoint(setting, chainId) ? setting : undefined) ||
+    (options.hosted ? chainParams(chainId).publicReadRpc : undefined);
   return second && second !== first ? [first, second] : [first];
+}
+
+const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+/**
+ * A chain endpoint setting the server may use (CCA-140): an https URL, or plain http only to this
+ * machine (a local node or fork) or on the local Anvil network. Anything else would carry the
+ * endpoint's key and every answer the chain runtime decides on in the clear.
+ */
+export function secureEndpoint(value: string, chainId: number): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(value.trim());
+  } catch {
+    return false;
+  }
+  if (/\s/.test(value.trim()) || !parsed.hostname) return false;
+  if (parsed.protocol === 'https:') return true;
+  return parsed.protocol === 'http:' && (chainId === 31337 || LOOPBACK.has(parsed.hostname));
 }
 
 export interface ReadTransportOptions {
@@ -153,6 +197,28 @@ const STATE_READ_BLOCK: Readonly<Record<string, number>> = {
   eth_getStorageAt: 2,
 };
 
+/**
+ * Pinned reads whose answer decides that something did NOT happen, so they stay on the configured
+ * endpoint whatever their pin (CCA-109): EntryPoint getNonce (submit.ts: a sponsorship lapsed, a
+ * nonce used by another operation), USDC authorizationState (Feed pay: an authorization unused
+ * until it expired) and SpendPermissionManager isRevoked (a limit revoked on Base; read inside a
+ * Multicall3 aggregate3, so the selector is looked for anywhere in the call data). A keyless
+ * second node answering one of them could otherwise retire a live operation or end a payment.
+ */
+export const HOME_ONLY_SELECTORS: readonly string[] = [
+  '35567e1a', // getNonce(address,uint192)
+  'e94a0102', // authorizationState(address,bytes32)
+  '3a3c58e8', // isRevoked(SpendPermission)
+];
+
+function homeOnlyCall(call: unknown): boolean {
+  const data = (call as { data?: unknown; input?: unknown } | null) ?? {};
+  const hex = typeof data.data === 'string' ? data.data : data.input;
+  if (typeof hex !== 'string') return false;
+  const lower = hex.toLowerCase();
+  return HOME_ONLY_SELECTORS.some((selector) => lower.includes(selector));
+}
+
 /** Whether the second endpoint may answer this request (see the module header). */
 export function mayFallBack(
   args: Args,
@@ -184,6 +250,7 @@ export function mayFallBack(
     }
     default: {
       const at = STATE_READ_BLOCK[args.method];
+      if (args.method === 'eth_call' && homeOnlyCall(params[0])) return false;
       // Exactly the read and its block: a state override (a third eth_call parameter) stays home.
       return at !== undefined && params.length === at + 1 && pinned(params[at]);
     }
@@ -260,7 +327,8 @@ export function baseReadTransport(
   const base: HttpTransportConfig =
     options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs };
   const purpose = options.purpose ?? 'read';
-  const configured = `${purpose}:configured`;
+  const configured = chainCountKey(options.chainId, `${purpose}:configured`);
+  const quoteCeiling = chainParams(options.chainId).fallbackQuoteCeilingWei;
   const primary = http(first, {
     ...base,
     retryCount: 0,
@@ -277,7 +345,7 @@ export function baseReadTransport(
       ? { timeout: options.secondTimeoutMs ?? PREFERRED_SECOND_TIMEOUT_MS }
       : base),
     retryCount: 0,
-    fetchFn: countingFetch(`${purpose}:second`),
+    fetchFn: countingFetch(chainCountKey(options.chainId, `${purpose}:second`)),
   });
   const now = options.now ?? (() => Date.now());
   return (params) => {
@@ -288,6 +356,28 @@ export function baseReadTransport(
     let checking: Promise<boolean> | null = null;
     /** Until when the second endpoint is skipped (a failed chain-id check, a timeout first). */
     let skipUntil = 0;
+    /** The configured endpoint's last fee quote per method, the bound of a second one. */
+    const lastQuote = new Map<string, bigint>();
+    const quoteOf = (answer: unknown) =>
+      typeof answer === 'string' && HEX_NUMBER.test(answer) ? BigInt(answer) : null;
+    /** The configured endpoint answered: a fee quote becomes the bound of the next second one. */
+    const fromHome = (args: Args, answer: unknown) => {
+      const quote = FEE_QUOTES.has(args.method) ? quoteOf(answer) : null;
+      if (quote !== null) lastQuote.set(args.method, quote);
+      return answer;
+    };
+    /** A fee quote from the second endpoint above its bound (or unreadable): taken as absent. */
+    const quoteTooHigh = (args: Args, answer: unknown) => {
+      if (!FEE_QUOTES.has(args.method)) return false;
+      const quote = quoteOf(answer);
+      if (quote === null) return true;
+      const last = lastQuote.get(args.method);
+      const bound =
+        last !== undefined && last * FALLBACK_QUOTE_FACTOR < quoteCeiling
+          ? last * FALLBACK_QUOTE_FACTOR
+          : quoteCeiling;
+      return quote > bound;
+    };
     const otherServesChain = (): Promise<boolean> => {
       if (sameChain !== null) return Promise.resolve(sameChain);
       if (now() < skipUntil) return Promise.resolve(false);
@@ -312,8 +402,12 @@ export function baseReadTransport(
         try {
           if (now() >= skipUntil && (await otherServesChain())) {
             const answer = await other.request(args as never, requestOptions as never);
-            // Presence only, and a tagged head only while it is recent.
-            if (!absence(args.method, answer) && !staleTaggedHead(args, answer, now()))
+            // Presence only, a tagged head only while it is recent, a fee quote only within bound.
+            if (
+              !absence(args.method, answer) &&
+              !staleTaggedHead(args, answer, now()) &&
+              !quoteTooHigh(args, answer)
+            )
               return answer;
           }
         } catch (error) {
@@ -321,10 +415,10 @@ export function baseReadTransport(
           // node that does not answer in time is skipped for a while.
           if (timedOut(error)) skipUntil = now() + SECOND_BACKOFF_MS;
         }
-        return home.request(args as never, requestOptions as never);
+        return fromHome(args, await home.request(args as never, requestOptions as never));
       }
       try {
-        return await once.request(args as never, requestOptions as never);
+        return fromHome(args, await once.request(args as never, requestOptions as never));
       } catch (error) {
         // A revert is the chain's answer: asking another node would only hide it.
         if (reverted(error)) throw error;
@@ -336,7 +430,7 @@ export function baseReadTransport(
           if (secondError !== error && reverted(secondError)) throw secondError;
           throw error;
         }
-        if (absence(args.method, answer)) throw error;
+        if (absence(args.method, answer) || quoteTooHigh(args, answer)) throw error;
         return answer;
       }
     }) as EIP1193RequestFn;

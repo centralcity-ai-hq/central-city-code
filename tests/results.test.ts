@@ -13,6 +13,7 @@ import { backupDatabase } from '../server/recovery.js';
 import type { CityLimits } from '../server/limits.js';
 import type { ResultOptions } from '../server/results/contract.js';
 import { ASSISTANT_SCOPES, type AssistantScope } from '../shared/assistant.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 /**
  * v1 "Answers" (exchange before compute; docs/ANSWERS.md): publish, unpublish, ask, report reuse, trust,
@@ -103,7 +104,7 @@ async function person(
     remoteAddress: nextAddress(),
   });
   assert.equal(res.statusCode, 201, res.body);
-  const cookie = `cc_session=${res.cookies.find((item) => item.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(res.cookies);
   const id = res.json().operator.id as string;
   await sql(app, 'UPDATE operators SET created_at=created_at-$2 WHERE id=$1', [id, age * DAY]);
   const grant = await rest(app, cookie, 'POST', '/api/assistant-access', {
@@ -1248,7 +1249,11 @@ test('15b retry classification is an allowlist and every error with a window car
     'ask_timeout',
     'busy',
     'cursor_stale',
+    'github_unavailable',
     'inbox_full',
+    'invite_unavailable',
+    'link_fetch_failed',
+    'link_timeout',
     'rate_limited',
     'remote_quota',
     'source_unavailable',
@@ -1503,7 +1508,7 @@ async function hostedApp(
     ]);
     return {
       id,
-      cookie: `cc_session=${res.cookies.find((item) => item.name === 'cc_session')!.value}`,
+      cookie: sessionPair(res.cookies),
     };
   };
   const agentOf = async (cookie: string, name: string) => {

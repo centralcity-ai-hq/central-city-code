@@ -482,21 +482,29 @@ a.v4b-row:hover {
   line-height: 1.4;
 }
 .v4b-select {
+  /* A quiet value like the other rows' values ("Ask ⌄"), not a grey box. */
   flex: none;
-  width: auto;
+  align-self: center;
+  width: fit-content;
+  max-width: 50%;
   min-width: 0;
   appearance: none;
-  height: calc(30 * var(--ws-px));
-  padding: 0 calc(24 * var(--ws-px)) 0 calc(10 * var(--ws-px));
+  height: auto;
+  margin: 0;
+  padding: calc(2 * var(--ws-px)) calc(18 * var(--ws-px)) calc(2 * var(--ws-px)) calc(4 * var(--ws-px));
   border: 0;
-  border-radius: calc(8 * var(--ws-px));
-  background: var(--v4b-sunken)
+  border-radius: calc(6 * var(--ws-px));
+  background: transparent
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none' stroke='%2364748b' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 1l4 4 4-4'/%3E%3C/svg%3E")
-    no-repeat right calc(9 * var(--ws-px)) center;
-  color: var(--v4b-text);
+    no-repeat right calc(2 * var(--ws-px)) center;
+  color: var(--v4b-muted);
   font: inherit;
-  font-size: calc(13.5 * var(--ws-type-px));
+  font-size: calc(14 * var(--ws-type-px));
+  text-align: right;
   cursor: pointer;
+}
+.v4b-select:hover {
+  color: var(--v4b-text);
 }
 .v4b-select:focus-visible {
   outline: 2px solid var(--v4b-accent);
@@ -526,4 +534,55 @@ a.v4b-row:hover {
 .v4b-unblock:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* ===== Choose a chain (Operation Arc): two equal quiet cards with a radio ===== */
+.v4b-step {
+  margin: 0 calc(2 * var(--ws-px));
+  font-size: calc(13.5 * var(--ws-type-px));
+  font-weight: 600;
+}
+.v4b-chains {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: calc(10 * var(--ws-px));
+}
+@media (max-width: 420px) {
+  .v4b-chains {
+    grid-template-columns: 1fr;
+  }
+}
+.v4b-chain {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: calc(4 * var(--ws-px));
+  padding: calc(12 * var(--ws-px)) calc(14 * var(--ws-px)) calc(12 * var(--ws-px))
+    calc(38 * var(--ws-px));
+  background: var(--v4b-surface);
+  border-radius: calc(12 * var(--ws-px));
+  box-shadow: var(--v4b-shadow-s);
+  cursor: pointer;
+  min-width: 0;
+  transition: box-shadow 0.12s;
+}
+.v4b-chain[data-on] {
+  box-shadow:
+    var(--v4b-shadow-s),
+    0 0 0 2px var(--v4b-accent);
+}
+.v4b-chain input {
+  position: absolute;
+  left: calc(14 * var(--ws-px));
+  top: calc(13 * var(--ws-px));
+  margin: 0;
+  accent-color: var(--v4b-accent);
+}
+.v4b-chain b {
+  font-size: calc(14 * var(--ws-type-px));
+  font-weight: 600;
+}
+.v4b-chain span {
+  color: var(--v4b-muted);
+  font-size: calc(12.5 * var(--ws-type-px));
 }

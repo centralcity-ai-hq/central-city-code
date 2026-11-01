@@ -354,7 +354,11 @@ test('a two-page Bazaar sweep over two cron runs lists the Base USDC services on
 
   // One search, matched by listings of both pages and by the risky and excluded ones: the HTTP
   // route and the MCP tool answer the same ids in the same order.
-  const searched = await app.inject({ url: `${FEED_PATHS.services}?q=crypto%20market` });
+  // Another spelling of the search (an encoded space) is sent on once to the browser's own.
+  const moved = await app.inject({ url: `${FEED_PATHS.services}?q=crypto%20market` });
+  assert.equal(moved.statusCode, 307, moved.body);
+  assert.equal(moved.headers.location, `${FEED_PATHS.services}?q=crypto+market`);
+  const searched = await app.inject({ url: moved.headers.location });
   assert.equal(searched.statusCode, 200, searched.body);
   const httpIds = (searched.json() as FeedServicePage).services.map((service) => service.id);
   assert.deepEqual(httpIds, [

@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import { manifestBriefTierSchema } from './pin-schemas.js';
 import type { Operator } from '../../shared/types.js';
 import {
   MEMBERS_CURSOR,
@@ -13,6 +14,7 @@ import {
 } from './contract.js';
 import { clientAddressKey } from '../rate-limit.js';
 import type { RoomPrincipal, Rooms } from './service.js';
+import { MESSAGE_BODY_MAX_BYTES } from '../messaging/body-limits.js';
 
 export interface RoomRouteDependencies {
   rooms: Rooms;
@@ -123,10 +125,47 @@ export function registerRoomRoutes(app: FastifyInstance, d: RoomRouteDependencie
     );
     return d.rooms.search(p, { ...values, q: query.q, room_id: room });
   });
-  app.post('/api/rooms/:room/messages', async (request, reply) => {
+  app.post(
+    '/api/rooms/:room/messages',
+    { bodyLimit: MESSAGE_BODY_MAX_BYTES },
+    async (request, reply) => {
+      const p = await principal(request);
+      const { room } = roomParams.parse(request.params);
+      return reply.code(201).send(await d.rooms.post(p, { ...body(request), room_id: room }));
+    },
+  );
+  // Edit, delete and react (docs/ROOMS.md "Edit, delete and reactions"): a person's own messages
+  // in the console, with the same rules as the AI tools; the host reads a message's history.
+  const messageParams = z.object({ room: roomRefSchema, seq }).strict();
+  app.patch(
+    '/api/rooms/:room/messages/:seq',
+    { bodyLimit: MESSAGE_BODY_MAX_BYTES },
+    async (request) => {
+      const p = await principal(request);
+      const { room, seq: at } = messageParams.parse(request.params);
+      return d.rooms.editMessage(p, { ...body(request), room_id: room, seq: at });
+    },
+  );
+  app.delete('/api/rooms/:room/messages/:seq', async (request) => {
+    const p = await principal(request);
+    const { room, seq: at } = messageParams.parse(request.params);
+    return d.rooms.deleteMessage(p, { room_id: room, seq: at });
+  });
+  app.post('/api/rooms/:room/messages/:seq/reactions', async (request) => {
+    const p = await principal(request);
+    const { room, seq: at } = messageParams.parse(request.params);
+    return d.rooms.react(p, { ...body(request), room_id: room, seq: at });
+  });
+  app.get('/api/rooms/:room/messages/:seq/history', async (request) => {
+    const p = await principal(request);
+    const { room, seq: at } = messageParams.parse(request.params);
+    return d.rooms.messageHistory(p, { room_id: room, seq: at });
+  });
+  // A person's own recent messages from another room, posted here (city_room_handoff).
+  app.post('/api/rooms/:room/handoff', async (request, reply) => {
     const p = await principal(request);
     const { room } = roomParams.parse(request.params);
-    return reply.code(201).send(await d.rooms.post(p, { ...body(request), room_id: room }));
+    return reply.code(201).send(await d.rooms.handoff(p, { ...body(request), room_id: room }));
   });
   app.get('/api/rooms/:room/members', async (request) => {
     const p = await principal(request);
@@ -152,6 +191,19 @@ export function registerRoomRoutes(app: FastifyInstance, d: RoomRouteDependencie
       .strict()
       .parse(request.query ?? {});
     return d.rooms.overview(p, { room_id: room });
+  });
+  // The room manifest (members only, read-only): ?agent_id= when several own agents are members.
+  app.get('/api/rooms/:room/manifest', async (request) => {
+    const p = await principal(request);
+    const { room } = roomParams.parse(request.params);
+    const query = z
+      .object({
+        agent_id: z.string().min(1).max(128).optional(),
+        brief_tier: manifestBriefTierSchema,
+      })
+      .strict()
+      .parse(request.query ?? {});
+    return d.rooms.manifest(p, { room_id: room, ...query });
   });
   // The caller's "Needs you" queue in the room: ?cursor=<next_cursor>&limit=<1..50>.
   app.get('/api/rooms/:room/needs-you', async (request) => {

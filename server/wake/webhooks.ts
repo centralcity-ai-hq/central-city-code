@@ -2,7 +2,12 @@ import { createHash, createHmac, hkdfSync, timingSafeEqual } from 'node:crypto';
 import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
 import type { Database } from '../database.js';
-import { isPublicAddress, publicLookup } from '../oauth/clients.js';
+import {
+  createPublicLookup,
+  isPublicAddress,
+  localOnlyHostName,
+  type PublicLookup,
+} from '../oauth/clients.js';
 import { WAKE_LIMITS, WEBHOOK_BACKOFF_MS } from './contract.js';
 
 /**
@@ -39,11 +44,8 @@ export function validateWebhookUrl(value: string): URL {
   if (url.username || url.password || url.hash)
     throw new WebhookUrlError('Webhook urls cannot carry credentials or a fragment.');
   const host = url.hostname.startsWith('[') ? url.hostname.slice(1, -1) : url.hostname;
-  if (
-    isIP(host)
-      ? !isPublicAddress(host)
-      : !host.includes('.') || /\.(local|localhost|internal|lan|home|arpa)$/i.test(host)
-  )
+  // The outbound fetchers' one static host rule (trailing dots stripped, every local suffix).
+  if (isIP(host) ? !isPublicAddress(host) : localOnlyHostName(host))
     throw new WebhookUrlError('Webhook urls must point to a public host.');
   return url;
 }
@@ -107,49 +109,59 @@ export function verifyWebhook(
  * public addresses only (checked at connection time, so DNS rebinding cannot reach private
  * ranges), no redirects (a 3xx is a failure), a strict timeout, response body discarded.
  */
-export const httpsWebhookTransport: WebhookTransport = (url, body, headers, timeoutMs) =>
-  new Promise((resolve, reject) => {
-    let target: URL;
-    try {
-      target = validateWebhookUrl(url);
-    } catch (error) {
-      return reject(error);
-    }
-    let settled = false;
-    const finish = (action: () => void) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      action();
-    };
-    const req = httpsRequest(
-      target,
-      {
-        method: 'POST',
-        headers: { ...headers, 'content-length': String(Buffer.byteLength(body)) },
-        lookup: publicLookup as never,
-        agent: false,
-      },
-      (res) => {
-        let length = 0;
-        res.on('data', (chunk: Buffer) => {
-          length += chunk.length;
-          if (length > 4096) req.destroy();
-        });
-        res.on('error', () => {});
-        res.on('end', () => finish(() => resolve({ status: res.statusCode ?? 0 })));
-        res.on('close', () => finish(() => resolve({ status: res.statusCode ?? 0 })));
-      },
-    );
-    const timer = setTimeout(() => {
-      req.destroy();
-      finish(() => reject(new Error('timeout')));
-    }, timeoutMs);
-    req.on('error', (error: NodeJS.ErrnoException) =>
-      finish(() => reject(new Error(error.code === 'ENOTPUBLIC' ? 'not_public' : 'network'))),
-    );
-    req.end(body);
-  });
+export const httpsWebhookTransport: WebhookTransport = createHttpsWebhookTransport();
+
+/** The production transport; `lookup` replaces the public-address lookup in tests. */
+export function createHttpsWebhookTransport(
+  options: { lookup?: PublicLookup } = {},
+): WebhookTransport {
+  return (url, body, headers, timeoutMs) =>
+    new Promise((resolve, reject) => {
+      let target: URL;
+      try {
+        target = validateWebhookUrl(url);
+      } catch (error) {
+        return reject(error);
+      }
+      // The deadline also cancels a host name lookup still waiting on the name servers.
+      const lookups = new AbortController();
+      let settled = false;
+      const finish = (action: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        lookups.abort();
+        action();
+      };
+      const req = httpsRequest(
+        target,
+        {
+          method: 'POST',
+          headers: { ...headers, 'content-length': String(Buffer.byteLength(body)) },
+          lookup: (options.lookup ?? createPublicLookup({ signal: lookups.signal })) as never,
+          agent: false,
+        },
+        (res) => {
+          let length = 0;
+          res.on('data', (chunk: Buffer) => {
+            length += chunk.length;
+            if (length > 4096) req.destroy();
+          });
+          res.on('error', () => {});
+          res.on('end', () => finish(() => resolve({ status: res.statusCode ?? 0 })));
+          res.on('close', () => finish(() => resolve({ status: res.statusCode ?? 0 })));
+        },
+      );
+      const timer = setTimeout(() => {
+        req.destroy();
+        finish(() => reject(new Error('timeout')));
+      }, timeoutMs);
+      // A host that resolves only to private addresses reads as any other network failure, so the
+      // stored status does not tell which internal names exist.
+      req.on('error', () => finish(() => reject(new Error('network'))));
+      req.end(body);
+    });
+}
 
 /** Wake target kinds (migration 26): signed HTTPS webhooks, and hosted responders. */
 export type WakeTargetKind = 'https' | 'responder';

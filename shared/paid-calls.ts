@@ -63,9 +63,15 @@ export interface BaseAgentsField {
   as_of: string;
 }
 
+/**
+ * The optional `arc_agents` field (same shape): the explorer-listed agents on the Arc chain, sent
+ * only while Arc is on. The landing tile shows base_agents + arc_agents; Base-only places don't.
+ */
+export type ArcAgentsField = BaseAgentsField;
+
 /** The label after the Base agents number: "Base agent" for exactly 1. */
 export function baseAgentsLabel(total: number): string {
-  return total === 1 ? 'Base agent' : 'Base agents';
+  return total === 1 ? 'ERC-8004 agent' : 'ERC-8004 agents';
 }
 
 /** True unless CITY_PAID_CALLS_TICKER is exactly '0'. */

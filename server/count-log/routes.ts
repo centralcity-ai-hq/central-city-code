@@ -8,8 +8,9 @@ import {
   isDay,
   nextCheckpointAt,
 } from '../../shared/count-log/index.js';
-import { CheckpointInProgress, LEAVES_PAGE_MAX, type CountLog } from './service.js';
+import { CheckpointInProgress, LEAVES_BLOCKS, LEAVES_PAGE_MAX, type CountLog } from './service.js';
 import { FEED_LIMITS } from './pending.js';
+import { clientAddressPrefixes } from '../rate-limit.js';
 
 /*
  * Public, cacheable routes of the verifiable agent count, the owner-only proof route and the
@@ -26,12 +27,32 @@ export const SHORT_EDGE = 'public, max-age=300, stale-while-revalidate=86400';
 export const LIVE_EDGE = 'public, max-age=2, stale-while-revalidate=3600';
 const IMMUTABLE = 'public, max-age=31536000, s-maxage=31536000, immutable';
 
+/** A leaf index in its one decimal spelling ("7", never "07" or "7.0"): one cache key per page. */
+const leafIndex = z
+  .string()
+  .regex(/^(?:0|[1-9]\d{0,9})$/)
+  .transform(Number)
+  .pipe(z.number().max(2_147_483_647));
+/**
+ * Aligned blocks only (LEAVES_BLOCKS): without `to`, a full page from a multiple of the page
+ * size. Any other range is refused, so the possible URLs are the log's blocks and nothing else.
+ */
 const leavesQuery = z
-  .object({
-    from: z.coerce.number().int().min(0).default(0),
-    to: z.coerce.number().int().min(1).optional(),
-  })
-  .strict();
+  .object({ from: leafIndex.optional(), to: leafIndex.optional() })
+  .strict()
+  .transform(({ from = 0, to }) => ({ from, to: to ?? from + LEAVES_PAGE_MAX }))
+  .refine(
+    ({ from, to }) => LEAVES_BLOCKS.some((size) => to - from === size && from % size === 0),
+    'Ask for an aligned block: from a multiple of 10000 with to = from + 10000, of 100 with to = from + 100, or one leaf.',
+  );
+/**
+ * Per address (IPv6 /64) and per /56, for leaf pages the edge did not already hold. The verify
+ * page's whole-log checks read every page in a row, and after a deployment the edge starts empty:
+ * per address this is the general API limit's default (600 a minute), so one check of a log up to 6 million
+ * leaves fits in a minute, and the /56 holds four addresses at it. Beyond that the page waits for
+ * Retry-After and goes on (src/verify/countLogClient.ts leavesBetween).
+ */
+export const LEAVES_RATE = { perSource: 600, perSite: 2_400, windowMs: 60_000 } as const;
 /**
  * The withdrawn list, paged by leaf index like /leaves: other query strings would each be a
  * separate edge-cache entry and a fresh read of the whole (append-only) table.
@@ -48,9 +69,10 @@ const checkpointsQuery = z
   .strict();
 const feedQuery = z
   .object({
+    // The last entry's fingerprint (pending.ts parseCursor).
     before: z
       .string()
-      .regex(/^\d{1,18}$/)
+      .regex(/^[0-9a-f]{64}$/)
       .optional(),
     limit: z.coerce.number().int().min(1).max(FEED_LIMITS.max).optional(),
   })
@@ -93,6 +115,27 @@ export function checkpointsCache(
 /** Seconds until the next daily checkpoint (12:00 Europe/Berlin), when a confirmed entry may change. */
 function untilCheckpoint(now: number): number {
   return Math.max(2, Math.floor((nextCheckpointAt(now) - now) / 1000));
+}
+/** A feed page while the day's checkpoint is due but not sealed yet: 5 s, like the checkpoint list. */
+export const FEED_SEALING = 'public, max-age=5, s-maxage=5';
+
+/**
+ * The Cache-Control of one feed page. The head page and pages with a pending entry are live; a
+ * page whose entries are all removed is final. A settled page (no pending entry) can change only
+ * at the next checkpoint, so it is cached until the next 12:00 Berlin cut. Between the day's cut
+ * and its seal (the checkpoint not listed yet) that next checkpoint is today's, still running: the
+ * page gets 5 s, as the checkpoint list does, instead of a lifetime that ends at tomorrow's cut.
+ */
+export function feedCache(
+  page: { cursor: boolean; stability: 'final' | 'checkpoint' | 'live'; latest: string | null },
+  now: number,
+): string {
+  if (!page.cursor || page.stability === 'live') return LIVE;
+  if (page.stability === 'final') return FINAL;
+  const today = new Date(now).toISOString().slice(0, 10);
+  if (now >= cutInstant(today) && (page.latest ?? '') < today) return FEED_SEALING;
+  const age = untilCheckpoint(now);
+  return `public, max-age=${age}, s-maxage=${age}`;
 }
 const dateParams = z.object({ date: z.string().refine(isDay, 'Use YYYY-MM-DD.') }).strict();
 const agentParams = z.object({ id: z.string().uuid() }).strict();
@@ -153,13 +196,14 @@ export function registerCountLogRoutes(
   app.get('/api/public/count-log/feed', async (request, reply) => {
     const query = feedQuery.parse(request.query);
     const feed = await d.log.feed(query);
-    const age = untilCheckpoint(Date.now());
-    const cache =
-      query.before === undefined || feed.stability === 'live'
-        ? LIVE
-        : feed.stability === 'final'
-          ? FINAL
-          : `public, max-age=${age}, s-maxage=${age}`;
+    const cache = feedCache(
+      {
+        cursor: query.before !== undefined,
+        stability: feed.stability,
+        latest: feed.latest_checkpoint,
+      },
+      Date.now(),
+    );
     const { stability: _stability, ...body } = feed;
     if (cache === LIVE) reply.header('Vercel-CDN-Cache-Control', LIVE_EDGE);
     return reply.header('Cache-Control', cache).send(body);
@@ -173,16 +217,28 @@ export function registerCountLogRoutes(
   });
   app.get('/api/public/count-log/leaves', async (request, reply) => {
     const { from, to } = leavesQuery.parse(request.query);
-    const page = await d.log.leaves(from, to ?? from + LEAVES_PAGE_MAX);
-    const end = from + page.leaves.length;
-    // Immutable only when the URL pins the range (`to` given) and the page is filled (up to `to`,
-    // or a full page): those leaves never change. Without `to` the page follows the log's current
-    // size, so it revalidates. Either way the body's tree_size is the size at response time:
-    // clients read the current size from /checkpoints, never from a cached leaves page.
-    const settled = to !== undefined && (end >= to || page.leaves.length === LEAVES_PAGE_MAX);
-    return reply
-      .header('Cache-Control', settled ? IMMUTABLE : SHORT)
-      .send({ from, tree_size: page.tree_size, leaves: page.leaves });
+    const prefixes = clientAddressPrefixes(request.ip);
+    await d.limit?.(
+      `count-log-leaves:${prefixes.source}`,
+      LEAVES_RATE.perSource,
+      LEAVES_RATE.windowMs,
+    );
+    await d.limit?.(
+      `count-log-leaves-site:${prefixes.site}`,
+      LEAVES_RATE.perSite,
+      LEAVES_RATE.windowMs,
+    );
+    const page = await d.log.leaves(from, to);
+    // Immutable once the block is filled: those leaves never change. A block at the log's end keeps
+    // its URL while the log grows, and grows only when a checkpoint is listed: it is cached like
+    // the checkpoint list (checkpointsCache), so no copy from before a cut is served after it and
+    // the block always reaches the size /checkpoints shows. Either way the body's tree_size is the
+    // size at response time: clients read the current size from /checkpoints.
+    if (from + page.leaves.length < to) {
+      const cache = checkpointsCache(page.date ?? undefined, d.now?.() ?? Date.now());
+      reply.header('Cache-Control', cache.browser).header('Vercel-CDN-Cache-Control', cache.edge);
+    } else reply.header('Cache-Control', IMMUTABLE);
+    return reply.send({ from, tree_size: page.tree_size, leaves: page.leaves });
   });
   app.get('/api/public/count-log/withdrawn', async (request, reply) => {
     const { from, to } = withdrawnQuery.parse(request.query);

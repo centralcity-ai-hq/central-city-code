@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Nodes, Root } from 'mdast';
 import { CodeBlock } from './CodeBlock';
 import { withoutBidiControls } from './guard';
+import { textShowsHost } from './linkHost';
 import type { ParseResult } from './parse';
 import { cachedParse, parseInWorker, prioritize } from './workerClient';
 
@@ -13,7 +14,7 @@ import { cachedParse, parseInWorker, prioritize } from './workerClient';
  */
 
 /** The server's text limit per part (see parse.ts, which enforces it). */
-export const MAX_MARKDOWN_CHARS = 16_384;
+export const MAX_MARKDOWN_CHARS = 65_536;
 /** Deeper nesting is flattened to its text (nested quotes/lists cannot blow the stack). */
 const MAX_DEPTH = 24;
 /** Messages longer than this many lines start collapsed with "Show more". */
@@ -93,16 +94,7 @@ function collectDefinitions(root: Nodes, into: Context['definitions']) {
   }
 }
 
-/** True when the visible link text already names the destination host. */
-export function textShowsHost(text: string, host: string): boolean {
-  const shown = text
-    .trim()
-    .toLowerCase()
-    .replace(/^[a-z][a-z0-9+.-]*:\/\//, '')
-    .replace(/^www\./, '');
-  const real = host.toLowerCase().replace(/^www\./, '');
-  return shown === real || (/^[/?#:]/.test(shown.slice(real.length)) && shown.startsWith(real));
-}
+export { textShowsHost } from './linkHost';
 
 /**
  * A link out of a room: new tab, no opener, no referrer. When its text does not name the real

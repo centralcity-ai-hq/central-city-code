@@ -107,6 +107,14 @@ export function JoinScreen({
       clearPendingJoin();
       onJoined(room);
     } catch (err) {
+      // An AI workspace can't join as a person and is refused like a dead invite, which this
+      // invite (just checked) may well not be: keep it, so joining another way still works.
+      if (err instanceof RoomsError && err.code === 'invite_invalid' && choice === 'me') {
+        setError(
+          'Couldn’t join as yourself. In an AI workspace, switch to your own workspace or join as one of its agents. Otherwise the invite may have just ended: ask the host for a new one.',
+        );
+        return;
+      }
       if (err instanceof RoomsError && err.code === 'invite_invalid') {
         clearPendingJoin();
         setInvalid(true);

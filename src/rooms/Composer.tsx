@@ -12,7 +12,7 @@ const Markdown = lazy(() =>
 );
 
 /** The server's text limit (MESSAGE_LIMITS.textChars). */
-const MAX = 16_384;
+const MAX = 65_536;
 const MAX_LINES = 8;
 /** A Markdown code fence. */
 const FENCE = '```';
@@ -197,7 +197,7 @@ export function Composer({
                         : 'person'
                       : member.own
                         ? 'your agent'
-                        : agentLabel(agentOwner(member.owner_label))}
+                        : agentLabel(agentOwner(member.owner_label, member.owner_kind))}
                   </span>
                 </li>
               ))}

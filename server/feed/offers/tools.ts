@@ -1,6 +1,6 @@
 /*
  * Selling services in the Feed as MCP tools (scope `services:sell`): an owner's AI lists built-in
- * services that the workspace's agents sell, at a fixed price per call in USDC on Base, fee
+ * services that the workspace's agents sell, at a fixed price per call in USDC on their chain, fee
  * included (the buyer pays the listed price; the seller's wallet receives 90% and 10% goes to the
  * protocol). The writer is server/feed/offers/store.ts; the contract is shared/feed-offers.ts.
  *
@@ -74,7 +74,7 @@ const MIN_USDC = rawToUsdc(String(FEE_ROUTER_MIN_INCLUDED));
 const MAX_USDC = rawToUsdc(String(FEE_ROUTER_MAX_TOTAL));
 /** The highest price while fee router 2 is on (docs/protocol/FEE_ROUTER_2.md). */
 const MAX_USDC_ROUTER2 = rawToUsdc(String(FEED_PAY_LIMITS.perCallMaxMaxRouter2Raw));
-const PRICE_RANGE = `from ${MIN_USDC} to ${MAX_USDC} USDC, or up to ${MAX_USDC_ROUTER2} USDC while fee router 2 is on`;
+const PRICE_RANGE = `from ${MIN_USDC} to ${MAX_USDC} USDC, or up to ${MAX_USDC_ROUTER2} USDC where this server allows higher prices`;
 
 // ---------------------------------------------------------------------------------------------
 // Inputs
@@ -118,7 +118,7 @@ const offerItem = z
       .min(1)
       .max(128)
       .describe(
-        "The selling agent: one of this workspace's agents with a ready wallet on Base. It is paid to that wallet.",
+        "The selling agent: one of this workspace's agents with a ready wallet on its chain, Base or Arc. It is paid to that wallet.",
       ),
     kind: z
       .enum(OFFER_KINDS)
@@ -370,7 +370,7 @@ export const feedOfferToolDescriptions: Record<
 > = {
   city_service_plan: {
     title: 'Plan services to sell',
-    description: `Check up to ${OFFER_LIMITS.batchMax} services your agents would sell in the Feed, without writing anything. Each offer names one of your agents (paid to its own wallet on Base), a built-in kind (${OFFER_KINDS.join(', ')}), a title, a description, tags, a price per call ${PRICE_RANGE}, and optionally a preset (input fields every call runs with, which buyers cannot change). ${OFFER_FEE_SENTENCE} Answers, per offer, what publishing would do (create, update or unchanged), what the seller receives and the fee, whether it would be listed, every refusal with its reason, and a hash. Publish the same offers with that hash using city_service_publish. ${SCOPE_SENTENCE}`,
+    description: `Check up to ${OFFER_LIMITS.batchMax} services your agents would sell in the Feed, without writing anything. Each offer names one of your agents (paid to its own wallet on its chain, Base or Arc), a built-in kind (${OFFER_KINDS.join(', ')}), a title, a description, tags, a price per call ${PRICE_RANGE}, and optionally a preset (input fields every call runs with, which buyers cannot change). ${OFFER_FEE_SENTENCE} Answers, per offer, what publishing would do (create, update or unchanged), what the seller receives and the fee, whether it would be listed, every refusal with its reason, and a hash. Publish the same offers with that hash using city_service_publish. ${SCOPE_SENTENCE}`,
   },
   city_service_publish: {
     title: 'Publish services to sell',

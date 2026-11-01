@@ -75,9 +75,31 @@ function decodeBool(data: `0x${string}`, functionName: 'isApproved' | 'isRevoked
   return decodeFunctionResult({ abi: spendPermissionManagerAbi, functionName, data }) as boolean;
 }
 
+/**
+ * How long basePermissionReader reuses the settled block (Base's finalized block) per chain
+ * (CCA-112): every spending-limit write proves "nothing active" with a settled read, and without
+ * this each one fetched the finalized block from Base again. A reused block is still final, only
+ * up to this much older; the permission values themselves are always read fresh at that block.
+ */
+export const SETTLED_BLOCK_CACHE_MS = 10_000;
+
+export interface PermissionReaderOptions {
+  /** Reuse the settled block for this long, per chain (0 or absent: read it every time). */
+  settledBlockCacheMs?: number;
+  now?: () => number;
+}
+
 /** The read over an already built client (tests use a local JSON-RPC stand-in). */
-export function permissionReaderFor(client: PublicClient, network: BaseNetwork): PermissionReader {
+export function permissionReaderFor(
+  client: PublicClient,
+  network: BaseNetwork,
+  options: PermissionReaderOptions = {},
+): PermissionReader {
   const manager = network.contracts.spendPermissionManager;
+  const cacheMs = options.settledBlockCacheMs ?? 0;
+  const now = options.now ?? Date.now;
+  // One entry per chain (bounded); concurrent writes share one pending read; a failure is dropped.
+  const settledBlocks = new Map<number, { at: number; block: Promise<bigint> }>();
   let chainChecked = false;
   // A URL for another network must never report its permissions as this network's.
   const checkChain = async () => {
@@ -88,6 +110,21 @@ export function permissionReaderFor(client: PublicClient, network: BaseNetwork):
   };
 
   async function blockFor(settled: boolean): Promise<bigint> {
+    if (!settled || cacheMs <= 0) return readBlock(settled);
+    const key = network.chainId;
+    const hit = settledBlocks.get(key);
+    const at = now();
+    if (hit && at - hit.at >= 0 && at - hit.at < cacheMs) return hit.block;
+    const block = readBlock(true);
+    const entry = { at, block };
+    settledBlocks.set(key, entry);
+    block.catch(() => {
+      if (settledBlocks.get(key) === entry) settledBlocks.delete(key);
+    });
+    return block;
+  }
+
+  async function readBlock(settled: boolean): Promise<bigint> {
     if (settled && network.chainId === BASE_MAINNET) {
       const finalized = await client.getBlock({ blockTag: 'finalized' });
       if (finalized.number === null) throw new Error('No finalized block.');
@@ -198,6 +235,7 @@ export function basePermissionReader(
   url: string | readonly string[],
   network: BaseNetwork,
   timeoutMs = 3_000,
+  options: PermissionReaderOptions = {},
 ): PermissionReader {
   return permissionReaderFor(
     createPublicClient({
@@ -208,5 +246,6 @@ export function basePermissionReader(
       }),
     }),
     network,
+    { settledBlockCacheMs: SETTLED_BLOCK_CACHE_MS, ...options },
   );
 }

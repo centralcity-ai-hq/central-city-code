@@ -87,6 +87,8 @@ export async function postSystemLine(
   text: string,
   time: number,
   messagesPerRoom: number,
+  /** The owner whose own action this line reports (migration 334), when one did; else null. */
+  actorOwnerId: string | null = null,
 ): Promise<number | null> {
   const seq = (
     await tx.query<{ seq: string | number }>(
@@ -96,8 +98,8 @@ export async function postSystemLine(
   ).rows[0]?.seq;
   if (seq === undefined) return null;
   await tx.query(
-    `INSERT INTO room_messages(room_id,seq,id,sender_agent_id,sender_owner_id,sender_name,sender_owner_label,parts,created_at,format,sender_kind,auto_reply)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,'plain','system',NULL)`,
+    `INSERT INTO room_messages(room_id,seq,id,sender_agent_id,sender_owner_id,sender_name,sender_owner_label,parts,created_at,format,sender_kind,auto_reply,actor_owner_id)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,'plain','system',NULL,$10)`,
     [
       roomId,
       Number(seq),
@@ -108,6 +110,7 @@ export async function postSystemLine(
       SYSTEM_SENDER.ownerLabel,
       JSON.stringify([{ type: 'text', text }]),
       time,
+      actorOwnerId,
     ],
   );
   return Number(seq);

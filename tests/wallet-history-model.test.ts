@@ -93,6 +93,19 @@ test('Basescan only for an operation in a block, and only a Basescan transaction
     assert.equal(explorerOf(view('w-1', 'included', { explorerUrl })), null, explorerUrl);
 });
 
+test('an operation on Arc links only to that Arc network’s own explorer', () => {
+  const on = (explorerUrl: string, chainId = 5042002) =>
+    explorerOf({ ...view('w-1', 'included', { explorerUrl }), chainId });
+  const arc = `https://explorer.testnet.arc.io/tx/${TX}`;
+  assert.equal(on(arc), arc);
+  // Never Basescan for an Arc operation, another Arc network's, or a look-alike.
+  assert.equal(on(`https://basescan.org/tx/${TX}`), null);
+  assert.equal(on(`https://explorer.arc.io/tx/${TX}`), null);
+  assert.equal(on(`https://explorer.testnet.arc.io.evil.example/tx/${TX}`), null);
+  // And never Arc's explorer for an operation on Base.
+  assert.equal(on(arc, 8453), null);
+});
+
 test('a line keeps this browser’s record only while its hash is the server’s', () => {
   const record: LaneRecord = {
     withdrawalId: 'w-1',

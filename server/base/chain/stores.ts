@@ -244,7 +244,12 @@ interface KeyRow {
 const KEY_COLUMNS =
   'key_id, kek_version, wrapped_dek, ciphertext, signer_address, created_at::text AS created_at, committed_at::text AS committed_at';
 
-/** Orphaned keys (never referenced by a wallet) older than this are deleted. */
+/**
+ * Age after which an uncommitted key counts as orphaned (never referenced by a wallet). Orphans are
+ * not deleted on a schedule: deleteOrphans runs only as a reviewed operator step, because service
+ * keys outside base_wallets must be committed first (docs/base/ARCHITECTURE.md "Spender KEK
+ * lifecycle").
+ */
 export const ORPHAN_KEY_AGE_MS = 60 * 60 * 1000;
 
 export function pgSpenderKeyStore(db: Database) {
@@ -295,7 +300,10 @@ export function pgSpenderKeyStore(db: Database) {
       );
     },
 
-    /** Deletes uncommitted keys older than an hour that no wallet references; returns the count. */
+    /**
+     * Deletes uncommitted keys older than an hour that no wallet references; returns the count.
+     * Operator step only, never scheduled (see ORPHAN_KEY_AGE_MS).
+     */
     async deleteOrphans(now = Date.now()) {
       const { rows } = await db.query<{ key_id: string }>(
         `DELETE FROM base_spender_keys k

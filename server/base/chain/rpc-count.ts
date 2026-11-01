@@ -5,6 +5,7 @@
  * endpoint's URL carries a key), an address or a parameter. It changes no behaviour; it shows how
  * close the CDP endpoint's limits are while many agents pay or register at once.
  */
+import { chainFamily } from '../../../shared/chains.js';
 import { busyRpcAnswer } from './transient.js';
 
 export type RpcOutcome = 'ok' | 'http429' | 'busy' | 'failed';
@@ -54,6 +55,16 @@ export function rpcOutcome(error: unknown): Exclude<RpcOutcome, 'ok'> {
     current = e.cause;
   }
   return busy ? 'busy' : 'failed';
+}
+
+/**
+ * The count key of a request on a chain: Base keeps its keys as they are (the minute line reads as
+ * before), any other chain's are prefixed with its family ('arc:feed-pay:bundler'), so two chains'
+ * requests never add up in one row.
+ */
+export function chainCountKey(chainId: number, key: string): string {
+  const family = chainFamily(chainId);
+  return family && family !== 'base' ? `${family}:${key}` : key;
 }
 
 /** Counts one request; the first count after a full minute writes the last window's line. */

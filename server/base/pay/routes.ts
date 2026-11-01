@@ -1,6 +1,7 @@
 /*
  * Operation Base Pay P1 over HTTP (service: pay/service.ts). Registered by the wallet routes,
- * behind the same CITY_BASE_WALLET flag (404 while off), on the wallet network only.
+ * behind the same CITY_BASE_WALLET flag (404 while off). A payment is on the paying agent's chain;
+ * with Arc on, the two reads take ?chain=<its id> for Arc (the wallet network without it).
  *
  *   GET  /api/base/pay/recipient?q=<typed>          200 who a payment would go to, checked at a block
  *   POST /api/base/agents/:agentId/wallet/payments  201 the withdrawal to sign + payment
@@ -25,7 +26,13 @@ export interface PayRouteDeps {
   person(
     request: FastifyRequest,
   ): Promise<{ ok: true; accountId: string } | { ok: false; code: number }>;
+  /** The wallet network's; its `create` follows the paying agent's chain (wallet/routes.ts). */
   service: PayService;
+  /**
+   * The lookup and incoming read of the chain a request names (?chain=), only while that chain is on.
+   * Without it, or with Arc off, ?chain= is refused like any other unknown parameter.
+   */
+  onChain?: (chainId: number) => Pick<PayService, 'lookup' | 'incoming'> | null;
   /** The shared rate limiter (server/app.ts); absent in unit tests. */
   limit?: (key: string, max: number, windowMs: number) => Promise<void>;
 }
@@ -40,8 +47,13 @@ export const PAY_RATES = {
   create: { prefix: 'pay-create', max: 20, windowMs: 60_000 },
 } as const;
 
-const recipientQuery = z.strictObject({ q: z.string().max(PAY_QUERY_MAX) });
+const chainParam = z
+  .string()
+  .regex(/^[1-9][0-9]{0,9}$/)
+  .optional();
+const recipientQuery = z.strictObject({ q: z.string().max(PAY_QUERY_MAX), chain: chainParam });
 const incomingQuery = z.strictObject({
+  chain: chainParam,
   // The cursor of the last page: the change's transaction id and the payment id.
   after: z
     .string()
@@ -55,6 +67,9 @@ const incomingQuery = z.strictObject({
 const params = z.object({ agentId: z.string().uuid() });
 
 export function registerPayRoutes(app: FastifyInstance, deps: PayRouteDeps) {
+  /** The service a query names: the wallet network's without ?chain=, null when it names no chain on. */
+  const serviceOf = (chain: string | undefined) =>
+    chain === undefined ? deps.service : (deps.onChain?.(Number(chain)) ?? null);
   const limited = (rate: (typeof PAY_RATES)[keyof typeof PAY_RATES], accountId: string) =>
     deps.limit?.(`${rate.prefix}:${accountId}`, rate.max, rate.windowMs);
   const failure = (reply: FastifyReply, error: unknown) => {
@@ -77,13 +92,14 @@ export function registerPayRoutes(app: FastifyInstance, deps: PayRouteDeps) {
     const person = await deps.person(request);
     if (!person.ok) return reply.code(person.code).send({ error: 'Not found.' });
     const query = recipientQuery.safeParse(request.query ?? {});
-    if (!query.success)
+    const service = query.success ? serviceOf(query.data.chain) : null;
+    if (!query.success || !service)
       return reply
         .code(400)
         .send({ error: 'Use ?q=<passport or Base ID>.', code: 'invalid_query' });
     await limited(PAY_RATES.lookup, person.accountId);
     try {
-      return await deps.service.lookup(person.accountId, query.data.q);
+      return await service.lookup(person.accountId, query.data.q);
     } catch (error) {
       return failure(reply, error);
     }
@@ -113,7 +129,8 @@ export function registerPayRoutes(app: FastifyInstance, deps: PayRouteDeps) {
     const person = await deps.person(request);
     if (!person.ok) return reply.code(person.code).send({ error: 'Not found.' });
     const query = incomingQuery.safeParse(request.query ?? {});
-    if (!query.success)
+    const service = query.success ? serviceOf(query.data.chain) : null;
+    if (!query.success || !service)
       return reply.code(400).send({
         error: `Use ?after=<cursor> and ?limit=<1 to ${PAY_INCOMING_PAGE_MAX}>.`,
         code: 'invalid_query',
@@ -127,7 +144,7 @@ export function registerPayRoutes(app: FastifyInstance, deps: PayRouteDeps) {
     await limited(PAY_RATES.incoming, person.accountId);
     const [xid, paymentId] = query.data.after?.split('.') ?? [];
     try {
-      return await deps.service.incoming(person.accountId, {
+      return await service.incoming(person.accountId, {
         after: query.data.after ? { xid, paymentId } : null,
         limit,
       });

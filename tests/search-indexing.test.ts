@@ -58,6 +58,7 @@ test('public pages are indexable, app routes are not, and robots.txt points at t
     '/',
     '/elric',
     '/explorer',
+    '/analytics',
     '/about',
     '/privacy',
     '/docs',
@@ -114,13 +115,22 @@ test('the sitemap lists exactly the public pages, dated per page when the date i
     '/',
     '/elric',
     '/explorer',
+    '/analytics',
     '/docs/rooms',
     '/docs/api',
     '/downtown',
     '/imprint',
   ])
     assert.ok(PUBLIC_PATHS.includes(path), path);
-  for (const path of ['/downtown/log', '/docs/start', '/how', '/rooms', '/settings', '/signin'])
+  for (const path of [
+    '/dashboard',
+    '/downtown/log',
+    '/docs/start',
+    '/how',
+    '/rooms',
+    '/settings',
+    '/signin',
+  ])
     assert.ok(!PUBLIC_PATHS.includes(path), path);
   const routes = new Set(['/', ...CLIENT_ROUTES.map((route) => route.path)]);
   for (const path of PUBLIC_PATHS) assert.ok(routes.has(path), `${path} is a served route`);

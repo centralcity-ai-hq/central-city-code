@@ -107,7 +107,7 @@ test('the home, Elric, Connect, Invite, Verify and Explorer pages carry their co
   assert.match(h1, /<span class="cc-room">One room\.<\/span>/);
   for (const line of [
     'Open protocol for AI agents',
-    'Claude, ChatGPT, Gemini and your own agents work together in shared rooms, carry a passport on Base and pay each other for services in USDC.',
+    'Claude, ChatGPT, Gemini and your own agents work together in shared rooms, carry a passport onchain and pay each other for services in USDC.',
     'Central City',
     'Every AI at the same table.',
     'Every agent deserves a passport.',
@@ -120,7 +120,7 @@ test('the home, Elric, Connect, Invite, Verify and Explorer pages carry their co
     '/downtown',
     '/downtown/verify',
     '/docs',
-    '/explorer/calls',
+    '/explorer',
     '/explorer/base',
     '/elric',
     '/connect',
@@ -208,7 +208,7 @@ test('live numbers are not baked into the HTML: they render in their loading sta
   assert.deepEqual(cells(home), {
     value: { attributes: '', text: 'Total value settled (x402)$–USDC' },
     paid: { attributes: '', text: 'Paid service calls–' },
-    base: { attributes: '', text: 'Central City base agents–' },
+    base: { attributes: '', text: 'Central City ERC-8004 Agents–' },
     agents: { attributes: ' data-agent-ticker="true"', text: 'AI agents joined–' },
   });
   assert.match(home, /<dl class="cc-kgrid" aria-hidden="true">/);
@@ -243,7 +243,7 @@ test("the build's agent count is in the landing HTML, marked as of the build", (
     // The other numbers stay dashes: only the agent count is read at build time.
     assert.equal(value?.text, 'Total value settled (x402)$–USDC');
     assert.equal(paid?.text, 'Paid service calls–');
-    assert.equal(base?.text, 'Central City base agents–');
+    assert.equal(base?.text, 'Central City ERC-8004 Agents–');
     assert.equal(home.match(/data-agent-ticker/g)?.length, 1);
     loaded.setAgentCount({ total: 1, at });
     assert.equal(
@@ -278,17 +278,17 @@ test("the build's Base agents number is in its cell, marked as of the build; nev
       base?.attributes,
       ' data-build-base="31452" data-build-base-at="2026-10-05T12:00:00.000Z"',
     );
-    assert.equal(base?.text, 'Central City base agents31,452');
+    assert.equal(base?.text, 'Central City ERC-8004 Agents31,452');
     assert.match(
       home,
-      /<p class="visually-hidden">Central City, last known: 31,452 Central City base agents, 114,251 AI agents joined\.<\/p>/,
+      /<p class="visually-hidden">Central City, last known: 31,452 Central City ERC-8004 Agents on Base and Arc, 114,251 AI agents joined\.<\/p>/,
     );
     // The money numbers stay dashes.
     assert.equal(paid?.text, 'Paid service calls–');
     assert.equal(value?.text, 'Total value settled (x402)$–USDC');
     loaded.setBaseAgents({ total: 0, asOf: at });
     const zero = cells(rootOf(homeHtml(index, render, assert.fail).html)).base;
-    assert.equal(zero?.text, 'Central City base agents–');
+    assert.equal(zero?.text, 'Central City ERC-8004 Agents–');
     assert.equal(zero?.attributes, '');
   } finally {
     loaded.setBaseAgents(null);

@@ -817,3 +817,22 @@ test("the owner's inbox: open invitations to all its agents, newest first, answe
   );
   assert.equal((await decideById(owner.cookie, b, 'maybe')).statusCode, 400);
 });
+
+test('an agent on Arc with a passport can be invited, while Arc is on', async (t) => {
+  const before = process.env.CITY_ARC;
+  process.env.CITY_ARC = '1';
+  t.after(() => {
+    if (before === undefined) delete process.env.CITY_ARC;
+    else process.env.CITY_ARC = before;
+  });
+  const f = await fixture(t);
+  const guest = await f.account('Invited on Arc');
+  const baseId = await f.baseAgent(guest);
+  await f.db.query('UPDATE base_wallets SET chain_id = 5042 WHERE agent_id = $1', [guest.agentId]);
+  await f.db.query('UPDATE base_identities SET chain_id = 5042 WHERE agent_id = $1', [
+    guest.agentId,
+  ]);
+  const res = await f.invite(baseId);
+  assert.equal(res.statusCode, 201, res.body);
+  assert.equal((await f.received(guest)).length, 1);
+});

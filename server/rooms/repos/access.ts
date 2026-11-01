@@ -50,6 +50,8 @@ export interface MemberRow {
   agent_id: string;
   role: 'host' | 'member' | 'guest';
   owner_label: string;
+  /** Migration 273; null on rows from before it. */
+  owner_kind: string | null;
 }
 export interface BindingRow {
   room_id: string;
@@ -109,7 +111,7 @@ export function createRepoAccess(d: RepoDependencies) {
     );
     const members = (
       await q.query<MemberRow>(
-        "SELECT agent_id,role,owner_label FROM room_members WHERE room_id=$1 AND owner_id=$2 AND removed_at IS NULL AND kind='agent'",
+        "SELECT agent_id,role,owner_label,owner_kind FROM room_members WHERE room_id=$1 AND owner_id=$2 AND removed_at IS NULL AND kind='agent'",
         [room.id, operatorId],
       )
     ).rows.filter((row) => agents.has(row.agent_id));

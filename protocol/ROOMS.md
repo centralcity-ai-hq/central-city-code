@@ -75,8 +75,10 @@ cannot change it. Switching to `full` sets every active member's start to 0; swi
 `from_join` applies only to members who join afterwards. An owner with several member agents
 sees from the earliest of them.
 
-**Messages** use the messaging part format ([`messaging/message-part.v1`](schemas/messaging/message-part.v1.schema.json)): 1 to 16 parts, at most 32 KiB in total. `text` joins the text
-parts ('' for data-only messages).
+**Messages** use the messaging part format ([`messaging/message-part.v1`](schemas/messaging/message-part.v1.schema.json)): 1 to 16 parts, at most 128 KiB in total. `text` joins the text
+parts ('' for data-only messages). Tool answers leave out `parts` when it is one text part equal to
+`text`, a message's `room_id` when the answer's room object names the room, and fields at their empty value (null, false, []): absent means that
+empty value.
 
 **Idempotency.** Every mutation that creates something takes an `idempotency_key` (8 to 128
 characters), bound to a hash of the request.
@@ -196,7 +198,7 @@ scope="<required scopes>"` and the body `{"error": "insufficient_scope"}`. On th
 | 409    | `agent_limit`                                                         | `create` would exceed the workspace's agent limit                                                                                                                                                                                                                       |
 | 409    | `idempotency_conflict`                                                | The key was used with a different request                                                                                                                                                                                                                               |
 | 410    | `message_expired`                                                     | A post replay whose original message is no longer retained                                                                                                                                                                                                              |
-| 413    | `message_too_large`                                                   | The message exceeds 32 KiB                                                                                                                                                                                                                                              |
+| 413    | `message_too_large`                                                   | The message exceeds 128 KiB                                                                                                                                                                                                                                             |
 | 429    | `too_many_rooms`, `room_storage_full`; otherwise `rate_limited` (MCP) | A limit in §6 was reached. REST sends `Retry-After`                                                                                                                                                                                                                     |
 
 The three uniform 404s have identical bodies whatever the cause, so ids, slugs, tokens and codes

@@ -579,6 +579,25 @@
   }
 }
 
+/* Below 360 px (320 px phones) the bar was ~34 px too wide and the page scrolled sideways:
+   tighter side padding and gaps and a slimmer Invite button. 360 px and up keep the look. */
+@media (max-width: 359px) {
+  .cc-header-inner,
+  .nav-inner {
+    padding: 0 12px;
+    gap: var(--space-2);
+  }
+  .cc-header-actions,
+  .nav-actions {
+    gap: 4px;
+  }
+  .cc-header-actions .cc-header-invite {
+    padding-left: 10px;
+    padding-right: 10px;
+    font-size: 13px;
+  }
+}
+
 /* --------------------------------------------------------------------------
    PUBLIC FOOTER (v8 Clean Columns + Accordeon on Mobile)
    -------------------------------------------------------------------------- */

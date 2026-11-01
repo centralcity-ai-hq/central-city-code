@@ -8,6 +8,18 @@ move funds.
 ## Current implementation
 
 - `server/base/identity/` implements ERC-8004 identity and passport registration.
+- The domain verification file `/.well-known/agent-registration.json` (ERC-8004 Endpoint Domain
+  Verification, same `registrations` format) is scoped: it lists only the newest confirmed,
+  public, not-moved registrations of each chain (`DOMAIN_FILE_SCOPE`, highest ERC-8004 ids first).
+  That is the window in which explorers index a new agent and check its domain; ERC-8004 needs no
+  check when the agent URI is served from the endpoint's own domain, as every listed agent URI
+  (`https://centralcity.ai/a/<short id>`) is. A cron builds and stores it every minute with a size
+  guard: an ALERT line (`domain_file_large`) well below the host's response limit, and a body over
+  `DOMAIN_FILE_MAX_BYTES` is never stored (`domain_file_refused`, ALERT; the last stored file stays).
+  ALERT lines go to the console (the Fastify logger is off in production). The full list is the
+  paginated companion `GET /api/public/base/domain-registrations?chain=<chain id>&before=<id>`:
+  newest first, at most `DOMAIN_PAGE_SIZE` entries per page, `nextBefore` for the next page, no
+  other query keys (400), cached like the domain file, 503 until the public cards are backfilled.
 - `server/base/wallet/`, `server/base/chain/` and `src/base/` implement non-custodial
   owner wallets, browser-encrypted owner keys and limited server-held spending authority.
 - `server/base/payments/` handles wallet transfers; `server/feed/pay/` handles service
@@ -17,7 +29,7 @@ move funds.
   up to 100 USDC within owner limits. While enabled, Router 3 settles hosted Central City
   services sold fee-included between 0.05 and 100 USDC as x402 payments (two EIP-3009
   authorizations signed by the payer), sent by Central City's own x402 facilitator, an EOA that
-  pays the gas in ETH and never holds USDC; below 0.05 USDC, Router 1 is used. Existing calls
+  pays the gas in ETH and never receives USDC from settlements; below 0.05 USDC, Router 1 is used. Existing calls
   retain their pinned router.
 - Included-fee service payments split in the router transaction. External x402 seller
   payment and protocol fee are separate legs. Payment settlement does not prove delivery.
@@ -305,7 +317,8 @@ deploy + first spend` are submitted together in one batched UserOp at the first 
   browser; key generation and decryption run only on pages with a strict CSP and no third-party
   scripts.
 - **Spender KEK:** `spender_key_ref = v<version>:<id>` so `CITY_BASE_SPENDER_KEK` can rotate;
-  decryption only inside the chain adapter, buffers zeroed after use.
+  decryption only inside the chain adapter, buffers zeroed after use. See "Spender KEK lifecycle"
+  below for retiring a version.
 - **EntryPoint v0.6** (`0x5FF1…2789`) for Coinbase Smart Wallet v1; the CDP bundler/paymaster URL
   for v0.6 is pinned in `shared/base/chains.ts`. v0.7 is not used.
 - **Nonces:** 2D UserOp nonces, one nonce key per lane; concurrency 8 per signer.
@@ -313,6 +326,29 @@ deploy + first spend` are submitted together in one batched UserOp at the first 
   threshold.
 - **Network binding:** `base_wallets` unique on `(agent_id, chain_id)`; every idempotency key
   includes the chain id.
+
+#### Spender KEK lifecycle
+
+The same `CITY_BASE_SPENDER_KEK` versions wrap every key in `base_spender_keys`: the agent spender
+keys, and the service keys (own paymaster signer and submitters, the sponsor key, the x402
+facilitator keys), whose refs also live in deployment settings. The highest version encrypts new
+keys; any listed version decrypts the keys that name it. A version can be removed only when no
+stored key names it any more.
+
+1. Add the new version (`v<n+1>:<base64 32 bytes>`) to `CITY_BASE_SPENDER_KEK`, keep the old one,
+   and deploy. New keys use it from then on.
+2. Dry run `scripts/rewrap-spender-keys.ts` (it prints its target and the KEK versions first). Then
+   `--confirm` re-wraps the agent spender keys and their `base_wallets` refs together, one
+   transaction per key; repeat until `"walletKeys":0`. A key that fails is counted as `failed`.
+3. Service keys (`"serviceKeys"`) are never moved by the script: their refs are deployment
+   settings. Each one is moved by its own runbook (for the paymaster, `OWN_PAYMASTER_OPS.md`), with a
+   settings change and a deploy, until the dry run reports `"pending":0`.
+4. Remove the old version from `CITY_BASE_SPENDER_KEK` and deploy. Record the date.
+
+**Orphans.** A key created but never committed (`committed_at` NULL, for example a provisioning
+attempt that stopped) is an orphan after an hour. Orphans are not deleted on a schedule, because a
+deleted key cannot come back: `deleteOrphans` in `server/base/chain/stores.ts` is an operator step,
+run only after checking that every service key in use is committed.
 
 ### 11.2 Identity (ERC-8004)
 

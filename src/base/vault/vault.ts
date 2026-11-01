@@ -18,6 +18,7 @@ import { createOwnerKey, openKey, passwordProblem, sealKey, VaultCryptoError } f
 import { parseBackupKey } from './backupKey';
 import { pinOwnerKey } from './keyPin';
 import { checkServerNetwork } from '../stalePage';
+import { signedInName } from '../signedInPerson';
 
 /** GET /api/base/vault: the account's vault (or none) and a fresh challenge for its next proof. */
 export interface VaultState {
@@ -38,9 +39,12 @@ const ROUTE = '/api/base/vault';
 
 export const readVault = () => api<VaultState>(ROUTE, undefined, 'GET');
 
-/** Refuses a password that can't lock a key before anything is read, derived or written. */
+/**
+ * Refuses a password that can't lock a key before anything is read, derived or written; one with
+ * the signed-in person's account name in it too.
+ */
 function checkPassword(password: string) {
-  const problem = passwordProblem(password);
+  const problem = passwordProblem(password, [signedInName()]);
   if (problem) throw new VaultCryptoError('weak_password', problem);
 }
 

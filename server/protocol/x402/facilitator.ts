@@ -40,10 +40,13 @@ import {
 } from 'viem';
 import type { PrivateKeyAccount } from 'viem/accounts';
 import type { Database, Transaction } from '../../database.js';
-import type { Address } from '../../../shared/base/chains.js';
+import { BASE_MAINNET, type Address } from '../../../shared/base/chains.js';
+import { assertFeeFloor, chainParams } from '../../base/chain/chain-params.js';
 import type { FeedPayOp } from '../../base/chain/feed-pay-chain.js';
+import type { HotWalletRole, HotWalletWatch } from '../../base/chain/hot-wallets.js';
 import type { NEVER_BROADCAST, StoredOperation } from '../../base/chain/submit.js';
 import { transientChainError } from '../../base/chain/transient.js';
+import { feeFor } from '../fees/fee-call.js';
 
 /** One router 3 settlement, as the buyer signed it (CentralCityFeeRouter3.Settlement). */
 export interface Router3Settlement {
@@ -139,6 +142,8 @@ export const BATCH_KEY_PREFIX = 'batch:';
 
 type Keystore = {
   withSigner<T>(ref: string, use: (account: PrivateKeyAccount) => Promise<T>): Promise<T>;
+  /** The stored address without decrypting the key (keystore.ts); used when present. */
+  addressOf?(ref: string): Promise<Address>;
 };
 
 export interface Router3FacilitatorDeps {
@@ -151,12 +156,13 @@ export interface Router3FacilitatorDeps {
   chainId: number;
   /** Least ETH (wei) the EOA must hold for submit to store a new settlement. */
   minBalanceWei?: bigint;
-  /** Fee ceilings and replacement bound (defaults: FEE_CAPS). */
+  /** Fee ceilings and replacement bound (defaults: this chain's, FEE_CAPS on Base). */
   caps?: Partial<FacilitatorCaps>;
   /**
    * The Base L1 data fee (wei) reserved for one signed transaction, given that transaction
    * serialized unsigned with its real nonce, gas limit and fees (default: the OP-stack
-   * GasPriceOracle's getL1Fee over it, doubled as a margin for price moves).
+   * GasPriceOracle's getL1Fee over it, doubled as a margin for price moves; 0 on a chain with no
+   * such fee, chain-params.ts).
    */
   l1FeeWei?: (unsignedTx: Hex) => Promise<bigint>;
   now?: () => number;
@@ -168,26 +174,81 @@ export interface Router3FacilitatorDeps {
    * replaced or fenced (a facilitator that shares its table with another one's sponsored keys).
    */
   foreignReadOnly?: boolean;
+  /**
+   * The EOA's role and the watch that sees each of its ETH balance reads: ALERT above its
+   * ceiling or on outflow (audit CCA-706, server/base/chain/hot-wallets.ts).
+   */
+  hotWallet?: { role: HotWalletRole; watch: HotWalletWatch };
+  /**
+   * USDC base units per 1 ETH (CITY_X402_FACILITATOR_ETH_USD × 1e6), for the settlement economics
+   * watch (CCA-754). Absent: each settlement's gas and fee are still logged, never compared.
+   */
+  usdcPerEth?: bigint;
 }
+
+/**
+ * Reverted batches in a row from which every further one is an ALERT (CCA-744). A failing or
+ * front-run member reverts its whole batch and spends the facilitator's gas for it; the
+ * simulation before sending and the gas budgets bound each one, this catches a repeated pattern.
+ */
+export const BATCH_REVERT_ALERT_AFTER = 3;
+/**
+ * Settlement gas (with its L1 fee) above this share of the protocol fee it carries, in basis
+ * points, is an ALERT (CCA-754): at the 0.05 USDC minimum the fee is of the order of the gas.
+ * Base's; each chain's is in chain-params.ts.
+ */
+export const GAS_FEE_ALERT_BPS = chainParams(BASE_MAINNET).settleGasAlertBps;
+
+/** The ETH price range the economics watch accepts (USD per ETH): anything else is a typo. */
+export const ETH_USD_RANGE = { min: 1, max: 1_000_000 } as const;
+
+/**
+ * The ETH price for the economics watch, CITY_X402_FACILITATOR_ETH_USD (USD per ETH, a plain
+ * decimal within ETH_USD_RANGE), as USDC units per ETH. Unset or invalid: undefined (the
+ * comparison is off); never throws.
+ */
+export function usdcPerEthFromEnv(env: Record<string, string | undefined>): bigint | undefined {
+  const text = env.CITY_X402_FACILITATOR_ETH_USD?.trim() ?? '';
+  if (!/^\d{1,7}(\.\d{1,6})?$/.test(text)) return undefined;
+  const usd = Number(text);
+  if (!(usd >= ETH_USD_RANGE.min && usd <= ETH_USD_RANGE.max)) return undefined;
+  const scaled = Math.round(usd * 1e6);
+  return Number.isSafeInteger(scaled) && scaled > 0 ? BigInt(scaled) : undefined;
+}
+
+/**
+ * Thrown by a `beforeBroadcast` that means "not now" rather than "never" (a runtime pause, Base not
+ * answering): a single settlement's claim is released and it stays queued and unsigned, for a later
+ * submit with the same key to check again, or endUnsent to fence. Any other throw ends it never
+ * sent. A settlement on the batch lane ends either way: nothing there uses this.
+ */
+export class BroadcastDeferred extends Error {}
 
 export class FacilitatorError extends Error {
   constructor(
     readonly code:
       | 'IDEMPOTENCY_CONFLICT'
+      /** Its beforeBroadcast said not now (BroadcastDeferred): the row stays queued, unsigned. */
+      | 'DEFERRED'
       /** The EOA holds less ETH than minBalanceWei: nothing was stored. */
       | 'LOW_GAS_FUNDS'
       /** Base could not answer before the first send: the row stays queued, nothing was sent. */
       | 'RPC_UNAVAILABLE'
       /** The caller's deadline passed before signing: the row stays queued, nothing was signed. */
-      | 'DEADLINE_PASSED',
+      | 'DEADLINE_PASSED'
+      /**
+       * Another settlement with the same key prefix (submitCall oneInFlight) is still in flight on
+       * this EOA: nothing was stored.
+       */
+      | 'IN_FLIGHT',
     message: string,
   ) {
     super(message);
   }
 }
 
-/** 0.0005 ETH. */
-export const DEFAULT_MIN_BALANCE_WEI = 500_000_000_000_000n;
+/** 0.0005 ETH: Base's, as FEE_CAPS below (chain-params.ts holds every chain's). */
+export const DEFAULT_MIN_BALANCE_WEI = chainParams(BASE_MAINNET).facilitator.minBalanceWei;
 /**
  * Spending bounds of the facilitator EOA. Every signature (first send and each replacement) is
  * checked with its ACTUAL gas limit: maxFeePerGas and the priority fee are capped, the gas limit
@@ -202,14 +263,14 @@ export interface FacilitatorCaps {
   maxGasLimit: bigint;
   maxReplacements: number;
   reserveWei: bigint;
+  /**
+   * Most Base L1 data fee (wei) one signature may reserve. Above it nothing is signed: a first
+   * send ends never sent (L1_FEE_CAP), a replacement is not signed (alerted). Absent: no cap (the
+   * reserve covers it, as before).
+   */
+  maxL1FeeWei?: bigint;
 }
-export const FEE_CAPS: FacilitatorCaps = {
-  maxFeePerGasWei: 500_000_000n, // 0.5 gwei (Base runs around 0.006 gwei)
-  maxPriorityFeePerGasWei: 50_000_000n, // 0.05 gwei
-  maxGasLimit: 400_000n, // one settle measured 164k-185k on a Base fork
-  maxReplacements: 3,
-  reserveWei: 200_000_000_000_000n, // 0.0002 ETH
-};
+export const FEE_CAPS: FacilitatorCaps = chainParams(BASE_MAINNET).facilitator.caps;
 /** Base's (OP stack) L1 fee oracle predeploy. */
 export const GAS_PRICE_ORACLE = '0x420000000000000000000000000000000000000F' as const;
 const gasPriceOracleAbi = [
@@ -229,6 +290,23 @@ export const HEAD_CHECK_MS = 15_000;
 export const HEAD_STALE_MS = 30_000;
 /** A claim on a queued settlement (simulate, sign, send) older than this may be taken over. */
 export const CLAIM_TTL_MS = 60_000;
+/**
+ * A settlement still in flight: signed and not in a block yet, or queued and unsigned while a
+ * worker can still be sending it (stored or claimed within CLAIM_TTL_MS). A queued row older than
+ * that, with no live claim, does not count: no worker is sending it. It is not dead, though: a
+ * later submitCall with the same key (a retry) may claim it again and send it, and with
+ * oneInFlight that claim is taken under the payer's lock and only while no other settlement of
+ * the payer is in flight (else IN_FLIGHT, the row stays queued and unsigned). $n is the current
+ * time (ms). Callers add status NOT IN ('final','failed') so the open-rows index
+ * (x402_facilitator_ops_open) serves the query.
+ */
+const inFlightSql = (
+  n: number,
+) => `status IN ('queued','submitted','unknown','reorged','reconciling')
+  AND (raw_tx IS NOT NULL OR created_at > $${n}::bigint - ${CLAIM_TTL_MS}
+    OR claimed_at > $${n}::bigint - ${CLAIM_TTL_MS})`;
+/** A key prefix that is safe in LIKE (no wildcard or escape character). */
+const KEY_PREFIX = /^[a-z0-9:-]{1,120}$/;
 
 /** The chain module's never-broadcast codes (submit.ts NEVER_BROADCAST), reused unchanged. */
 type NeverBroadcast = (typeof NEVER_BROADCAST)[number];
@@ -357,14 +435,22 @@ export function simulationRevert(error: unknown): { reverted: boolean; name: str
 
 export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
   const now = deps.now ?? Date.now;
-  const log = deps.log ?? (() => {});
-  const minBalance = deps.minBalanceWei ?? DEFAULT_MIN_BALANCE_WEI;
-  const caps: FacilitatorCaps = { ...FEE_CAPS, ...deps.caps };
-  /** Caps a fee quote: never above the configured ceilings. */
+  // The effective sink: the caller's, else the console (the Fastify logger is off in production).
+  const log = deps.log ?? ((line: string) => console.error(line));
+  const params = chainParams(deps.chainId);
+  const minBalance = deps.minBalanceWei ?? params.facilitator.minBalanceWei;
+  const caps: FacilitatorCaps = { ...params.facilitator.caps, ...deps.caps };
+  // A cap under the chain's fee floor could only clamp a fee into being dropped: refused here, at
+  // once, so `capped` below can never go under the floor. Base's floor is 0.
+  assertFeeFloor(params, caps.maxFeePerGasWei, 'The facilitator fee cap');
+  /**
+   * Caps a fee quote: never above the configured ceilings, and a low quote is raised to the chain's
+   * floor (maxFeePerGas is a limit; only the block's price is paid).
+   */
   const capped = (fees: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }) => {
     const maxPriorityFeePerGas = minOf(fees.maxPriorityFeePerGas, caps.maxPriorityFeePerGasWei);
     const maxFeePerGas = maxOf(
-      minOf(fees.maxFeePerGas, caps.maxFeePerGasWei),
+      minOf(maxOf(fees.maxFeePerGas, params.minMaxFeePerGasWei), caps.maxFeePerGasWei),
       maxPriorityFeePerGas,
     );
     return { maxFeePerGas, maxPriorityFeePerGas };
@@ -387,11 +473,11 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
     const { rows } = await q.query<{ wei: string | null }>(
       `SELECT COALESCE(SUM(gas_limit * max_fee_per_gas + COALESCE(l1_fee_wei, 0)), 0)::text AS wei
        FROM x402_facilitator_ops
-       WHERE facilitator = $1 AND op_key <> $2 AND raw_tx IS NOT NULL
+       WHERE facilitator = $1 AND op_key <> $2 AND raw_tx IS NOT NULL AND chain_id = $4
          AND status NOT IN ('final', 'failed')
          AND NOT (status = 'included' AND block_number IS NOT NULL
            AND block_number <= $3::numeric)`,
-      [from.toLowerCase(), exceptKey, balanceBlock.toString(10)],
+      [from.toLowerCase(), exceptKey, balanceBlock.toString(10), deps.chainId],
     );
     return BigInt(rows[0]?.wei ?? '0');
   };
@@ -403,16 +489,19 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
     l1Fee: bigint,
     liability: bigint,
   ) => balance >= gas * maxFeePerGas + l1Fee + caps.reserveWei + liability;
+  // A chain with no L1 data fee never asks the OP-stack oracle (there is none at that address).
   const l1Oracle =
     deps.l1FeeWei ??
-    (async (unsignedTx: Hex) =>
-      2n *
-      ((await deps.client.readContract({
-        address: GAS_PRICE_ORACLE,
-        abi: gasPriceOracleAbi,
-        functionName: 'getL1Fee',
-        args: [unsignedTx],
-      })) as bigint));
+    (params.l1FeeOracle
+      ? async (unsignedTx: Hex) =>
+          2n *
+          ((await deps.client.readContract({
+            address: GAS_PRICE_ORACLE,
+            abi: gasPriceOracleAbi,
+            functionName: 'getL1Fee',
+            args: [unsignedTx],
+          })) as bigint)
+      : async () => 0n);
   /**
    * The L1 data fee of exactly the transaction about to be signed: the oracle reads the whole
    * EIP-1559 transaction serialized unsigned, with its allocated nonce, gas limit and capped fees
@@ -523,8 +612,11 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
   const foreign = async (row: OpRow) => Boolean(deps.foreignReadOnly) && storedByOther(row);
 
   const address = async (): Promise<Address> => {
+    // The address alone never needs the key decrypted (CCA-719); signing checks it again.
     if (!cachedAddress)
-      cachedAddress = await deps.keystore.withSigner(deps.keyRef, async (a) => a.address);
+      cachedAddress = deps.keystore.addressOf
+        ? await deps.keystore.addressOf(deps.keyRef)
+        : await deps.keystore.withSigner(deps.keyRef, async (a) => a.address);
     return cachedAddress;
   };
 
@@ -536,7 +628,12 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
       )
     ).rows[0] ?? null;
 
-  const ethBalance = async () => deps.client.getBalance({ address: await address() });
+  const observed = (balance: bigint) => {
+    deps.hotWallet?.watch.observe(deps.hotWallet.role, 'eth', balance);
+    return balance;
+  };
+  const ethBalance = async () =>
+    observed(await deps.client.getBalance({ address: await address() }));
   /**
    * The EOA's balance at one block, with that block's number. The liabilities are counted against
    * the same observation (an op included at or below it has paid its gas in this balance; one
@@ -545,7 +642,9 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
   const ethBalanceAt = async () => {
     const head = await deps.client.getBlock({ blockTag: 'latest' });
     const block = BigInt(head.number!);
-    const balance = await deps.client.getBalance({ address: await address(), blockNumber: block });
+    const balance = observed(
+      await deps.client.getBalance({ address: await address(), blockNumber: block }),
+    );
     return { balance, block };
   };
 
@@ -557,26 +656,39 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
     return { maxFeePerGas: 2n * base + priority, maxPriorityFeePerGas: priority };
   };
 
-  const sign = (input: {
-    nonce: bigint;
-    data: Hex;
-    gas: bigint;
-    maxFeePerGas: bigint;
-    maxPriorityFeePerGas: bigint;
-  }) =>
-    deps.keystore.withSigner(deps.keyRef, (account) =>
-      account.signTransaction({
-        type: 'eip1559',
-        chainId: deps.chainId,
-        nonce: Number(input.nonce),
-        to: router,
-        value: 0n,
-        data: input.data,
-        gas: input.gas,
-        maxFeePerGas: input.maxFeePerGas,
-        maxPriorityFeePerGas: input.maxPriorityFeePerGas,
-      }),
-    );
+  /**
+   * The EOA's key, opened BEFORE the transaction that signs with it: the key store reads on a
+   * connection of its own, which is never asked for while the lane lock is held (under load that
+   * lock would wait on the pool; on one connection, PGlite, it would wait forever). The signature
+   * itself stays inside the transaction, under the lane lock. The account never leaves `use`.
+   */
+  const withKey = <T>(use: (account: PrivateKeyAccount) => Promise<T>) =>
+    deps.keystore.withSigner(deps.keyRef, use);
+
+  const sign = async (
+    account: PrivateKeyAccount,
+    input: {
+      nonce: bigint;
+      data: Hex;
+      gas: bigint;
+      maxFeePerGas: bigint;
+      maxPriorityFeePerGas: bigint;
+    },
+  ) => {
+    // The last gate: every signature of this EOA passes here (capped already keeps fees above it).
+    assertFeeFloor(params, input.maxFeePerGas, 'A settlement fee');
+    return account.signTransaction({
+      type: 'eip1559',
+      chainId: deps.chainId,
+      nonce: Number(input.nonce),
+      to: router,
+      value: 0n,
+      data: input.data,
+      gas: input.gas,
+      maxFeePerGas: input.maxFeePerGas,
+      maxPriorityFeePerGas: input.maxPriorityFeePerGas,
+    });
+  };
 
   /** Ends a queued, unsigned settlement this worker claimed, as never sent. */
   const endClaimed = async (key: string, claimId: string, code: string, name: string | null) => {
@@ -641,11 +753,21 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
     const gasLimit = ceilMul(gas, 13n, 10n);
     if (gasLimit > gasCap)
       return (await endClaimed(key, claimId, 'GAS_LIMIT_EXCEEDED', null)) ?? row;
-    fees = capped(fees);
+    fees = capped({
+      ...fees,
+      maxPriorityFeePerGas: minOf(
+        fees.maxPriorityFeePerGas,
+        params.firstSendTipWei ?? fees.maxPriorityFeePerGas,
+      ),
+    });
 
     try {
       await beforeBroadcast();
-    } catch {
+    } catch (error) {
+      if (error instanceof BroadcastDeferred) {
+        await releaseClaim(key, claimId);
+        throw new FacilitatorError('DEFERRED', 'The first send was put off: nothing was signed.');
+      }
       return (await endClaimed(key, claimId, REFUSED, null)) ?? row;
     }
 
@@ -666,66 +788,94 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
       throw new FacilitatorError('RPC_UNAVAILABLE', 'Base could not report the gas balance now.');
     }
 
+    // An L1 data fee above its cap is never signed (a fee spike, or calldata far larger than a
+    // settlement needs): ended never sent, so it never holds a nonce.
+    if (caps.maxL1FeeWei !== undefined && l1Fee > caps.maxL1FeeWei) {
+      log(`x402 facilitator: ALERT ${key} L1 fee above its cap, never sent`);
+      return (await endClaimed(key, claimId, 'L1_FEE_CAP', null)) ?? row;
+    }
     if (deadline !== undefined && now() >= deadline) {
       await releaseClaim(key, claimId);
       throw new FacilitatorError('DEADLINE_PASSED', 'No time left to sign in this run.');
     }
     let overBudget = false;
     let pastDeadline = false;
-    const stored = await deps.db.transaction(async (tx) => {
-      const at = now();
-      const lane = await lockLane(tx, from, at);
-      const current = await get(key, tx, true);
-      if (!current || current.claim_id !== claimId || current.status !== 'queued' || current.raw_tx)
-        return null;
-      const nonce = maxOf(BigInt(lane.next_nonce), BigInt(pending));
-      // The budget is checked under the lane lock, against every settlement already signed, so
-      // two concurrent first sends can never both spend the same balance.
-      if (
-        !fits(
-          balance.balance,
-          gasLimit,
-          fees.maxFeePerGas,
-          l1Fee,
-          await inFlightLiability(tx, from, key, balance.block),
+    let claimExpired = false;
+    const stored = await withKey((account) =>
+      deps.db.transaction(async (tx) => {
+        const at = now();
+        const lane = await lockLane(tx, from, at);
+        const current = await get(key, tx, true);
+        if (
+          !current ||
+          current.claim_id !== claimId ||
+          current.status !== 'queued' ||
+          current.raw_tx
         )
-      ) {
-        overBudget = true;
-        return null;
-      }
-      // Under the lane and row locks, right before signing: waiting for them may have crossed the
-      // deadline (room #234). Nothing is written in this transaction then.
-      if (deadline !== undefined && now() >= deadline) {
-        pastDeadline = true;
-        return null;
-      }
-      const raw = await sign({ nonce, data, gas: gasLimit, ...fees });
-      const hash = keccak256(raw);
-      await tx.query(
-        'UPDATE x402_facilitator_lanes SET next_nonce = $3, updated_at = $4 WHERE chain_id = $1 AND facilitator = $2',
-        [deps.chainId, from.toLowerCase(), (nonce + 1n).toString(10), at],
-      );
-      return (
-        await tx.query<OpRow>(
-          `UPDATE x402_facilitator_ops SET status = 'submitted', claim_id = NULL, nonce = $2,
+          return null;
+        // A claim older than CLAIM_TTL_MS (this worker stalled) is no longer in flight (inFlightSql,
+        // same clock): another settlement of the payer may have been admitted meanwhile. Never signed
+        // then: the claim is released and the next submitCall (its oneInFlight guard) or flush
+        // decides. For a batch this is the batch op's claim, the only claim its members are sent
+        // under, so no batch is signed for members whose claim has expired.
+        if (current.claimed_at === null || Number(current.claimed_at) <= now() - CLAIM_TTL_MS) {
+          claimExpired = true;
+          return null;
+        }
+        const nonce = maxOf(BigInt(lane.next_nonce), BigInt(pending));
+        // The budget is checked under the lane lock, against every settlement already signed, so
+        // two concurrent first sends can never both spend the same balance.
+        if (
+          !fits(
+            balance.balance,
+            gasLimit,
+            fees.maxFeePerGas,
+            l1Fee,
+            await inFlightLiability(tx, from, key, balance.block),
+          )
+        ) {
+          overBudget = true;
+          return null;
+        }
+        // Under the lane and row locks, right before signing: waiting for them may have crossed the
+        // deadline (room #234). Nothing is written in this transaction then.
+        if (deadline !== undefined && now() >= deadline) {
+          pastDeadline = true;
+          return null;
+        }
+        const raw = await sign(account, { nonce, data, gas: gasLimit, ...fees });
+        const hash = keccak256(raw);
+        await tx.query(
+          'UPDATE x402_facilitator_lanes SET next_nonce = $3, updated_at = $4 WHERE chain_id = $1 AND facilitator = $2',
+          [deps.chainId, from.toLowerCase(), (nonce + 1n).toString(10), at],
+        );
+        return (
+          await tx.query<OpRow>(
+            `UPDATE x402_facilitator_ops SET status = 'submitted', claim_id = NULL, nonce = $2,
              gas_limit = $3, max_fee_per_gas = $4, max_priority_fee_per_gas = $5, raw_tx = $6,
              tx_hash = $7, tx_hashes = ARRAY[$7]::text[], sent_at = $8, updated_at = $8,
              l1_fee_wei = $9
            WHERE op_key = $1 RETURNING ${COLUMNS}`,
-          [
-            key,
-            nonce.toString(10),
-            gasLimit.toString(10),
-            fees.maxFeePerGas.toString(10),
-            fees.maxPriorityFeePerGas.toString(10),
-            raw,
-            hash,
-            at,
-            l1Fee.toString(10),
-          ],
-        )
-      ).rows[0];
-    });
+            [
+              key,
+              nonce.toString(10),
+              gasLimit.toString(10),
+              fees.maxFeePerGas.toString(10),
+              fees.maxPriorityFeePerGas.toString(10),
+              raw,
+              hash,
+              at,
+              l1Fee.toString(10),
+            ],
+          )
+        ).rows[0];
+      }),
+    );
+    if (claimExpired) {
+      await releaseClaim(key, claimId);
+      log(`x402 facilitator: ${key} claim expired before signing, released, nothing sent`);
+      return (await get(key)) ?? row;
+    }
     if (pastDeadline) {
       await releaseClaim(key, claimId);
       throw new FacilitatorError('DEADLINE_PASSED', 'No time left to sign in this run.');
@@ -813,73 +963,86 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
     const from = row.facilitator as Address;
     const maxFeePerGas = bumped.maxFeePerGas;
     let overBudget = false;
+    let l1Capped = false;
     let l1Fee = 0n;
     let raw: Hex | null = null;
     // Budget check, signature and storage under the EOA's lane lock: concurrent replacements and
-    // first sends see each other's liabilities and can never oversubscribe the balance.
-    const rows = await deps.db.transaction(async (tx) => {
-      const at = now();
-      await lockLane(tx, from, at);
-      const current = await get(row.op_key, tx, true);
-      if (!current || current.sent_at !== row.sent_at) return [] as OpRow[];
-      // Balance and this replacement's own L1 fee read under the lane lock, consistent with the
-      // liabilities below; the replacement's reservation replaces the one stored for the old one.
-      let balance: { balance: bigint; block: bigint };
-      try {
-        balance = await ethBalanceAt();
-        l1Fee = await l1FeeOf({
+    // first sends see each other's liabilities and can never oversubscribe the balance. The address
+    // (read under the lock for the balance) is known before it, as the key is.
+    await address();
+    const rows = await withKey((account) =>
+      deps.db.transaction(async (tx) => {
+        const at = now();
+        await lockLane(tx, from, at);
+        const current = await get(row.op_key, tx, true);
+        if (!current || current.sent_at !== row.sent_at) return [] as OpRow[];
+        // Balance and this replacement's own L1 fee read under the lane lock, consistent with the
+        // liabilities below; the replacement's reservation replaces the one stored for the old one.
+        let balance: { balance: bigint; block: bigint };
+        try {
+          balance = await ethBalanceAt();
+          l1Fee = await l1FeeOf({
+            nonce: BigInt(row.nonce!),
+            data: row.calldata as Hex,
+            gas: BigInt(row.gas_limit!),
+            maxFeePerGas,
+            maxPriorityFeePerGas: bumped.maxPriorityFeePerGas,
+          });
+        } catch {
+          return [] as OpRow[];
+        }
+        if (caps.maxL1FeeWei !== undefined && l1Fee > caps.maxL1FeeWei) {
+          l1Capped = true;
+          return [] as OpRow[];
+        }
+        if (
+          !fits(
+            balance.balance,
+            BigInt(row.gas_limit!),
+            maxFeePerGas,
+            l1Fee,
+            await inFlightLiability(tx, from, row.op_key, balance.block),
+          )
+        ) {
+          overBudget = true;
+          return [] as OpRow[];
+        }
+        raw = await sign(account, {
           nonce: BigInt(row.nonce!),
           data: row.calldata as Hex,
           gas: BigInt(row.gas_limit!),
           maxFeePerGas,
           maxPriorityFeePerGas: bumped.maxPriorityFeePerGas,
         });
-      } catch {
-        return [] as OpRow[];
-      }
-      if (
-        !fits(
-          balance.balance,
-          BigInt(row.gas_limit!),
-          maxFeePerGas,
-          l1Fee,
-          await inFlightLiability(tx, from, row.op_key, balance.block),
-        )
-      ) {
-        overBudget = true;
-        return [] as OpRow[];
-      }
-      raw = await sign({
-        nonce: BigInt(row.nonce!),
-        data: row.calldata as Hex,
-        gas: BigInt(row.gas_limit!),
-        maxFeePerGas,
-        maxPriorityFeePerGas: bumped.maxPriorityFeePerGas,
-      });
-      const hash = keccak256(raw);
-      // Stored before it is sent; claimed on sent_at, so racing readers replace once between them.
-      return (
-        await tx.query<OpRow>(
-          `UPDATE x402_facilitator_ops SET raw_tx = $3, tx_hash = $4, tx_hashes = array_append(tx_hashes, $4),
+        const hash = keccak256(raw);
+        // Stored before it is sent; claimed on sent_at, so racing readers replace once between them.
+        return (
+          await tx.query<OpRow>(
+            `UPDATE x402_facilitator_ops SET raw_tx = $3, tx_hash = $4, tx_hashes = array_append(tx_hashes, $4),
          max_fee_per_gas = $5, max_priority_fee_per_gas = $6, sent_at = $7, updated_at = $7,
          l1_fee_wei = $9
        WHERE op_key = $1 AND sent_at = $2 AND status = ANY($8::text[]) RETURNING ${COLUMNS}`,
-          [
-            row.op_key,
-            row.sent_at,
-            raw,
-            hash,
-            maxFeePerGas.toString(10),
-            bumped.maxPriorityFeePerGas.toString(10),
-            at,
-            ['submitted', 'unknown', 'reorged'],
-            l1Fee.toString(10),
-          ],
-        )
-      ).rows;
-    });
+            [
+              row.op_key,
+              row.sent_at,
+              raw,
+              hash,
+              maxFeePerGas.toString(10),
+              bumped.maxPriorityFeePerGas.toString(10),
+              at,
+              ['submitted', 'unknown', 'reorged'],
+              l1Fee.toString(10),
+            ],
+          )
+        ).rows;
+      }),
+    );
     if (overBudget) {
       log(`x402 facilitator: ALERT ${row.op_key} gas budget reached, replacement not signed`);
+      return row;
+    }
+    if (l1Capped) {
+      log(`x402 facilitator: ALERT ${row.op_key} L1 fee above its cap, replacement not signed`);
       return row;
     }
     const replaced = rows[0];
@@ -903,6 +1066,67 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
     return null;
   }
 
+  /**
+   * Monitoring of a receipt when it is first recorded in a block (refresh); reads and logs only,
+   * nothing sent changes. A reverted batch (CCA-744): the latest BATCH_REVERT_ALERT_AFTER batches
+   * of this EOA in a block, by nonce, all reverted is an ALERT (read from the table, so every
+   * instance sees the same run). A router-3 settlement that went through (CCA-754): its gas, with
+   * its L1 fee, against the protocol fee it carries, logged; above GAS_FEE_ALERT_BPS of that fee
+   * an ALERT, when an ETH price is configured. Calldata that is not router 3's (the public
+   * facilitator's USDC settle) is skipped.
+   */
+  async function watchReceipt(row: OpRow, receipt: TransactionReceipt): Promise<void> {
+    const batch = row.op_key.startsWith(BATCH_KEY_PREFIX);
+    if (receipt.status !== 'success') {
+      if (!batch) return;
+      const { rows } = await deps.db.query<{ error_code: string | null }>(
+        `SELECT error_code FROM x402_facilitator_ops
+         WHERE chain_id = $1 AND facilitator = $2 AND nonce IS NOT NULL AND op_key LIKE 'batch:%'
+           AND block_hash IS NOT NULL AND status IN ('included', 'final', 'failed')
+         ORDER BY nonce DESC LIMIT $3`,
+        [deps.chainId, row.facilitator, BATCH_REVERT_ALERT_AFTER],
+      );
+      const run = rows.findIndex((r) => r.error_code !== 'REVERTED');
+      const inRow = run < 0 ? rows.length : run;
+      log(
+        inRow >= BATCH_REVERT_ALERT_AFTER
+          ? `x402 facilitator: ALERT ${row.op_key} reverted, the last ${inRow} batches reverted`
+          : `x402 facilitator: ${row.op_key} batch reverted`,
+      );
+      return;
+    }
+    const { gasUsed, effectiveGasPrice } = receipt;
+    if (typeof gasUsed !== 'bigint' || typeof effectiveGasPrice !== 'bigint') return;
+    const l1Fee = (receipt as { l1Fee?: bigint | null }).l1Fee;
+    const gasWei = gasUsed * effectiveGasPrice + (typeof l1Fee === 'bigint' ? l1Fee : 0n);
+    const calldata = batch
+      ? (
+          await deps.db.query<{ calldata: string }>(
+            'SELECT calldata FROM x402_facilitator_ops WHERE batch_key = $1',
+            [row.op_key],
+          )
+        ).rows.map((r) => r.calldata)
+      : [row.calldata];
+    if (!calldata.length) return;
+    let feeRaw = 0n;
+    for (const data of calldata) {
+      try {
+        feeRaw += feeFor(decodeSettle(data as Hex).gross);
+      } catch {
+        return;
+      }
+    }
+    log(
+      `x402 facilitator: economics ${row.op_key} items ${calldata.length} gas_wei ${gasWei} fee_raw ${feeRaw}`,
+    );
+    if (deps.usdcPerEth === undefined) return;
+    const gasRaw = (gasWei * deps.usdcPerEth) / 10n ** 18n;
+    if (gasRaw * 10_000n > feeRaw * params.settleGasAlertBps)
+      log(
+        `x402 facilitator: ALERT ${row.op_key} gas ${gasRaw} above ${params.settleGasAlertBps / 100n}% of fee ${feeRaw} (USDC units)`,
+      );
+  }
+
   let headCheckedAt = 0;
   /**
    * The lane's head: the stored settlement holding the next nonce Base expects. Every later
@@ -923,9 +1147,9 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
       const mined = await deps.client.getTransactionCount({ address: from, blockTag: 'latest' });
       const { rows } = await deps.db.query<OpRow>(
         `SELECT ${COLUMNS} FROM x402_facilitator_ops
-         WHERE facilitator = $1 AND nonce = $2::numeric AND raw_tx IS NOT NULL
+         WHERE facilitator = $1 AND nonce = $2::numeric AND raw_tx IS NOT NULL AND chain_id = $3
            AND status NOT IN ('included', 'final', 'failed') LIMIT 1`,
-        [from.toLowerCase(), String(mined)],
+        [from.toLowerCase(), String(mined), deps.chainId],
       );
       const head = rows[0];
       if (!head || Number(head.sent_at ?? 0) > now() - HEAD_STALE_MS) return;
@@ -992,7 +1216,7 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
         row.status !== 'included' ||
         row.tx_hash !== hash ||
         row.block_hash !== receipt.blockHash.toLowerCase()
-      )
+      ) {
         current = await move(row, IN_FLIGHT, {
           status: 'included',
           tx_hash: hash,
@@ -1000,6 +1224,15 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
           block_hash: receipt.blockHash.toLowerCase(),
           error_code: reverted ? 'REVERTED' : null,
         });
+        if (current.status === 'included' && current.tx_hash === hash)
+          // Runs once, at this first transition; a failed check is itself an ALERT (its
+          // receipt status included), so a reverted batch or a costly settlement is never lost.
+          await watchReceipt(current, receipt).catch(() =>
+            log(
+              `x402 facilitator: ALERT ${row.op_key} receipt monitoring failed (${reverted ? 'reverted' : 'success'}), check it on Base`,
+            ),
+          );
+      }
       if (current.status !== 'included') return current;
       const finalized = await deps.client.getBlock({ blockTag: 'finalized' });
       if (finalized.number === null || receipt.blockNumber > finalized.number) return current;
@@ -1082,12 +1315,15 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
     BigInt(n) * (deps.batch?.perItemGas ?? BATCH_DEFAULTS.perItemGas) + BATCH_DEFAULTS.baseGas;
   const isBatch = (row: OpRow) => row.op_key.startsWith(BATCH_KEY_PREFIX);
 
-  /** A waiting or batched member refused or abandoned: never sent, out of any batch. */
+  /**
+   * A waiting member refused or abandoned: never sent. A member already claimed into a batch is
+   * left alone (that batch may be signed or on its way to Base; it is judged again before signing).
+   */
   const endMember = async (key: string, code: string) =>
     deps.db.query(
       `UPDATE x402_facilitator_ops SET status = 'failed', never_sent = true, error_code = $2,
-         batch_key = NULL, claim_id = NULL, updated_at = $3
-       WHERE op_key = $1 AND status = 'queued' AND raw_tx IS NULL`,
+         claim_id = NULL, updated_at = $3
+       WHERE op_key = $1 AND status = 'queued' AND raw_tx IS NULL AND batch_key IS NULL`,
       [key, code, now()],
     );
 
@@ -1454,6 +1690,172 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
     return (await get(row.op_key)) ?? row;
   }
 
+  /** submitCall oneInFlight: the per-prefix (one payer's) advisory lock, held to the commit. */
+  const lockPayer = (tx: Transaction, prefix: string) =>
+    tx.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`x402-one:${prefix}`]);
+  /** Whether a settlement of this EOA other than `key` whose key starts with `prefix` is in flight. */
+  const otherInFlight = async (
+    tx: Transaction,
+    from: string,
+    prefix: string,
+    key: string,
+    at: number,
+  ) =>
+    (
+      await tx.query(
+        `SELECT 1 FROM x402_facilitator_ops
+         WHERE facilitator = $1 AND op_key LIKE $2 AND op_key <> $3
+           AND status NOT IN ('final','failed') AND ${inFlightSql(4)}
+         LIMIT 1`,
+        [from, `${prefix}%`, key, at],
+      )
+    ).rows.length > 0;
+  const inFlight = () =>
+    new FacilitatorError('IN_FLIGHT', 'Another settlement of this payer is in flight.');
+
+  const submitCall = async (input: {
+    key: string;
+    intentHash: Hex;
+    /** The transaction's calldata for this facilitator's target (router 3 settle, or USDC). */
+    calldata: Hex;
+    beforeBroadcast: () => Promise<void>;
+    /**
+     * The batch lane (allowlisted workspace, decided by the engine from the server-side
+     * workspace): the settlement waits for a settleBatch instead of its own transaction. Used
+     * only when this facilitator has a batch config and `authorize` is given.
+     */
+    batch?: {
+      authorize: Authorize;
+      /**
+       * The grant or key an MCP purchase was made with (checked again before the batch is sent);
+       * null: no grant applies (a Feed purchase). undefined: unknown here, so it is not batched.
+       */
+      grant?: { kind: 'grant' | 'key'; id: string } | null;
+    };
+    /**
+     * A key prefix (the public sender's: one payer's): a NEW settlement is not stored, and a
+     * queued unsigned one already stored is not claimed again (resumed), while another one of
+     * this EOA whose key starts with it is in flight (inFlightSql), FacilitatorError IN_FLIGHT.
+     * Checked and stored or claimed under one advisory lock per prefix, so concurrent instances
+     * never both store or resume one. A key already signed (submitted or later) is followed as
+     * always: the same key answers the same settlement.
+     */
+    oneInFlight?: string;
+  }): Promise<FeedPayOp> => {
+    if (input.oneInFlight !== undefined && !KEY_PREFIX.test(input.oneInFlight))
+      throw new Error('Invalid key prefix.');
+    await healHead();
+    const intentHash = input.intentHash.toLowerCase();
+    const calldata = input.calldata.toLowerCase() as Hex;
+    const conflict = () =>
+      new FacilitatorError('IDEMPOTENCY_CONFLICT', 'This key was used for another settlement.');
+    let row = await get(input.key);
+    if (row && row.intent_hash !== intentHash) throw conflict();
+    // Stored by another EOA: only that facilitator may continue it (its key, its nonce lane).
+    if (row && (await foreign(row))) return opOf(row);
+    const lane = laneOfKey(input.key);
+    if (!row) {
+      const balance = await ethBalance().catch(() => {
+        throw new FacilitatorError('RPC_UNAVAILABLE', 'Base could not report the gas balance now.');
+      });
+      if (balance < minBalance)
+        throw new FacilitatorError('LOW_GAS_FUNDS', 'The facilitator is low on gas funds.');
+      const at = now();
+      const from = (await address()).toLowerCase();
+      const insert = (q: Transaction) =>
+        q.query(
+          `INSERT INTO x402_facilitator_ops (op_key, intent_hash, chain_id, facilitator, router,
+             calldata, status, created_at, updated_at, batch_lane, grant_kind, grant_id)
+           VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, $7, $8, $9, $10)
+           ON CONFLICT (op_key) DO NOTHING`,
+          [
+            input.key,
+            intentHash,
+            deps.chainId,
+            from,
+            router,
+            calldata,
+            at,
+            Boolean(
+              input.batch &&
+              typeof input.batch.authorize === 'function' &&
+              deps.batch &&
+              lane &&
+              input.batch.grant !== undefined,
+            ),
+            input.batch?.grant?.kind ?? null,
+            input.batch?.grant?.id ?? null,
+          ],
+        );
+      if (input.oneInFlight === undefined) await insert(deps.db);
+      else {
+        const prefix = input.oneInFlight;
+        const busy = await deps.db.transaction(async (tx) => {
+          await lockPayer(tx, prefix);
+          if (await otherInFlight(tx, from, prefix, input.key, at)) return true;
+          await insert(tx);
+          return false;
+        });
+        if (busy) throw inFlight();
+      }
+      row = await get(input.key);
+      if (!row) throw new Error('Settlement row missing after insert.');
+      if (row.intent_hash !== intentHash) throw conflict();
+    }
+    // In a batch: its batch's state (never a transaction of its own).
+    if (row.batch_key) return opOf(await memberStatus(row, input.batch?.authorize));
+    if (row.status !== 'queued' || row.raw_tx) return opOf(row);
+    if (row.calldata !== calldata) throw conflict();
+    if (row.batch_lane) {
+      // Waiting for a batch: checked now, again before its batch is simulated and signed.
+      try {
+        await input.beforeBroadcast();
+      } catch {
+        await endMember(input.key, REFUSED);
+        const ended = (await get(input.key)) ?? row;
+        // Claimed into a batch meanwhile: it follows that batch.
+        return opOf(ended.batch_key ? await memberStatus(ended, input.batch?.authorize) : ended);
+      }
+      if (input.batch && deps.batch)
+        await flush(input.batch.authorize, false, undefined, lane).catch(() =>
+          log('x402 facilitator: batch flush failed'),
+        );
+      const now_ = (await get(input.key)) ?? row;
+      return opOf(now_.batch_key ? await memberStatus(now_) : now_);
+    }
+
+    const claimId = randomUUID();
+    const at = now();
+    const claim = async (q: Transaction) =>
+      (
+        await q.query<OpRow>(
+          `UPDATE x402_facilitator_ops SET claim_id = $2, claimed_at = $3, updated_at = $3
+           WHERE op_key = $1 AND status = 'queued' AND raw_tx IS NULL
+             AND (claimed_at IS NULL OR claimed_at <= $4) RETURNING ${COLUMNS}`,
+          [input.key, claimId, at, at - CLAIM_TTL_MS],
+        )
+      ).rows[0];
+    let claimed: OpRow | undefined;
+    if (input.oneInFlight === undefined) claimed = await claim(deps.db);
+    else {
+      // A queued row already stored (an earlier attempt that never signed, its claim expired) is
+      // resumed only under the same guard as a new one: claimed under the payer's lock and only
+      // while no other settlement of this payer is in flight. Otherwise the claim is rolled back
+      // and the row stays queued, unsigned (IN_FLIGHT, as for a new settlement).
+      const prefix = input.oneInFlight;
+      const from = (await address()).toLowerCase();
+      claimed = await deps.db.transaction(async (tx) => {
+        await lockPayer(tx, prefix);
+        const got = await claim(tx);
+        // Thrown inside the transaction, so the claim above is rolled back.
+        if (got && (await otherInFlight(tx, from, prefix, input.key, at))) throw inFlight();
+        return got;
+      });
+    }
+    if (!claimed) return opOf((await get(input.key)) ?? row);
+    return opOf(await firstSend(claimed, claimId, input.beforeBroadcast));
+  };
+
   return {
     /** The facilitator EOA (from the keystore signer). */
     address,
@@ -1495,6 +1897,56 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
       return row ? opOf(row) : null;
     },
 
+    /**
+     * This EOA's settlements whose key starts with `prefix` that are in flight (submitCall
+     * oneInFlight) or in a block and not final yet (their outcome, a revert too, is known), at most
+     * 10, oldest first. Database only.
+     */
+    async openWithPrefix(prefix: string): Promise<FeedPayOp[]> {
+      if (!KEY_PREFIX.test(prefix)) throw new Error('Invalid key prefix.');
+      const { rows } = await deps.db.query<OpRow>(
+        `SELECT ${COLUMNS} FROM x402_facilitator_ops
+         WHERE facilitator = $1 AND op_key LIKE $2 AND status NOT IN ('final','failed')
+           AND (status = 'included' OR (${inFlightSql(3)}))
+         ORDER BY created_at LIMIT 10`,
+        [(await address()).toLowerCase(), `${prefix}%`, now()],
+      );
+      return rows.map(opOf);
+    },
+
+    /** The intent hash stored for a key (database only), null for an unknown key. */
+    async storedIntent(key: string): Promise<Hex | null> {
+      const row = await get(key);
+      return row ? (row.intent_hash as Hex) : null;
+    },
+
+    /**
+     * Whether a new transaction signed now would still get into a block: the node's fee (twice
+     * the latest base fee plus its tip, nodeFees) is within the maxFeePerGas cap. False in a fee
+     * spike, where a capped transaction would wait unmined holding its nonce (and every later
+     * one). Throws when Base cannot answer.
+     */
+    async feeRoom(): Promise<boolean> {
+      return (await nodeFees()).maxFeePerGas <= caps.maxFeePerGasWei;
+    },
+
+    /**
+     * Whether the lane is stuck: its head (the signed settlement holding the next nonce Base
+     * expects) was stored more than `olderThanMs` ago and is still not in a block. Everything signed
+     * behind it waits too. One chain read and one database read; throws when Base cannot answer.
+     */
+    async laneStuck(olderThanMs: number): Promise<boolean> {
+      const from = await address();
+      const mined = await deps.client.getTransactionCount({ address: from, blockTag: 'latest' });
+      const { rows } = await deps.db.query(
+        `SELECT 1 FROM x402_facilitator_ops
+         WHERE facilitator = $1 AND nonce = $2::numeric AND raw_tx IS NOT NULL
+           AND status NOT IN ('included', 'final', 'failed') AND created_at <= $3 LIMIT 1`,
+        [from.toLowerCase(), String(mined), now() - olderThanMs],
+      );
+      return rows.length > 0;
+    },
+
     /** Whether the EOA holds at least minBalanceWei (submit refuses new settlements below it). */
     async canPay(): Promise<boolean> {
       return (await ethBalance()) >= minBalance;
@@ -1525,84 +1977,31 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
         grant?: { kind: 'grant' | 'key'; id: string } | null;
       };
     }): Promise<FeedPayOp> {
-      await healHead();
-      const intentHash = input.intentHash.toLowerCase();
-      const calldata = encodeSettle(input.settlement);
-      const conflict = () =>
-        new FacilitatorError('IDEMPOTENCY_CONFLICT', 'This key was used for another settlement.');
-      let row = await get(input.key);
-      if (row && row.intent_hash !== intentHash) throw conflict();
-      // Stored by another EOA: only that facilitator may continue it (its key, its nonce lane).
-      if (row && (await foreign(row))) return opOf(row);
-      const lane = laneOfKey(input.key);
-      if (!row) {
-        const balance = await ethBalance().catch(() => {
-          throw new FacilitatorError(
-            'RPC_UNAVAILABLE',
-            'Base could not report the gas balance now.',
-          );
-        });
-        if (balance < minBalance)
-          throw new FacilitatorError('LOW_GAS_FUNDS', 'The facilitator is low on gas funds.');
-        const at = now();
-        await deps.db.query(
-          `INSERT INTO x402_facilitator_ops (op_key, intent_hash, chain_id, facilitator, router,
-             calldata, status, created_at, updated_at, batch_lane, grant_kind, grant_id)
-           VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, $7, $8, $9, $10)
-           ON CONFLICT (op_key) DO NOTHING`,
-          [
-            input.key,
-            intentHash,
-            deps.chainId,
-            (await address()).toLowerCase(),
-            router,
-            calldata,
-            at,
-            Boolean(
-              input.batch &&
-              typeof input.batch.authorize === 'function' &&
-              deps.batch &&
-              lane &&
-              input.batch.grant !== undefined,
-            ),
-            input.batch?.grant?.kind ?? null,
-            input.batch?.grant?.id ?? null,
-          ],
-        );
-        row = await get(input.key);
-        if (!row) throw new Error('Settlement row missing after insert.');
-        if (row.intent_hash !== intentHash) throw conflict();
-      }
-      // In a batch: its batch's state (never a transaction of its own).
-      if (row.batch_key) return opOf(await memberStatus(row, input.batch?.authorize));
-      if (row.status !== 'queued' || row.raw_tx) return opOf(row);
-      if (row.calldata !== calldata) throw conflict();
-      if (row.batch_lane) {
-        // Waiting for a batch: checked now, again before its batch is simulated and signed.
-        try {
-          await input.beforeBroadcast();
-        } catch {
-          await endMember(input.key, REFUSED);
-          return opOf((await get(input.key)) ?? row);
-        }
-        if (input.batch && deps.batch)
-          await flush(input.batch.authorize, false, undefined, lane).catch(() =>
-            log('x402 facilitator: batch flush failed'),
-          );
-        const now_ = (await get(input.key)) ?? row;
-        return opOf(now_.batch_key ? await memberStatus(now_) : now_);
-      }
+      return submitCall({ ...input, calldata: encodeSettle(input.settlement) });
+    },
 
-      const claimId = randomUUID();
-      const at = now();
-      const { rows } = await deps.db.query<OpRow>(
-        `UPDATE x402_facilitator_ops SET claim_id = $2, claimed_at = $3, updated_at = $3
-         WHERE op_key = $1 AND status = 'queued' AND raw_tx IS NULL
-           AND (claimed_at IS NULL OR claimed_at <= $4) RETURNING ${COLUMNS}`,
-        [input.key, claimId, at, at - CLAIM_TTL_MS],
-      );
-      if (!rows[0]) return opOf((await get(input.key)) ?? row);
-      return opOf(await firstSend(rows[0], claimId, input.beforeBroadcast));
+    /**
+     * The same durable send for any calldata on this facilitator's target (its own instance, its
+     * own EOA and lane): the public x402 facilitator settles USDC transferWithAuthorization with
+     * it. Router 3 settlements use submit.
+     */
+    submitCall,
+
+    /** Read-only simulation of any calldata on this facilitator's target, from its EOA. */
+    async verifyCall(
+      data: Hex,
+    ): Promise<
+      { ok: true; gas: bigint } | { ok: false; reason: string | null; retryable: boolean }
+    > {
+      try {
+        const gas = await deps.client.estimateGas({ account: await address(), to: router, data });
+        return { ok: true, gas };
+      } catch (error) {
+        const revert = simulationRevert(error);
+        if (revert.reverted && !transientChainError(error))
+          return { ok: false, reason: revert.name, retryable: false };
+        return { ok: false, reason: null, retryable: true };
+      }
     },
 
     /**

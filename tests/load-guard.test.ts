@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
-import { classify } from '../scripts/load/client.js';
+import { classify, OwnerSession } from '../scripts/load/client.js';
 import { connectServer } from '../scripts/load/server-handle.js';
 import {
   assertNotProductionOrigin,
@@ -335,4 +335,19 @@ test('server child death before ready fails startup', async () => {
   await assert.rejects(handle, /Server child (exited|disconnected)/);
   const silent = new FakeChild();
   await assert.rejects(connectServer(silent, { readyTimeoutMs: 30 }), /ready in time/);
+});
+
+test('an owner session keeps the session pair under the name the server set', () => {
+  const hosted = new OwnerSession('owner', '198.51.100.1');
+  hosted.absorb([
+    '__Host-cc_device=device; Path=/; HttpOnly; Secure',
+    '__Host-cc_session=token; Path=/; HttpOnly; Secure; SameSite=Strict',
+  ]);
+  assert.equal(hosted.cookie, '__Host-cc_session=token');
+  // A cleared cookie (the name before the prefix) does not replace it.
+  hosted.absorb(['cc_session=; Path=/; Max-Age=0']);
+  assert.equal(hosted.cookie, '__Host-cc_session=token');
+  const loopback = new OwnerSession('owner', '198.51.100.1');
+  loopback.absorb(['cc_session=token; Path=/; HttpOnly']);
+  assert.equal(loopback.cookie, 'cc_session=token');
 });

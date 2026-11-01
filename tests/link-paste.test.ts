@@ -6,6 +6,7 @@ import { createApp } from '../server/app.js';
 import { bareInviteCode, inviteCodeFrom, pastedLink, PASTE_HINT } from '../server/links/paste.js';
 import { parseInvite } from '../server/rooms/service.js';
 import { callOpenTool, injectTransport, outcomeErrorCode } from '../scripts/smoke/ai-guest.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 process.env.CITY_INVITE_FLOW = '1';
 process.env.CITY_RATE_LIMIT_KEY ??= 'synthetic-paste-test-root-not-a-real-secret';
@@ -133,7 +134,7 @@ async function fixture(t: { after(fn: () => Promise<unknown>): void }) {
   });
   assert.equal(registered.statusCode, 201, registered.body);
   const host = {
-    cookie: `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`,
+    cookie: sessionPair(registered.cookies),
   };
   const agent = await post(
     '/api/agents',
@@ -180,7 +181,16 @@ async function fixture(t: { after(fn: () => Promise<unknown>): void }) {
     });
     return { statusCode: res.statusCode, body: res.body };
   }, ORIGIN);
-  return { post, room, invoke, transport, now: () => time };
+  return {
+    post,
+    room,
+    invoke,
+    transport,
+    now: () => time,
+    advance: (ms: number) => {
+      time += ms;
+    },
+  };
 }
 
 test('REST bootstrap and redeem accept the full link, in a sentence, and say what to paste', async (t) => {
@@ -229,10 +239,13 @@ test('guest REST tools: 401 without a usable credential, 404 for unknown tools, 
   for (const credential of unusable) {
     const read = await f.invoke(credential, 'city_room_read');
     assert.equal(read.statusCode, 401, read.body);
+    // The REST answer also carries the shared recovery hint (error-guidance.ts), never the value.
     assert.deepEqual(read.json(), {
       error: 'Missing or invalid room credential: join with an invite link first.',
       code: 'room_credential_invalid',
+      hint: 'Renew with POST /api/public/invites/renew (or city_room_renew on /mcp/open), or ask the host for a rejoin link and use your recovery code.',
     });
+    if (credential) assert.ok(!read.body.includes(credential), 'the credential is never echoed');
   }
   const renew = await f.post('/api/public/invites/renew', {});
   assert.equal(renew.statusCode, 401, renew.body);
@@ -253,7 +266,7 @@ test('guest REST tools: 401 without a usable credential, 404 for unknown tools, 
   });
   assert.equal(impostor.statusCode, 403, impostor.body);
   assert.equal((await f.invoke(guest.credential, 'city_room_read')).statusCode, 200);
-  // Renewing gives 24 hours on REST too, and the old credential is then simply invalid.
+  // Renewing gives 24 hours on REST too; the old credential then reads only, for 10 minutes.
   const renewed = await f.post(
     '/api/public/invites/renew',
     {},
@@ -261,6 +274,14 @@ test('guest REST tools: 401 without a usable credential, 404 for unknown tools, 
   );
   assert.equal(renewed.statusCode, 200, renewed.body);
   assert.equal(Date.parse(renewed.json().expires_at) - f.now(), 24 * 3_600_000);
+  assert.equal((await f.invoke(guest.credential, 'city_room_read')).statusCode, 200);
+  const write = await f.invoke(guest.credential, 'city_room_post', {
+    text: 'With the old credential.',
+    idempotency_key: randomUUID(),
+  });
+  assert.equal(write.statusCode, 401, write.body);
+  assert.match(write.json().hint, /You already renewed/);
+  f.advance(10 * 60_000 + 1);
   assert.equal((await f.invoke(guest.credential, 'city_room_read')).statusCode, 401);
 });
 

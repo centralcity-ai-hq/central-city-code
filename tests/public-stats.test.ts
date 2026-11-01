@@ -48,13 +48,20 @@ import {
   BASE_AGENTS_FAILURE_BACKOFF_MS,
   BASE_AGENTS_LAST_GOOD_MS,
   baseAgentsForResponse,
+  ARC_AGENTS_KEY,
+  BASE_AGENTS_KEY,
   countBaseAgents,
+  countListedAgents,
+  createArcAgentsReader,
   createBaseAgentsReader,
 } from '../server/stats/base-agents.js';
+import { ARC_NETWORKS, ARC_TESTNET } from '../shared/chains.js';
+import { ercAgentsTotal, parseArcAgents, parseStatsRates } from '../src/agentCount.js';
 import { createOnBaseStore } from '../server/base/explorer/store.js';
 import { add, NOW, SEPOLIA_REGISTRY, setup } from './on-base-fixture.js';
 import Fastify from 'fastify';
 import { ownerApi, type App } from './oauth-helpers.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 const jsonHeaders = { 'content-type': 'application/json', 'x-city-request': '1' };
 
@@ -454,7 +461,7 @@ test('GET /api/public/stats: unauthenticated, cacheable, only the number, and co
     payload: JSON.stringify({ name: 'Ticker owner', password: 'Synthetic ticker password' }),
   });
   assert.equal(register.statusCode, 201, register.body);
-  const cookie = `cc_session=${register.cookies.find((c) => c.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(register.cookies);
   const created: Record<string, string> = {};
   for (const mode of ['external', 'hosted'] as const) {
     const res = await ownerApi(app, cookie, '/api/agents', {
@@ -1086,4 +1093,88 @@ test('base_agents rides on the stats response; left out when unavailable; never 
   assert.ok(performance.now() - started < 1_000);
   last = { value: 1, refreshedAt: AT - BASE_AGENTS_LAST_GOOD_MS - 1 };
   assert.equal((await get()).base_agents, undefined);
+});
+
+// ---------------------------------------------------------------------------------------------
+// arc_agents: the same count on the Arc chain, its own row, only while Arc is on
+
+const ARC_ON = { CITY_ARC: '1', CITY_ARC_CHAIN_ID: String(ARC_TESTNET) };
+
+test('arc_agents: Arc off means no reader and no query; Arc on counts Arc only, never the Base row', async (t) => {
+  const queries: unknown[] = [];
+  const spy = { query: async (...args: unknown[]) => (queries.push(args), { rows: [] }) };
+  const store = sqlPublicStatsStore(spy as never);
+  for (const env of [{}, { CITY_ARC: '0' }, { CITY_ARC_CHAIN_ID: String(ARC_TESTNET) }])
+    assert.equal(
+      createArcAgentsReader({ db: spy as never, store, clock: () => 1, env }),
+      undefined,
+    );
+  assert.equal(queries.length, 0);
+
+  // Arc on: the explorer's LISTED count with Arc's chain id and identity registry.
+  const arcRegistry = ARC_NETWORKS[ARC_TESTNET].contracts.identityRegistry;
+  const counting = {
+    query: async (...args: unknown[]) => (queries.push(args), { rows: [{ n: '3' }] }),
+  };
+  assert.equal(await countListedAgents(counting as never, ARC_TESTNET, arcRegistry), 3);
+  const [sql, params] = queries[0] as [string, unknown[]];
+  assert.equal(sql, BASE_AGENTS_COUNT_SQL);
+  assert.deepEqual(params.slice(0, 2), [ARC_TESTNET, arcRegistry]);
+  queries.length = 0;
+  await countBaseAgents(counting as never);
+  assert.equal((queries[0] as [string, unknown[]])[1][0], 8453);
+
+  const s = await baseShared(t);
+  s.state.value = 9;
+  const arc = createArcAgentsReader({
+    db: s.db as never,
+    store: s.store,
+    clock: () => 8_000_000,
+    env: ARC_ON,
+    count: s.count,
+  });
+  assert.ok(arc);
+  assert.equal((await arc.read())?.value, 9);
+  assert.equal((await s.store.read(ARC_AGENTS_KEY))?.value, 9);
+  // The Base row (read by server/dashboard/rollup.ts as the Base total) is never touched.
+  assert.equal(await s.store.read(BASE_AGENTS_KEY), null);
+  assert.match(ARC_AGENTS_KEY, /^[a-z_]{1,64}$/);
+});
+
+test('arc_agents rides on the stats response only with an Arc reader; Base unchanged', async (t) => {
+  const reader = (value: number) => {
+    const stat = { value, refreshedAt: AT - 1_000 };
+    return { read: async () => stat, lastGood: () => stat };
+  };
+  const make = async (arcAgents?: ReturnType<typeof reader>) => {
+    const app = Fastify();
+    t.after(() => app.close());
+    registerPublicStatsRoutes(app, {
+      stats: { get: async () => ({ ai_agents_total: 42, updated_at: new Date(AT).toISOString() }) },
+      limit: async () => {},
+      env: {},
+      clock: () => AT,
+      baseAgents: reader(100),
+      ...(arcAgents ? { arcAgents } : {}),
+      baseAgentsBudgetMs: 50,
+    });
+    return (await app.inject({ method: 'GET', url: '/api/public/stats' })).json();
+  };
+  const off = await make();
+  assert.equal(off.arc_agents, undefined);
+  assert.equal(off.base_agents.total, 100);
+  assert.equal(off.rates?.arc_agents, undefined);
+  const on = await make(reader(7));
+  assert.deepEqual(on.arc_agents, { total: 7, as_of: new Date(AT - 1_000).toISOString() });
+  assert.equal(on.base_agents.total, 100);
+  // The landing tile: Base plus Arc; Arc missing counts 0; no Base number, no tile number.
+  const base = { total: 100, asOf: AT };
+  assert.equal(ercAgentsTotal({ base, arc: parseArcAgents(on) }), 107);
+  assert.equal(ercAgentsTotal({ base, arc: parseArcAgents(off) }), 100);
+  assert.equal(ercAgentsTotal({ base, arc: undefined }), 100);
+  assert.equal(ercAgentsTotal({ base: null, arc: parseArcAgents(on) }), null);
+  assert.deepEqual(parseStatsRates({ rates: { base_agents: 1, arc_agents: 0.5 } }), {
+    base: 1,
+    arc: 0.5,
+  });
 });

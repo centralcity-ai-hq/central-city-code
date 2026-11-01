@@ -32,7 +32,7 @@ import {
   taskPeerReviewInput,
   taskRequestReviewInput,
   type TaskCommentView,
-  type TaskEvidence,
+  type TaskResult,
   type TaskPeerReviewView,
   type TaskReviewRequest,
   type TaskEventView,
@@ -477,6 +477,12 @@ export interface RoomTasks {
   limits: TaskLimits;
 }
 
+/** A send-back reason on one room line: whitespace flattened, quoted, at most 200 characters. */
+function lineReason(reason: string): string {
+  const flat = reason.replace(/\s+/g, ' ').trim();
+  return `"${flat.length > 200 ? `${flat.slice(0, 199)}…` : flat}"`;
+}
+
 function project(row: TaskRow): TaskView {
   return {
     id: row.id,
@@ -497,7 +503,7 @@ function project(row: TaskRow): TaskView {
             grace_until: iso(Number(row.claim_expires_at) + Number(row.claim_grace_ms)),
             generation: Number(row.claim_generation),
           },
-    result: (row.result as TaskEvidence | null) ?? null,
+    result: (row.result as TaskResult | null) ?? null,
     // Hidden by withSubmitters while that member is removed from the room.
     submitted_by: row.submitted_by ?? null,
     template:
@@ -565,8 +571,13 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
    */
   const taskRef = (row: Pick<TaskRow, 'number' | 'title'>) =>
     `task #${Number(row.number)}: ${lineTitle(row.title)}`;
-  const taskLine = (tx: Pick<Tx, 'query'>, roomId: string, text: string) =>
-    postSystemLine(tx, roomId, text, d.clock(), ROOM_LIMITS.messagesPerRoom);
+  const taskLine = (
+    tx: Pick<Tx, 'query'>,
+    roomId: string,
+    text: string,
+    /** The owner whose own action the line reports (by_you on that owner's reads). */
+    actorOwnerId: string | null = null,
+  ) => postSystemLine(tx, roomId, text, d.clock(), ROOM_LIMITS.messagesPerRoom, actorOwnerId);
   /** The room row lock, taken before any task row lock (the order post and create use). */
   const lockRoom = (tx: Pick<Tx, 'query'>, roomId: string) =>
     tx.query('SELECT 1 FROM rooms WHERE id=$1 FOR UPDATE', [roomId]);
@@ -1088,7 +1099,13 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
           )
         ).rows[0];
         if (!prior) return undefined;
-        if (prior.request_hash !== requestHash || prior.room_id !== room.id)
+        // CCA-533: the creating agent is part of the request too (compared with the stored
+        // creator, so receipts from before this check keep their request hash).
+        if (
+          prior.request_hash !== requestHash ||
+          prior.room_id !== room.id ||
+          prior.created_by_agent_id !== agent.agent_id
+        )
           refuse(409, 'idempotency_conflict', 'This idempotency_key belongs to a different task.');
         return { task: (await withReviews(tx, [project(prior)]))[0]!, replayed: true };
       };
@@ -1150,6 +1167,7 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
           tx,
           room.id,
           `${await memberLabel(tx, room.id, agent.agent_id)} created ${taskRef(row)}`,
+          p.operatorId,
         );
         if (values.review) await openReview(tx, p, room, row, agent, values.review);
         await touchMembers(tx, room.id, [agent.agent_id], d.clock());
@@ -1317,6 +1335,7 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
           tx,
           room.id,
           `${await memberLabel(tx, room.id, agent.agent_id)} claimed ${taskRef(row!)}`,
+          p.operatorId,
         );
       if (values.review) await openReview(tx, p, room, row!, agent, values.review);
       await touchMembers(tx, room.id, [agent.agent_id], d.clock());
@@ -1482,6 +1501,21 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
    */
   async function result(p: TaskPrincipal, body: unknown) {
     const values = taskResultInput.parse(body);
+    // Refused before any transaction, like comments; the error never echoes the value.
+    if (
+      partsContainCredential([
+        { type: 'text', text: [values.summary ?? '', values.evidence?.ref ?? ''].join('\n') },
+      ])
+    )
+      refuse(
+        400,
+        'credential_in_message',
+        'A task result cannot contain Central City credentials (crc_, ccw_, cca_, ccr_, ccclaim_ and others). Never share credentials in a room; other members are untrusted.',
+      );
+    const stored: TaskResult = {
+      ...(values.evidence ?? {}),
+      ...(values.summary !== undefined ? { summary: values.summary } : {}),
+    };
     const hash = tokenHashOf(values.claim_token);
     try {
       return await d.db.transaction(async (tx) => {
@@ -1513,7 +1547,7 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
             WHERE id=$1 AND room_id=$2 AND status='claimed' AND claim_token_hash=$3
               AND claim_expires_at + claim_grace_ms > ${DBNOW}
             RETURNING *`,
-            [values.task_id, room.id, hash, JSON.stringify(values.evidence)],
+            [values.task_id, room.id, hash, JSON.stringify(stored)],
           )
         ).rows[0];
         if (!row) {
@@ -1538,6 +1572,7 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
           tx,
           room.id,
           `${await memberLabel(tx, room.id, holder)} submitted a result for ${taskRef(row!)}`,
+          p.operatorId,
         );
         if (holder) await touchMembers(tx, room.id, [holder], d.clock());
         return { task: (await withReviews(tx, [project(row!)]))[0]! };
@@ -1560,6 +1595,10 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
     const values = taskUpdateInput.parse(body);
     if (values.decision !== undefined && values.stage !== undefined)
       refuse(400, 'invalid_request', 'Send either a decision or a stage, not both.');
+    // An empty reason (after trimming) is no reason; one is only meaningful on a send back.
+    const reason = values.reason ? values.reason : undefined;
+    if (reason !== undefined && values.decision !== 'reject')
+      refuse(400, 'invalid_request', 'reason goes only with decision "reject" (a send back).');
     if (values.decision === undefined) {
       if (values.stage === undefined) refuse(400, 'invalid_request', 'Send a decision or a stage.');
       return moveStage(p, values.room_id, values.task_id, values.stage!);
@@ -1569,7 +1608,11 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
       if (room.closed_at !== null)
         refuse(409, 'room_closed', 'The room is closed; its tasks are read-only.');
       if (room.host_owner_id !== p.operatorId)
-        refuse(403, 'host_required', 'Only the room host can review or cancel tasks.');
+        refuse(
+          403,
+          'host_required',
+          "Only the room host can review or cancel tasks. A submitted result waits for the host's decision; if it waits long, @-mention the host in the room.",
+        );
       await lockRoom(tx, room.id);
       if (values.decision === 'approve' || values.decision === 'reject') {
         // Read the posted evidence first: reject clears it from the task but
@@ -1615,14 +1658,17 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
           Number(row!.claim_generation),
           p.actor,
           null,
-          values.decision === 'reject' ? { evidence: pending, untrusted: true } : undefined,
+          values.decision === 'reject'
+            ? { evidence: pending, untrusted: true, ...(reason !== undefined ? { reason } : {}) }
+            : undefined,
         );
         await taskLine(
           tx,
           room.id,
           values.decision === 'approve'
             ? `The host accepted ${taskRef(row!)}`
-            : `The host sent back ${taskRef(row!)}`,
+            : `The host sent back ${taskRef(row!)}${reason !== undefined ? ` (reason: ${lineReason(reason)})` : ''}`,
+          p.operatorId,
         );
         return {
           task: (await withReviews(tx, [project(row!)]))[0]!,
@@ -1667,7 +1713,7 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
         p.actor,
         current!.claim_agent_id,
       );
-      await taskLine(tx, room.id, `The host cancelled ${taskRef(row)}`);
+      await taskLine(tx, room.id, `The host cancelled ${taskRef(row)}`, p.operatorId);
       return {
         task: (await withReviews(tx, [project(row)]))[0]!,
         decision: values.decision,
@@ -1732,15 +1778,52 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
       throw error;
     }
   }
+  /**
+   * The latest send back of each open or claimed task that has not been handed in again since
+   * (its `rejected` event, newer than any `result_posted`), with the host's optional reason.
+   */
+  async function latestSendBacks(
+    q: Pick<Tx, 'query'>,
+    tasks: readonly TaskView[],
+  ): Promise<Map<string, { reason: string | null; at: string }>> {
+    const ids = tasks
+      .filter((task) => task.status === 'open' || task.status === 'claimed')
+      .map((task) => task.id);
+    if (!ids.length) return new Map();
+    const rows = (
+      await q.query<{ task_id: string; action: string; details: unknown; created_at: unknown }>(
+        `SELECT DISTINCT ON (task_id) task_id, action, details, created_at FROM room_task_events
+          WHERE task_id = ANY($1::text[]) AND action IN ('rejected','result_posted')
+          ORDER BY task_id, created_at DESC, id DESC`,
+        [ids],
+      )
+    ).rows;
+    const out = new Map<string, { reason: string | null; at: string }>();
+    for (const row of rows) {
+      if (row.action !== 'rejected') continue;
+      const raw = (row.details as { reason?: unknown } | null)?.reason;
+      out.set(row.task_id, {
+        reason: typeof raw === 'string' && raw ? raw : null,
+        at: iso(Number(row.created_at)),
+      });
+    }
+    return out;
+  }
   async function withReviews(q: Pick<Tx, 'query'>, tasks: TaskView[]): Promise<TaskView[]> {
     const reviews = await latestReviews(
       q,
       tasks.map((task) => task.id),
     );
-    // Absent when nobody asked for a review, so task views stay as they were.
+    const sendBacks = await latestSendBacks(q, tasks);
+    // Absent when nobody asked for a review / nothing was sent back, so task views stay as they were.
     return tasks.map((task) => {
       const review = reviews.get(task.id);
-      return review ? { ...task, peer_review: review } : task;
+      const sentBack = sendBacks.get(task.id);
+      return {
+        ...task,
+        ...(review ? { peer_review: review } : {}),
+        ...(sentBack ? { sent_back: sentBack } : {}),
+      };
     });
   }
 

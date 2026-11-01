@@ -4,6 +4,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { PGlite } from '@electric-sql/pglite';
 import { createApp } from '../server/app.js';
 import type { ProviderPostRequest } from '../server/responder/providers.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 process.env.CITY_INVITE_FLOW = '1';
 process.env.CITY_RATE_LIMIT_KEY ??= 'synthetic-private-agent-chat-test-root-secret';
@@ -110,7 +111,7 @@ async function fixture(
       `203.0.113.${address++}`,
     );
     assert.equal(registered.statusCode, 201, registered.body);
-    const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+    const cookie = sessionPair(registered.cookies);
     const operatorId = (
       await app.city.db.query<{ id: string }>('SELECT id FROM operators WHERE name=$1', [name])
     ).rows[0]!.id;

@@ -16,7 +16,9 @@ import {
   type PublicClient,
 } from 'viem';
 import type { Database } from '../../database.js';
-import type { Address, BaseChainId, BaseNetwork } from '../../../shared/base/chains.js';
+import type { Address, BaseNetwork } from '../../../shared/base/chains.js';
+import type { ChainId } from '../../../shared/chains.js';
+import type { SponsorAllowlist } from '../../../shared/base/paymasters.js';
 import type { IdentityChainPort, IdentityOp } from '../identity/service.js';
 import { deriveAddressLocal, spenderAccountRecipe } from './derive.js';
 import {
@@ -72,6 +74,8 @@ export interface IdentityPortDeps {
    * to `client`.
    */
   finalizedClient?: PublicClient;
+  /** The pinned sponsors every registration and hand-over must be sponsored by (CCA-138). */
+  sponsors?: SponsorAllowlist;
 }
 
 /**
@@ -103,7 +107,7 @@ export type IdentityChainOp = IdentityOp & {
 
 export interface MintEvidenceInput {
   operationKey: string;
-  chainId: BaseChainId;
+  chainId: ChainId;
   /** The agent URI the registration was for; the minted id must carry it at the receipt block. */
   uri: string;
 }
@@ -141,7 +145,7 @@ export type MintEvidence =
     };
 
 export interface IdentityAtInput {
-  chainId: BaseChainId;
+  chainId: ChainId;
   id: bigint;
   /** Only the finalized block is read; anything else is refused (also from untyped callers). */
   blockTag: 'finalized';
@@ -182,7 +186,7 @@ export interface IdentityEvidencePort extends IdentityChainPort {
    * head numbers, each null when it cannot be read. Read only, possibly shared for a while and
    * from the second endpoint: never evidence, only "not yet" or "look now".
    */
-  settledHeads(chainId: BaseChainId): Promise<{ safe: bigint | null; finalized: bigint | null }>;
+  settledHeads(chainId: ChainId): Promise<{ safe: bigint | null; finalized: bigint | null }>;
 }
 
 export class IdentityPortError extends Error {
@@ -593,6 +597,8 @@ export function createIdentityChainPort(deps: IdentityPortDeps): IdentityEvidenc
             uris: [input.uri],
             maxCostWeiCap: deps.maxCostWeiCap,
             beforeBroadcast: walletUsable(spender),
+            sponsorAccountId: input.accountId ?? null,
+            ...(deps.sponsors ? { sponsors: deps.sponsors } : {}),
           }),
       );
     },
@@ -739,6 +745,8 @@ export function createIdentityChainPort(deps: IdentityPortDeps): IdentityEvidenc
             transfers: [{ id: input.id, to: getAddress(input.to) }],
             maxCostWeiCap: deps.maxCostWeiCap,
             beforeBroadcast: walletUsable(spender),
+            sponsorAccountId: input.accountId ?? null,
+            ...(deps.sponsors ? { sponsors: deps.sponsors } : {}),
           }),
       );
     },

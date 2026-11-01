@@ -126,3 +126,18 @@ test('secret scanner includes untracked files and rejects inline suppression', o
     report.results.find((phase: { phase: string }) => phase.phase === 'current-files').findings > 0,
   );
 });
+
+test('secret scanner detects Central City agent credentials', options, (t) => {
+  const f = fixture(t);
+  // Assembled at runtime: the prefixes plus 43 base64url characters.
+  const body = 'Q7w' + 'E9r'.repeat(13) + 'x';
+  const values = ['cc' + 'rt_' + body, 'cc' + 'ag_' + body.split('').reverse().join('')];
+  fs.writeFileSync(path.join(f.directory, 'notes.txt'), `${values.join('\n')}\n`);
+  f.commit();
+  const result = f.scan();
+  assert.equal(result.status, 1);
+  const report = JSON.parse(result.stdout);
+  const rules = new Set(report.results.flatMap((phase: { rules: string[] }) => phase.rules));
+  assert.ok(rules.has('central-city-agent-credential'));
+  for (const value of values) assert.ok(!`${result.stdout}${result.stderr}`.includes(value));
+});

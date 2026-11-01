@@ -81,9 +81,9 @@ async function setup(t: TestContext, wrap: (db: Database) => Database = (db) => 
       payload: JSON.stringify({ client_name: 'Synthetic MCP client', redirect_uris: [REDIRECT] }),
       remoteAddress: `198.51.100.${++address}`,
     });
-  /** Fills the table to `rows` never-used (so evictable) clients, oldest first. */
+  /** Fills the table to `rows` never-used (so evictable: past the dwell time) clients, oldest first. */
   const fill = async (rows: number) => {
-    const now = Date.now();
+    const now = Date.now() - OAUTH_CAPS.clientMinDwellMs;
     await app.city.db.query(
       `INSERT INTO oauth_clients(client_id,client_name,redirect_uris,created_at)
        SELECT 'ccc_filler_' || lpad(i::text, 5, '0'), 'n', $1::jsonb, $2::bigint - 100000 + i

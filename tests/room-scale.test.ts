@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { PGlite } from '@electric-sql/pglite';
 import { createApp } from '../server/app.js';
 import { ROOM_LIMITS } from '../server/rooms/contract.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 /**
  * Rooms up to 10,000 members (approved operators only): a PGlite load test. A room with member_cap 10,000 is filled with
@@ -62,7 +63,7 @@ test(`a room of ${MEMBERS} members: post, mention, read and list stay fast; the 
       remoteAddress: `203.0.113.${address}`,
     });
     assert.equal(registered.statusCode, 201, registered.body);
-    const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+    const cookie = sessionPair(registered.cookies);
     const agent = await call('POST', '/api/agents', cookie, {
       name: `${name} agent`,
       capability: 'research',

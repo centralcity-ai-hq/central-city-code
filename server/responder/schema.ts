@@ -58,9 +58,40 @@ CREATE INDEX IF NOT EXISTS responder_credentials_kek
 `,
 };
 
+/**
+ * Migration 303 `responder_pause_root_key` (CCA-641 c): a pause because the stored key is wrapped
+ * under a root key this server does not have (CITY_RESPONDER_KEK_PREVIOUS removed too early, or a
+ * deploy overlap) gets its own stored reason, `root_key_unavailable`, instead of `invalid_key`
+ * (which says the provider rejected the owner's key). The pause_reason CHECK of migration 20 is
+ * replaced by the same list plus that one value: a strictly wider set, so every row and every
+ * write of an older build stays valid. Found by definition, not by name, so a constraint that got
+ * another name is replaced too. Lock: ACCESS EXCLUSIVE on responder_settings (one row per agent
+ * with Auto-reply set up) for the re-check of its rows; no other table is touched.
+ */
+export const responderPauseRootKeyMigration: Migration = {
+  version: 303,
+  name: 'responder_pause_root_key',
+  sql: `
+DO $drop$
+DECLARE c text;
+BEGIN
+  FOR c IN SELECT conname FROM pg_constraint
+    WHERE conrelid = 'responder_settings'::regclass AND contype = 'c'
+      AND pg_get_constraintdef(oid) LIKE '%pause_reason%'
+  LOOP
+    EXECUTE format('ALTER TABLE responder_settings DROP CONSTRAINT %I', c);
+  END LOOP;
+END
+$drop$;
+ALTER TABLE responder_settings ADD CONSTRAINT responder_settings_pause_reason_check CHECK (pause_reason IN
+  ('invalid_key','quota','rate_limited','model_unavailable','forbidden','key_removed','repeated_failures','root_key_unavailable'));
+`,
+};
+
 /** Idempotent; call before runMigrations. */
 export function registerResponderMigration(): void {
   registerMigration(responderMigration);
+  registerMigration(responderPauseRootKeyMigration);
 }
 // Registered on import (like server/autonomy/expiry-schema.ts): the claim flows import the
 // revocation helper, so the tables exist wherever those flows run.

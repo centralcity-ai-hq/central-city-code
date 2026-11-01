@@ -1,6 +1,6 @@
-import { useState } from 'react';
 import {
   CONTACT_EMAIL,
+  CopyText,
   HELLO_EMAIL,
   Mail,
   PRIVACY_EMAIL,
@@ -22,35 +22,6 @@ const MAILBOXES = [
   { to: PRIVACY_EMAIL, purpose: 'Privacy and data protection requests' },
 ] as const;
 
-function CopyAddress({ address }: { address: string }) {
-  const [result, setResult] = useState<'copied' | 'failed' | null>(null);
-  const show = (next: 'copied' | 'failed') => {
-    setResult(next);
-    window.setTimeout(() => setResult(null), 1600);
-  };
-  return (
-    <>
-      <button
-        type="button"
-        className="contact-copy"
-        aria-label={`Copy ${address}`}
-        onClick={() => {
-          if (!navigator.clipboard) return show('failed');
-          void navigator.clipboard.writeText(address).then(
-            () => show('copied'),
-            () => show('failed'),
-          );
-        }}
-      >
-        {result === 'copied' ? 'Copied' : result === 'failed' ? 'Copy failed' : 'Copy'}
-      </button>
-      <span className="visually-hidden" role="status">
-        {result === 'copied' ? `${address} copied` : result === 'failed' ? 'Copy failed' : ''}
-      </span>
-    </>
-  );
-}
-
 export function Contact() {
   return (
     <>
@@ -60,7 +31,7 @@ export function Contact() {
           <li key={to}>
             <div className="contact-address">
               <Mail to={to} />
-              <CopyAddress address={to} />
+              <CopyText text={to} label={to} />
             </div>
             <p className="contact-purpose">{purpose}</p>
           </li>

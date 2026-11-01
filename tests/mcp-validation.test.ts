@@ -4,14 +4,20 @@ import { randomUUID } from 'node:crypto';
 import { PGlite } from '@electric-sql/pglite';
 import { z as zod, type z } from 'zod';
 import { McpServer, createMcpHandler } from '@modelcontextprotocol/server';
-import { withUniformValidation } from '../server/remote-mcp/validation.js';
+import {
+  argumentHint,
+  compactJsonSchema,
+  withUniformValidation,
+} from '../server/remote-mcp/validation.js';
 import { createApp } from '../server/app.js';
 import { ASSISTANT_SCOPES } from '../shared/assistant.js';
 import { ANONYMOUS_TOOLS } from '../shared/assistant-tools.js';
 import { openOnlyInputSchemas, remoteInputSchemas } from '../server/remote-mcp/tools.js';
-import { openInviteInputSchemas } from '../server/remote-mcp/open-invite.js';
+import { openInviteTools } from '../server/remote-mcp/open-invite.js';
 import { roomReadToolInput } from '../server/rooms/contract.js';
+import { guestToolsNow } from '../server/links/invites.js';
 import { rpcResult } from './oauth-helpers.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 /**
  * Every schema failure on every remote MCP tool answers with the uniform invalid_arguments body
@@ -56,7 +62,7 @@ async function fixture(t: { after(fn: () => Promise<unknown>): void }) {
     password: 'Synthetic validation password',
   });
   assert.equal(registered.statusCode, 201, registered.body);
-  const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(registered.cookies);
   const agent = await post(
     '/api/agents',
     { name: 'Validation desk', capability: 'research', mode: 'hosted' },
@@ -133,7 +139,17 @@ async function fixture(t: { after(fn: () => Promise<unknown>): void }) {
     assert.equal(res.statusCode, 200, res.body);
     return rpcResult(res.body).result.tools as Array<{ name: string; inputSchema: unknown }>;
   };
-  return { app, key: await mintKey(ASSISTANT_SCOPES), mintKey, roomCredential, rpc, call, list };
+  const roomId = room.json().room.id as string;
+  return {
+    app,
+    key: await mintKey(ASSISTANT_SCOPES),
+    mintKey,
+    roomCredential,
+    roomId,
+    rpc,
+    call,
+    list,
+  };
 }
 
 interface ToolResult {
@@ -252,6 +268,38 @@ test('an unknown extra field gets invalid_arguments on every endpoint', async (t
   );
 });
 
+test('the most common wrong arguments get a fixed hint, never an echoed value', async (t) => {
+  const f = await fixture(t);
+  const hintOf = (outcome: { result: ToolResult }) =>
+    JSON.parse(outcome.result.content[0]!.text).error.hint as string | undefined;
+  // A guest on /mcp/open passing room_id and agent_id instead of its credential.
+  const ids = await f.call('/mcp/open', undefined, 'city_room_read', {
+    room_id: MARKER,
+    agent_id: MARKER,
+  });
+  invalidArguments(ids, [
+    { path: 'room_id', message: 'Unknown field' },
+    { path: 'agent_id', message: 'Unknown field' },
+  ]);
+  assert.match(hintOf(ids)!, /pass room_credential .* in place of room_id and agent_id/);
+  // The text under another name: the hint says text, and the post contract line carries it.
+  const named = await f.call('/mcp/open', undefined, 'city_room_post', {
+    room_credential: f.roomCredential,
+    message: MARKER,
+    idempotency_key: randomUUID(),
+  });
+  assert.equal(named.result.isError, true);
+  assert.ok(!named.body.includes(MARKER), 'the received value is never echoed');
+  assert.equal(hintOf(named), 'Put the message in text (or parts).');
+  assert.match(
+    named.result.content[1]!.text,
+    /Put the message in text \(or parts\)\. Nothing was added/,
+  );
+  // On /mcp, room_id is right: no credential hint there.
+  const member = await f.call('/mcp', f.key, 'city_workspace', { room_id: MARKER });
+  assert.equal(hintOf(member), undefined);
+});
+
 test('valid arguments still reach the tool, parsed', async (t) => {
   const f = await fixture(t);
   const { result, body } = await f.call('/mcp', f.key, 'city_workspace', {});
@@ -315,24 +363,54 @@ test('tools/list still advertises the exact input schemas on every endpoint', as
   const check = (
     tools: Array<{ name: string; inputSchema: unknown }>,
     expected: Record<string, z.ZodType>,
+    compact = false,
   ) => {
     assert.deepEqual(tools.map((tool) => tool.name).sort(), Object.keys(expected).sort());
-    for (const tool of tools)
-      assert.deepEqual(tool.inputSchema, advertised(expected[tool.name]!), tool.name);
+    for (const tool of tools) {
+      const want = advertised(expected[tool.name]!);
+      assert.deepEqual(tool.inputSchema, compact ? compactJsonSchema(want) : want, tool.name);
+    }
   };
   const all: Record<string, z.ZodType> = { ...remoteInputSchemas, ...openOnlyInputSchemas };
   check(await f.list('/mcp', f.key), remoteInputSchemas);
-  check(await f.list('/mcp/open'), {
-    ...Object.fromEntries(ANONYMOUS_TOOLS.map((name) => [name, all[name]!])),
-    ...openInviteInputSchemas,
+  check(
+    await f.list('/mcp/open'),
+    {
+      ...Object.fromEntries(ANONYMOUS_TOOLS.map((name) => [name, all[name]!])),
+      ...(openInviteTools() as Record<string, z.ZodType>),
+    },
+    // /mcp/open advertises compact copies (no $schema, no pattern beside format: uuid).
+    true,
+  );
+  const remote = remoteInputSchemas as Record<string, z.ZodType>;
+  check(
+    await f.list('/mcp', f.roomCredential),
+    Object.fromEntries(
+      guestToolsNow()
+        .filter((name) => remote[name])
+        .map((name) => [name, name === 'city_room_read' ? roomReadToolInput : remote[name]!]),
+    ),
+  );
+});
+
+test('/mcp with a room credential lists the guest pin, brief, overview and mention tools and runs them', async (t) => {
+  const f = await fixture(t);
+  const names = (await f.list('/mcp', f.roomCredential)).map((tool) => tool.name);
+  for (const name of [
+    'city_room_pins',
+    'city_room_brief',
+    'city_room_pin',
+    'city_room_unpin',
+    'city_room_overview',
+    'city_mentions',
+    'city_ack_mentions',
+  ])
+    assert.ok(names.includes(name), `${name} missing: ${names.join(', ')}`);
+  const brief = await f.call('/mcp', f.roomCredential, 'city_room_brief', {
+    room_id: f.roomId,
   });
-  check(await f.list('/mcp', f.roomCredential), {
-    city_room_read: roomReadToolInput,
-    city_room_post: remoteInputSchemas.city_room_post,
-    city_room_members: remoteInputSchemas.city_room_members,
-    city_room_leave: remoteInputSchemas.city_room_leave,
-    city_room_search: remoteInputSchemas.city_room_search,
-  });
+  assert.notEqual(brief.result.isError, true, brief.body);
+  assert.equal(typeof JSON.parse(brief.result.content[0]!.text).brief, 'string', brief.body);
 });
 
 test('every listed tool on every endpoint answers an unknown field with invalid_arguments', async (t) => {
@@ -419,4 +497,68 @@ test('a server without the SDK tool registry fails loudly, not inside Object.ent
       'MCP SDK internals changed: _registeredTools not found; recheck server/remote-mcp/validation.ts after the SDK upgrade',
     ),
   );
+});
+
+test('DM, pin and search argument hints name the real field', () => {
+  const unknown = (path: string) => [{ path, message: 'Unknown field' }];
+  assert.match(argumentHint('city_room_dm_send', unknown('to'), true)!, /to_agent_id/);
+  assert.match(argumentHint('city_room_pin', unknown('seq'), true)!, /message_seq/);
+  assert.equal(
+    argumentHint('city_room_search', unknown('query'), true),
+    'Put the search words in q.',
+  );
+  // seq is right for react: no hint there.
+  assert.equal(argumentHint('city_room_react', unknown('message_seq'), true), undefined);
+});
+
+test('task argument hints: comment body, lease minutes, result evidence', () => {
+  const unknown = (path: string) => [{ path, message: 'Unknown field' }];
+  assert.equal(
+    argumentHint('city_room_task_comment_add', unknown('text'), true),
+    'Put the comment in body.',
+  );
+  assert.equal(
+    argumentHint('city_room_task_claim', unknown('ttl_seconds'), false),
+    'The lease is ttl_minutes (5-120).',
+  );
+  // summary is a real field now; the result's text under another name points at it.
+  assert.equal(argumentHint('city_room_task_result', unknown('summary'), true), undefined);
+  assert.equal(
+    argumentHint('city_room_task_result', unknown('text'), true),
+    'Put the result in summary.',
+  );
+  assert.equal(argumentHint('city_room_task_list', unknown('text'), true), undefined);
+});
+
+test('broken JSON on the MCP endpoints is a JSON-RPC parse error; other routes keep theirs', async (t) => {
+  const app = await createApp({
+    database: await PGlite.create('memory://'),
+    hosted: {
+      databaseUrl: 'postgres://unused.invalid/test',
+      publicOrigin: 'https://centralcity.ai',
+      allowedOrigins: ['https://centralcity.ai'],
+    },
+    startWorkers: false,
+  });
+  t.after(() => app.close());
+  const broken = (url: string) =>
+    app.inject({
+      method: 'POST',
+      url,
+      headers: { 'content-type': 'application/json', host: 'centralcity.ai' },
+      payload: '{bad',
+      remoteAddress: '198.51.100.200',
+    });
+  for (const url of ['/mcp/open', '/mcp']) {
+    const res = await broken(url);
+    assert.equal(res.statusCode, 400, url);
+    assert.deepEqual(res.json(), {
+      jsonrpc: '2.0',
+      id: null,
+      error: { code: -32700, message: 'Parse error' },
+    });
+  }
+  assert.deepEqual((await broken('/api/public/invites/tools/city_room_read')).json(), {
+    error: 'Invalid JSON',
+  });
 });

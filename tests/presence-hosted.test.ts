@@ -15,6 +15,7 @@ import {
 } from '../server/model.js';
 import { signedHeaders } from '../connector/signing.js';
 import type { Agent, Snapshot } from '../shared/types.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 /**
  * Hosted agents' synthetic presence (server/app.ts refreshPresence) without a workspace rewrite on
@@ -92,7 +93,7 @@ async function fixture(
     password: 'Synthetic hosted presence test password',
   });
   assert.equal(registered.statusCode, 201, registered.body);
-  const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(registered.cookies);
   const agent = async (name: string, mode: 'hosted' | 'external' = 'hosted') => {
     const created = await call(apps[0]!, 'POST', '/api/agents', cookie, {
       name,
@@ -292,7 +293,7 @@ test('the local worker tick does not rewrite the workspace on every tick', async
     payload: JSON.stringify({ name: 'Worker owner', password: 'Synthetic worker tick password' }),
   });
   assert.equal(registered.statusCode, 201, registered.body);
-  const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(registered.cookies);
   for (const name of ['North', 'South']) {
     const created = await app.inject({
       method: 'POST',

@@ -13,6 +13,7 @@ import { ApiError } from '../api';
 import type { Member, Room } from './api';
 import {
   createTask,
+  SEND_BACK_REASON_MAX,
   decideTask,
   listTasks,
   requestReview,
@@ -23,6 +24,7 @@ import {
   type PeerVerdict,
   type RoomTask,
   type TaskDecision,
+  type TaskListCut,
   type TaskStatus,
 } from './tasks';
 import { requestKey } from './requestKey';
@@ -149,7 +151,7 @@ function TaskItem({
   commentAs?: string;
   nameOf: (agentId: string) => string;
   busy: boolean;
-  onDecide: (task: RoomTask, decision: TaskDecision) => void;
+  onDecide: (task: RoomTask, decision: TaskDecision, reason?: string) => void | Promise<boolean>;
   onAskReview: (task: RoomTask, reviewerId: string, checklist: string[]) => Promise<boolean>;
   onWithdrawReview: (task: RoomTask) => void;
   onPeerReview: (
@@ -185,6 +187,9 @@ function TaskItem({
   useEffect(() => setCommentCount(task.comment_count ?? 0), [task.comment_count]);
   const onCount = useCallback((count: number) => setCommentCount(count), []);
   const threadId = useId();
+  const reasonId = useId();
+  const reasonCountId = useId();
+  const [reason, setReason] = useState('');
   const status =
     task.status === 'open'
       ? 'Waiting for a member to take it.'
@@ -222,10 +227,22 @@ function TaskItem({
       />
       {task.body ? <TaskBody body={task.body} /> : null}
       <p className="rm-meta">{status}</p>
+      {task.sent_back && (task.status === 'open' || task.status === 'claimed') ? (
+        <p className="rm-task-result" data-kind="sent-back">
+          <span className="rm-meta">Sent back{task.sent_back.reason ? ': ' : '.'}</span>
+          {task.sent_back.reason ? (
+            <span className="rm-task-summary">{task.sent_back.reason}</span>
+          ) : null}
+        </p>
+      ) : null}
       {task.result && (task.status === 'in_review' || task.status === 'done') ? (
         <p className="rm-task-result">
           <span className="rm-meta">Result: </span>
-          <span className="rm-task-ref">{task.result.ref}</span>
+          {task.result.summary ? (
+            <span className="rm-task-summary">{task.result.summary}</span>
+          ) : null}
+          {task.result.summary && task.result.ref ? ' ' : null}
+          {task.result.ref ? <span className="rm-task-ref">{task.result.ref}</span> : null}
         </p>
       ) : null}
       {review ? <PeerReviewSummary review={review} nameOf={nameOf} /> : null}
@@ -278,10 +295,32 @@ function TaskItem({
             type="button"
             className="rm-quiet"
             disabled={busy}
-            onClick={() => onDecide(task, 'reject')}
+            onClick={() =>
+              void Promise.resolve(onDecide(task, 'reject', reason)).then((done) => {
+                if (done) setReason('');
+              })
+            }
           >
             Send back
           </button>
+          <label htmlFor={reasonId} className="rm-visually-hidden">
+            Reason for sending {`T${task.number}`} back (optional)
+          </label>
+          <input
+            id={reasonId}
+            className="rm-input rm-task-reason"
+            value={reason}
+            maxLength={SEND_BACK_REASON_MAX}
+            placeholder="Reason (optional)"
+            aria-describedby={reasonCountId}
+            disabled={busy}
+            onChange={(event) => setReason(event.target.value)}
+          />
+          <span id={reasonCountId} className="rm-meta" aria-live="polite">
+            {reason.length > SEND_BACK_REASON_MAX - 100
+              ? `${SEND_BACK_REASON_MAX - reason.length} characters left`
+              : ''}
+          </span>
         </div>
       ) : null}
       {canCancel ? (
@@ -362,6 +401,8 @@ export function useRoomTasks(roomId: string, active: boolean) {
   const [stages, setStages] = useState<string[]>([]);
   const [available, setAvailable] = useState<boolean | null>(null);
   const [error, setError] = useState('');
+  // What the last read could not load (a room past the page budget, R1-7).
+  const [cut, setCut] = useState<TaskListCut>('none');
   // Pages the last read took: a bigger room is re-read less often (taskRefreshDelay).
   const pages = useRef(1);
   const refresh = useCallback(async () => {
@@ -372,6 +413,7 @@ export function useRoomTasks(roomId: string, active: boolean) {
         pages.current = list.pages;
         setTasks(list.tasks);
         setStages(list.stages);
+        setCut(list.cut);
       }
       setError('');
     } catch (err) {
@@ -398,7 +440,19 @@ export function useRoomTasks(roomId: string, active: boolean) {
       window.clearTimeout(timer);
     };
   }, [active, refresh]);
-  return { tasks, stages, available, error, refresh, setTasks };
+  return { tasks, stages, available, error, cut, refresh, setTasks };
+}
+
+/** Says when a room has more tasks than the panel loads (R1-7); nothing otherwise. */
+export function TasksCutNotice({ cut }: { cut?: TaskListCut }) {
+  if (cut !== 'finished' && cut !== 'some') return null;
+  return (
+    <p className="rm-quiet" role="status" data-testid="tasks-cut">
+      {cut === 'finished'
+        ? 'This room has more tasks than the panel loads at once. Every open, claimed and in-review task is listed; some done or cancelled tasks are not.'
+        : 'This room has more tasks than the panel loads at once. Some tasks are not listed.'}
+    </p>
+  );
 }
 
 export function TasksPanel({
@@ -413,7 +467,8 @@ export function TasksPanel({
 }: {
   room: Room;
   members: Member[];
-  state: ReturnType<typeof useRoomTasks>;
+  /** `cut` may be left out (nothing to report). */
+  state: Omit<ReturnType<typeof useRoomTasks>, 'cut'> & { cut?: TaskListCut };
   /** Changes when the composer asks for a new task: open the form. */
   startAdding?: number;
   /** v2: open this task's detail (a T-number cited by the catch-up); `key` changes per click. */
@@ -497,6 +552,7 @@ export function TasksPanel({
           own[0])!.id
       : undefined;
   const { tasks, stages, error, refresh, setTasks } = state;
+  const cutNotice = <TasksCutNotice cut={state.cut} />;
   const ownAgents = new Set(members.filter((member) => member.own).map((member) => member.id));
 
   function resetForm() {
@@ -544,15 +600,17 @@ export function TasksPanel({
     }
   }
 
-  async function decide(task: RoomTask, decision: TaskDecision) {
+  async function decide(task: RoomTask, decision: TaskDecision, reason?: string) {
     setBusy(true);
     setActionError('');
     try {
-      const updated = await decideTask(room.id, task.id, decision);
+      const updated = await decideTask(room.id, task.id, decision, reason);
       setTasks((list) => (list ?? []).map((item) => (item.id === updated.id ? updated : item)));
+      return true;
     } catch (err) {
       setActionError(message(err));
       void refresh();
+      return false;
     } finally {
       setBusy(false);
     }
@@ -671,7 +729,7 @@ export function TasksPanel({
       commentAs={commentAs}
       nameOf={nameOf}
       busy={busy}
-      onDecide={(item, decision) => void decide(item, decision)}
+      onDecide={(item, decision, reason) => decide(item, decision, reason)}
       onAskReview={(item, reviewerId, checklist) =>
         run(() =>
           requestReview(room.id, item.id, {
@@ -758,6 +816,7 @@ export function TasksPanel({
                   may not see it here.
                 </p>
               ) : null}
+              {cutNotice}
               {sorted && sorted.length ? (
                 <TaskFilterRow counts={countTasks(sorted)} value={filter} onChange={setFilter} />
               ) : null}
@@ -846,6 +905,7 @@ export function TasksPanel({
         )
       ) : null}
       {errorBox}
+      {cutNotice}
       {!sorted ? (
         loading
       ) : sorted.length ? (

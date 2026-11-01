@@ -109,7 +109,23 @@ export type RoomSearchRow = {
   sender_kind: string | null;
   created_at: string | number;
   snippet: string;
+  /** Characters of the full text (text parts joined with newlines) and of it whitespace-collapsed. */
+  full_length: string | number;
+  flat_length: string | number;
 };
+/**
+ * The truncation signal of one hit (docs/ROOMS.md "Shortened text"): the snippet leaves text out
+ * when it is shorter than the whitespace-collapsed message or was cut at SNIPPET_MAX.
+ */
+export function snippetTruncation(
+  snippet: string,
+  row: Pick<RoomSearchRow, 'full_length' | 'flat_length'>,
+): { truncated?: true; full_length?: number } {
+  const cut = snippet.length >= SNIPPET_MAX && snippet.endsWith('…');
+  return cut || snippet.length < Number(row.flat_length)
+    ? { truncated: true, full_length: Number(row.full_length) }
+    : {};
+}
 /**
  * The search statement. The query text is only ever a bind parameter of websearch_to_tsquery
  * (which accepts any input and never raises a syntax error), so neither SQL nor tsquery syntax
@@ -142,7 +158,9 @@ export function roomSearchSql(f: RoomSearchFilters): { text: string; params: unk
 hits AS (SELECT seq FROM matches ORDER BY seq DESC LIMIT ${limit})
 SELECT m.seq, m.id, m.sender_name, m.sender_agent_id, m.sender_owner_id, m.sender_kind, m.created_at,
        ts_headline('simple'::regconfig, translate(room_message_text(m.parts), E'\\x01\\x02', ''),
-         websearch_to_tsquery('simple'::regconfig, $3), ${options}) AS snippet
+         websearch_to_tsquery('simple'::regconfig, $3), ${options}) AS snippet,
+       char_length(room_message_text(m.parts)) AS full_length,
+       char_length(regexp_replace(btrim(room_message_text(m.parts)), '\\s+', ' ', 'g')) AS flat_length
   FROM hits h JOIN room_messages m ON m.room_id=$1 AND m.seq=h.seq
  ORDER BY m.seq DESC`,
     params,

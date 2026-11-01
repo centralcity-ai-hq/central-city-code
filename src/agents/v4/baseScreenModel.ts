@@ -3,6 +3,7 @@
  * its row shows on the agent's home (docs/design/my-agents-v4-mockup.html). Pure, no React.
  */
 import type { Agent } from '../../../shared/types';
+import { chainWords } from '../../../shared/base/wallet-chains';
 import { finishedId, type IdentityView, type Stage } from '../../base/baseRegistrationModel';
 
 export type BaseScreenState =
@@ -55,11 +56,17 @@ export function finalizingSince(identity: IdentityView | null, stage: Stage | nu
   return null;
 }
 
-/** The quiet line while Base finalizes: its usual time, until that has passed. */
-export function finalizingLine(since: number | null, now: number): string {
-  return since !== null && now - since > FINALIZING_USUAL_MS
-    ? 'Finalizing on Base · taking longer than usual'
-    : 'Finalizing on Base · usually 15–30 min';
+/** The screen's title: the agent's chain; with Arc on and no chain known yet, it may be either. */
+export const baseScreenTitle = (chainId: number | undefined, arcOn: boolean): string =>
+  chainId === undefined && arcOn ? 'Base or Arc' : chainWords(chainId).on;
+
+/** The quiet line while the agent's chain finalizes: its usual time, until that has passed. */
+export function finalizingLine(since: number | null, now: number, chainId?: number): string {
+  return chainWords(chainId).say(
+    since !== null && now - since > FINALIZING_USUAL_MS
+      ? 'Finalizing on Base · taking longer than usual'
+      : 'Finalizing on Base · usually 15–30 min',
+  );
 }
 
 /** Milliseconds until the finalizing line says "taking longer", or null when it never will. */
@@ -158,8 +165,11 @@ export function passportCode(agentUri: string): string {
   return path.slice(path.lastIndexOf('/') + 1);
 }
 
+/** The identity row's label on the agent's home: the standard, since an agent may be on Base or Arc. */
+export const IDENTITY_ROW_LABEL = 'ERC-8004';
+
 export interface BaseRowSummary {
-  /** The value next to "Base"; null while it is not known yet (its place stays kept). */
+  /** The value next to "ERC-8004"; null while it is not known yet (its place stays kept). */
   text: string | null;
   tone: 'muted' | 'strong' | 'bad';
   spinner: boolean;
@@ -175,6 +185,7 @@ export function baseRowSummary(
   id: string | null,
   since: number | null = null,
   now = 0,
+  chainId?: number,
 ): BaseRowSummary {
   const row = (text: string | null, more: Partial<BaseRowSummary> = {}): BaseRowSummary => ({
     text,
@@ -193,9 +204,12 @@ export function baseRowSummary(
     case 'slow':
       return row('Taking longer');
     case 'finalizing':
-      return row(`ID ${id}`, { tone: 'strong', sub: finalizingLine(since, now) });
+      return row(`On ${chainWords(chainId).on} · ID ${id}`, {
+        tone: 'strong',
+        sub: finalizingLine(since, now, chainId),
+      });
     case 'final':
-      return row(`ID ${id}`, { tone: 'strong', check: true });
+      return row(`On ${chainWords(chainId).on} · ID ${id}`, { tone: 'strong', check: true });
     case 'rechecking':
       return row('Re-checking', { spinner: true });
     case 'failed':

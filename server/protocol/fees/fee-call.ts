@@ -25,6 +25,7 @@ import {
   stringToHex,
   type Hex,
 } from 'viem';
+import { isReservedPayee, reservedPayees } from '../../../shared/protocol.js';
 
 export const FEE_BPS = 1_000n;
 export const MAX_TOTAL = 100_000n; // USDC units, fee included: $0.10
@@ -50,11 +51,31 @@ const USDC_ABI = parseAbi(['function approve(address spender, uint256 value) ret
 
 export class FeeQuoteError extends Error {
   constructor(
-    readonly code: 'OVER_CAP' | 'FEE_ZERO' | 'INVALID_PRICE',
+    readonly code: 'OVER_CAP' | 'FEE_ZERO' | 'INVALID_PRICE' | 'PAYEE_RESERVED',
     message: string,
   ) {
     super(message);
   }
+}
+
+/**
+ * Refuses a payee no router call may name: a reserved address (shared/protocol.ts reservedPayees;
+ * the caller's set for its chain) or the call's own router or token. The routers accept such a
+ * payee and the seller's share would be stranded there for good.
+ */
+function assertPayee(input: {
+  payee: Hex;
+  router: Hex;
+  usdc: Hex;
+  reserved?: ReadonlySet<string> | undefined;
+}): void {
+  const payee = input.payee.toLowerCase();
+  if (
+    isReservedPayee(payee, input.reserved ?? reservedPayees()) ||
+    payee === input.router.toLowerCase() ||
+    payee === input.usdc.toLowerCase()
+  )
+    throw new FeeQuoteError('PAYEE_RESERVED', 'This address cannot be paid.');
 }
 
 export interface FeeQuote {
@@ -179,7 +200,10 @@ export function feeCalls(input: {
   paymentIntentId: string;
   /** The pinned router's MAX_TOTAL (MAX_TOTAL for router 1, MAX_TOTAL_ROUTER2 for router 2). */
   maxTotal?: bigint;
+  /** The reserved payees of the payment's chain (protocolReservedPayees); default Base mainnet's. */
+  reserved?: ReadonlySet<string>;
 }): FeeCall[] {
+  assertPayee(input);
   const again = quoteFeeOnTop(input.quote.gross, input.maxTotal);
   if (again.fee !== input.quote.fee || again.total !== input.quote.total)
     throw new FeeQuoteError('INVALID_PRICE', 'The quote does not match its price.');
@@ -218,7 +242,10 @@ export function payCalls(input: {
   paymentIntentId: string;
   /** The pinned router's MAX_TOTAL (MAX_TOTAL for router 1, MAX_TOTAL_ROUTER2 for router 2). */
   maxTotal?: bigint;
+  /** The reserved payees of the payment's chain (protocolReservedPayees); default Base mainnet's. */
+  reserved?: ReadonlySet<string>;
 }): FeeCall[] {
+  assertPayee(input);
   const again = quoteFeeIncluded(input.quote.gross, input.maxTotal);
   if (again.fee !== input.quote.fee || again.net !== input.quote.net)
     throw new FeeQuoteError('INVALID_PRICE', 'The quote does not match its price.');
@@ -318,57 +345,4 @@ export function feeEventsOf(
     });
   }
   return out;
-}
-
-const SETTLEMENT_ABI = parseAbi([
-  'event Transfer(address indexed from, address indexed to, uint256 value)',
-  'event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce)',
-]);
-
-export interface SettlementLog {
-  address: Hex;
-  topics: Hex[];
-  data: Hex;
-}
-
-/**
- * Whether a seller settlement receipt proves the service payment of a fee-on-top call: the
- * transaction succeeded on USDC and moved exactly `gross` from the payer to the seller's payTo,
- * consuming the payer's EIP-3009 authorization with the call's nonce. Only then may the fee row be
- * marked service-verified (its price then counts as volume).
- */
-export function settlementMatches(
-  receipt: { status: 'success' | 'reverted'; logs: readonly SettlementLog[] },
-  expected: { usdc: Hex; payer: Hex; payee: Hex; gross: bigint; authorizationNonce: Hex },
-): boolean {
-  if (receipt.status !== 'success') return false;
-  let transferred = false;
-  let authorized = false;
-  for (const log of receipt.logs) {
-    if (getAddress(log.address) !== getAddress(expected.usdc)) continue;
-    let decoded;
-    try {
-      decoded = decodeEventLog({
-        abi: SETTLEMENT_ABI,
-        data: log.data,
-        topics: log.topics as [Hex, ...Hex[]],
-      });
-    } catch {
-      continue;
-    }
-    if (
-      decoded.eventName === 'Transfer' &&
-      getAddress(decoded.args.from) === getAddress(expected.payer) &&
-      getAddress(decoded.args.to) === getAddress(expected.payee) &&
-      decoded.args.value === expected.gross
-    )
-      transferred = true;
-    if (
-      decoded.eventName === 'AuthorizationUsed' &&
-      getAddress(decoded.args.authorizer) === getAddress(expected.payer) &&
-      decoded.args.nonce.toLowerCase() === expected.authorizationNonce.toLowerCase()
-    )
-      authorized = true;
-  }
-  return transferred && authorized;
 }

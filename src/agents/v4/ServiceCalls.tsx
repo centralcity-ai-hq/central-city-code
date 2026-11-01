@@ -18,12 +18,14 @@ import {
   type FeedPayHistory,
   type FeedPayHistoryItem,
 } from '../../../shared/feed-pay';
+import { chainWords } from '../../../shared/base/wallet-chains';
 import { workspaceClick } from '../../feed/feedNav';
 import { feedHref } from '../../feed/feedPaths';
 import { getServiceCalls, payFailure } from '../../feed/payApi';
 import {
   agentLines,
   callMoneyLines,
+  callTxLabel,
   feeOpen,
   feeTxHref,
   historyAmountRaw,
@@ -293,7 +295,7 @@ function CallSheetBody({ item, now }: { item: FeedPayHistoryItem; now: number })
             Details
           </a>
         )}
-        {tx ? <TxLink className="ap4-btn ap4-ghost" href={tx} /> : null}
+        {tx ? <TxLink className="ap4-btn ap4-ghost" href={tx} label={callTxLabel(item)} /> : null}
         {feeTx ? (
           <TxLink className="ap4-btn ap4-ghost" href={feeTx} label="Fee transaction" />
         ) : null}
@@ -302,16 +304,20 @@ function CallSheetBody({ item, now }: { item: FeedPayHistoryItem; now: number })
   );
 }
 
-function MoveSheetBody({ move }: { move: FeedPayFloatMove }) {
+function MoveSheetBody({ move, on }: { move: FeedPayFloatMove; on: string }) {
   return (
     <>
       <dl className="w4-facts-card" aria-label="Transfer">
         <Fact label="Between">Wallet and Ready to spend</Fact>
-        <Fact label="Status">{moveState(move) ?? 'Final on Base'}</Fact>
+        <Fact label="Status">{moveState(move) ?? `Final on ${on}`}</Fact>
       </dl>
       {move.explorerUrl ? (
         <div className="w4-sheet-actions">
-          <TxLink className="ap4-btn ap4-ghost" href={move.explorerUrl} />
+          <TxLink
+            className="ap4-btn ap4-ghost"
+            href={move.explorerUrl}
+            label={`${on} transaction`}
+          />
         </div>
       ) : null}
     </>
@@ -327,11 +333,14 @@ function Sheet({
   line,
   now,
   returnTo,
+  on,
   onClose,
 }: {
   line: Line;
   now: number;
   returnTo: string;
+  /** The agent's chain, as a move's details name it. */
+  on: string;
   onClose: () => void;
 }) {
   const id = useId();
@@ -407,7 +416,7 @@ function Sheet({
         {call ? (
           <CallSheetBody item={call} now={now} />
         ) : line.kind === 'move' ? (
-          <MoveSheetBody move={line.move} />
+          <MoveSheetBody move={line.move} on={on} />
         ) : null}
       </aside>
     </div>,
@@ -586,7 +595,16 @@ function PotForm({
   );
 }
 
-export function ServiceCalls({ agentId, name }: { agentId: string; name: string }) {
+export function ServiceCalls({
+  agentId,
+  name,
+  chainId,
+}: {
+  agentId: string;
+  name: string;
+  /** The agent's chain, from its wallet view. */
+  chainId?: number;
+}) {
   const [history, setHistory] = useState<FeedPayHistory | null>(null);
   // Feed pay is on for the owner and this agent is one that pays: the maximum can change. The
   // same read the Feed uses (kept for a minute), not one of its own.
@@ -849,6 +867,7 @@ export function ServiceCalls({ agentId, name }: { agentId: string; name: string 
           line={opened}
           now={now}
           returnTo={`${rowId}-${opened.key}`}
+          on={chainWords(chainId).on}
           onClose={() => setOpen(null)}
         />
       ) : null}

@@ -6,7 +6,8 @@
 import { randomBytes } from 'node:crypto';
 import { getAddress, type Hex } from 'viem';
 import type { Transaction } from '../../database.js';
-import type { Address } from '../../../shared/base/chains.js';
+import { BASE_MAINNET, type Address } from '../../../shared/base/chains.js';
+import { chainFamily, chainView } from '../../../shared/chains.js';
 import { TX_EXPLORER } from '../../base/wallet/withdrawals.js';
 import {
   FEED_NETWORK,
@@ -15,8 +16,8 @@ import {
   type FeedHttpMethod,
 } from '../../../shared/feed.js';
 import {
-  FEED_PAY_FAILURE_MESSAGES,
   feedPayCallDone,
+  feedPayFailureMessage,
   feedPayMoneyMoved,
   type FeedPayCall,
   type FeedPayCallState,
@@ -24,6 +25,7 @@ import {
   type FeedPayFeeState,
   type FeedPayFloatMove,
   type FeedPayHistoryItem,
+  type FeedPayNetwork,
   type FeedPayOrigin,
   type FeedPayPayment,
   type FeedPayPaymentState,
@@ -207,6 +209,16 @@ export const paidAmountRaw = (row: Pick<CallRow, 'pay_kind' | 'amount_raw' | 'fe
     ? (BigInt(row.amount_raw) + BigInt(row.fee_raw)).toString(10)
     : row.amount_raw;
 
+/** A call's network: the Feed's on Base, else its own chain's, by CAIP-2. */
+const networkOf = (chainId: number | string): FeedPayNetwork =>
+  chainFamily(Number(chainId)) === 'arc' ? `eip155:${Number(chainId)}` : FEED_NETWORK;
+
+/** Where a transaction of that chain is shown. */
+const txExplorerOf = (chainId: number | string) =>
+  chainFamily(Number(chainId)) === 'arc'
+    ? `${chainView(Number(chainId))!.explorerUrl}/tx/`
+    : TX_EXPLORER;
+
 export function paymentView(row: CallRow): FeedPayPayment | null {
   if (!row.payment_state) return null;
   const txHash = row.tx_hash && TX.test(row.tx_hash) ? row.tx_hash : null;
@@ -217,14 +229,14 @@ export function paymentView(row: CallRow): FeedPayPayment | null {
     amount: amountOf(amountRaw),
     payTo: getAddress(row.pay_to) as Address,
     host: row.host,
-    network: FEED_NETWORK,
+    network: networkOf(row.chain_id),
     state: row.payment_state,
     from: {
       wallet: getAddress(row.wallet_address) as Address,
       spender: getAddress(row.spender_address) as Address,
     },
     validBefore: Number(row.valid_before ?? 0) * 1000,
-    ...(txHash ? { txHash, explorerUrl: `${TX_EXPLORER}${txHash}` } : {}),
+    ...(txHash ? { txHash, explorerUrl: `${txExplorerOf(row.chain_id)}${txHash}` } : {}),
     ...(row.settled_at !== null ? { settledAt: Number(row.settled_at) } : {}),
   };
 }
@@ -270,7 +282,10 @@ export function callView(row: CallRow): FeedPayCall {
     resultExpiresAt:
       row.result_received_at === null ? null : Number(row.result_expires_at ?? 0) || null,
     failure: row.failure_code
-      ? { code: row.failure_code, message: FEED_PAY_FAILURE_MESSAGES[row.failure_code] }
+      ? {
+          code: row.failure_code,
+          message: feedPayFailureMessage(row.failure_code, Number(row.chain_id)),
+        }
       : null,
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
@@ -312,7 +327,7 @@ export interface MoveRow {
 export const MOVE_COLUMNS = `move_id, wallet_id, kind, amount_raw::text AS amount_raw, op_key,
   intent_hash, state, call_id, reason, period_end, tx_hash, created_at, updated_at`;
 
-export function moveView(row: MoveRow): FeedPayFloatMove {
+export function moveView(row: MoveRow, chainId: number = BASE_MAINNET): FeedPayFloatMove {
   const txHash = row.tx_hash && TX.test(row.tx_hash) ? (row.tx_hash as Hex) : null;
   return {
     moveId: row.move_id,
@@ -320,7 +335,7 @@ export function moveView(row: MoveRow): FeedPayFloatMove {
     amount: amountOf(row.amount_raw),
     state: row.state,
     txHash,
-    explorerUrl: txHash ? `${TX_EXPLORER}${txHash}` : null,
+    explorerUrl: txHash ? `${txExplorerOf(chainId)}${txHash}` : null,
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
   };

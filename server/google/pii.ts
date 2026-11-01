@@ -267,6 +267,8 @@ export interface PiiRewrapCounts {
   pending: number;
   rewrapped: number;
   unknownRoot: number;
+  /** Rows whose re-wrap threw (for example a corrupt wrapped key): skipped, the run continues. */
+  failed: number;
   dryRun: boolean;
 }
 
@@ -294,33 +296,39 @@ export async function rewrapPiiKeys(
     rewrapped: 0,
     unknownRoot: rows.filter((row) => !keyring.all.some((key) => key.kid === row.dob_kek_id))
       .length,
+    failed: 0,
     dryRun: !options.confirm,
   };
   if (!options.confirm) return counts;
   for (const { operator_id: operatorId } of rows) {
-    const done = await db.transaction(async (tx) => {
-      const row = (
-        await tx.query<{ dob_wrapped_dek: Uint8Array | null; dob_kek_id: string | null }>(
-          'SELECT dob_wrapped_dek,dob_kek_id FROM elric_age_checks WHERE operator_id=$1 FOR UPDATE',
-          [operatorId],
-        )
-      ).rows[0];
-      if (!row?.dob_wrapped_dek || !row.dob_kek_id || row.dob_kek_id === current.kid) return false;
-      const from = keyring.all.find((key) => key.kid === row.dob_kek_id);
-      if (!from) return false;
-      const wrapped = rewrapPiiDek(
-        from.key,
-        current.key,
-        piiAad('date_of_birth', operatorId),
-        Buffer.from(row.dob_wrapped_dek),
-      );
-      await tx.query(
-        'UPDATE elric_age_checks SET dob_wrapped_dek=$2, dob_kek_id=$3 WHERE operator_id=$1',
-        [operatorId, wrapped, current.kid],
-      );
-      return true;
-    });
-    if (done) counts.rewrapped += 1;
+    // One row that cannot be re-wrapped is counted and skipped; the run goes on.
+    const done = await db
+      .transaction(async (tx) => {
+        const row = (
+          await tx.query<{ dob_wrapped_dek: Uint8Array | null; dob_kek_id: string | null }>(
+            'SELECT dob_wrapped_dek,dob_kek_id FROM elric_age_checks WHERE operator_id=$1 FOR UPDATE',
+            [operatorId],
+          )
+        ).rows[0];
+        if (!row?.dob_wrapped_dek || !row.dob_kek_id || row.dob_kek_id === current.kid)
+          return false;
+        const from = keyring.all.find((key) => key.kid === row.dob_kek_id);
+        if (!from) return false;
+        const wrapped = rewrapPiiDek(
+          from.key,
+          current.key,
+          piiAad('date_of_birth', operatorId),
+          Buffer.from(row.dob_wrapped_dek),
+        );
+        await tx.query(
+          'UPDATE elric_age_checks SET dob_wrapped_dek=$2, dob_kek_id=$3 WHERE operator_id=$1',
+          [operatorId, wrapped, current.kid],
+        );
+        return true;
+      })
+      .catch(() => 'failed' as const);
+    if (done === 'failed') counts.failed += 1;
+    else if (done) counts.rewrapped += 1;
   }
   return counts;
 }

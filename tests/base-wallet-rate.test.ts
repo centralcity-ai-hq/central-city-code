@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { AGENT_ROWS_SQL } from '../server/agent-rows/schema.js';
 import { WORKSPACE_AGENT_PATH_SQL } from '../server/agent-rows/agent-lookup-schema.js';
+import { AGENT_PUBLIC_CARDS_SQL } from '../server/agent-rows/public-cards-schema.js';
 import test from 'node:test';
 import { PGlite } from '@electric-sql/pglite';
 import Fastify from 'fastify';
@@ -51,6 +52,8 @@ import {
 } from '../server/base/schema.js';
 import { listMigrations } from '../server/migrations.js';
 import { registerBaseWalletRoutes } from '../server/base/wallet/routes.js';
+import { parseLookup } from '../server/base/rate/service.js';
+import { chainWords } from '../shared/base/wallet-chains.js';
 import { accountIndexFor } from '../server/base/wallet/service.js';
 import type { ChainRuntime } from '../server/base/identity/routes.js';
 import type { BalanceReader } from '../server/base/chain/balances.js';
@@ -484,6 +487,8 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }, options
     // workspace_agent() (245, then 254), which the public name reads the agent through.
     AGENT_ROWS_SQL,
     WORKSPACE_AGENT_PATH_SQL,
+    // The current public cards (280), which the public name is read from.
+    AGENT_PUBLIC_CARDS_SQL,
   ])
     await pg.exec(sql);
   const db: Database = {
@@ -1504,6 +1509,32 @@ test('cap: counted again when the rating is stored, so a rating made meanwhile i
   assert.equal(audit.rows.length, 0);
 });
 
+test('a rating refused after its sponsored prepare gives that sponsorship back', async (t) => {
+  const f = await setup(t);
+  await both(f);
+  const day = calendarPeriod('day', NOW);
+  await seedRatings(f, 99, day.start * 1000);
+  const lookupId = await lookedUp(f);
+  const prepared: string[] = [];
+  const released: string[] = [];
+  const port = f.ops.port;
+  const prepare = port.prepare.bind(port);
+  port.prepare = async (input) => {
+    const op = await prepare(input);
+    prepared.push(op.userOpHash.toLowerCase());
+    return op;
+  };
+  port.release = async (hash) => void released.push(hash.toLowerCase());
+  // Refused when it is stored (another rating of the account made meanwhile is the 100th).
+  f.base.state.duringRead = async () => {
+    await seedRatings(f, 1, NOW, 500);
+  };
+  const res = await rate(f, { ...rateBody(1), to: { lookupId } });
+  assert.equal(res.statusCode, 429, res.body);
+  assert.equal(prepared.length, 1);
+  assert.deepEqual(released, prepared);
+});
+
 test('idempotency: same key and body, the same rating; another body or kind is refused', async (t) => {
   const f = await setup(t);
   await both(f);
@@ -2519,4 +2550,20 @@ test('ratings given: newest first, at most 50, never one that was never signed i
   f.clock.now = NOW + 60_001;
   list = (await given(f)).json().ratings;
   assert.equal(list[0].withdrawalId, 'given-55');
+});
+
+test('the lookup’s refusals name the chain’s own id; Base reads as ever', () => {
+  const message = (input: unknown, chainId?: number) => {
+    try {
+      parseLookup(input, chainId ? chainWords(chainId).say : undefined);
+    } catch (error) {
+      return (error as Error).message;
+    }
+    return '';
+  };
+  assert.match(message({}), /the agent’s Base ID and/);
+  assert.match(message({ baseId: 'x', passport: 'Ab3dE9' }), /^A Base ID is a whole/);
+  assert.match(message({}, 5042), /the agent’s Arc ID and/);
+  assert.match(message({ baseId: 'x', passport: 'Ab3dE9' }, 5042), /^An Arc ID is a whole/);
+  assert.doesNotMatch(message({ baseId: 'x', passport: 'Ab3dE9' }, 5042), /Base/);
 });

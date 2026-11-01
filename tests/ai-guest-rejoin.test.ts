@@ -14,6 +14,7 @@ import {
   readAsGuest,
   type SmokeTransport,
 } from '../scripts/smoke/ai-guest.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 process.env.CITY_INVITE_FLOW = '1';
 process.env.CITY_RATE_LIMIT_KEY ??= 'synthetic-rejoin-test-root-stand-in';
@@ -56,7 +57,7 @@ async function fixture(
     password: 'Synthetic rejoin test password',
   });
   assert.equal(registered.statusCode, 201, registered.body);
-  const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(registered.cookies);
   const host = { cookie };
   const agent = await post(
     '/api/agents',
@@ -110,8 +111,17 @@ test('rejoin with a fresh link after leaving works for the same member', async (
   const guest = joined.guest!;
   const rejoinCode = await hostRejoinLink(f, guest.agentId);
   assert.ok(rejoinCode, 'host issues a rejoin link for a live guest member');
-  // A rejoin keeps the same member: same agent, same room, fresh credential.
-  const back = await joinWithInvite(f.transport, rejoinCode!, SMOKE_GUEST_NAME);
+  // A rejoin (with the member's recovery code) keeps the same member: same agent, same room,
+  // fresh credential.
+  assert.match(guest.recoveryCode ?? '', /^crk_[A-Za-z0-9_-]{43}$/);
+  const back = await joinWithInvite(
+    f.transport,
+    rejoinCode!,
+    SMOKE_GUEST_NAME,
+    undefined,
+    undefined,
+    guest.recoveryCode,
+  );
   assert.equal(back.ok, true, back.raw);
   assert.equal(back.guest!.agentId, guest.agentId);
   assert.equal(back.guest!.roomId, guest.roomId);
@@ -141,9 +151,24 @@ test('a rejoin link works once: the second redemption is refused', async (t) => 
   assert.equal(joined.ok, true, joined.raw);
   const rejoinCode = await hostRejoinLink(f, joined.guest!.agentId);
   assert.ok(rejoinCode);
-  const first = await joinWithInvite(f.transport, rejoinCode!, SMOKE_GUEST_NAME);
+  const recovery = joined.guest!.recoveryCode;
+  const first = await joinWithInvite(
+    f.transport,
+    rejoinCode!,
+    SMOKE_GUEST_NAME,
+    undefined,
+    undefined,
+    recovery,
+  );
   assert.equal(first.ok, true, first.raw);
-  const second = await joinWithInvite(f.transport, rejoinCode!, SMOKE_GUEST_NAME);
+  const second = await joinWithInvite(
+    f.transport,
+    rejoinCode!,
+    SMOKE_GUEST_NAME,
+    undefined,
+    undefined,
+    first.guest!.recoveryCode,
+  );
   assert.equal(second.ok, false);
   assert.equal(second.code, 'invite_invalid');
   assert.ok(!second.raw.includes(rejoinCode!));

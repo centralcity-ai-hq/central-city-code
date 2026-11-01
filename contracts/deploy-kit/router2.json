@@ -3,6 +3,7 @@
   "chainId": 8453,
   "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
   "compiler": "solc 0.8.28+commit.7893614a.Emscripten.clang",
+  "sourceUnit": "fees/CentralCityFeeRouter2.sol",
   "settings": {
     "optimizer": {
       "enabled": true,
@@ -12,6 +13,38 @@
   },
   "sourceSha": "0x07d52969bc5a03e071f0c676847d54d6bb79b7129ce38ae838541c57afd8965a",
   "bytecodeSha": "0xc6e8fe84cc2dddbd3ebec6639f34d8a5a7fcf3d6486c1895a73322de04c4108e",
+  "runtimeSize": 2251,
+  "runtimeMaskedSha": "0x459b81d176e7fc5c65d2b70a1be300e3fb82cea4bcfb7b39eb5086833d8ecd78",
+  "immutables": {
+    "token": [
+      {
+        "length": 32,
+        "start": 458
+      },
+      {
+        "length": 32,
+        "start": 1681
+      }
+    ],
+    "treasury": [
+      {
+        "length": 32,
+        "start": 268
+      },
+      {
+        "length": 32,
+        "start": 534
+      },
+      {
+        "length": 32,
+        "start": 726
+      },
+      {
+        "length": 32,
+        "start": 886
+      }
+    ]
+  },
   "abi": [
     {
       "inputs": [

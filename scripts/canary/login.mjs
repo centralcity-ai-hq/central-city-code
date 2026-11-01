@@ -24,11 +24,13 @@ export async function loginCanary(
       body: JSON.stringify({ name, password }),
     });
     if (!response.ok) throw new Error('HTTP');
-    const cookie = response.headers
-      .getSetCookie()
-      .map((value) => value.split(';')[0])
-      .find((value) => value.startsWith('cc_session='));
-    if (!cookie || cookie === 'cc_session=') throw new Error('Cookie');
+    // Hosted sign-ins set __Host-cc_session; the plain name is what they set before the prefix.
+    // The pair is sent back exactly as received.
+    const pairs = response.headers.getSetCookie().map((value) => value.split(';')[0]);
+    const cookie =
+      pairs.find((value) => value.startsWith('__Host-cc_session=')) ??
+      pairs.find((value) => value.startsWith('cc_session='));
+    if (!cookie || cookie.endsWith('=')) throw new Error('Cookie');
     return cookie;
   } catch {
     throw new Error('Canary login failed');

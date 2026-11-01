@@ -40,6 +40,11 @@ import { feedPayIncludedSettledMigration } from '../server/feed/offers/uses-sche
 import { feedServiceDetail, feedStatus, searchFeedServices } from '../server/feed/query.js';
 import { BAZAAR_SOURCE, HOSTED_SOURCE } from '../server/feed/types.js';
 import { MAX_TOTAL } from '../server/protocol/fees/fee-call.js';
+import {
+  PROTOCOL_BASE_MAINNET,
+  reservedPayees,
+  X402_FACILITATOR_BASE_MAINNET,
+} from '../shared/protocol.js';
 import { WALLET_CHAIN_ID, WALLET_NETWORK } from '../shared/base/wallet-network.js';
 import {
   FEED_HOSTED_SOURCE,
@@ -69,6 +74,8 @@ import {
  */
 
 const NOW = Date.parse('2026-10-15T06:00:00Z');
+/** The UTC day of NOW: Central City's listings publish their times to the day. */
+const DAY = Date.parse('2026-10-15T00:00:00Z');
 const HOUR = 3_600_000;
 const ORIGIN = 'https://city.example.com';
 const HOST = 'city.example.com';
@@ -446,8 +453,8 @@ test('a published offer shows at once on the unfiltered Feed, credited to Centra
     credit: 'Listed on Central City',
     url: FEED_HOSTED_SOURCE.url,
     recordId: `cc:${offerId}`,
-    fetchedAt: NOW,
-    updatedAt: NOW,
+    fetchedAt: DAY,
+    updatedAt: DAY,
   });
   assert.equal(service.usage.reportedBy, 'Central City');
   assert.equal(service.status, 'active');
@@ -518,7 +525,7 @@ test('public JSON names the agent, its wallet, price and text only: no owner or 
     input: offerInputSummary('hash'),
     output: { format: 'json', fields: [], more: 0, example: null, exampleState: null },
     usage: { paidCalls30d: 0, payers30d: 0, lastCalledAt: null, reportedBy: 'Central City' },
-    lastSeenAt: NOW,
+    lastSeenAt: DAY,
     status: 'active',
     moreFromHost: 0,
   } satisfies Partial<FeedService>);
@@ -538,6 +545,33 @@ test('public JSON names the agent, its wallet, price and text only: no owner or 
     assert.ok(!text.includes(hidden), hidden);
   assert.match(id, /^svc_[a-z2-7]{20}$/);
   assert.ok(url.startsWith(`${ORIGIN}/api/public/x402/off_`));
+});
+
+test('offers of several agents written in one publish show the UTC day, not their write time', async (t) => {
+  const f = await fixture(t, { agents: 2 });
+  f.advance(17 * 60_000 + 1_234);
+  await f.publish(f.agents.map((agent, n) => offer(agent, `together-${n}`)));
+  const { services } = await f.list();
+  assert.equal(services.length, 2);
+  assert.notEqual(services[0].payTo, services[1].payTo);
+  for (const service of services) {
+    assert.equal(service.source.fetchedAt, DAY);
+    assert.equal(service.source.updatedAt, DAY);
+    assert.equal(service.lastSeenAt, DAY);
+    const detail = (await feedServiceDetail(f.db, service.id, f.now()))!.service;
+    assert.deepEqual(
+      [detail.source.fetchedAt, detail.source.updatedAt, detail.lastSeenAt],
+      [DAY, DAY, DAY],
+    );
+  }
+  // The stored rows keep the write time; only what is published is the day.
+  const stored = await f.sql<{ fetched_at: string }>(
+    'SELECT fetched_at::text AS fetched_at FROM feed_services',
+  );
+  assert.deepEqual(
+    stored.map((row) => Number(row.fetched_at)),
+    [f.now(), f.now()],
+  );
 });
 
 test('30 offers from 15 wallets on one host show 2 per wallet: the cap counts sellers', async (t) => {
@@ -797,6 +831,37 @@ test('table: the migration accepts every built-in kind and no other', async (t) 
     OFFER_KINDS.length,
   );
   await assert.rejects(insert(OFFER_KINDS.length, 'mint'));
+});
+
+test('an offer is never paid to a reserved address: a fee router, the treasury, USDC, the facilitator', async (t) => {
+  const f = await fixture(t, { agents: 1 });
+  const [agent] = f.agents;
+  const reasons = async (store: typeof f.store, offers: unknown[]) =>
+    (await store.planOffers(f.ownerId, offers)).refusals.map((item) => [item.index, item.reason]);
+  assert.deepEqual(await reasons(f.store, [offer(agent, 'x')]), []);
+  // A test network's own configured addresses, injected per batch.
+  const injected = createOfferStore(f.db, {
+    origin: ORIGIN,
+    now: f.now,
+    reservedPayees: () => reservedPayees([agent.wallet]),
+  });
+  assert.deepEqual(await reasons(injected, [offer(agent, 'x')]), [[0, 'payee_reserved']]);
+  assert.deepEqual(await reasons(injected, [offer(agent, 'x', { state: 'paused' })]), [
+    [0, 'payee_reserved'],
+  ]);
+  // Base mainnet's, by default (an agent wallet is derived, so it is checked against these set
+  // members rather than stored as one).
+  const d = PROTOCOL_BASE_MAINNET;
+  const defaults = reservedPayees();
+  for (const reserved of [
+    d.feeRouter,
+    d.feeRouter2,
+    d.feeRouter3,
+    d.treasury,
+    d.usdc,
+    X402_FACILITATOR_BASE_MAINNET,
+  ])
+    assert.ok(defaults.has(reserved.toLowerCase()), reserved);
 });
 
 test('checks: agent, wallet, pause, kind, text, keys; a refused plan cannot be published', async (t) => {
@@ -1613,4 +1678,43 @@ test('presets: a plan without one hashes as before; merge rules; migration 231 a
       [f.ownerId, f.agents[0].wallet],
     ),
   );
+});
+
+test('use counts: a listing sold on Arc counts its Arc calls while Arc is on', async (t) => {
+  const f = await fixture(t, { agents: 1 });
+  const [seller] = f.agents;
+  const published = await f.publish([offer(seller, 'arc-used')]);
+  const row = (
+    await f.sql<{ id: string; record_id: string }>(
+      `SELECT id, record_id FROM feed_services WHERE source = 'Central City'`,
+    )
+  )[0];
+  assert.ok(published.writes >= 1);
+  await payCall(f.sql, {
+    serviceId: row.id,
+    offerId: row.record_id.slice(3),
+    payer: seller,
+    settledAt: NOW - HOUR,
+    chainId: 5042,
+  });
+  assert.equal(await refreshHostedUses(f.db, NOW), 0, 'Arc off: Base rows only');
+  assert.equal(await refreshHostedUses(f.db, NOW, 5042), 1);
+  const listed = (await f.list()).services.find((service) => service.id === row.id)!;
+  assert.equal(listed.usage.paidCalls30d, 1);
+});
+
+test('a listing whose seller is on Arc says Arc and its USDC, never Base', async (t) => {
+  const f = await fixture(t, { agents: 2 });
+  const [onArc, onBase] = f.agents;
+  await f.publish([offer(onArc, 'arc-seller'), offer(onBase, 'base-seller')]);
+  await f.sql(`UPDATE base_wallets SET chain_id = 5042 WHERE agent_id = $1`, [onArc.id]);
+  const services = (await f.list()).services.filter(
+    (service) => service.source.name === 'Central City',
+  );
+  const networks = services.map((service) => service.network).sort();
+  assert.deepEqual(networks, ['eip155:5042', 'eip155:8453']);
+  const arc = services.find((service) => service.network === 'eip155:5042')!;
+  assert.equal(arc.asset.address, '0x3600000000000000000000000000000000000000');
+  const base = services.find((service) => service.network === 'eip155:8453')!;
+  assert.deepEqual(base.asset, FEED_USDC);
 });

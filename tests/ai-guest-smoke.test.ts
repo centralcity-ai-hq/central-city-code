@@ -18,6 +18,7 @@ import {
   runAiGuestSmoke,
   type SmokeTransport,
 } from '../scripts/smoke/ai-guest.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 process.env.CITY_INVITE_FLOW = '1';
 process.env.CITY_RATE_LIMIT_KEY ??= 'synthetic-smoke-test-root-stand-in';
@@ -60,7 +61,7 @@ async function fixture(
     password: 'Synthetic smoke test password',
   });
   assert.equal(registered.statusCode, 201, registered.body);
-  const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(registered.cookies);
   const host = { cookie };
   const agent = await post(
     '/api/agents',

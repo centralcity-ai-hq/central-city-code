@@ -807,3 +807,40 @@ test('a principal guard runs inside the task transaction and refuses the call', 
   const listed = await tasks.list({ ...p(b.id), guard: async () => {} }, { room_id: roomId });
   assert.equal(listed.tasks.length, 0, 'nothing was created');
 });
+
+test('CCA-533: the same idempotency key with another agent of the owner is a conflict, not a replay', async (t) => {
+  const app = await fixture(t);
+  const tasks = tasksOf(app, []);
+  const a = await owner(app, 'Two agent workspace');
+  const host = await agent(app, a.key, 'Task host');
+  const second = await agent(app, a.key, 'Task host helper');
+  const created = await createRoom(app, a.key, host);
+  await joinRoom(app, a.key, created.link.link, second);
+  const roomId = created.room.id as string;
+  const key = randomUUID();
+  const first = await tasks.create(p(a.id), {
+    room_id: roomId,
+    agent_id: host,
+    title: 'One task',
+    idempotency_key: key,
+  });
+  assert.equal(first.task.created_by_agent_id, host);
+  const err = await failsCode(
+    tasks.create(p(a.id), {
+      room_id: roomId,
+      agent_id: second,
+      title: 'One task',
+      idempotency_key: key,
+    }),
+    'idempotency_conflict',
+  );
+  assert.equal(err.statusCode, 409);
+  // The creator's own retry still replays.
+  const again = await tasks.create(p(a.id), {
+    room_id: roomId,
+    agent_id: host,
+    title: 'One task',
+    idempotency_key: key,
+  });
+  assert.equal(again.replayed, true);
+});

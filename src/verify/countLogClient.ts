@@ -33,31 +33,70 @@ export const short = (hex: string) => `${hex.slice(0, 12)}…${hex.slice(-6)}`;
 export const plural = (n: number, one: string, many: string) =>
   `${number.format(n)} ${n === 1 ? one : many}`;
 
+/** A 429: the server asks to wait `waitMs` (its Retry-After, bounded) before asking again. */
+export class RetryLater extends Error {
+  constructor(
+    path: string,
+    readonly waitMs: number,
+  ) {
+    super(`${path} 429`);
+  }
+}
+/** The longest Retry-After a client waits for at once (the server's windows are a minute). */
+export const RETRY_WAIT_MAX_MS = 60_000;
+
 export async function json<T>(path: string): Promise<T> {
   const response = await fetch(path, { headers: { accept: 'application/json' } });
+  if (response.status === 429) {
+    const seconds = Number(response.headers.get('retry-after'));
+    const wait = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 5_000;
+    throw new RetryLater(path, Math.min(wait, RETRY_WAIT_MAX_MS));
+  }
   if (!response.ok) throw new Error(`${path} ${response.status}`);
   return (await response.json()) as T;
 }
 
-/** The server's page cap for /api/public/count-log/leaves (LEAVES_PAGE_MAX). */
+/** The server's page size for /api/public/count-log/leaves (LEAVES_PAGE_MAX). */
 export const LEAVES_PAGE = 10_000;
+/** The route's small block (LEAVES_BLOCKS), for the few rows the live list shows at a time. */
+export const LEAVES_BLOCK = 100;
+
+/** How many times one block is asked again after a 429 before the read gives up. */
+export const LEAVES_RETRIES = 10;
+const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
- * Leaves `from` up to (not including) `to`, in order, fetched in pages the server answers in
- * full: one request past the cap would come back short and leave a gap the list never fills.
+ * Leaves `from` up to (not including) `to`, in order. The route serves aligned blocks only (each
+ * block one edge-cached URL), so this asks for the blocks that cover the range and keeps the part
+ * inside it: small blocks for a short range, full pages for a long one. A whole-log read of a large
+ * log can reach the route's per-address limit on edge misses: it then waits for Retry-After and
+ * goes on with the same block, so the read is slower, never wrong.
  */
-export async function leavesBetween<L>(
+export async function leavesBetween<L extends { idx: number }>(
   from: number,
   to: number,
   get: (path: string) => Promise<{ leaves: L[] }> = json,
+  onProgress?: (n: number) => void,
+  sleep: (ms: number) => Promise<void> = pause,
 ): Promise<L[]> {
+  const block = to - from <= 10 * LEAVES_BLOCK ? LEAVES_BLOCK : LEAVES_PAGE;
   const leaves: L[] = [];
-  for (let at = from; at < to;) {
-    const end = Math.min(to, at + LEAVES_PAGE);
-    const page = await get(`/api/public/count-log/leaves?from=${at}&to=${end}`);
-    if (!page.leaves.length) break;
-    leaves.push(...page.leaves);
-    at += page.leaves.length;
+  const read = async (path: string) => {
+    for (let retry = 0; ; retry++) {
+      try {
+        return await get(path);
+      } catch (error) {
+        if (!(error instanceof RetryLater) || retry >= LEAVES_RETRIES) throw error;
+        await sleep(error.waitMs);
+      }
+    }
+  };
+  for (let at = from - (from % block); at < to; at += block) {
+    const page = await read(`/api/public/count-log/leaves?from=${at}&to=${at + block}`);
+    for (const leaf of page.leaves) if (leaf.idx >= from && leaf.idx < to) leaves.push(leaf);
+    onProgress?.(leaves.length);
+    // A short block is the end of the signed log: nothing after it yet.
+    if (page.leaves.length < block) break;
   }
   return leaves;
 }

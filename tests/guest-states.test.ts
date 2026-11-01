@@ -6,6 +6,7 @@ import { createApp } from '../server/app.js';
 import type { CityLimits } from '../server/limits.js';
 import { ASSISTANT_SCOPES } from '../shared/assistant.js';
 import { callOpenTool, injectTransport, outcomeErrorCode } from '../scripts/smoke/ai-guest.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 process.env.CITY_INVITE_FLOW = '1';
 process.env.CITY_RATE_LIMIT_KEY ??= 'synthetic-guest-states-test-root-not-a-real-secret';
@@ -62,7 +63,7 @@ async function fixture(
       password: 'Synthetic co-owner password',
     });
     assert.equal(person.statusCode, 201, person.body);
-    const cookie = `cc_session=${person.cookies.find((c) => c.name === 'cc_session')!.value}`;
+    const cookie = sessionPair(person.cookies);
     const claimed = await post(
       '/api/workspaces/claim',
       { claim_token: res.json().claim_token },
@@ -130,7 +131,7 @@ async function fixture(
       password: 'Synthetic console password',
     });
     assert.equal(registered.statusCode, 201, registered.body);
-    const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+    const cookie = sessionPair(registered.cookies);
     return { post: (url: string, body: unknown) => post(url, body, { cookie }) };
   };
   return {

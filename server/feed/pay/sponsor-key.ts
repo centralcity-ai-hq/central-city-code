@@ -8,16 +8,21 @@
  * Its own table (migration 249), never x402_facilitator_key: the sponsor key is not the router-3
  * facilitator's and the live facilitator's provisioning is left exactly as it is.
  *
- * Behind the ops guard (Bearer CITY_OPS_SECRET); 404 otherwise. Refused (409) while
- * CITY_SFP_SPONSOR_KEY_REF is set. Answers ONLY the address (to be funded with USDC and a little
- * ETH) and the opaque keyRef (for CITY_SFP_SPONSOR_KEY_REF), no-store.
+ * The sponsor key does more than sign: it signs both router-3 legs (it is the payer) AND, unless
+ * CITY_SFP_SEND_VIA_FACILITATOR=1, it also SENDS the router-3 settlement transactions from its own
+ * EOA (its own facilitator and nonce lane, server/base/chain/runtime.ts sponsorPay). So it needs ETH
+ * for gas as well as USDC, and a leak of it exposes both the sponsor's USDC and its send lane.
+ *
+ * Behind the ops guard (capability 'keys': CITY_OPS_KEYS_SECRET, else CITY_OPS_SECRET); 404 otherwise. Refused (409) while
+ * CITY_SFP_SPONSOR_KEY_REF is set. Answers ONLY the address (to be funded with USDC and ETH for its
+ * router-3 sends) and the opaque keyRef (for CITY_SFP_SPONSOR_KEY_REF), no-store.
  */
 import type { FastifyInstance } from 'fastify';
 import type { Database } from '../../database.js';
 import { registerMigration, type Migration } from '../../migrations.js';
 import { createKeystore, parseKeks, parseKeyRef } from '../../base/chain/keystore.js';
 import { pgSpenderKeyStore } from '../../base/chain/stores.js';
-import { opsAuthorized } from '../../elric/ops.js';
+import { opsAuthorizedFor } from '../../elric/ops.js';
 
 export const SFP_SPONSOR_KEY_PATH = '/api/ops/sfp/sponsor-key';
 export const SFP_SPONSOR_KEY_REF_SETTING = 'CITY_SFP_SPONSOR_KEY_REF';
@@ -56,7 +61,7 @@ export function registerSponsorKeyRoute(
 
   app.post(SFP_SPONSOR_KEY_PATH, async (request, reply) => {
     reply.header('Cache-Control', 'no-store');
-    if (!opsAuthorized(request.headers.authorization, deps.env.CITY_OPS_SECRET))
+    if (!opsAuthorizedFor(request.headers.authorization, deps.env, 'keys'))
       return reply.code(404).send({ error: 'Not found.', code: 'not_found' });
     if (deps.env[SFP_SPONSOR_KEY_REF_SETTING]?.trim())
       return reply.code(409).send({

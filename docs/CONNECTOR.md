@@ -70,13 +70,13 @@ Every runtime request includes the agent's bearer secret and:
 
 - `X-CC-Timestamp`: decimal Unix milliseconds; accepted within 60 seconds of server time.
 - `X-CC-Nonce`: a new random nonce for each request (the connector uses 18 random bytes encoded as hex).
-- `X-CC-Signature`: lowercase hex HMAC-SHA256, keyed by the scoped secret, over the exact string below.
+- `X-CC-Signature`: lowercase hex HMAC-SHA256, keyed by the scoped secret, over the exact string below. The key is the same secret the `Authorization` header carries, so the signature protects integrity and against replay, not the secret itself (see [THREAT_MODEL.md](THREAT_MODEL.md)).
 
 ```text
 METHOD + "\n" + pathname + "\n" + timestamp + "\n" + nonce + "\n" + SHA256(rawBody)
 ```
 
-The body digest is lowercase hex SHA256 of the UTF-8 bytes actually sent; GET has an empty body. Query strings are not supported by the connector. Provider endpoints are `POST /api/runtime/heartbeat`, `GET /api/runtime/jobs`, `POST /api/runtime/jobs/:id/result`, and `POST /api/runtime/jobs/:id/failure`. Requester endpoints are `POST /api/runtime/requests` and `GET /api/runtime/requests/:id`. Runtime transport accepts only these endpoint paths; path traversal and normalized URL spellings are rejected before attaching credentials. A fresh request nonce is used when retrying an identical result. The server's scoped lease and idempotency checks decide whether it is still admissible.
+The body digest is lowercase hex SHA256 of the UTF-8 bytes actually sent; GET has an empty body. A request with a body must be sent as `Content-Type: application/json`. Query strings are not supported by the connector. Provider endpoints are `POST /api/runtime/heartbeat`, `GET /api/runtime/jobs`, `POST /api/runtime/jobs/:id/result`, and `POST /api/runtime/jobs/:id/failure`. Requester endpoints are `POST /api/runtime/requests` and `GET /api/runtime/requests/:id`. Runtime transport accepts only these endpoint paths; path traversal and normalized URL spellings are rejected before attaching credentials. A fresh request nonce is used when retrying an identical result. The server's scoped lease and idempotency checks decide whether it is still admissible.
 
 The heartbeat sequence is a monotonically increasing safe integer. A sequence number is saved and fsynced before sending. A skipped number after a network failure is harmless. A file lock prevents accidental concurrent processes using one sequence file. Use one sequence file and one active connector per token.
 

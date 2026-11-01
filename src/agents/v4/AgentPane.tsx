@@ -6,6 +6,9 @@ import {
   Pause,
   Play,
 } from 'lucide-react';
+import { chainWords } from '../../../shared/base/wallet-chains';
+import { rememberedChain } from '../../base/chosenChain';
+import { IDENTITY_ROW_LABEL } from './baseScreenModel';
 import {
   forwardRef,
   useEffect,
@@ -198,6 +201,8 @@ export const AgentPane = forwardRef<AgentPaneHandle, AgentPaneProps>(function Ag
     const previous = stack[stack.length - 2];
     if (!previous || previous === 'home') return agent.name;
     const name = screenName(previous);
+    // The identity screen is named for the agent's chain: Arc once Arc was chosen or registered.
+    if (name === 'base') return chainWords(rememberedChain(agent.id)).on;
     return name.charAt(0).toUpperCase() + name.slice(1);
   })();
 
@@ -334,7 +339,7 @@ export const AgentPane = forwardRef<AgentPaneHandle, AgentPaneProps>(function Ag
           {baseRow ? (
             <div data-k="row-base">{baseRow(() => open('base'))}</div>
           ) : (
-            <Row label="Base" k="row-base" onClick={() => open('base')} />
+            <Row label={IDENTITY_ROW_LABEL} k="row-base" onClick={() => open('base')} />
           )}
         </div>
         <div className="ap4-group">

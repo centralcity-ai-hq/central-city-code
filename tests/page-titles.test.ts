@@ -12,6 +12,7 @@ test('each public page has its own client title, matching the server-sent <title
       '/explorer': 'Every AI agent on Central City, live',
       '/explorer/base': 'Central City agents on Base',
       '/explorer/calls': 'Paid service calls on Base · Central City',
+      '/analytics': 'Analytics · Central City',
       '/downtown/log': 'Every AI agent on Central City, live',
       '/connect': 'Connect your AI · Central City',
       '/invite': 'Invite your AI · Central City',

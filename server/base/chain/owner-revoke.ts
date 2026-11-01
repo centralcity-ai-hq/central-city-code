@@ -25,6 +25,12 @@
  * The bundler URL carries a key: no error from here repeats an RPC or bundler message.
  */
 import {
+  chainFamily,
+  chainNetwork,
+  isRealMoneyChain,
+  type ChainId,
+} from '../../../shared/chains.js';
+import {
   createPublicClient,
   encodeFunctionData,
   getAddress,
@@ -35,24 +41,21 @@ import {
 } from 'viem';
 import { getUserOperationHash, type UserOperation } from 'viem/account-abstraction';
 import type { Database } from '../../database.js';
-import {
-  BASE_MAINNET,
-  baseNetwork,
-  type Address,
-  type BaseChainId,
-  type BaseNetwork,
-} from '../../../shared/base/chains.js';
+import type { Address, BaseNetwork } from '../../../shared/base/chains.js';
 import {
   SPONSOR_PAYMASTERS,
   sponsoredWithoutCharge,
   type SponsorAllowlist,
 } from '../../../shared/base/paymasters.js';
+import { arcRuntimeEnv } from './arc-env.js';
+import { chainParams } from './chain-params.js';
 import { createAccountCall, deriveAddressLocal, type DerivationRecipe } from './derive.js';
+import { ownPaymasterAddress } from './own-paymaster-keys.js';
 import { walletSignature } from './permissions.js';
 import { BundlerError, rpcBundler } from './rpc-bundler.js';
 import { CDP_RETRY } from './rpc-budget.js';
-import { baseReadTransport, baseReadUrls } from './read-transport.js';
-import { ChainRuntimeError, WALLET_FEE_CAP_SETTING, walletFeeCap } from './runtime.js';
+import { baseReadTransport, baseReadUrls, secureEndpoint } from './read-transport.js';
+import { ChainRuntimeError, maxFeePerGasCapFromEnv, walletFeeCap } from './runtime.js';
 import { pgChainOperationStore } from './stores.js';
 import {
   encodeAccountCalls,
@@ -119,6 +122,8 @@ export interface OwnerRevokePort {
     wallet: Address;
     recipe: DerivationRecipe;
     calls: Call[];
+    /** The wallet's owner account, whose sponsorship budget the revoke counts against. */
+    accountId?: string;
   }): Promise<PreparedOwnerOperation>;
   /** Stores and sends a prepared operation with the owner's signature (idempotent per key). */
   submit(input: {
@@ -135,6 +140,13 @@ export interface OwnerRevokePort {
   }): Promise<StoredOperation>;
   /** The stored operation with its inclusion and finality brought up to date; never signs. */
   refresh(idempotencyKey: string): Promise<StoredOperation | null>;
+  /**
+   * A prepared revoke that will never be signed (replaced, or made moot): what its sponsorship
+   * still holds is given back now (Bundler.release). Best effort; idempotent.
+   */
+  release?(userOpHash: Hex): Promise<void>;
+  /** As OwnerOperationsPort.sendMarginMs: the bundler's send margin before validUntil (ms). */
+  sendMarginMs?(paymasterAndData: string | undefined): number;
 }
 
 export interface OwnerRevokeDeps {
@@ -194,7 +206,7 @@ export function createOwnerRevokePort(deps: OwnerRevokeDeps): OwnerRevokePort {
     });
   /** Real money is never spent without a fee budget: on mainnet a cost cap is mandatory. */
   function requireBudget() {
-    if (chainId === BASE_MAINNET && deps.maxCostWeiCap === undefined)
+    if (isRealMoneyChain(chainId) && deps.maxCostWeiCap === undefined)
       throw new OwnerRevokeError(
         'FEE_BUDGET_REQUIRED',
         'Owner operations on Base need a fee budget.',
@@ -247,7 +259,15 @@ export function createOwnerRevokePort(deps: OwnerRevokeDeps): OwnerRevokePort {
             paymasterAndData: '0x',
             signature: '0x',
           },
-          { intent: { flow: 'exit', calls: input.calls, sender, initCode } },
+          {
+            intent: {
+              flow: 'exit',
+              calls: input.calls,
+              sender,
+              initCode,
+              accountId: input.accountId ?? null,
+            },
+          },
         );
         if (
           getAddress(operation.sender) !== sender ||
@@ -325,6 +345,12 @@ export function createOwnerRevokePort(deps: OwnerRevokeDeps): OwnerRevokePort {
       }
     },
 
+    async release(userOpHash) {
+      await deps.bundler.release?.(userOpHash);
+    },
+
+    sendMarginMs: (data) => (deps.bundler.sendMarginS?.((data ?? '0x') as Hex) ?? 0) * 1000,
+
     async refresh(idempotencyKey) {
       const readOnly: SubmitDeps = {
         network: deps.network,
@@ -348,56 +374,74 @@ export function createOwnerRevokePort(deps: OwnerRevokeDeps): OwnerRevokePort {
   };
 }
 
-const POSITIVE_INT = /^[1-9][0-9]{0,77}$/;
-
 /**
  * The port from the environment, with the same settings as the chain runtime (runtime.ts): the
- * network's bundler/RPC URL and CITY_BASE_MAX_FEE_PER_GAS_WEI; CITY_BASE_WALLET_FEE_CAP_WEI caps one
+ * network's bundler/RPC URL and its chain's max-fee setting; its chain's wallet fee cap caps one
  * owner operation, by the same rule as W2's owner operations (runtime.ts walletFeeCap: mandatory on
  * mainnet, never malformed). A missing setting throws ChainRuntimeError (no value in any message).
  * Its reads fall back like the runtime's (read-transport.ts); its bundler and paymaster calls, and
- * the nonce and code reads that build an operation, stay on the CDP endpoint.
+ * the nonce and code reads that build an operation, stay on the configured endpoint.
+ *
+ * On Arc it sees Arc's settings only (arcRuntimeEnv). Arc's RPC has no bundler, so `bundler` is the
+ * Arc runtime's own (ChainRuntime.arcOwnerBundler); without it nothing is built. No Arc paymaster is
+ * pinned in SPONSOR_PAYMASTERS yet: until one is, the only sponsor taken is the configured one, under
+ * the same no-charge rule.
  */
 export function ownerRevokePortFromEnv(
   db: Database,
   env: Record<string, string | undefined>,
-  chainId: BaseChainId,
-  options: { hosted?: boolean } = {},
+  chainId: ChainId,
+  options: { hosted?: boolean; bundler?: Bundler } = {},
 ): OwnerRevokePort {
-  const network = baseNetwork(chainId, env);
+  const onArc = chainFamily(chainId) === 'arc';
+  const scoped = onArc ? arcRuntimeEnv(env) : env;
+  const network = chainNetwork(chainId, scoped);
   if (!network) throw new ChainRuntimeError('network');
-  const url = env[network.bundlerEnv]?.trim();
-  if (!url) throw new ChainRuntimeError(network.bundlerEnv);
-  const feeCap = env.CITY_BASE_MAX_FEE_PER_GAS_WEI?.trim();
-  if (!feeCap || !POSITIVE_INT.test(feeCap))
-    throw new ChainRuntimeError('CITY_BASE_MAX_FEE_PER_GAS_WEI');
-  const opCap = walletFeeCap(env, network.chainId);
-  if (!opCap) throw new ChainRuntimeError(WALLET_FEE_CAP_SETTING);
+  const url = scoped[network.bundlerEnv]?.trim();
+  if (!url || !secureEndpoint(url, network.chainId))
+    throw new ChainRuntimeError(network.bundlerEnv);
+  const maxFeePerGasCap = maxFeePerGasCapFromEnv(scoped, network.chainId);
+  const opCap = walletFeeCap(scoped, network.chainId);
+  if (!opCap) throw new ChainRuntimeError(chainParams(network.chainId).settings.walletFeeCap);
   const client = createPublicClient({
     chain: {
       id: network.chainId,
       name: network.name,
-      nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+      nativeCurrency: chainParams(network.chainId).nativeCurrency,
       rpcUrls: { default: { http: [url] } },
     },
-    transport: baseReadTransport(baseReadUrls(url, env, network.chainId, options), {
+    transport: baseReadTransport(baseReadUrls(url, scoped, network.chainId, options), {
       chainId: network.chainId,
       retry: CDP_RETRY,
     }),
   });
+  if (onArc && !options.bundler) throw new ChainRuntimeError('CITY_ARC_PAYMASTER');
+  const ownPaymaster = onArc ? ownPaymasterAddress(scoped) : null;
   return createOwnerRevokePort({
     network,
     client,
     store: pgChainOperationStore(db),
-    bundler: rpcBundler({
-      url,
-      entryPoint: network.contracts.entryPointV06,
-      chainId: network.chainId,
-      client,
-      maxFeePerGasCap: BigInt(feeCap),
-      // The gas-estimation stub: a SignatureWrapper around a well-formed, never-real signature.
-      stubSignature: walletSignature(`0x${'ff'.repeat(64)}1c` as Hex, { ownerIndex: OWNER_INDEX }),
-    }),
+    bundler:
+      options.bundler ??
+      rpcBundler({
+        url,
+        entryPoint: network.contracts.entryPointV06,
+        chainId: network.chainId,
+        client,
+        maxFeePerGasCap,
+        // The gas-estimation stub: a SignatureWrapper around a well-formed, never-real signature.
+        stubSignature: walletSignature(`0x${'ff'.repeat(64)}1c` as Hex, {
+          ownerIndex: OWNER_INDEX,
+        }),
+      }),
     maxCostWeiCap: opCap.cap,
+    ...(onArc
+      ? {
+          sponsors: {
+            [network.chainId]:
+              SPONSOR_PAYMASTERS[network.chainId] ?? (ownPaymaster ? [ownPaymaster] : []),
+          },
+        }
+      : {}),
   });
 }

@@ -11,7 +11,7 @@ import {
   offsetOf,
   skillNames,
 } from '../server/directory/store.js';
-import { ON_BASE_LIVE } from '../server/base/explorer/routes.js';
+import { ON_BASE_LIVE, SEARCH_TIMEOUT_MS } from '../server/base/explorer/routes.js';
 import {
   DIRECTORY_LIMITS,
   DIRECTORY_PATHS,
@@ -70,8 +70,16 @@ function routes(
   return app;
 }
 
+/**
+ * One search, as a browser reads it: another spelling of the query (an encoded space, the default
+ * sort, an empty value) is sent on once to its canonical URL, which then answers.
+ */
 async function search(app: ReturnType<typeof Fastify>, query = '') {
-  const response = await app.inject({ url: `${DIRECTORY_PATHS.search}${query}` });
+  let response = await app.inject({ url: `${DIRECTORY_PATHS.search}${query}` });
+  if (response.statusCode === 307) {
+    response = await app.inject({ url: String(response.headers.location) });
+    assert.notEqual(response.statusCode, 307, 'sent on once only');
+  }
   assert.equal(response.statusCode, 200, response.body);
   return response.json() as DirectoryPage;
 }
@@ -233,11 +241,15 @@ test('ratings: min_rating filters, best_rated sorts by average, raters, newest; 
   );
   assert.deepEqual(ids(await search(app, '?min_rating=4')), ['101', '102', '105', '106']);
   assert.deepEqual(ids(await search(app, '?min_rating=5&sort=newest')), ['102', '101']);
-  // Unreadable values fall back to their defaults.
-  assert.deepEqual(ids(await search(app, '?min_rating=9&sort=loudest')), ids(best));
+  // Values it would not read are refused, never read as the defaults (they would skip the edge
+  // cache).
+  for (const bad of ['?min_rating=9', '?min_rating=4.5', '?sort=loudest']) {
+    const response = await app.inject({ url: `${DIRECTORY_PATHS.search}${bad}` });
+    assert.equal(response.statusCode, 400, bad);
+  }
 });
 
-test('pages: pageSize per page, an opaque cursor, anything else is the first page', async (t) => {
+test('pages: pageSize per page, an opaque cursor, anything else is refused', async (t) => {
   const db = await directoryDb(t);
   const total = DIRECTORY_LIMITS.pageSize + 6;
   for (let n = 1; n <= total; n++) {
@@ -261,12 +273,15 @@ test('pages: pageSize per page, an opaque cursor, anything else is the first pag
     assert.deepEqual(ids(page), [], `cursor ${past}`);
     assert.equal(page.next, null);
   }
-  for (const bad of ['zzz', 'MA', '!!', ''])
-    assert.deepEqual(
-      ids(await search(app, `?sort=newest&before=${encodeURIComponent(bad)}`)),
-      ids(first),
-      `cursor ${bad}`,
-    );
+  // An empty one is no cursor; anything this server did not write is refused.
+  assert.deepEqual(ids(await search(app, '?sort=newest&before=')), ids(first));
+  for (const bad of ['zzz', 'MA', '!!', 'MDI0']) {
+    const response = await app.inject({
+      url: `${DIRECTORY_PATHS.search}?sort=newest&before=${encodeURIComponent(bad)}`,
+    });
+    assert.equal(response.statusCode, 400, `cursor ${bad}`);
+    assert.equal(response.headers['cache-control'], 'no-store');
+  }
   assert.equal(offsetOf(cursorOf(24)), 24);
   assert.equal(offsetOf(null), 0);
   assert.equal(offsetOf('MDI0'), 0, 'not canonical (leading zero)');
@@ -399,4 +414,85 @@ test('the app: routes are on, the owner reads and writes, another account gets 4
   const page = await app.inject({ url: `${DIRECTORY_PATHS.search}?q=scout` });
   assert.equal(page.statusCode, 200, page.body);
   assert.deepEqual(page.json(), { agents: [], next: null });
+});
+
+test('the search runs read only with a statement timeout, busy is 503, a text search is limited per /56', async (t) => {
+  const base = await directoryDb(t);
+  await add(base, { n: 1, kind: 'final', id: 10, name: 'Harbor' });
+  await setListed(base, 1);
+  const statements: string[] = [];
+  let failing: false | 'timeout' | 'broken' = false;
+  const db: Database = {
+    ...base,
+    transaction: (action) =>
+      base.transaction((tx) =>
+        action({
+          ...tx,
+          query: ((sql: string, params?: unknown[]) => {
+            statements.push(sql);
+            if (failing === 'timeout' && /agent_directory/.test(sql))
+              return Promise.reject(
+                Object.assign(new Error('canceling statement due to statement timeout'), {
+                  code: '57014',
+                }),
+              );
+            if (failing === 'broken' && /agent_directory/.test(sql))
+              return tx.query('SELECT 1 FROM no_such_table_for_the_search', []);
+            return tx.query(sql, params as never);
+          }) as Database['query'],
+        }),
+      ),
+  };
+  const limits: string[] = [];
+  const app = Fastify();
+  t.after(() => app.close());
+  registerDirectoryRoutes(app, {
+    db,
+    owns: async () => 'ok',
+    limit: async (key) => {
+      limits.push(key);
+    },
+  });
+  assert.deepEqual(ids(await search(app, '?q=harb')), ['10']);
+  assert.ok(statements.includes('SET TRANSACTION READ ONLY'));
+  assert.ok(statements.includes(`SET LOCAL statement_timeout = ${SEARCH_TIMEOUT_MS}`));
+  failing = 'timeout';
+  const busy = await app.inject({ url: `${DIRECTORY_PATHS.search}?q=harb` });
+  assert.equal(busy.statusCode, 503);
+  assert.equal(busy.headers['cache-control'], 'no-store');
+  assert.equal((busy.json() as { code: string }).code, 'busy');
+  // Any other failure is an error of its own (500, logged), never busy.
+  failing = 'broken';
+  assert.equal((await app.inject({ url: `${DIRECTORY_PATHS.search}?q=harb` })).statusCode, 500);
+  failing = false;
+  limits.length = 0;
+  await app.inject({ url: `${DIRECTORY_PATHS.search}?q=harb`, remoteAddress: '2001:db8:1:2a::5' });
+  await app.inject({ url: DIRECTORY_PATHS.search, remoteAddress: '2001:db8:1:2a::5' });
+  await app.inject({ url: `${DIRECTORY_PATHS.search}?q=harb`, remoteAddress: '192.0.2.7' });
+  assert.deepEqual(
+    limits.filter((key) => key.startsWith('ip:directory-search:')),
+    ['ip:directory-search:2001:db8:1:0::/56'],
+  );
+});
+
+test('an Arc agent is told the directory lists Base, not that it needs a Base ID', async (t) => {
+  const db = await directoryDb(t);
+  const app = routes(t, db);
+  const real = db.query.bind(db);
+  (db as { query: unknown }).query = (sql: string, params?: unknown[]) =>
+    sql.includes('SELECT chain_id FROM base_identities')
+      ? Promise.resolve({ rows: [{ chain_id: 5042 }] })
+      : real(sql, params as never);
+  const refused = await app.inject({
+    method: 'PATCH',
+    url: settingsPath(agentId(1)),
+    headers: { 'content-type': 'application/json' },
+    payload: JSON.stringify({ listed: true }),
+  });
+  assert.equal(refused.statusCode, 409);
+  assert.equal(refused.json().code, 'not_base_agent');
+  assert.equal(
+    refused.json().error,
+    'The directory lists agents on Base for now, and this agent is on Arc.',
+  );
 });

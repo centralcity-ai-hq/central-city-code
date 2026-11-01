@@ -18,6 +18,7 @@ import {
 } from 'viem';
 import { getUserOperationHash, type UserOperation } from 'viem/account-abstraction';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
+import { signedConsent } from './helpers/agent-pay-sign.js';
 import { createApp } from '../server/app.js';
 import {
   AGENT_PAY_STATUS_PER_MINUTE,
@@ -41,7 +42,11 @@ import { createChainRuntime } from '../server/base/chain/runtime.js';
 import { pgChainOperationStore } from '../server/base/chain/stores.js';
 import { abandonBeforeBroadcast, type Bundler } from '../server/base/chain/submit.js';
 import type { PayChainReader } from '../server/base/pay/chain.js';
-import { createAgentPayService, type AgentPayDeps } from '../server/base/payments/agent-pay.js';
+import {
+  AGENT_PAY_STATUS_REFRESH_MS,
+  createAgentPayService,
+  type AgentPayDeps,
+} from '../server/base/payments/agent-pay.js';
 import {
   AGENT_PAY_TOOLS,
   AGENT_PAY_TOOL_SCOPES,
@@ -559,12 +564,18 @@ async function setup(t: { after: (fn: () => unknown) => void }, options: Options
   };
 
   /** The P2b consent route, as the owner's console calls it. */
-  const consent = (agentId: string, permissionHash: string, cookie = payer.cookie) =>
+  const consent = async (
+    agentId: string,
+    permissionHash: string,
+    cookie = payer.cookie,
+    owner = OWNER_A,
+  ) =>
     app.inject({
       method: 'PUT',
       url: `/api/base/agents/${agentId}/wallet/agent-pay`,
       headers: { ...json, cookie },
-      payload: JSON.stringify({ permissionHash }),
+      // Signed by the wallet's owner key, as the owner's screen does (CCA-113).
+      payload: await signedConsent(app, cookie, agentId, owner, { permissionHash }),
     });
   const withdraw = (agentId: string, cookie = payer.cookie) =>
     app.inject({
@@ -1427,6 +1438,33 @@ test('6: status reads have their own budget per grant or key, and one per worksp
     }
   assert.equal(answered, spare);
   assert.ok(limited > 0);
+});
+
+test('6: a payment in flight is read from Base at most once per refresh window per instance (R7-5)', async (t) => {
+  let skew = 0;
+  const f = await setup(t, { now: () => Date.now() + skew });
+  await f.ready();
+  const res = await f.pay();
+  assert.equal(res.statusCode, 200, res.body);
+  const { payment_id: id } = res.json();
+  const chainsBefore = f.base.state.chains;
+  const first = await f.status(id);
+  assert.equal(first.statusCode, 200, first.body);
+  assert.equal(f.base.state.chains, chainsBefore + 1, 'the first status read reads Base');
+  // Polled again and again inside the window: answered from the stored record, Base untouched.
+  for (let i = 0; i < 5; i += 1) {
+    const again = await f.status(id);
+    assert.equal(again.statusCode, 200, again.body);
+    assert.equal(again.json().state, first.json().state);
+  }
+  assert.equal(f.base.state.chains, chainsBefore + 1, 'repeat reads inside the window skip Base');
+  // Past the window the next read reads Base again and sees the landed payment.
+  f.base.land(f.base.state.sends[0]!);
+  skew += AGENT_PAY_STATUS_REFRESH_MS;
+  const later = await f.status(id);
+  assert.equal(later.statusCode, 200, later.body);
+  assert.equal(f.base.state.chains, chainsBefore + 2);
+  assert.equal(later.json().state, 'final');
 });
 
 test('7: an unknown broadcast outcome reconciles; the same key never makes a second transfer', async (t) => {

@@ -6,6 +6,7 @@ import { signedInPerson } from './signedInPerson';
 import { readVault, unlockVault, VaultCryptoError } from './vault';
 import { heldOwnerKeys } from './vault/keyPin';
 import { expectedWallet } from './wallet/derive';
+import { ARC_MAINNET, ARC_TESTNET } from '../../shared/chains';
 
 /*
  * Registering an agent on Base with the person's own wallet key (decision A, one wallet): the Base
@@ -39,7 +40,7 @@ const message = (error: unknown) =>
     ? error.message
     : 'Something went wrong. Try again.';
 
-async function readKey(agentId: string): Promise<RegisterKey> {
+async function readKey(agentId: string, chainId?: number): Promise<RegisterKey> {
   let vault;
   try {
     vault = await readVault();
@@ -55,19 +56,29 @@ async function readKey(agentId: string): Promise<RegisterKey> {
   const held = heldOwnerKeys();
   if (held.some((key) => key !== owner)) return { k: 'refused', message: OTHER_KEY_HELD };
   if (!held.length) return { k: 'unlock' };
-  return { k: 'ready', owner, expectedWallet: expectedWallet(owner, agentId) };
+  // Base derives as before; another chain (Arc) derives with its own factory and manager.
+  let wallet: `0x${string}`;
+  try {
+    wallet =
+      chainId === ARC_MAINNET || chainId === ARC_TESTNET
+        ? expectedWallet(owner, agentId, chainId)
+        : expectedWallet(owner, agentId);
+  } catch (error) {
+    return { k: 'error', message: message(error) };
+  }
+  return { k: 'ready', owner, expectedWallet: wallet };
 }
 
 /** Where the person's wallet key stands for registering `agentId`, and its unlock. */
-export function useRegisterWithKey(agentId: string, idle = false) {
+export function useRegisterWithKey(agentId: string, idle = false, chainId?: number) {
   const [state, setState] = useState<RegisterKey>({ k: 'loading' });
   const run = useRef(0);
   const reload = useCallback(async () => {
     const mine = ++run.current;
-    const next = await readKey(agentId);
+    const next = await readKey(agentId, chainId);
     if (run.current === mine) setState(next);
     return next;
-  }, [agentId]);
+  }, [agentId, chainId]);
   useEffect(() => {
     if (idle) return;
     void reload();

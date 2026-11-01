@@ -100,6 +100,14 @@ const COMMON_DROP: RegExp[] = [
 
 export const PUBLIC_DOCS: PublicDoc[] = [
   {
+    slug: 'dashboard-api',
+    source: 'DASHBOARD_API.md',
+    title: 'Analytics API',
+    summary:
+      'The free public API behind /analytics: value settled, protocol fees by router, active and new Base agents, contracts and wallets.',
+    keep: ['Endpoints', 'Reading the numbers', 'Fields', 'Wallets', 'Limits'],
+  },
+  {
     slug: 'elric',
     source: 'ELRIC_ABOUT.md',
     title: 'Elric, your AI assistant',
@@ -158,6 +166,7 @@ export const PUBLIC_DOCS: PublicDoc[] = [
     summary:
       "Step by step in the app: what a Base agent is, making an agent a Base agent (its Base ID and wallet on Base, finality), the passport number (CC-…) versus the Base ID, the passport page, the Agent Explorer and Verify, inviting an agent to a room by its passport number, answering an invitation in the agent's Messages, the Room invitations setting, Pay and Rate, and network fees.",
     keep: [
+      'Base or Arc',
       'What a Base agent is',
       'Make an agent a Base agent',
       'Base ID and passport number',
@@ -182,6 +191,40 @@ export const PUBLIC_DOCS: PublicDoc[] = [
       'Reporting periods',
       'Refunds and corrections',
       'Verification and privacy',
+    ],
+  },
+  {
+    slug: 'x402-facilitator',
+    source: 'X402_FACILITATOR.md',
+    title: 'x402 facilitator',
+    summary:
+      "Central City's public x402 facilitator for Base USDC: endpoints, what it accepts, how a payment is checked, refusal reasons and limits.",
+    keep: [
+      'Endpoints',
+      'What it accepts',
+      'How a payment is checked',
+      'Answers when a payment is refused',
+      'Limits',
+    ],
+  },
+  {
+    // Also the page /audit (src/trust/Audit.tsx renders this text: scripts/public-docs/guides.ts).
+    slug: 'audit',
+    source: 'AUDIT.md',
+    title: 'Central City Security Audit',
+    summary:
+      'Internal security review by the Central City Audit Division: scope, method and the fixed findings for our smart contracts and the payment services around them.',
+    keep: [
+      'About this review',
+      'Scope',
+      'Method',
+      'Summary of findings',
+      'Findings',
+      'What we verified',
+      'Earlier internal reviews',
+      'Known limits and out of scope',
+      'Recommendations',
+      'Report a problem',
     ],
   },
   {
@@ -259,7 +302,7 @@ export const PUBLIC_DOCS: PublicDoc[] = [
         ].join('\n'),
       ],
       [
-        / Configure `CITY_SIGNING_KEY` as a private Ed25519[\s\S]*?an empty JWKS\./,
+        / Configure `CITY_SIGNING_KEY` as a private Ed25519[\s\S]*?served unsigned by a missing setting\./,
         ' During a key rotation the retired key stays in the JWKS for verification only and never signs.',
       ],
       [
@@ -279,6 +322,9 @@ export const PUBLIC_DOCS: PublicDoc[] = [
       'MCP tools',
       'Search',
       'Pins and the handoff brief',
+      'Decisions and approvals',
+      'Owner digest',
+      'Room files',
       'Room templates',
       'Authorization and ordering',
       'Limits (defaults)',

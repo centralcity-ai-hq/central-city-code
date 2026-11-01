@@ -105,7 +105,7 @@ async function setup(page: Page, populated = false): Promise<ReadState> {
   };
   // Explicit state also applies to the preview navigation's periodic request-count reads.
   for (const endpoint of ['requests', 'invites'] as const) {
-    await page.route(`**${base}/${endpoint}`, async (route) => {
+    await page.route(`**${base}/${endpoint}*`, async (route) => {
       if (route.request().method() !== 'GET') return route.fallback();
       if (state.failure === endpoint) {
         await route.fulfill({
@@ -196,7 +196,7 @@ async function expectLists(page: Page) {
     const held = new Promise<void>((resolve) => {
       release = resolve;
     });
-    await page.route(`**${base}/requests`, async (route) => {
+    await page.route(`**${base}/requests*`, async (route) => {
       if (route.request().method() !== 'POST') return route.fallback();
       bodies.push(route.request().postDataJSON() as RequestBody);
       if (!recover) {
@@ -300,7 +300,7 @@ for (const edited of ['sender', 'target', 'note'] as const) {
   }) => {
     await setup(page);
     const bodies: RequestBody[] = [];
-    await page.route(`**${base}/requests`, async (route) => {
+    await page.route(`**${base}/requests*`, async (route) => {
       if (route.request().method() !== 'POST') return route.fallback();
       bodies.push(route.request().postDataJSON() as RequestBody);
       await route.fulfill({ status: 503, json: { error: requestError } });
@@ -404,7 +404,7 @@ test('confirmed submission followed by a failed reload clears the draft and retr
 }) => {
   const state = await setup(page);
   const bodies: RequestBody[] = [];
-  await page.route(`**${base}/requests`, async (route) => {
+  await page.route(`**${base}/requests*`, async (route) => {
     if (route.request().method() !== 'POST') return route.fallback();
     bodies.push(route.request().postDataJSON() as RequestBody);
     state.lists.outgoing = [outgoing()];

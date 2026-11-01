@@ -27,13 +27,13 @@ const EMPTY_SENTENCE = '<p class="visually-hidden">Numbers of Central City.</p>'
 
 /** The Base agents cell as built without a number: a dash. */
 export const EMPTY_BASE =
-  '<div class="cc-kc" data-stat="base"><dt>Central City base agents</dt><dd>–</dd></div>';
+  '<div class="cc-kc" data-stat="base"><dt>Central City ERC-8004 Agents</dt><dd>–</dd></div>';
 
 /** The Base agents cell as built with `total`. */
 export function builtBase(total: number, at: string): string {
   return (
     `<div class="cc-kc" data-stat="base" data-build-base="${total}" data-build-base-at="${at}">` +
-    `<dt>Central City base agents</dt><dd>${total.toLocaleString('en-US')}</dd></div>`
+    `<dt>Central City ERC-8004 Agents</dt><dd>${total.toLocaleString('en-US')}</dd></div>`
   );
 }
 

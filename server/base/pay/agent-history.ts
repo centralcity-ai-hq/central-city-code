@@ -29,11 +29,11 @@ import {
   type PayState,
 } from '../../../shared/base/pay.js';
 import { WALLET_CHAIN_ID } from '../../../shared/base/wallet-network.js';
-import { TX_EXPLORER } from '../wallet/withdrawals.js';
+import type { ChainNetwork } from '../../../shared/chains.js';
+import { txExplorerOf } from '../wallet/withdrawals.js';
 import { createPayStore } from './store.js';
 
-const NETWORK = BASE_NETWORKS[WALLET_CHAIN_ID];
-const USDC = NETWORK.tokens.USDC;
+const WALLET_NET: ChainNetwork = BASE_NETWORKS[WALLET_CHAIN_ID];
 
 interface Row {
   payment_id: string;
@@ -53,13 +53,16 @@ function stateOf(row: Pick<Row, 'state' | 'op_status'>): PayState {
   return row.op_status === 'included' ? 'included' : 'pending';
 }
 
-export function createAgentPayHistory(deps: { db: Database }) {
+export function createAgentPayHistory(deps: { db: Database; network?: ChainNetwork }) {
   const { db } = deps;
-  const registry = NETWORK.contracts.identityRegistry;
+  // One chain's payments: the wallet network's without a network, an Arc wallet's own on Arc.
+  const network = deps.network ?? WALLET_NET;
+  const chainId = network.chainId;
+  const USDC = network.tokens.USDC;
+  const txExplorer = txExplorerOf(chainId);
+  const registry = network.contracts.identityRegistry;
   // Without a canonical registry nothing names a recipient: the wallet alone is shown.
-  const store = registry
-    ? createPayStore({ chainId: WALLET_CHAIN_ID, registry, network: NETWORK })
-    : null;
+  const store = registry ? createPayStore({ chainId, registry, network }) : null;
 
   async function recipientOf(wallet: string): Promise<PayByAgent['to']> {
     const found = store ? await store.recipients(db, { wallet }) : [];
@@ -80,7 +83,7 @@ export function createAgentPayHistory(deps: { db: Database }) {
       const { rows: wallets } = await db.query<{ wallet_id: string; operator_id: string }>(
         `SELECT wallet_id, operator_id FROM base_wallets
          WHERE agent_id = $1 AND chain_id = $2 AND owner_account_id = $3`,
-        [agentId, WALLET_CHAIN_ID, accountId],
+        [agentId, chainId, accountId],
       );
       const wallet = wallets[0];
       if (!wallet) return null;
@@ -96,14 +99,7 @@ export function createAgentPayHistory(deps: { db: Database }) {
            AND lower(p.token_address) = lower($5)
          ORDER BY p.created_at DESC, p.payment_id DESC
          LIMIT $6`,
-        [
-          wallet.operator_id,
-          WALLET_CHAIN_ID,
-          wallet.wallet_id,
-          agentId,
-          USDC.address,
-          PAY_BY_AGENT_MAX,
-        ],
+        [wallet.operator_id, chainId, wallet.wallet_id, agentId, USDC.address, PAY_BY_AGENT_MAX],
       );
       const payments: PayByAgent[] = [];
       for (const row of rows) {
@@ -120,7 +116,7 @@ export function createAgentPayHistory(deps: { db: Database }) {
             display: formatUnits(BigInt(row.amount), USDC.decimals),
           },
           txHash,
-          explorerUrl: txHash ? TX_EXPLORER + txHash : null,
+          explorerUrl: txHash ? txExplorer + txHash : null,
           createdAt: Number(row.created_at),
           updatedAt: Number(row.updated_at),
         });
@@ -142,7 +138,8 @@ export function registerAgentPayHistoryRoutes(
     person(
       request: FastifyRequest,
     ): Promise<{ ok: true; accountId: string } | { ok: false; code: number }>;
-    history: AgentPayHistory;
+    /** The agent's chain's history (wallet/routes.ts). */
+    history: Pick<AgentPayHistory, 'list'>;
   },
 ) {
   app.get(PAY_PATHS.agentPayments, async (request, reply) => {

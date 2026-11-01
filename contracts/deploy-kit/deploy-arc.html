@@ -1,0 +1,1044 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Arc mainnet deploy</title>
+    <style>
+      :root {
+        --bg: #f7f7f5;
+        --fg: #18181b;
+        --muted: #5b5b66;
+        --line: #d9d9de;
+        --accent: #1d4ed8;
+        --ok: #15803d;
+        --bad: #b91c1c;
+        color-scheme: light;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #111114;
+          --fg: #ececf1;
+          --muted: #a1a1aa;
+          --line: #2e2e35;
+          --accent: #7aa2ff;
+          --ok: #4ade80;
+          --bad: #f87171;
+          color-scheme: dark;
+        }
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font:
+          15px/1.5 system-ui,
+          -apple-system,
+          Segoe UI,
+          sans-serif;
+        padding: 24px 16px;
+      }
+      main {
+        max-width: 720px;
+        margin: 0 auto;
+        display: grid;
+        gap: 16px;
+      }
+      h1 {
+        font-size: 22px;
+        margin: 0;
+      }
+      section {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 16px;
+        display: grid;
+        gap: 10px;
+      }
+      h2 {
+        font-size: 15px;
+        margin: 0;
+      }
+      p {
+        margin: 0;
+      }
+      button {
+        font: inherit;
+        padding: 8px 14px;
+        border-radius: 8px;
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: #fff;
+        cursor: pointer;
+        justify-self: start;
+      }
+      button:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+      input {
+        font:
+          13px ui-monospace,
+          Consolas,
+          monospace;
+        padding: 8px;
+        border-radius: 8px;
+        border: 1px solid var(--line);
+        background: transparent;
+        color: var(--fg);
+        width: 100%;
+        box-sizing: border-box;
+      }
+      label {
+        display: grid;
+        gap: 4px;
+      }
+      code,
+      pre,
+      .mono {
+        font:
+          13px ui-monospace,
+          Consolas,
+          monospace;
+        word-break: break-all;
+      }
+      pre {
+        margin: 0;
+        white-space: pre-wrap;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .ok {
+        color: var(--ok);
+      }
+      .bad {
+        color: var(--bad);
+      }
+      dl {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: 4px 12px;
+        margin: 0;
+      }
+      dt {
+        color: var(--muted);
+      }
+      dd {
+        margin: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Central City: deploy on Arc mainnet</h1>
+      <p class="muted">
+        Each step below is one click and one confirmation in MetaMask. The page fixes every
+        transaction, and your key never leaves MetaMask. Keep MetaMask's suggested fee: a fee under
+        20 gwei blocks your next transactions until it is replaced.
+      </p>
+      <p id="notice"></p>
+
+      <section>
+        <h2>Kit</h2>
+        <dl id="kit">
+          <dt>Status</dt>
+          <dd>Loading the kit…</dd>
+        </dl>
+      </section>
+
+      <section>
+        <h2>Connect MetaMask (Arc mainnet, chain 5042)</h2>
+        <button id="connect">Connect</button>
+        <dl>
+          <dt>Account</dt>
+          <dd id="account" class="mono">–</dd>
+          <dt>Network</dt>
+          <dd id="network">–</dd>
+          <dt>Balance</dt>
+          <dd id="balance">–</dd>
+        </dl>
+      </section>
+
+      <section>
+        <h2>1. PublicERC6492Validator</h2>
+        <p class="muted">The same input as on Base, so it lands at the same address.</p>
+        <button id="go-validator" disabled>Deploy validator</button>
+        <dl>
+          <dt>Status</dt>
+          <dd id="st-validator">Connect first.</dd>
+          <dt>Transaction</dt>
+          <dd id="tx-validator" class="mono">–</dd>
+          <dt>Contract</dt>
+          <dd id="addr-validator" class="mono">–</dd>
+        </dl>
+      </section>
+
+      <section>
+        <h2>2. SpendPermissionManager</h2>
+        <p class="muted">The same input as on Base, so it lands at the same address.</p>
+        <button id="go-manager" disabled>Deploy manager</button>
+        <dl>
+          <dt>Status</dt>
+          <dd id="st-manager">After step 1.</dd>
+          <dt>Transaction</dt>
+          <dd id="tx-manager" class="mono">–</dd>
+          <dt>Contract</dt>
+          <dd id="addr-manager" class="mono">–</dd>
+        </dl>
+      </section>
+
+      <section>
+        <h2>3. Fee router 3</h2>
+        <dl>
+          <dt>Token</dt>
+          <dd class="mono">Arc USDC 0x3600000000000000000000000000000000000000</dd>
+          <dt>Treasury</dt>
+          <dd class="mono">0xAF36084a4dc0CE760A6dCfa46Cf129e140c92aa9</dd>
+        </dl>
+        <p class="muted">Both are fixed by this page, and can never change after deploying.</p>
+        <button id="go-router" disabled>Deploy fee router</button>
+        <dl>
+          <dt>Status</dt>
+          <dd id="st-router">After step 2.</dd>
+          <dt>Transaction</dt>
+          <dd id="tx-router" class="mono">–</dd>
+          <dt>Contract</dt>
+          <dd id="addr-router" class="mono">–</dd>
+        </dl>
+      </section>
+
+      <section>
+        <h2>4. Paymaster</h2>
+        <p class="muted">
+          Paste the two addresses we give you. Addresses only: never a key. The connected account
+          becomes the paymaster's owner.
+        </p>
+        <label
+          >Verifying signer address
+          <input id="signer" spellcheck="false" autocomplete="off" />
+        </label>
+        <label
+          >Submitter address
+          <input id="submitter" spellcheck="false" autocomplete="off" />
+        </label>
+        <button id="go-paymaster" disabled>Deploy paymaster</button>
+        <dl>
+          <dt>Status</dt>
+          <dd id="st-paymaster">After step 3.</dd>
+          <dt>Transaction</dt>
+          <dd id="tx-paymaster" class="mono">–</dd>
+          <dt>Contract</dt>
+          <dd id="addr-paymaster" class="mono">–</dd>
+        </dl>
+      </section>
+
+      <section>
+        <h2>5. Allow the submitter</h2>
+        <p class="muted">The submitter becomes the only account that may send for the paymaster.</p>
+        <button id="go-allowlist" disabled>Allow the submitter</button>
+        <dl>
+          <dt>Status</dt>
+          <dd id="st-allowlist">After step 4.</dd>
+          <dt>Transaction</dt>
+          <dd id="tx-allowlist" class="mono">–</dd>
+        </dl>
+      </section>
+
+      <section>
+        <h2>6. Paymaster deposit at the EntryPoint</h2>
+        <p class="muted">
+          Must be above 10 USDC: that is Arc's protected reserve, and at or under it every ordinary
+          flow is refused. The default leaves 5 USDC for ordinary use.
+        </p>
+        <label
+          >Deposit (USDC)
+          <input id="depositAmount" value="15" spellcheck="false" autocomplete="off" />
+        </label>
+        <button id="go-deposit" disabled>Deposit</button>
+        <dl>
+          <dt>Status</dt>
+          <dd id="st-deposit">After step 5.</dd>
+          <dt>Transaction</dt>
+          <dd id="tx-deposit" class="mono">–</dd>
+        </dl>
+      </section>
+
+      <section>
+        <h2>7. Fund the submitter</h2>
+        <p class="muted">It pays each send up front, and the EntryPoint repays it.</p>
+        <label
+          >Amount (USDC)
+          <input id="submitterAmount" value="2" spellcheck="false" autocomplete="off" />
+        </label>
+        <button id="go-submitter" disabled>Fund the submitter</button>
+        <dl>
+          <dt>Status</dt>
+          <dd id="st-submitter">After step 6.</dd>
+          <dt>Transaction</dt>
+          <dd id="tx-submitter" class="mono">–</dd>
+        </dl>
+      </section>
+
+      <section>
+        <h2>8. Fund the facilitator</h2>
+        <p class="muted">
+          Paste the address we give you. It pays the gas of every settlement; under 1 USDC the
+          server refuses to settle.
+        </p>
+        <label
+          >Facilitator address
+          <input id="facilitator" spellcheck="false" autocomplete="off" />
+        </label>
+        <label
+          >Amount (USDC)
+          <input id="facilitatorAmount" value="5" spellcheck="false" autocomplete="off" />
+        </label>
+        <button id="go-facilitator" disabled>Fund the facilitator</button>
+        <dl>
+          <dt>Status</dt>
+          <dd id="st-facilitator">After step 7.</dd>
+          <dt>Transaction</dt>
+          <dd id="tx-facilitator" class="mono">–</dd>
+        </dl>
+      </section>
+
+      <section>
+        <h2>9. Production settings to give back</h2>
+        <pre id="settings">After step 8.</pre>
+        <p id="afterNote" class="muted"></p>
+      </section>
+    </main>
+    <script src="keccak.js"></script>
+    <script src="guard.js"></script>
+    <script src="arc-guard.js"></script>
+    <script>
+      const K = window.kitKeccak;
+      const L = window.kitGuard;
+      const G = window.arcGuard;
+      const STEPS = [
+        'validator',
+        'manager',
+        'router',
+        'paymaster',
+        'allowlist',
+        'deposit',
+        'submitter',
+        'facilitator',
+      ];
+      const SEL = {
+        token: '0xfc0c546a',
+        treasury: '0x61d027b3',
+        MAX_TOTAL: '0xcd60fe35',
+        MIN_INCLUDED: '0xa0dbd6f4',
+        FEE_BPS: '0xbf333f2c',
+        entryPoint: '0xb0d691fe',
+        owner: '0x8da5cb5b',
+        verifyingSigner: '0x23d9ac9b',
+        pendingVerifyingSigner: '0xff1ff13a',
+        isBundlerAllowed: '0x4031c20e',
+        updateBundlerAllowlist: '0x8764b0e1',
+        depositTo: '0xb760faf9',
+        balanceOf: '0x70a08231',
+      };
+      // How many of the account's latest nonces are searched for its own contracts.
+      const SCAN_NONCES = 200;
+      const $ = (id) => document.getElementById(id);
+      let arcKit = null,
+        routerKit = null,
+        kitOk = false,
+        account = null,
+        current = null;
+      // Set before the first await of a send: while MetaMask is asked, nothing can start another.
+      let submitting = false;
+      let found = {};
+      let scanned = null;
+
+      // One send per step and browser: the latch in localStorage (kitGuard, as deploy.html) holds a
+      // pending marker from just before MetaMask is asked, then the hash. Only a rejection in MetaMask
+      // or a mined revert clears it, and all steps share one cross-tab lock.
+      const latchKey = (step) => 'cc-arc-5042-' + step;
+      const LOCK = 'cc-arc-5042';
+      const CONFIG = 'cc-arc-5042-config';
+      const latch = (step) => L.latchRead(localStorage, latchKey(step));
+      const hasLocks = () =>
+        typeof navigator !== 'undefined' &&
+        Boolean(navigator.locks) &&
+        typeof navigator.locks.request === 'function';
+      const NO_LOCKS =
+        'This browser does not support Web Locks (navigator.locks), which the page needs so that only one tab can send: nothing will be sent. Use a current Chrome, Edge, Firefox or Brave.';
+
+      const eth = (method, params = []) => window.ethereum.request({ method, params });
+      // The fixed public Arc endpoint: skips and read-backs never rely on the wallet's node.
+      const rpc = async (method, params = []) => {
+        const response = await fetch(G.PUBLIC_RPC, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+        });
+        const body = await response.json();
+        if (body.error) throw new Error(body.error.message || 'public Arc endpoint error');
+        return body.result;
+      };
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const hex = (n) => '0x' + BigInt(n).toString(16);
+      const call = (to, data) => rpc('eth_call', [{ to, data }, 'latest']);
+      const asAddr = (w) => '0x' + String(w).slice(-40);
+      const val = (id) => $(id).value.trim();
+      const row = (dl, k, v, cls) => {
+        const dt = document.createElement('dt');
+        dt.textContent = k;
+        const dd = document.createElement('dd');
+        dd.textContent = v;
+        if (cls) dd.className = cls;
+        dl.append(dt, dd);
+      };
+      const link = (el, path, text) => {
+        el.textContent = '';
+        const a = document.createElement('a');
+        a.href = G.EXPLORER + path + text;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.textContent = text;
+        el.append(a);
+      };
+      const say = (step, text, cls) => {
+        $('st-' + step).textContent = text;
+        $('st-' + step).className = cls || '';
+      };
+
+      // Only addresses and amounts: what a reload needs to read the same steps back.
+      const readConfig = () => {
+        try {
+          return JSON.parse(localStorage.getItem(CONFIG)) || {};
+        } catch {
+          return {};
+        }
+      };
+      const saveConfig = () => {
+        const config = {};
+        for (const id of [
+          'signer',
+          'submitter',
+          'facilitator',
+          'depositAmount',
+          'submitterAmount',
+          'facilitatorAmount',
+        ])
+          config[id] = val(id);
+        localStorage.setItem(CONFIG, JSON.stringify(config));
+      };
+      const INPUTS = {
+        signer: 'paymaster',
+        submitter: 'allowlist',
+        depositAmount: 'deposit',
+        submitterAmount: 'submitter',
+        facilitator: 'facilitator',
+        facilitatorAmount: 'facilitator',
+      };
+      {
+        const saved = readConfig();
+        for (const id of Object.keys(INPUTS)) if (saved[id]) $(id).value = saved[id];
+        for (const id of Object.keys(INPUTS)) $(id).addEventListener('input', sync);
+      }
+
+      Promise.all([
+        fetch('arc-mainnet.json').then((r) => r.json()),
+        fetch('router3.json').then((r) => r.json()),
+      ])
+        .then(([arc, router]) => {
+          const rows = G.checkKits(arc, router, K);
+          const dl = $('kit');
+          dl.textContent = '';
+          for (const r of rows) row(dl, r.key, r.text, r.ok ? 'ok' : 'bad');
+          kitOk = rows.every((r) => r.ok);
+          if (kitOk) {
+            arcKit = arc;
+            routerKit = router;
+          }
+          sync();
+        })
+        .catch(() => {
+          $('kit').textContent = '';
+          row($('kit'), 'Status', 'Kit files missing or unreadable: everything blocked.', 'bad');
+        });
+
+      // A wallet that switches network or account must be connected again.
+      if (window.ethereum && typeof window.ethereum.on === 'function') {
+        const reset = (why) => {
+          account = null;
+          current = null;
+          $('account').textContent = why;
+          $('network').textContent = '–';
+          $('network').className = '';
+          for (const step of STEPS) $('go-' + step).disabled = true;
+        };
+        window.ethereum.on('chainChanged', () => reset('Network changed: connect again.'));
+        window.ethereum.on('accountsChanged', () => reset('Account changed: connect again.'));
+      }
+      // Another tab's send blocks this one at once.
+      if (typeof window.addEventListener === 'function')
+        window.addEventListener('storage', () => {
+          if (account && !submitting) refresh();
+        });
+
+      async function toArc() {
+        let chain = await eth('eth_chainId');
+        if (chain === G.CHAIN) return chain;
+        try {
+          await eth('wallet_switchEthereumChain', [{ chainId: G.CHAIN }]);
+        } catch (e) {
+          if (!e || e.code !== 4902) throw e;
+          await eth('wallet_addEthereumChain', [G.NETWORK]);
+          await eth('wallet_switchEthereumChain', [{ chainId: G.CHAIN }]);
+        }
+        chain = await eth('eth_chainId');
+        return chain;
+      }
+
+      $('connect').addEventListener('click', async () => {
+        if (!window.ethereum) {
+          $('account').textContent = 'MetaMask not found in this browser.';
+          return;
+        }
+        if (submitting) return;
+        account = null;
+        current = null;
+        try {
+          const [connected] = await eth('eth_requestAccounts');
+          const chain = await toArc();
+          const onArc = chain === G.CHAIN;
+          $('account').textContent = connected;
+          $('network').textContent = onArc
+            ? 'Arc mainnet (5042)'
+            : 'Wrong network: ' + chain + '. This page runs on Arc mainnet only.';
+          $('network').className = onArc ? 'ok' : 'bad';
+          if (onArc) account = connected;
+        } catch (e) {
+          $('account').textContent = 'Not connected: ' + (e && e.message ? e.message : e);
+        }
+        await refresh();
+      });
+
+      /** Why the step's named inputs can't be used, or null. */
+      function refusal(step) {
+        const address = (id, name) =>
+          G.isAddress(val(id), K) ? null : name + ' is not an address.';
+        const taken = (id, name, others) => {
+          for (const [other, otherName] of others)
+            if (G.same(val(id), other)) return name + ' must not be the ' + otherName + '.';
+          return null;
+        };
+        const fixed = [
+          [String(account), 'connected account'],
+          [G.TREASURY, 'treasury'],
+        ];
+        if (step === 'paymaster' || step === 'allowlist') {
+          return (
+            address('signer', 'The verifying signer') ||
+            address('submitter', 'The submitter') ||
+            taken('signer', 'The verifying signer', fixed) ||
+            taken('submitter', 'The submitter', [...fixed, [val('signer'), 'verifying signer']])
+          );
+        }
+        if (step === 'deposit') return G.depositRefusal(val('depositAmount'));
+        if (step === 'submitter') return G.fundRefusal('submitter', val('submitterAmount'));
+        if (step === 'facilitator')
+          return (
+            address('facilitator', 'The facilitator') ||
+            taken('facilitator', 'The facilitator', [
+              ...fixed,
+              [val('signer'), 'verifying signer'],
+              [val('submitter'), 'submitter'],
+            ]) ||
+            G.fundRefusal('facilitator', val('facilitatorAmount'))
+          );
+        return null;
+      }
+
+      /** The open step's button follows its inputs, with no chain read. */
+      function sync() {
+        for (const [id, label, text] of [
+          ['deposit', 'depositAmount', 'Deposit '],
+          ['submitter', 'submitterAmount', 'Send the submitter '],
+          ['facilitator', 'facilitatorAmount', 'Send the facilitator '],
+        ]) {
+          const wei = G.parseUsdc(val(label));
+          $('go-' + id).textContent = wei === null ? text.trim() : text + G.showUsdc(wei) + ' USDC';
+        }
+        if (!hasLocks()) {
+          $('notice').textContent = NO_LOCKS;
+          $('notice').className = 'bad';
+        }
+        for (const step of STEPS) $('go-' + step).disabled = true;
+        if (!current || submitting || !account || !kitOk || !hasLocks()) return;
+        const why = refusal(current);
+        say(current, why || 'Ready.', why ? 'bad' : '');
+        $('go-' + current).disabled = Boolean(why);
+      }
+
+      /** Code at an address; after a mined transaction, an empty answer is retried (lagging node). */
+      async function codeAt(address, wait) {
+        let code = await rpc('eth_getCode', [address, 'latest']);
+        for (let i = 0; wait && i < 30 && (!code || code === '0x'); i++) {
+          await sleep(2000);
+          code = await rpc('eth_getCode', [address, 'latest']);
+        }
+        return code || '0x';
+      }
+
+      /** This account's contracts by its nonces: finds them with the browser's memory gone. */
+      async function scan() {
+        if (scanned) return scanned;
+        const nonce = Number(BigInt(await rpc('eth_getTransactionCount', [account, 'latest'])));
+        const list = [];
+        for (let n = nonce - 1; n >= 0 && n >= nonce - SCAN_NONCES; n--) {
+          const address = G.createAddress(account, n, K);
+          const code = await rpc('eth_getCode', [address, 'latest']);
+          if (code && code !== '0x') list.push({ address, code });
+        }
+        scanned = list;
+        return list;
+      }
+
+      /** The block a contract appeared in, from the public node; null if it has no old state. */
+      async function creationBlock(address) {
+        try {
+          let high = BigInt(await rpc('eth_blockNumber'));
+          let low = 0n;
+          while (low < high) {
+            const middle = (low + high) / 2n;
+            const code = await rpc('eth_getCode', [address, hex(middle)]);
+            if (code && code !== '0x') high = middle;
+            else low = middle + 1n;
+          }
+          return low;
+        } catch {
+          return null;
+        }
+      }
+
+      const mined = (receipt) => Boolean(receipt) && receipt.status === '0x1';
+
+      async function readReplay(replay, receipt) {
+        const code = await codeAt(replay.address, mined(receipt));
+        if (code === '0x') return { done: false };
+        if (code.toLowerCase() !== replay.runtime.toLowerCase())
+          return { bad: 'Other code at ' + replay.address + ': stop and tell us.' };
+        return {
+          done: true,
+          address: replay.address,
+          text: 'Deployed; its code is what this kit expects.',
+        };
+      }
+
+      async function routerProblem(address, code) {
+        const runtime = L.runtimeCheck(code, routerKit, G.ARC_USDC, G.TREASURY, K);
+        if (!runtime.ok) return 'Runtime code: ' + runtime.reason;
+        const expected = [
+          ['token', SEL.token, G.ARC_USDC],
+          ['treasury', SEL.treasury, G.TREASURY],
+        ];
+        for (const [name, sel, want] of expected)
+          if (!G.same(asAddr(await call(address, sel)), want)) return name + ' is not ' + want;
+        const numbers = [
+          ['MAX_TOTAL', SEL.MAX_TOTAL, 100000000n],
+          ['MIN_INCLUDED', SEL.MIN_INCLUDED, 50000n],
+          ['FEE_BPS', SEL.FEE_BPS, 1000n],
+        ];
+        for (const [name, sel, want] of numbers)
+          if (BigInt(await call(address, sel)) !== want) return name + ' is not ' + want;
+        return null;
+      }
+
+      async function readRouter(receipt) {
+        let address = null;
+        if (mined(receipt)) {
+          address = receipt.contractAddress;
+          const problem = await routerProblem(address, await codeAt(address, true));
+          if (problem) return { bad: problem + '. Do not use this contract; tell us.' };
+        } else {
+          for (const candidate of await scan())
+            if (L.runtimeCheck(candidate.code, routerKit, G.ARC_USDC, G.TREASURY, K).ok) {
+              address = candidate.address;
+              const problem = await routerProblem(address, candidate.code);
+              if (problem) return { bad: problem + '. Do not use this contract; tell us.' };
+              break;
+            }
+        }
+        if (!address) return { done: false };
+        const block = mined(receipt) ? BigInt(receipt.blockNumber) : await creationBlock(address);
+        found.routerBlock = block;
+        found.router = address;
+        return { done: true, address, text: 'Deployed; code, token and treasury read back.' };
+      }
+
+      async function paymasterProblem(address, code) {
+        if (code.toLowerCase() !== arcKit.paymaster.runtime.toLowerCase())
+          return "Its code is not Base's paymaster code";
+        if (!G.same(asAddr(await call(address, SEL.entryPoint)), G.ENTRY_POINT))
+          return 'Its EntryPoint is not v0.6';
+        const owner = asAddr(await call(address, SEL.owner));
+        if (!G.same(owner, account)) return 'Its owner is ' + owner + ': connect that account';
+        const signer = asAddr(await call(address, SEL.verifyingSigner));
+        const saved = readConfig().signer;
+        if (saved && !G.same(saved, signer))
+          return 'Its signer is ' + signer + ', not the one entered: ' + saved;
+        if (!/^0x0+$/.test(asAddr(await call(address, SEL.pendingVerifyingSigner))))
+          return 'It has a pending signer';
+        $('signer').value = signer;
+        return null;
+      }
+
+      async function readPaymaster(receipt) {
+        let address = null;
+        if (mined(receipt)) {
+          address = receipt.contractAddress;
+          const problem = await paymasterProblem(address, await codeAt(address, true));
+          if (problem) return { bad: problem + '. Stop and tell us.' };
+        } else {
+          for (const candidate of await scan()) {
+            if (candidate.code.toLowerCase() !== arcKit.paymaster.runtime.toLowerCase()) continue;
+            const problem = await paymasterProblem(candidate.address, candidate.code);
+            if (problem) return { bad: problem + '. Stop and tell us.' };
+            address = candidate.address;
+            break;
+          }
+        }
+        if (!address) return { done: false };
+        found.paymaster = address;
+        return { done: true, address, text: 'Deployed; EntryPoint, owner and signer read back.' };
+      }
+
+      const usdcAt = async (address) => BigInt(await rpc('eth_getBalance', [address, 'latest']));
+
+      async function readAllowlist(receipt) {
+        if (!G.isAddress(val('submitter'), K)) return { done: false };
+        const data = SEL.isBundlerAllowed + G.word(val('submitter'));
+        let allowed = BigInt(await call(found.paymaster, data)) === 1n;
+        for (let i = 0; mined(receipt) && !allowed && i < 10; i++) {
+          await sleep(2000);
+          allowed = BigInt(await call(found.paymaster, data)) === 1n;
+        }
+        if (allowed) return { done: true, text: 'The submitter is allowed; read back.' };
+        if (mined(receipt)) return { bad: 'Sent, but the submitter is not allowed. Tell us.' };
+        return { done: false };
+      }
+
+      async function readDeposit(receipt) {
+        const data = SEL.balanceOf + G.word(found.paymaster);
+        const held = BigInt(await call(G.ENTRY_POINT, data));
+        const text = 'The paymaster holds ' + G.showUsdc(held) + ' USDC at the EntryPoint.';
+        if (held > G.RESERVE) return { done: true, text };
+        if (mined(receipt))
+          return { done: true, text: text + ' That is not above the reserve: tell us.' };
+        return { done: false, text };
+      }
+
+      const readFunded = (inputs) => async (receipt) => {
+        if (!G.isAddress(val(inputs.address), K)) return { done: false };
+        const wanted = G.parseUsdc(val(inputs.amount));
+        const held = await usdcAt(val(inputs.address));
+        const text = 'It holds ' + G.showUsdc(held) + ' USDC.';
+        return { done: mined(receipt) || (wanted !== null && held >= wanted), text };
+      };
+
+      const READ = {
+        validator: (receipt) => readReplay(arcKit.replays[0], receipt),
+        manager: (receipt) => readReplay(arcKit.replays[1], receipt),
+        router: readRouter,
+        paymaster: readPaymaster,
+        allowlist: readAllowlist,
+        deposit: readDeposit,
+        submitter: readFunded({ address: 'submitter', amount: 'submitterAmount' }),
+        facilitator: readFunded({
+          address: 'facilitator',
+          amount: 'facilitatorAmount',
+        }),
+      };
+
+      /** The transaction of a step: everything fixed here or by a checked input. */
+      const BUILD = {
+        validator: () => ({ to: G.DEPLOYER, data: arcKit.replays[0].input }),
+        manager: () => ({ to: G.DEPLOYER, data: arcKit.replays[1].input }),
+        router: () => ({
+          data: routerKit.bytecode + G.word(G.ARC_USDC) + G.word(G.TREASURY),
+        }),
+        paymaster: () => ({
+          data: arcKit.paymaster.initCode + G.word(val('signer')) + G.word(account),
+        }),
+        allowlist: () => ({
+          to: found.paymaster,
+          data: SEL.updateBundlerAllowlist + G.word(val('submitter')) + G.word('1'),
+        }),
+        deposit: () => ({
+          to: G.ENTRY_POINT,
+          data: SEL.depositTo + G.word(found.paymaster),
+          value: hex(G.parseUsdc(val('depositAmount'))),
+        }),
+        submitter: () => ({
+          to: val('submitter'),
+          value: hex(G.parseUsdc(val('submitterAmount'))),
+        }),
+        facilitator: () => ({
+          to: val('facilitator'),
+          value: hex(G.parseUsdc(val('facilitatorAmount'))),
+        }),
+      };
+
+      /** One step's state from its latch and the public endpoint. */
+      async function evaluate(step) {
+        const saved = latch(step);
+        const receipt = saved.hash ? await rpc('eth_getTransactionReceipt', [saved.hash]) : null;
+        if (saved.hash) link($('tx-' + step), '/tx/', saved.hash);
+        const read = await READ[step](receipt);
+        if (read.bad) return { state: 'bad', text: read.bad };
+        if (read.address && $('addr-' + step)) link($('addr-' + step), '/address/', read.address);
+        if (read.done) return { state: 'done', text: read.text };
+        if (saved.pending)
+          return {
+            state: 'blocked',
+            text: 'A send was started in this browser and its outcome is unknown. Check MetaMask activity and the explorer for this account; do not send again.',
+          };
+        if (saved.hash) {
+          if (!receipt) {
+            const tx = await rpc('eth_getTransactionByHash', [saved.hash]);
+            const fee = tx ? BigInt(tx.maxFeePerGas || tx.gasPrice || 0) : null;
+            return {
+              state: 'blocked',
+              text:
+                fee !== null && fee < G.FEE_FLOOR
+                  ? 'Sent with a fee under the 20 gwei floor: it blocks this account. Use Speed up in MetaMask, then reload.'
+                  : 'Sent, not confirmed yet. Wait, or check it on the explorer; do not send again.',
+            };
+          }
+          // Mined and reverted: it changed nothing, so another attempt is safe.
+          try {
+            localStorage.removeItem(latchKey(step));
+          } catch {
+            return { state: 'blocked', text: 'It reverted, and this browser cannot record that.' };
+          }
+          return { state: 'ready', note: 'The last attempt reverted; nothing changed.' };
+        }
+        return { state: 'ready', note: read.text };
+      }
+
+      let walking = null;
+      let walkAgain = false;
+      function refresh() {
+        if (walking) {
+          walkAgain = true;
+          return walking;
+        }
+        walking = walk().finally(() => {
+          walking = null;
+          if (walkAgain) {
+            walkAgain = false;
+            return refresh();
+          }
+        });
+        return walking;
+      }
+
+      async function walk() {
+        current = null;
+        found = {};
+        scanned = null;
+        for (const step of STEPS) $('go-' + step).disabled = true;
+        if (!hasLocks() || !kitOk || !account) return sync();
+        $('settings').textContent = 'After step 8.';
+        $('afterNote').textContent = '';
+        let open = null;
+        let stopped = false;
+        let note = null;
+        const done = new Set();
+        try {
+          const publicChain = await rpc('eth_chainId');
+          if (publicChain !== G.CHAIN) throw new Error('it answered chain ' + publicChain);
+          $('balance').textContent = G.showUsdc(await usdcAt(account)) + ' USDC';
+        } catch (e) {
+          stopped = true;
+          $('network').textContent =
+            'Public Arc endpoint not usable (' +
+            (e && e.message ? e.message : e) +
+            '): nothing will be sent.';
+          $('network').className = 'bad';
+        }
+        for (const [i, step] of STEPS.entries()) {
+          if (stopped) {
+            say(step, i ? 'After step ' + i + '.' : 'Stopped.', '');
+            continue;
+          }
+          let result;
+          try {
+            result = await evaluate(step);
+          } catch (e) {
+            result = {
+              state: 'bad',
+              text:
+                'Could not read the chain (' +
+                (e && e.message ? e.message : e) +
+                '): nothing will be sent. Reload to try again.',
+            };
+          }
+          if (result.state === 'done') {
+            done.add(step);
+            say(step, result.text, 'ok');
+            continue;
+          }
+          stopped = true;
+          if (result.state === 'ready') {
+            open = step;
+            note = result.note;
+          } else say(step, result.text, 'bad');
+        }
+        current = open;
+        sync();
+        if (open && note && !$('go-' + open).disabled) say(open, note, '');
+        lockInputs(done);
+        if (!stopped) showSettings();
+      }
+
+      /** An input that a sent or done step used can't change any more. */
+      function lockInputs(done) {
+        for (const [id, step] of Object.entries(INPUTS))
+          $(id).readOnly = done.has(step) || latch(step).blocked;
+      }
+
+      function showSettings() {
+        const block = found.routerBlock;
+        $('settings').textContent = [
+          'CITY_ARC_FEE_ROUTER3=' + found.router,
+          'CITY_ARC_FEE_ROUTER3_FROM_BLOCK=' +
+            (block === null || block === undefined
+              ? 'not known: read the contract creation block on the explorer'
+              : block.toString()),
+          'CITY_ARC_PAYMASTER=' + found.paymaster,
+          'CITY_ARC_RPC_URL=' + G.PUBLIC_RPC,
+        ].join('\n');
+        $('afterNote').textContent =
+          'Send us these four lines: they are public, and no key belongs here. Recording the SpendPermissionManager (' +
+          arcKit.replays[1].address +
+          ') in shared/chains.ts is a code change we make afterwards.';
+      }
+
+      for (const step of STEPS)
+        $('go-' + step).addEventListener('click', () => {
+          if (!hasLocks()) {
+            $('notice').textContent = NO_LOCKS;
+            return Promise.resolve();
+          }
+          return navigator.locks.request(LOCK, () => send(step));
+        });
+
+      async function send(step) {
+        if (!hasLocks() || submitting || !kitOk || !account || current !== step) return;
+        const why = refusal(step);
+        if (why) return say(step, why, 'bad');
+        submitting = true;
+        for (const other of STEPS) $('go-' + other).disabled = true;
+        const stop = (text) => {
+          say(step, text, 'bad');
+          submitting = false;
+        };
+        let hash = null;
+        let tx;
+        try {
+          // Everything again, right before asking MetaMask: another tab may have sent since.
+          if (latch(step).blocked) {
+            submitting = false;
+            return refresh();
+          }
+          if ((await eth('eth_chainId').catch(() => null)) !== G.CHAIN)
+            return stop('MetaMask is not on Arc mainnet (5042): nothing was sent.');
+          if ((await rpc('eth_chainId')) !== G.CHAIN)
+            return stop('The public endpoint is not Arc mainnet: nothing was sent.');
+          scanned = null;
+          const before = await READ[step](null);
+          if (before.bad || before.done) {
+            submitting = false;
+            return refresh();
+          }
+          const block = await rpc('eth_getBlockByNumber', ['latest', false]);
+          const fees = G.fees(BigInt(block.baseFeePerGas));
+          if (!fees)
+            return stop(
+              'The base fee is too close to the 30 gwei this page pays: nothing was sent. Try again later.',
+            );
+          const plan = { from: account, ...BUILD[step]() };
+          const gas = G.gasFor(step, BigInt(await rpc('eth_estimateGas', [plan])));
+          if (!gas)
+            return stop('The dry run needs more gas than expected: nothing was sent. Tell us.');
+          const needed = gas * fees.maxFeePerGas + BigInt(plan.value || 0);
+          if ((await usdcAt(account)) < needed)
+            return stop(
+              'This account needs ' + G.showUsdc(needed) + ' USDC for this step: nothing was sent.',
+            );
+          tx = {
+            ...plan,
+            chainId: G.CHAIN,
+            type: '0x2',
+            gas: hex(gas),
+            maxFeePerGas: hex(fees.maxFeePerGas),
+            maxPriorityFeePerGas: hex(fees.maxPriorityFeePerGas),
+          };
+          if (latch(step).blocked || !account) {
+            submitting = false;
+            return refresh();
+          }
+          if (!L.latchPending(localStorage, latchKey(step), Date.now())) {
+            return stop(
+              'This browser cannot record the send (site storage is off): use one that can.',
+            );
+          }
+          saveConfig();
+        } catch (e) {
+          return stop('Nothing was sent: ' + (e && e.message ? e.message : e));
+        }
+        try {
+          say(step, 'Confirm in MetaMask.', '');
+          hash = await eth('eth_sendTransaction', [tx]);
+          L.latchSent(localStorage, latchKey(step), hash);
+          link($('tx-' + step), '/tx/', hash);
+          say(step, 'Sent. Waiting for the receipt.', '');
+          let receipt = null;
+          for (let i = 0; i < 120 && !receipt; i++) {
+            await sleep(2000);
+            receipt = await rpc('eth_getTransactionReceipt', [hash]);
+          }
+        } catch (e) {
+          const text = e && e.message ? e.message : e;
+          if (hash) {
+            // Sent: never offer it again; the transaction is on its way or decided on Arc.
+            say(
+              step,
+              'Sent, but reading the result failed (' + text + '). Check it on the explorer.',
+              'bad',
+            );
+          } else if (e && e.code === 4001) {
+            // Rejected in MetaMask: nothing was sent, a new attempt is safe.
+            L.latchRejected(localStorage, latchKey(step));
+            submitting = false;
+            await refresh();
+            say(step, 'Not sent: rejected in MetaMask.', '');
+            return;
+          } else {
+            // Unknown: MetaMask may still have sent it. The pending marker stays, also after a reload.
+            say(
+              step,
+              'Outcome unknown (' +
+                text +
+                '). Check MetaMask activity and the explorer before sending again.',
+              'bad',
+            );
+          }
+          submitting = false;
+          return;
+        }
+        submitting = false;
+        await refresh();
+      }
+      sync();
+    </script>
+  </body>
+</html>

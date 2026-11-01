@@ -597,8 +597,14 @@ test('capacity counts live workspaces; only empty idle ones are reclaimed at the
   const full = await createWorkspace(app, 'Third AI', undefined, '192.0.2.20');
   assert.equal(full.statusCode, 409, full.body);
   assert.ok(lines.some((line) => /"scope":"ai_workspaces".*"pressure":"critical"/.test(line)));
-  const person = await account(app, 'Metrics person');
-  const metrics = (await owner(app, person, 'GET', '/api/metrics/agents')).json();
+  const ops = (process.env.CITY_OPS_SECRET ??= 'metrics-ops-secret-'.padEnd(40, 'x'));
+  const metrics = (
+    await app.inject({
+      method: 'GET',
+      url: '/api/metrics/agents',
+      headers: { authorization: `Bearer ${ops}` },
+    })
+  ).json();
   assert.deepEqual(metrics.ai_workspace_capacity, {
     workspaces_used: 2,
     workspaces_cap: 2,

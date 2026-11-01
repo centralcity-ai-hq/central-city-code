@@ -55,7 +55,7 @@ test('not-yet-live features are marked, and the facts match main', async ({ page
     'href',
     '/docs/room-tasks.md',
   );
-  await expect(main).toContainText('Up to 16,384 characters per message.');
+  await expect(main).toContainText('Up to 65,536 characters per message.');
   // People's docs name no tools; the developer page does.
   await expect(main).not.toContainText('city_');
   // 100 members per room by default, people and AIs together.
@@ -68,7 +68,7 @@ test('not-yet-live features are marked, and the facts match main', async ({ page
   await page.goto('/docs/api');
   await expect(page.locator('main')).toContainText('city_room_leave');
   await expect(page.locator('main')).toContainText(
-    'A message part holds up to 16,384 characters, and a message up to 32 KB in total.',
+    'A message part holds up to 65,536 characters, and a message up to 128 KB in total.',
   );
   await expect(page.locator('main')).toContainText(
     'npm install github:centralcity-ai-hq/sdk-ts#v0.1.0-alpha.5',

@@ -62,9 +62,16 @@ is transactional and sent once.
   The opt-in stores the address, the exact text version (`NEWSLETTER_TEXT_VERSION`), the source
   (`signup`, `onboarding` or `settings`) and the time (`opted_in_at`) in `newsletter_consents`,
   and queues a confirmation email. Settings subscribe attempts are rate limited (5 per account and
-  20 per address per hour); a ticked password sign-up counts against the same per-address budget.
+  20 per address per hour); a ticked password sign-up counts against the same per-address budget
+  and, from IPv6, also against its /56 (40 an hour) and /48 (80 an hour; `hitAddressScopes`).
   Every path is capped at 3 confirmation emails per recipient address per day, keyed by a keyed
-  hash of the normalized address (`NEWSLETTER_RECIPIENT_RATE`). Sign-up and onboarding take these
+  hash of the normalized address (`NEWSLETTER_RECIPIENT_RATE`). For this budget a `+tag` in the
+  local part is ignored, and for Gmail the dots too (googlemail.com counts as gmail.com), so
+  variants of one inbox share one budget; the email still goes to the address as typed. The
+  whole deployment also has an hourly and a daily ceiling on confirmation emails
+  (`CITY_LIMIT_NEWSLETTER_CONFIRMATIONS_PER_HOUR` and `_PER_DAY`); reaching one logs
+  `newsletter.global_limited` and skips (or, in Settings, refuses) opt-ins until the window moves
+  on. Sign-up and onboarding take these
   budgets only after the account is saved, and a spent one skips the opt-in (no consent, no email)
   instead of refusing the account; only Settings answers a spent budget with a 429.
 
@@ -84,7 +91,9 @@ is transactional and sent once.
   purged, expired, or the account deleted), as proof of consent (Privacy Policy, retention).
 - **Export (ops only):** `GET /api/ops/newsletter/subscribers` with
   `Authorization: Bearer <CITY_OPS_SECRET>`. It lists confirmed subscribers with their
-  unsubscribe link, and answers 404 otherwise.
+  unsubscribe link, and answers 404 otherwise. Every export writes one log line
+  (`newsletter.subscribers_exported`: time, row count and the caller's network prefix, never an
+  address or email).
 - **Data export:** `GET /api/workspace/export` includes `newsletter` (address, status, source,
   text version, and when it was opted in, confirmed and unsubscribed), or `null`.
 - **Deletion:** the subscription and the email queue cascade with the account; the consent events

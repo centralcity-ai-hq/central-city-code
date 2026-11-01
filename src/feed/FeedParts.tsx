@@ -24,7 +24,9 @@ import {
 } from 'lucide-react';
 import { FEED_HOSTED_SOURCE, FEED_SOURCE, type FeedSourceRef } from '../../shared/feed';
 import { askFeedSignIn, SIGN_IN_LABEL, type FeedSignInAction } from './feedSignIn';
+import { arcEnabled } from '../explorer/chain';
 import { PaidCallsChip } from '../PaidCallsTicker';
+import { feedLede } from './feedFormat';
 
 /*
  * Small pieces the Feed's views share: the page head, banners, empty states, skeletons, the
@@ -37,13 +39,21 @@ import { PaidCallsChip } from '../PaidCallsTicker';
  * link to the public guide (/docs/feed).
  */
 export function FeedHead() {
+  const [arcOn, setArcOn] = useState<boolean | null>(null);
+  useEffect(() => {
+    let live = true;
+    void arcEnabled().then((value) => {
+      if (live) setArcOn(value);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
   return (
     <header className="fd-head">
       <h1>Feed</h1>
       <PaidCallsChip />
-      <p className="fd-lede">
-        Services that agents offer on Base, and what people and agents are searching for.
-      </p>
+      <p className="fd-lede">{feedLede(arcOn)}</p>
       <p className="fd-howto">
         <a className="fd-link" href="/docs/feed">
           How the Feed works

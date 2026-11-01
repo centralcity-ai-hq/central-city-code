@@ -30,29 +30,43 @@ import {
   exposureKey,
   lazyBundler,
   MAX_REPLACEMENTS,
+  ownSendMarginS,
   NeverBroadcastError,
   registerOwnBundlerMaintainRoute,
   type OwnBundlerUpkeep,
   VALIDITY_MARGIN_S,
   SPONSOR_VALIDITY_S,
+  OWNER_SPONSOR_VALIDITY_S,
+  sponsorValidityS,
   STUCK_MS,
+  SUBMITTER_RESERVE_WEI,
 } from '../server/base/chain/direct-bundler.js';
 import {
   EXPIRY_MARGIN_S,
+  OWN_PAYMASTER_ATTRIBUTION_SQL,
+  OWN_PAYMASTER_BUDGET_CHAIN_SQL,
   OWN_PAYMASTER_BUDGET_SQL,
+  OWN_PAYMASTER_RESERVATIONS_CHAIN_SQL,
   ownPaymasterBudget,
   type BudgetLimits,
+  BudgetError,
 } from '../server/base/chain/own-paymaster-budget.js';
 import { paymasterHash } from '../server/base/chain/own-paymaster.js';
 import type { PolicyAddresses, SponsorFlow } from '../server/base/chain/own-paymaster-policy.js';
 import {
   bundlerRateLimited,
   BundlerError,
+  sponsorBudgetRefused,
   SponsorError,
 } from '../server/base/chain/rpc-bundler.js';
+import { createKeystore, parseKeks } from '../server/base/chain/keystore.js';
+import { pgSpenderKeyStore } from '../server/base/chain/stores.js';
+import { BASE_MIGRATION_SQL, BASE_PAYMENTS_MIGRATION_SQL } from '../server/base/schema.js';
 import { encodeAccountCalls } from '../server/base/chain/submit.js';
 import { transientChainError } from '../server/base/chain/transient.js';
 import { BASE_MAINNET, BASE_NETWORKS } from '../shared/base/chains.js';
+import { ARC_TESTNET } from '../shared/chains.js';
+import { chainParams } from '../server/base/chain/chain-params.js';
 
 // Operation Paymaster's own bundler + sponsoring service (server/base/chain/direct-bundler.ts):
 // sponsor only the calls the flow intended, within policy and budget; store the signed handleOps
@@ -95,6 +109,9 @@ async function database(t: { after: (fn: () => Promise<unknown>) => void }) {
   const pg = await PGlite.create('memory://');
   t.after(() => pg.close());
   await pg.exec(OWN_PAYMASTER_BUDGET_SQL);
+  await pg.exec(OWN_PAYMASTER_ATTRIBUTION_SQL);
+  await pg.exec(OWN_PAYMASTER_BUDGET_CHAIN_SQL);
+  await pg.exec(OWN_PAYMASTER_RESERVATIONS_CHAIN_SQL);
   await pg.exec(DIRECT_BUNDLER_SQL);
   await pg.exec(DIRECT_BUNDLER_FINALITY_SQL);
   // The provisioned submitter (own-paymaster-keys.ts), as production records it.
@@ -133,6 +150,9 @@ function fakeBase() {
     simulate: 'ok' as 'ok' | 'revert' | 'aa25' | 'down',
     innerReverts: false,
     sendFails: false,
+    /** What the node answers to a send, as a node's own throw (Arc's pool, below). */
+    onSend: undefined as undefined | ((raw: Hex) => void),
+    lastRefused: undefined as undefined | Hex,
     sent: [] as Hex[],
     receipts: new Map<string, unknown>(),
   };
@@ -185,7 +205,11 @@ function fakeBase() {
     getBalance: async () => state.balance,
     getBlockNumber: async () => 101n,
     sendRawTransaction: async ({ serializedTransaction }: { serializedTransaction: Hex }) => {
-      if (state.sendFails) throw Object.assign(new Error('fetch failed'), { status: 503 });
+      if (state.sendFails) {
+        state.lastRefused = serializedTransaction;
+        throw Object.assign(new Error('fetch failed'), { status: 503 });
+      }
+      state.onSend?.(serializedTransaction);
       state.sent.push(serializedTransaction);
       return keccak256(serializedTransaction);
     },
@@ -200,17 +224,20 @@ function fakeBase() {
       throw new TransactionNotFoundError({ hash });
     },
   });
-  /** Mines a stored raw transaction with the operation's event (or reverted, without one). */
+  /**
+   * Mines a stored raw transaction with the operation's event (or reverted, without one).
+   * 'inner-revert': the bundle succeeds, the operation's own execution reverted (success false).
+   */
   const mine = (
     raw: Hex,
     userOpHash: Hex,
-    outcome: 'success' | 'reverted' | 'no-event',
+    outcome: 'success' | 'reverted' | 'no-event' | 'inner-revert',
     cost = 7_000_000_000n,
     block = { number: 101n, hash: `0x${'b'.repeat(64)}` as Hex },
   ) => {
     const hash = keccak256(raw);
     const logs =
-      outcome === 'success'
+      outcome === 'success' || outcome === 'inner-revert'
         ? [
             {
               address: ENTRY_POINT,
@@ -221,7 +248,7 @@ function fakeBase() {
               }),
               data: encodeAbiParameters(parseAbiParameters('uint256, bool, uint256, uint256'), [
                 0n,
-                true,
+                outcome === 'success',
                 cost,
                 300_000n,
               ]),
@@ -298,9 +325,12 @@ async function setup(
   options: {
     mode?: 'on' | 'prepare';
     deposit?: bigint;
-    limits?: BudgetLimits;
+    limits?: Partial<BudgetLimits>;
     now?: { at: number };
+    chainId?: number;
     fail?: { next: boolean };
+    /** No log dep: the bundler's own default sink (the console). */
+    noLog?: boolean;
   } = {},
 ) {
   const db = await database(t);
@@ -311,13 +341,16 @@ async function setup(
     deposit: async () => ({ wei: options.deposit ?? 100n * MILLI, block: 100n }),
     now: () => clock.at,
     ...(options.limits ? { limits: options.limits } : {}),
+    // As createDirectBundler builds it: only our submitter can send our sponsorships.
+    submitterBound: true,
   });
   /** Another instance on the same database, optionally with its budget wrapped (race tests). */
+  const lines: string[] = [];
   const make = (wrap?: (b: typeof budget) => typeof budget) =>
     directBundler({
       db,
       client: chain.client,
-      chainId: BASE_MAINNET,
+      chainId: options.chainId ?? BASE_MAINNET,
       entryPoint: ENTRY_POINT,
       mode: options.mode ?? 'on',
       paymaster: PAYMASTER,
@@ -328,8 +361,9 @@ async function setup(
       policy: { addresses: ADDRESSES },
       now: () => clock.at,
       autoMaintain: false,
+      ...(options.noLog ? {} : { log: (line: string) => void lines.push(line) }),
     });
-  return { db, chain, budget, bundler: make(), restart: make, clock };
+  return { db, chain, budget, bundler: make(), restart: make, clock, lines };
 }
 
 const unsigned = async (calls = [register()], extra: Partial<UserOperation<'0.6'>> = {}) =>
@@ -355,6 +389,7 @@ const intentOf = (flow: SponsorFlow, calls = [register()], sender: `0x${string}`
   calls,
   sender,
   initCode: '0x' as const,
+  accountId: null,
 });
 const hashOf = (op: UserOperation<'0.6'>) =>
   getUserOperationHash({
@@ -423,6 +458,47 @@ test('sponsored prepare: our signer over getHash, the 194-byte layout, reserved 
   assert.equal((await reservation(db, hashOf(op)))?.status, 'reserved');
 });
 
+test('a sponsorship an owner signs in the browser is valid 5 minutes, a server-signed one 9', async (t) => {
+  const { db, bundler } = await setup(t);
+  const until = (op: UserOperation<'0.6'>) =>
+    Number(BigInt(`0x${op.paymasterAndData!.slice(42, 54)}`));
+  // An owner's cancel (a no-op to its own wallet): the exit flow, handed out to be signed.
+  const cancel = [{ target: SPENDER, value: 0n, data: '0x' as const }];
+  const exit = await bundler.prepare(await unsigned(cancel), { intent: intentOf('exit', cancel) });
+  assert.equal(until(exit), S + OWNER_SPONSOR_VALIDITY_S);
+  assert.equal(OWNER_SPONSOR_VALIDITY_S, 300);
+  assert.equal((await reservation(db, hashOf(exit)))?.status, 'reserved');
+  const registration = await bundler.prepare(await unsigned([register()], { nonce: 6n }), {
+    intent: intentOf('registration'),
+  });
+  assert.equal(until(registration), S + SPONSOR_VALIDITY_S);
+  assert.deepEqual(
+    (['exit', 'ownerPay', 'rate', 'registration', 'agentPay', 'feedPay'] as const).map(
+      sponsorValidityS,
+    ),
+    [300, 300, 300, 540, 540, 540],
+  );
+});
+
+test("its send margin is told to callers (Bundler.sendMarginS): VALIDITY_MARGIN_S for our paymaster's sponsorships, 0 for anything else", async (t) => {
+  const { db, bundler } = await setup(t);
+  const cancel = [{ target: SPENDER, value: 0n, data: '0x' as const }];
+  const exit = await bundler.prepare(await unsigned(cancel), { intent: intentOf('exit', cancel) });
+  const coinbase = `0x2FAEB0760D4230Ef2aC21496Bb4F0b47D634FD4c${'00'.repeat(174)}` as const;
+  assert.equal(bundler.sendMarginS!(exit.paymasterAndData!), VALIDITY_MARGIN_S);
+  assert.equal(bundler.sendMarginS!(coinbase), 0);
+  assert.equal(bundler.sendMarginS!('0x'), 0);
+  // The same through the router, ours built or not, and through a CDP route.
+  const route = { db, chainId: BASE_MAINNET, entryPoint: ENTRY_POINT, paymaster: PAYMASTER };
+  const lazy = lazyBundler({ make: async () => bundler, route });
+  const cdp = fakeCdp().bundler;
+  for (const b of [lazy, lazy.routes(cdp)]) {
+    assert.equal(b.sendMarginS!(exit.paymasterAndData!), VALIDITY_MARGIN_S);
+    assert.equal(b.sendMarginS!(coinbase), 0);
+  }
+  assert.equal(ownSendMarginS(null, exit.paymasterAndData!), 0);
+});
+
 test('fails closed: prepare mode, foreign signer, foreign pending signer, not allowlisted, no intent', async (t) => {
   const prepareMode = await setup(t, { mode: 'prepare' });
   const intent = intentOf('registration');
@@ -478,6 +554,25 @@ test('budget: an hourly refusal is "busy" (retry later), never a permanent failu
   assert.ok(error instanceof SponsorError && error.rejection === 'busy');
   assert.ok(bundlerRateLimited(error));
   assert.ok(transientChainError(error));
+  assert.ok(sponsorBudgetRefused(error), 'the route can tell the owner it was the budget');
+  // A paymaster's other refusals are not the budget's.
+  assert.ok(!sponsorBudgetRefused(new SponsorError(new Error('down'))));
+});
+
+test('budget: a refused deposit is no "not now": no retry-later answer', async (t) => {
+  const { bundler, budget } = await setup(t);
+  const reserve = budget.reserve;
+  budget.reserve = async () => {
+    throw new BudgetError('deposit');
+  };
+  t.after(() => {
+    budget.reserve = reserve;
+  });
+  const error = await bundler
+    .prepare(await unsigned(), { intent: intentOf('registration') })
+    .catch((e: unknown) => e);
+  assert.ok(error instanceof SponsorError && error.rejection === 'other');
+  assert.ok(!sponsorBudgetRefused(error));
 });
 
 test('send: simulation revert sends nothing, takes no nonce and moves no reservation', async (t) => {
@@ -624,6 +719,78 @@ test('receipt: the event settles the reservation at actualGasCost; a reverted bu
   assert.equal(settled.rows[0]!.n, 4);
 });
 
+test('CCA-752: a sponsored operation that reverts inside is settled from the deposit at its cost and logged as an ALERT, once', async (t) => {
+  const { db, chain, bundler, lines } = await setup(t);
+  const intent = intentOf('registration');
+  const a = signed(await bundler.prepare(await unsigned(), { intent }));
+  const b = signed(await bundler.prepare(await unsigned([register()], { nonce: 6n }), { intent }));
+  await bundler.send(a);
+  await bundler.send(b);
+  const [rowA, rowB] = await sends(db);
+  chain.mine(rowA!.raw_tx as Hex, hashOf(a), 'success', 7_000_000_000n);
+  chain.mine(rowB!.raw_tx as Hex, hashOf(b), 'inner-revert', 6_000_000_000n);
+  assert.equal((await bundler.receipt(hashOf(a)))?.success, true);
+  assert.equal((await bundler.receipt(hashOf(b)))?.success, false);
+  // The worst case was reserved; the deposit paid the reverted operation's actual cost.
+  assert.deepEqual(await reservation(db, hashOf(b)), {
+    status: 'settled',
+    actual_cost_wei: '6000000000',
+  });
+  await bundler.receipt(hashOf(b));
+  const alerts = lines.filter((l) => l.includes('ALERT sponsored operation'));
+  assert.deepEqual(alerts, [
+    `own paymaster: ALERT sponsored operation ${hashOf(b)} reverted, deposit paid 6000000000 wei`,
+  ]);
+});
+
+test('CCA-752: without a log dep the reverted-operation ALERT reaches the console (the Fastify logger is off)', async (t) => {
+  const seen: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => void seen.push(args.map(String).join(' '));
+  t.after(() => {
+    console.error = original;
+  });
+  const { db, chain, bundler, lines } = await setup(t, { noLog: true });
+  const a = signed(await bundler.prepare(await unsigned(), { intent: intentOf('registration') }));
+  await bundler.send(a);
+  const [row] = await sends(db);
+  chain.mine(row!.raw_tx as Hex, hashOf(a), 'inner-revert', 6_000_000_000n);
+  assert.equal((await bundler.receipt(hashOf(a)))?.success, false);
+  assert.equal(lines.length, 0);
+  assert.deepEqual(
+    seen.filter((l) => l.includes('ALERT sponsored operation')),
+    [`own paymaster: ALERT sponsored operation ${hashOf(a)} reverted, deposit paid 6000000000 wei`],
+  );
+});
+
+test('CCA-752: a settlement whose database write fails is retried on the next refresh and ALERTs then, once', async (t) => {
+  const { db, chain, bundler, lines } = await setup(t);
+  const a = signed(await bundler.prepare(await unsigned(), { intent: intentOf('registration') }));
+  await bundler.send(a);
+  const [row] = await sends(db);
+  chain.mine(row!.raw_tx as Hex, hashOf(a), 'inner-revert', 6_000_000_000n);
+  const transaction = db.transaction;
+  let fail = true;
+  db.transaction = ((action: never) => {
+    if (fail) {
+      fail = false;
+      return Promise.reject(new Error('database unavailable'));
+    }
+    return transaction(action);
+  }) as typeof db.transaction;
+  t.after(() => void (db.transaction = transaction));
+  await bundler.receipt(hashOf(a)).catch(() => null);
+  const alerts = () => lines.filter((l) => l.includes('ALERT sponsored operation'));
+  assert.equal(alerts().length, 0, 'nothing settled, nothing alerted yet');
+  await bundler.receipt(hashOf(a));
+  await bundler.receipt(hashOf(a));
+  assert.equal(alerts().length, 1, JSON.stringify(lines));
+  assert.deepEqual(await reservation(db, hashOf(a)), {
+    status: 'settled',
+    actual_cost_wei: '6000000000',
+  });
+});
+
 test('the submitter exposure is reserved before signing; pending ones add up', async (t) => {
   const { db, bundler } = await setup(t);
   const intent = intentOf('registration');
@@ -646,14 +813,19 @@ test('the submitter exposure is reserved before signing; pending ones add up', a
   }
 });
 
-test('the ordinary budget nearly spent refuses the first send, and the replacement premium', async (t) => {
+test('at send only the deposit refuses: the first send, and the replacement premium; a spent ordinary budget never does', async (t) => {
   const clock = { at: NOW };
-  const limits: BudgetLimits = {
+  const limits: Partial<BudgetLimits> = {
     ordinaryCeilingWei: 150n * MILLI,
     hourlyOrdinaryWei: 10n * MILLI,
     protectedWei: 50n * MILLI,
   };
-  const { db, chain, bundler } = await setup(t, { now: clock, limits });
+  const options: { now: { at: number }; limits: Partial<BudgetLimits>; deposit: bigint } = {
+    now: clock,
+    limits,
+    deposit: 150n * MILLI,
+  };
+  const { db, chain, bundler } = await setup(t, options);
   const intent = intentOf('registration');
   const open = async () =>
     BigInt(
@@ -664,20 +836,23 @@ test('the ordinary budget nearly spent refuses the first send, and the replaceme
       ).rows[0]!.s,
     );
 
-  // 1. Only the sponsorship fits, not the submitter's exposure on top: nothing is signed.
+  // 1. The deposit covers the sponsorship, not the submitter's exposure on top: nothing is signed.
   const a = signed(await bundler.prepare(await unsigned(), { intent }));
-  limits.ordinaryCeilingWei = await open();
+  options.deposit = await open();
   await assert.rejects(
     bundler.send(a),
-    (e: unknown) => e instanceof BundlerError && /budget/.test(e.message),
+    (e: unknown) => e instanceof BundlerError && /budget \(deposit\)/.test(e.message),
   );
   assert.deepEqual(await sends(db), []);
   assert.equal(chain.state.sent.length, 0);
 
-  // 2. The exposure fits, the +30% premium does not: the replacement is never signed.
-  limits.ordinaryCeilingWei = 150n * MILLI;
-  await bundler.send(a);
+  // 2. The ordinary ceiling and hour spent meanwhile: admitted at reserve, it is still sent.
+  options.deposit = 150n * MILLI;
   limits.ordinaryCeilingWei = await open();
+  limits.hourlyOrdinaryWei = 1n;
+  await bundler.send(a);
+  // The +30% premium does not fit the deposit: the replacement is never signed.
+  options.deposit = await open();
   clock.at += STUCK_MS + 1;
   await bundler.maintain();
   const [row] = await sends(db);
@@ -685,7 +860,7 @@ test('the ordinary budget nearly spent refuses the first send, and the replaceme
   assert.equal(chain.state.sent.length, 1);
 
   // 3. With room again, the premium is admitted and only the increase counts (max, not sum).
-  limits.ordinaryCeilingWei = 150n * MILLI;
+  options.deposit = 150n * MILLI;
   const before = await open();
   await bundler.maintain();
   assert.equal((await sends(db))[0]!.tx_hashes.length, 2);
@@ -719,6 +894,115 @@ test('a stuck transaction is replaced at the same nonce with +30% fees, bounded 
   // Mined under the replacement's hash: found, settled.
   chain.mine(chain.state.sent[1]!, hashOf(op), 'success');
   assert.equal((await bundler.receipt(hashOf(op)))?.success, true);
+});
+
+test(
+  'the real key store on one connection: a send and its replacement complete under the lane lock',
+  { timeout: 30_000 },
+  async (t) => {
+    // The key store reads on its own connection. PGlite has one, so a read while the lane lock is held
+    // would wait forever: this test then hits its timeout.
+    const clock = { at: NOW };
+    const { db, chain, budget } = await setup(t, { now: clock });
+    await db.exec(`CREATE TABLE IF NOT EXISTS operators (id text PRIMARY KEY);`);
+    await db.exec(BASE_MIGRATION_SQL);
+    await db.exec(BASE_PAYMENTS_MIGRATION_SQL);
+    const keys = createKeystore({
+      keks: parseKeks(`v1:${Buffer.alloc(32, 7).toString('base64')}`),
+      store: pgSpenderKeyStore(db),
+    });
+    const created = await keys.createSpenderKey();
+    const bundler = directBundler({
+      db,
+      client: chain.client,
+      chainId: BASE_MAINNET,
+      entryPoint: ENTRY_POINT,
+      mode: 'on',
+      paymaster: PAYMASTER,
+      keystore: keys,
+      signer: { keyRef: 'v1:signer', address: signer.address },
+      submitter: { keyRef: created.keyRef, address: created.signer },
+      budget,
+      policy: { addresses: ADDRESSES },
+      now: () => clock.at,
+      autoMaintain: false,
+      log: () => undefined,
+    });
+    const op = signed(await bundler.prepare(await unsigned(), { sponsor: false }));
+    await bundler.send(op);
+    assert.equal(chain.state.sent.length, 1);
+    const first = parseTransaction(chain.state.sent[0]!);
+    // Sent again: never signed again.
+    await bundler.send(op);
+    assert.equal(chain.state.sent.length, 1);
+    assert.equal(await laneNonce(db), '1');
+    clock.at += STUCK_MS + 1;
+    await bundler.maintain();
+    assert.equal(chain.state.sent.length, 2);
+    const second = parseTransaction(chain.state.sent[1]!);
+    assert.equal(second.nonce, first.nonce);
+    assert.equal(await laneNonce(db), '1');
+    assert.equal((await sends(db))[0]!.tx_hashes.length, 2);
+  },
+);
+
+test('a send mined during the simulation is not cancelled: the nonce is read again first', async (t) => {
+  const clock = { at: NOW };
+  const { db, chain, bundler } = await setup(t, { now: clock });
+  const op = signed(await bundler.prepare(await unsigned(), { intent: intentOf('registration') }));
+  await bundler.send(op);
+  clock.at += STUCK_MS + 1;
+  chain.state.simulate = 'revert';
+  chain.state.onSimulate = async () => chain.mine(chain.state.sent[0]!, hashOf(op), 'success');
+  await bundler.maintain();
+  assert.equal(chain.state.sent.length, 1);
+  assert.equal((await sends(db))[0]!.tx_hashes.length, 1);
+  // The next pass finds its receipt: included, not cancelled.
+  await bundler.maintain();
+  assert.equal((await sends(db))[0]!.status, 'included');
+  assert.equal((await bundler.receipt(hashOf(op)))?.success, true);
+});
+
+test('a receipt seen with the nonce not moved yet (another node) also stops the cancel', async (t) => {
+  const clock = { at: NOW };
+  const { db, chain, bundler } = await setup(t, { now: clock });
+  const op = signed(await bundler.prepare(await unsigned(), { intent: intentOf('registration') }));
+  await bundler.send(op);
+  clock.at += STUCK_MS + 1;
+  chain.state.simulate = 'revert';
+  chain.state.onSimulate = async () => {
+    chain.mine(chain.state.sent[0]!, hashOf(op), 'success');
+    chain.state.mined = 0;
+  };
+  await bundler.maintain();
+  assert.equal(chain.state.sent.length, 1);
+  assert.equal((await sends(db))[0]!.tx_hashes.length, 1);
+});
+
+test('a failed read of the nonce cancels nothing; a send that really reverts is still cancelled', async (t) => {
+  const clock = { at: NOW };
+  const { db, chain, bundler } = await setup(t, { now: clock });
+  const op = signed(await bundler.prepare(await unsigned(), { intent: intentOf('registration') }));
+  await bundler.send(op);
+  clock.at += STUCK_MS + 1;
+  chain.state.simulate = 'revert';
+  const client = chain.client as unknown as { getTransactionCount: () => Promise<number> };
+  const read = client.getTransactionCount;
+  chain.state.onSimulate = async () => {
+    client.getTransactionCount = async () => {
+      throw new Error('fetch failed');
+    };
+  };
+  await bundler.maintain();
+  assert.equal(chain.state.sent.length, 1);
+  client.getTransactionCount = read;
+  await bundler.maintain();
+  assert.equal(chain.state.sent.length, 2);
+  assert.equal((await sends(db))[0]!.tx_hashes.length, 2);
+  assert.equal(
+    parseTransaction(chain.state.sent[1]!).to?.toLowerCase(),
+    submitter.address.toLowerCase(),
+  );
 });
 
 test('only our own sponsorship or a self-paid operation is submitted; low submitter funds wait', async (t) => {
@@ -889,26 +1173,33 @@ test('preVerificationGas carries the L1 data fee at the price the EntryPoint rep
   assert.equal(withL1.preVerificationGas - plain.preVerificationGas, expected);
 });
 
-test('a self-paid operation is ordinary work, never the protected exit reserve', async (t) => {
-  const limits: BudgetLimits = {
-    ordinaryCeilingWei: 150n * MILLI,
-    hourlyOrdinaryWei: 10n * MILLI,
+test('a self-paid operation is its own class: no sponsored cap, never the protected reserve, only the submitter float', async (t) => {
+  const limits: Partial<BudgetLimits> = {
+    ordinaryCeilingWei: 1n,
+    hourlyOrdinaryWei: 1n,
+    senderHourlyOrdinaryWei: 1n,
     protectedWei: 50n * MILLI,
   };
-  const { db, chain, bundler } = await setup(t, { limits });
+  const { db, chain, bundler } = await setup(t, { limits, deposit: 0n });
   const own = signed(await bundler.prepare(await unsigned(), { sponsor: false }));
-  // With the hourly cap spent, the owner-funded payment's submitter exposure is refused: it does
-  // not slip into the protected class.
-  limits.hourlyOrdinaryWei = 1n;
-  await assert.rejects(bundler.send(own), /budget \(hourly\)/);
-  assert.equal(chain.state.sent.length, 0);
-  limits.hourlyOrdinaryWei = 10n * MILLI;
+  // Every sponsored cap spent, the deposit empty: the owner-funded payment is still sent.
   await bundler.send(own);
-  const row = await db.query<{ flow: string; protected: boolean }>(
-    'SELECT flow, protected FROM own_paymaster_reservations WHERE user_op_hash = $1',
+  const row = await db.query<{ flow: string; protected: boolean; max: string }>(
+    'SELECT flow, protected, max_cost_wei::text AS max FROM own_paymaster_reservations WHERE user_op_hash = $1',
     [exposureKey(hashOf(own))],
   );
-  assert.deepEqual({ ...row.rows[0] }, { flow: 'ownerPay', protected: false });
+  assert.deepEqual(
+    { flow: row.rows[0]!.flow, protected: row.rows[0]!.protected },
+    { flow: 'selfPaid', protected: false },
+  );
+  // A second one while the first is pending: the submitter's float holds one and a half.
+  const exposure = BigInt(row.rows[0]!.max);
+  chain.state.balance = SUBMITTER_RESERVE_WEI + exposure + exposure / 2n;
+  const next = signed(
+    await bundler.prepare(await unsigned([register()], { nonce: 6n }), { sponsor: false }),
+  );
+  await assert.rejects(bundler.send(next), /budget \(submitter_float\)/);
+  assert.equal(chain.state.sent.length, 1);
 });
 
 test('no accounting record, no signature (a replacement is never classified by default)', async (t) => {
@@ -944,7 +1235,7 @@ const openSum = async (db: Database) =>
   );
 
 test('nothing settles before finality; a reorg never frees headroom twice', async (t) => {
-  const limits: BudgetLimits = {
+  const limits: Partial<BudgetLimits> = {
     ordinaryCeilingWei: 150n * MILLI,
     hourlyOrdinaryWei: 10n * MILLI,
     protectedWei: 50n * MILLI,
@@ -1153,7 +1444,7 @@ const fakeCdp = () => {
   };
 };
 
-test('while ours cannot be built, NEW operations use CDP (logged, effective cdp_fallback)', async (t) => {
+test('while ours cannot be built, NEW operations use CDP unsponsored (logged, effective cdp_fallback)', async (t) => {
   const db = await database(t);
   const lines: string[] = [];
   const cdp = fakeCdp();
@@ -1166,7 +1457,15 @@ test('while ours cannot be built, NEW operations use CDP (logged, effective cdp_
     route: { db, chainId: BASE_MAINNET, entryPoint: ENTRY_POINT, paymaster: PAYMASTER },
   });
   const op = await unsigned();
-  assert.equal(await lazy.prepare(op), op);
+  // No sponsorship on that path: refused as busy, CDP is never asked.
+  await assert.rejects(
+    lazy.prepare(op),
+    (e: unknown) => e instanceof SponsorError && /CDP is the fallback/.test(e.message),
+  );
+  await assert.rejects(lazy.prepare(op, { intent: intentOf('registration') }), SponsorError);
+  assert.deepEqual(cdp.calls, []);
+  // A self-paid one goes through.
+  assert.equal(await lazy.prepare(op, { sponsor: false }), op);
   await lazy.send(op); // prepared by CDP: not ours, CDP sends it
   assert.deepEqual(cdp.calls, ['prepare', 'send']);
   assert.equal(lazy.effective(), 'cdp_fallback');
@@ -1763,4 +2062,244 @@ test('a sponsorship without any reservation is ambiguous, never never-sent', asy
   assert.ok(!(error instanceof NeverBroadcastError));
   assert.match((error as Error).message, /no reservation/);
   assert.equal(chain.state.sent.length, 0);
+});
+
+test('a sponsorship records whom it is for, its submitter exposure too; release gives back a never-sent one', async (t) => {
+  const { db, bundler } = await setup(t);
+  const intent = { ...intentOf('registration'), accountId: 'ws-1' };
+  const a = signed(await bundler.prepare(await unsigned(), { intent }));
+  const b = signed(await bundler.prepare(await unsigned([register()], { nonce: 6n }), { intent }));
+  await bundler.send(a);
+  const who = async (hash: string) =>
+    (
+      await db.query<{ sender: string; account_id: string; status: string; released: boolean }>(
+        `SELECT sender, account_id, status, released_at IS NOT NULL AS released
+         FROM own_paymaster_reservations WHERE user_op_hash = $1`,
+        [hash],
+      )
+    ).rows[0];
+  const spender = SPENDER.toLowerCase();
+  assert.deepEqual(await who(hashOf(a)), {
+    sender: spender,
+    account_id: 'ws-1',
+    status: 'sent',
+    released: false,
+  });
+  assert.deepEqual(await who(exposureKey(hashOf(a))), {
+    sender: spender,
+    account_id: 'ws-1',
+    status: 'sent',
+    released: false,
+  });
+  // Never sent: given back at once, and then never sent.
+  await bundler.release!(hashOf(b));
+  await bundler.release!(hashOf(b));
+  assert.deepEqual(await who(hashOf(b)), {
+    sender: spender,
+    account_id: 'ws-1',
+    status: 'expired',
+    released: true,
+  });
+  await assert.rejects(bundler.send(b));
+  assert.equal((await sends(db)).length, 1);
+  // Sent: never touched.
+  await bundler.release!(hashOf(a));
+  assert.equal((await who(hashOf(a)))?.status, 'sent');
+});
+
+test('budget: the per-account refusals are "busy" too', async (t) => {
+  const { bundler } = await setup(t, { limits: { accountHourlyOrdinaryWei: 1n } });
+  const error = await bundler
+    .prepare(await unsigned(), { intent: { ...intentOf('registration'), accountId: 'ws-1' } })
+    .catch((e: unknown) => e);
+  assert.ok(error instanceof SponsorError && error.rejection === 'busy');
+  assert.match(error.message, /account_hourly/);
+  // Without an account the same operation is sponsored.
+  await bundler.prepare(await unsigned(), { intent: intentOf('registration') });
+});
+
+const tipsAfterBumps = async (
+  t: { after: (fn: () => Promise<unknown>) => void },
+  chainId: number,
+  firstTip: bigint,
+  bumps: number,
+) => {
+  const clock = { at: NOW };
+  const { chain, bundler } = await setup(t, { now: clock, chainId });
+  chain.state.balance = 100n * 10n ** 18n;
+  const client = chain.client as unknown as { estimateMaxPriorityFeePerGas: () => Promise<bigint> };
+  client.estimateMaxPriorityFeePerGas = async () => firstTip;
+  await bundler.send(signed(await bundler.prepare(await unsigned(), { sponsor: false })));
+  for (let i = 0; i < bumps; i++) {
+    clock.at += STUCK_MS + 1;
+    await bundler.maintain();
+  }
+  return chain.state.sent.map((raw) => parseTransaction(raw).maxPriorityFeePerGas ?? 0n);
+};
+
+test('a tip of 0 can be replaced: by the chain minimum, on Base and on Arc', async (t) => {
+  assert.deepEqual(await tipsAfterBumps(t, BASE_MAINNET, 0n, 2), [0n, 1_000_000n, 2_000_000n]);
+  const GWEI = 1_000_000_000n;
+  assert.deepEqual(await tipsAfterBumps(t, ARC_TESTNET, 0n, 2), [0n, GWEI, 2n * GWEI]);
+});
+
+test('the tip bump is the larger of +30% and the minimum, within the ceiling', async (t) => {
+  // Above 3.34 x the minimum, Base's +30% stands as before; under it the minimum raises more.
+  assert.deepEqual(await tipsAfterBumps(t, BASE_MAINNET, 10_000_000n, 1), [
+    10_000_000n,
+    13_000_000n,
+  ]);
+  assert.deepEqual(await tipsAfterBumps(t, BASE_MAINNET, 1_000_000n, 1), [1_000_000n, 2_000_000n]);
+  // Just under the 0.05 gwei ceiling: capped, never above it.
+  assert.deepEqual(await tipsAfterBumps(t, BASE_MAINNET, 49_000_000n, 1), [
+    49_000_000n,
+    50_000_000n,
+  ]);
+});
+
+test('every bump and cancel a send may take stays under the tip ceiling, on each chain', () => {
+  for (const chainId of [BASE_MAINNET, ARC_TESTNET]) {
+    const params = chainParams(chainId);
+    assert.ok(
+      params.minBumpWei * BigInt(MAX_REPLACEMENTS + 3) < params.gasCeilings.maxPriorityFeePerGas,
+    );
+  }
+});
+
+// Arc's node holds only about 16 nonces ahead of the mined head (measured on testnet, 1 Nov), and
+// answers "txpool is full" past that. A stuck lane must drain in one maintain run.
+const arcLane = async (t: Parameters<typeof setup>[0], count: number) => {
+  const clock = { at: NOW };
+  const ctx = await setup(t, { chainId: ARC_TESTNET, now: clock });
+  ctx.chain.state.balance = 10n ** 19n;
+  ctx.chain.state.finalized = 0;
+  ctx.chain.state.sendFails = true;
+  for (let i = 0; i < count; i++) {
+    const op = await ctx.bundler.prepare(await unsigned([register()], { nonce: BigInt(i) }), {
+      sponsor: false,
+    });
+    await ctx.bundler.send(signed(op)).catch(() => undefined);
+  }
+  ctx.chain.state.sendFails = false;
+  return { ...ctx, clock };
+};
+/** A node as measured: refuses past the window, mines every contiguous nonce it holds. */
+const arcNode = (chain: ReturnType<typeof fakeBase>, seen: number[] = []) => {
+  const held = new Set<number>();
+  chain.state.onSend = (raw) => {
+    const nonce = parseTransaction(raw).nonce ?? 0;
+    if (nonce >= chain.state.mined + 16) throw new Error('txpool is full');
+    seen.push(nonce);
+    held.add(nonce);
+    while (held.has(chain.state.mined)) chain.state.mined += 1;
+  };
+};
+
+test('Arc: a backlog past the pool window drains in one maintain run', async (t) => {
+  const { bundler, chain } = await arcLane(t, 40);
+  const seen: number[] = [];
+  arcNode(chain, seen);
+  await bundler.maintain(50);
+  assert.equal(chain.state.mined, 40);
+  // Nothing was offered past the window: no refused sends wasting the node's rate limit.
+  assert.equal(new Set(seen).size, 40);
+});
+
+test('Arc: nothing past the pool window is signed or sent, even when it can no longer succeed', async (t) => {
+  const { bundler, chain, clock, db } = await arcLane(t, 20);
+  const before = chain.state.sent.length;
+  await db.query('UPDATE own_paymaster_sends SET valid_until = $1', [S]);
+  clock.at += 60_000;
+  // The head never lands here: the window stays where it is.
+  chain.state.simulate = 'revert';
+  chain.state.onSend = () => undefined;
+  await bundler.maintain(5);
+  await bundler.maintain(50);
+  const nonces = chain.state.sent.slice(before).map((raw) => parseTransaction(raw).nonce ?? 0);
+  assert.ok(nonces.length > 0);
+  assert.ok(Math.max(...nonces) < 16);
+});
+
+test('Arc: expired neighbours are cancelled before the head can release them', async (t) => {
+  const { bundler, chain, clock, db } = await arcLane(t, 3);
+  await db.query('UPDATE own_paymaster_sends SET valid_until = $1', [S]);
+  clock.at += 60_000;
+  chain.state.simulate = 'revert';
+  const seen: number[] = [];
+  chain.state.onSend = (raw) => void seen.push(parseTransaction(raw).nonce ?? 0);
+  await bundler.maintain(5);
+  assert.deepEqual(seen, [2, 1, 0]);
+});
+
+test('Arc: a head the node knows but does not mine is replaced after 30 s, not 3 minutes', async (t) => {
+  const { bundler, chain, clock } = await arcLane(t, 1);
+  chain.state.sent.push(chain.state.lastRefused!);
+  const before = chain.state.sent.length;
+  clock.at += 31_000;
+  await bundler.maintain(5);
+  assert.ok(chain.state.sent.length > before);
+  const last = parseTransaction(chain.state.sent.at(-1)!);
+  const first = parseTransaction(chain.state.lastRefused!);
+  assert.ok(last.maxFeePerGas! > first.maxFeePerGas!);
+});
+
+test('Arc: a head refused as underpriced is replaced at once, without waiting to be stuck', async (t) => {
+  const { bundler, chain } = await arcLane(t, 1);
+  let answers = 0;
+  chain.state.onSend = () => {
+    if (answers++ === 0) throw new Error('replacement transaction underpriced');
+  };
+  await bundler.maintain(5);
+  assert.equal(answers, 2);
+  assert.equal(chain.state.sent.length, 1);
+  const raw = chain.state.sent[0]!;
+  assert.ok(
+    parseTransaction(raw).maxFeePerGas! > parseTransaction(chain.state.lastRefused!).maxFeePerGas!,
+  );
+});
+
+test('Base keeps its lane upkeep: no window, one pass, a known head waits for STUCK_MS', async (t) => {
+  const clock = { at: NOW };
+  const { bundler, chain } = await setup(t, { now: clock });
+  chain.state.finalized = 0;
+  chain.state.sendFails = true;
+  for (let i = 0; i < 20; i++) {
+    const op = await bundler.prepare(await unsigned([register()], { nonce: BigInt(i) }), {
+      sponsor: false,
+    });
+    await bundler.send(signed(op)).catch(() => undefined);
+  }
+  chain.state.sendFails = false;
+  const seen: number[] = [];
+  chain.state.onSend = (raw) => void seen.push(parseTransaction(raw).nonce ?? 0);
+  await bundler.maintain(50);
+  // Every unknown send rebroadcast once, past any window.
+  assert.deepEqual(
+    [...seen].sort((a, b) => a - b),
+    Array.from({ length: 20 }, (_, i) => i),
+  );
+  seen.length = 0;
+  clock.at += 31_000;
+  await bundler.maintain(50);
+  assert.deepEqual(seen, [], 'known to the node, not stuck: nothing is sent again');
+});
+
+test('Arc: the node\'s pool and rate limits are "not now": no failure line, the next pass offers again', async (t) => {
+  const { bundler, chain, lines } = await arcLane(t, 3);
+  lines.length = 0;
+  let answers = 0;
+  chain.state.onSend = (raw) => {
+    answers++;
+    if (answers === 1) throw Object.assign(new Error('txpool is full'), { code: -32003 });
+    if (answers === 2) throw Object.assign(new Error('rate limit exceeded'), { code: -32005 });
+    if ((parseTransaction(raw).nonce ?? 0) === chain.state.mined) chain.state.mined += 1;
+  };
+  await bundler.maintain(50);
+  assert.equal(chain.state.mined, 3);
+  assert.deepEqual(
+    lines.filter(
+      (line) => /rebroadcast failed|broadcast refused/.test(line) && !/stored/.test(line),
+    ),
+    [],
+  );
 });

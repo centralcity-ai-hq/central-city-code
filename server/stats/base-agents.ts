@@ -1,6 +1,8 @@
 import type { Database } from '../database.js';
 import { BASE_MAINNET, BASE_NETWORKS } from '../../shared/base/chains.js';
 import { AGENT_URI_ORIGIN } from '../../shared/base/on-base.js';
+import { arcNetwork } from '../../shared/chains.js';
+import { protocolArcChainIdFromEnv } from '../protocol/fees/cron.js';
 import type { BaseAgentsField } from '../../shared/paid-calls.js';
 import { FROM, LISTED } from '../base/explorer/store.js';
 import {
@@ -43,15 +45,59 @@ export const BASE_AGENTS_LAST_GOOD_MS = 60 * 60_000;
 export const BASE_AGENTS_COUNT_SQL = `SELECT count(*)::bigint AS n ${FROM} WHERE ${LISTED}`;
 
 export async function countBaseAgents(db: Pick<Database, 'query'>): Promise<number> {
-  const registry = BASE_NETWORKS[BASE_MAINNET].contracts.identityRegistry ?? '';
+  return countListedAgents(
+    db,
+    BASE_MAINNET,
+    BASE_NETWORKS[BASE_MAINNET].contracts.identityRegistry ?? '',
+  );
+}
+
+/** The explorer-listed agents on one chain and identity registry (the same SQL as Base's). */
+export async function countListedAgents(
+  db: Pick<Database, 'query'>,
+  chainId: number,
+  registry: string,
+): Promise<number> {
   const row = (
     await db.query<{ n: string | number }>(BASE_AGENTS_COUNT_SQL, [
-      BASE_MAINNET,
+      chainId,
       registry,
       AGENT_URI_ORIGIN,
     ])
   ).rows[0];
   return Number(row?.n ?? 0);
+}
+
+/**
+ * The Arc agents number (`arc_agents`): the explorer-listed agents on the Arc chain, shared through
+ * its own public_stats row. Never the Base row: server/dashboard/rollup.ts reads base_agents_total
+ * as the Base total.
+ */
+export const ARC_AGENTS_KEY = 'arc_agents_total';
+
+/** The Arc agents reader, or undefined while Arc is off (no chain id): no field, no query. */
+export function createArcAgentsReader(deps: {
+  db: Pick<Database, 'query'>;
+  store: PublicStatsStore;
+  clock: () => number;
+  env: Record<string, string | undefined>;
+  ttlMs?: number;
+  count?: () => Promise<number>;
+  hold?: (forMs: number) => Promise<void>;
+}): BaseAgentsReader | undefined {
+  const chainId = protocolArcChainIdFromEnv(deps.env);
+  const network = chainId === null ? null : arcNetwork(chainId, deps.env);
+  if (chainId === null || !network) return undefined;
+  const registry = network.contracts.identityRegistry;
+  return createBaseAgentsReader({
+    db: deps.db,
+    store: deps.store,
+    clock: deps.clock,
+    ttlMs: deps.ttlMs,
+    key: ARC_AGENTS_KEY,
+    count: deps.count ?? (() => countListedAgents(deps.db, chainId, registry)),
+    hold: deps.hold,
+  });
 }
 
 /** Extends a row's refresh lease to `forMs` from now on the database clock (never shortens it). */
@@ -81,7 +127,9 @@ export function createBaseAgentsReader(deps: {
   store: PublicStatsStore;
   clock: () => number;
   ttlMs?: number;
-  /** The count itself (tests); defaults to countBaseAgents. */
+  /** The public_stats row (default BASE_AGENTS_KEY). */
+  key?: string;
+  /** The count itself (tests, Arc); defaults to countBaseAgents. */
   count?: () => Promise<number>;
   /** Keeps the shared lease `forMs` more (database clock); defaults to holdLease on `db`. */
   hold?: (forMs: number) => Promise<void>;
@@ -89,7 +137,8 @@ export function createBaseAgentsReader(deps: {
   const ttl = deps.ttlMs ?? PUBLIC_STATS_TTL_MS;
   const count = deps.count ?? (() => countBaseAgents(deps.db));
   const { store } = deps;
-  const hold = deps.hold ?? ((forMs: number) => holdLease(deps.db, BASE_AGENTS_KEY, forMs));
+  const key = deps.key ?? BASE_AGENTS_KEY;
+  const hold = deps.hold ?? ((forMs: number) => holdLease(deps.db, key, forMs));
   let last: StoredStat | null = null;
   let until = 0;
   let failure: unknown = null;
@@ -104,18 +153,18 @@ export function createBaseAgentsReader(deps: {
     const now = deps.clock();
     let claimed = false;
     try {
-      const row = await store.read(BASE_AGENTS_KEY);
+      const row = await store.read(key);
       if (row && now - row.refreshedAt < ttl) return keep(row, row.refreshedAt + ttl);
       // The stored value stays the last good one while this instance counts, so a response that
       // cannot wait for the count still has a number.
       if (row && (!last || row.refreshedAt >= last.refreshedAt)) last = row;
-      if (await store.claim(BASE_AGENTS_KEY, now, ttl, PUBLIC_STATS_LEASE_MS)) {
+      if (await store.claim(key, now, ttl, PUBLIC_STATS_LEASE_MS)) {
         claimed = true;
         const total = await count();
         // Stamped with the claim time; a newer claim's value is never overwritten.
-        if (await store.write(BASE_AGENTS_KEY, total, now))
+        if (await store.write(key, total, now))
           return keep({ value: total, refreshedAt: now }, now + ttl);
-        const newer = await store.read(BASE_AGENTS_KEY);
+        const newer = await store.read(key);
         return keep(newer ?? { value: total, refreshedAt: now }, now + PUBLIC_STATS_RETRY_MS);
       }
       // Another instance is counting: serve the stored value (none yet: no field) and look again.

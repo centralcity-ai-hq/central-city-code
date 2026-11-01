@@ -4,6 +4,7 @@ import type { Database, Transaction as Tx } from '../database.js';
 import type { CityLimits } from '../limits.js';
 import type { ConnectionRequest, ConnectionInvite } from '../../shared/assistant.js';
 import { NO_NUL_MESSAGE, noNul } from '../messaging/contract.js';
+import { reservedOwnerName } from '../workspaces/owner-names.js';
 import {
   active,
   event,
@@ -49,10 +50,15 @@ const notFound = (): never =>
 
 /**
  * Label the other owner sees: an AI workspace's display name, or an opaque stable label for a
- * person's account (a person's account name is their sign-in name and is never disclosed).
+ * person's account (a person's account name is their sign-in name and is never disclosed). A
+ * workspace whose name reads as a person's label, the viewer's own AI, the host or Central City
+ * (named before such names were refused) is labelled "AI workspace <8 hex>" instead.
  */
 export function ownerLabel(owner: { id: string; name: string; kind: string }): string {
-  return owner.kind === 'ai' ? owner.name : `Account ${sha(`owner-label:${owner.id}`).slice(0, 8)}`;
+  if (owner.kind !== 'ai') return `Account ${sha(`owner-label:${owner.id}`).slice(0, 8)}`;
+  return reservedOwnerName(owner.name)
+    ? `AI workspace ${sha(`owner-label:ai:${owner.id}`).slice(0, 8)}`
+    : owner.name;
 }
 
 const uuid = z.string().uuid();

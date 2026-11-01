@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import {
   decodeFunctionData,
   encodeAbiParameters,
@@ -22,8 +24,13 @@ import {
   payCalls,
   quoteFeeIncluded,
   quoteFeeOnTop,
-  settlementMatches,
 } from '../server/protocol/fees/fee-call.js';
+import {
+  isReservedPayee,
+  PROTOCOL_BASE_MAINNET,
+  reservedPayees,
+  X402_FACILITATOR_BASE_MAINNET,
+} from '../shared/protocol.js';
 
 const addr = (n: number) => `0x${n.toString(16).padStart(40, '0')}` as Hex;
 const USDC = addr(0xc0);
@@ -186,6 +193,74 @@ test('fee included: one operation, approve(router, price) then router.pay(payee,
   );
 });
 
+test('payee: never a fee router, the treasury, USDC, the facilitator, zero, the call router or its token', () => {
+  const d = PROTOCOL_BASE_MAINNET;
+  const code = (build: () => unknown) => {
+    try {
+      build();
+      return 'OK';
+    } catch (e) {
+      return (e as FeeQuoteError).code;
+    }
+  };
+  const included = quoteFeeIncluded(70_000n);
+  const onTop = quoteFeeOnTop(50_000n);
+  const both = (payee: Hex, reserved?: ReadonlySet<string>) => [
+    code(() =>
+      payCalls({
+        usdc: USDC,
+        router: ROUTER,
+        payee,
+        quote: included,
+        paymentIntentId: 'p',
+        reserved,
+      }),
+    ),
+    code(() =>
+      feeCalls({ usdc: USDC, router: ROUTER, payee, quote: onTop, paymentIntentId: 'p', reserved }),
+    ),
+  ];
+  for (const payee of [
+    d.feeRouter,
+    d.feeRouter2,
+    d.feeRouter3,
+    d.treasury,
+    d.usdc,
+    X402_FACILITATOR_BASE_MAINNET,
+    `0x${'0'.repeat(40)}`,
+    ROUTER,
+    USDC,
+  ] as Hex[])
+    assert.deepEqual(both(payee), ['PAYEE_RESERVED', 'PAYEE_RESERVED'], payee);
+  // Any case.
+  assert.deepEqual(both(d.feeRouter3.toLowerCase() as Hex), ['PAYEE_RESERVED', 'PAYEE_RESERVED']);
+  // A test network's configured set (protocolReservedPayees) is honoured too.
+  assert.deepEqual(both(SELLER, reservedPayees([SELLER])), ['PAYEE_RESERVED', 'PAYEE_RESERVED']);
+  assert.deepEqual(both(SELLER), ['OK', 'OK']);
+  assert.equal(isReservedPayee('not-an-address'), true);
+  assert.equal(isReservedPayee(SELLER), false);
+});
+
+test('payee: never another pinned Base contract where USDC is stranded or anyone can take it (CCA-123)', async () => {
+  const { BASE_MAINNET, BASE_NETWORKS, MULTICALL3 } = await import('../shared/base/chains.js');
+  const { SPONSOR_PAYMASTERS } = await import('../shared/base/paymasters.js');
+  const c = BASE_NETWORKS[BASE_MAINNET].contracts;
+  for (const address of [
+    c.entryPointV06,
+    c.entryPointV07,
+    c.spendPermissionManager,
+    c.smartWalletFactory,
+    c.identityRegistry!,
+    c.reputationRegistry,
+    MULTICALL3,
+    ...(SPONSOR_PAYMASTERS[BASE_MAINNET] ?? []),
+  ]) {
+    assert.equal(isReservedPayee(address), true, address);
+    assert.equal(isReservedPayee(address.toLowerCase()), true, address);
+  }
+  assert.equal(isReservedPayee(SELLER), false);
+});
+
 test('fee included: FeeCharged kind 1 matches only with every field, and only from the router', () => {
   const quote = quoteFeeIncluded(80_000n);
   const expected = {
@@ -222,43 +297,19 @@ test('fee included: FeeCharged kind 1 matches only with every field, and only fr
   assert.equal(feeMatches({ ...events[0]!, payee: addr(0x5f) }, expected), false);
 });
 
-test('seller settlement: success, exact payer -> payee transfer of gross, and the call nonce used', () => {
-  const abi = parseAbi([
-    'event Transfer(address indexed from, address indexed to, uint256 value)',
-    'event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce)',
-  ]);
-  const nonce = keccak256(stringToHex('nonce-1'));
-  const t = (from: Hex, to: Hex, value: bigint, address: Hex = USDC) => ({
-    address,
-    topics: encodeEventTopics({ abi, eventName: 'Transfer', args: { from, to } }) as Hex[],
-    data: encodeAbiParameters([{ type: 'uint256' }], [value]),
-  });
-  const u = (authorizer: Hex, n: Hex, address: Hex = USDC) => ({
-    address,
-    topics: encodeEventTopics({
-      abi,
-      eventName: 'AuthorizationUsed',
-      args: { authorizer, nonce: n },
-    }) as Hex[],
-    data: '0x' as Hex,
-  });
-  const expected = {
-    usdc: USDC,
-    payer: PAYER,
-    payee: SELLER,
-    gross: 90_000n,
-    authorizationNonce: nonce,
-  };
-  const good = [u(PAYER, nonce), t(PAYER, SELLER, 90_000n)];
-  assert.equal(settlementMatches({ status: 'success', logs: good }, expected), true);
-  assert.equal(settlementMatches({ status: 'reverted', logs: good }, expected), false);
-  for (const logs of [
-    [u(PAYER, nonce), t(PAYER, SELLER, 89_999n)], // wrong amount
-    [u(PAYER, nonce), t(PAYER, addr(0x5f), 90_000n)], // wrong seller
-    [u(PAYER, nonce), t(addr(0xa2), SELLER, 90_000n)], // wrong payer
-    [u(PAYER, keccak256(stringToHex('other'))), t(PAYER, SELLER, 90_000n)], // other authorization
-    [t(PAYER, SELLER, 90_000n)], // plain transfer, no authorization
-    [u(PAYER, nonce, addr(0xbad)), t(PAYER, SELLER, 90_000n, addr(0xbad))], // not USDC
-  ])
-    assert.equal(settlementMatches({ status: 'success', logs }, expected), false);
+test('fee on top: the seller settlement is proven by the call authorization used on Base, as documented', async () => {
+  // The engine marks a fee-on-top call's service verified from payment_state 'settled', which only
+  // USDC's AuthorizationUsed for the payer and the call's nonce sets (FeedPayChain.outcome()). The
+  // public fee document says exactly that, and no unused receipt matcher claims more.
+  const feeCall = await import('../server/protocol/fees/fee-call.js');
+  assert.equal('settlementMatches' in feeCall, false);
+  const volume = readFileSync(
+    fileURLToPath(new URL('../docs/protocol/FEES.md', import.meta.url)),
+    'utf8',
+  )
+    .split('\n')
+    .find((line) => line.startsWith('| Volume'))!;
+  assert.match(volume, /AuthorizationUsed/);
+  assert.match(volume, /markServiceVerified/);
+  assert.doesNotMatch(volume, /settlementMatches/);
 });

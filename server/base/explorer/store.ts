@@ -18,15 +18,22 @@
  * Published per row: on-chain values (id, agent wallet, mint account, transactions, blocks), the
  * times Central City saw and confirmed them, and the display name only while the agent's card is
  * public. Never the agent id, the owner's own wallet, key references, operation keys or
- * workspace ids.
+ * workspace ids. Leaving these out does not make one owner's agents unlinkable: every agent wallet
+ * of one person has that person's owner key as an owner, so once deployed, anyone can link those
+ * wallets on Base (docs/base/WALLET-THREAT-MODEL.md, the privacy row; CCA-143).
  */
 import { getAddress } from 'viem';
 import type { Database } from '../../database.js';
-import { BASE_NETWORKS, type BaseChainId } from '../../../shared/base/chains.js';
+import { PUBLIC_CARDS_READY } from '../../agent-rows/public-cards-schema.js';
+import { BASE_NETWORKS } from '../../../shared/base/chains.js';
+import { ARC_NETWORKS } from '../../../shared/chains.js';
 import {
   AGENT_URI_ORIGIN,
   ON_BASE_PAGE_SIZE,
+  ON_BASE_TX_SEARCH_AVAILABLE,
+  onBaseSearchReadings,
   type OnBasePassport,
+  type OnBaseSearchNotice,
   type OnBaseRow,
 } from '../../../shared/base/on-base.js';
 import {
@@ -69,6 +76,21 @@ const MINT_TX = `COALESCE(i.mint_tx_hash,
  * LISTED's conditions on base_identities alone (no join): the Explorer list picks its newest
  * candidates with these through the base id index (migration 255), then joins only those.
  */
+/**
+ * Each address as base_wallets.spender_address may hold it: lower case and checksummed (EIP-55),
+ * so an exact match can read base_wallets_spender instead of lower(spender_address), which no
+ * production index serves. Anything that is not a 0x address is left out.
+ */
+export function spenderForms(addresses: readonly string[]): string[] {
+  const forms = new Set<string>();
+  for (const address of addresses) {
+    if (!/^0x[0-9a-fA-F]{40}$/.test(address)) continue;
+    forms.add(address.toLowerCase());
+    forms.add(getAddress(address));
+  }
+  return [...forms];
+}
+
 export const LISTED_IDENTITY = `i.chain_id = $1 AND lower(i.registry_address) = lower($2)
   AND i.mint_seen_at IS NOT NULL
   AND (
@@ -104,7 +126,8 @@ const COLUMNS = `i.agent_id, ${BASE_ID}::text AS base_id, (i.state = 'confirmed'
  * server/autonomy/index.ts). The FROM ... LIMIT 1 of a LATERAL joined onto a subquery aliased `l`
  * that has an `agent_id` column. The agent is read with workspace_agent() (one lookup, both storage
  * modes; migration 254 makes it one pass that stops at the match), never by expanding a fleet
- * workspace's ~19.5k agents into rows for each listed agent.
+ * workspace's ~19.5k agents into rows for each listed agent. Read only until agent_public_cards
+ * (migration 280) holds every agent; that table keeps this same rule.
  */
 const PUBLIC_REVISION = `FROM workspaces ws
   CROSS JOIN LATERAL (SELECT workspace_agent(ws.operator_id, ws.data, l.agent_id) AS a OFFSET 0) x
@@ -112,25 +135,60 @@ const PUBLIC_REVISION = `FROM workspaces ws
   WHERE ws.operator_id = (SELECT operator_id FROM agent_manifests WHERE agent_id = l.agent_id LIMIT 1)
     AND x.a->>'revokedAt' IS NULL
     AND m.manifest->'spec'->>'visibility' = 'public'
+    AND NOT ${PUBLIC_CARDS_READY}
   LIMIT 1`;
 
 /**
  * The current public display name (PUBLIC_REVISION's rule); anything else has no name here.
- * Joined onto a subquery aliased `l` that has an `agent_id` column (pay/store.ts too).
+ * Joined onto a subquery aliased `l` that has an `agent_id` column (pay/store.ts too). One index
+ * probe of agent_public_cards (migration 280) per row, never the owner's workspace document; until
+ * that table is backfilled, PUBLIC_REVISION's read of the workspace.
  */
 export const PUBLIC_NAME = `LEFT JOIN LATERAL (
-  SELECT NULLIF(btrim(m.manifest->'metadata'->>'displayName'), '') AS name
-  ${PUBLIC_REVISION}
+  (SELECT c.name FROM agent_public_cards c WHERE c.agent_id = l.agent_id AND ${PUBLIC_CARDS_READY})
+  UNION ALL
+  (SELECT NULLIF(btrim(m.manifest->'metadata'->>'displayName'), '') AS name
+  ${PUBLIC_REVISION})
+  LIMIT 1
 ) p ON true`;
 
 /**
- * The whole current public manifest as `pm.manifest` (PUBLIC_REVISION's rule), NULL while the
- * agent is private, revoked or unknown. The directory's cards (server/directory/store.ts).
+ * The current public manifest (PUBLIC_REVISION's rule) of every agent `ids` names, as rows
+ * (agent_id, manifest, name); an agent whose card is not public now is not among them. `ids` is
+ * a query of one column of agent ids, which may name a CTE of the statement it is used in.
+ *
+ * Read from agent_public_cards (migration 280): one index probe per agent and its manifest at that
+ * revision. Until that table is backfilled, each workspace's agents are read ONCE per statement
+ * (workspace_agents, both storage modes), however many of them are asked for, then matched by id:
+ * the first agent in array order with the id, not revoked, its current revision public. Use as a
+ * CTE (`p AS (${publicManifestsOf('SELECT agent_id FROM l')})`) and join it on agent_id; it takes
+ * no parameters.
  */
-export const PUBLIC_MANIFEST = `LEFT JOIN LATERAL (
-  SELECT m.manifest
-  ${PUBLIC_REVISION}
-) pm ON true`;
+export const publicManifestsOf = (ids: string) => `SELECT c.agent_id, m.manifest, c.name
+  FROM agent_public_cards c
+  JOIN agent_manifests m ON m.agent_id = c.agent_id AND m.revision = c.revision
+  WHERE c.agent_id IN (SELECT q.agent_id FROM (${ids}) AS q(agent_id)) AND ${PUBLIC_CARDS_READY}
+  UNION ALL
+  SELECT pm.* FROM (WITH pm_want AS MATERIALIZED (
+    SELECT w.agent_id,
+      (SELECT operator_id FROM agent_manifests WHERE agent_id = w.agent_id LIMIT 1) AS ws_id
+    FROM (SELECT DISTINCT q.agent_id FROM (${ids}) AS q(agent_id)) w),
+  pm_all AS MATERIALIZED (
+    SELECT ws.operator_id AS ws_id, wa.ordinal, wa.agent->>'id' AS agent_id,
+      wa.agent->>'revision' AS revision, wa.agent->>'revokedAt' IS NULL AS live
+    FROM workspaces ws
+    CROSS JOIN LATERAL workspace_agents(ws.operator_id, ws.data) wa
+    WHERE ws.operator_id IN (SELECT ws_id FROM pm_want)),
+  pm_cur AS (
+    SELECT DISTINCT ON (a.agent_id) a.agent_id, a.revision, a.live
+    FROM pm_all a JOIN pm_want w ON w.agent_id = a.agent_id AND w.ws_id = a.ws_id
+    ORDER BY a.agent_id, a.ordinal)
+  SELECT c.agent_id, m.manifest,
+    NULLIF(btrim(m.manifest->'metadata'->>'displayName'), '') AS name
+  FROM pm_cur c
+  JOIN agent_manifests m ON m.agent_id = c.agent_id AND m.revision = c.revision::int
+  WHERE c.live AND m.manifest->'spec'->>'visibility' = 'public') pm
+  WHERE NOT ${PUBLIC_CARDS_READY}`;
 
 interface Row {
   agent_id: string;
@@ -196,7 +254,11 @@ function rowOf(row: Row): OnBaseRow {
   };
 }
 
-/** What the search text can mean; every reading that fits is tried (OR). */
+/**
+ * What the search text can mean (onBaseSearchReadings); every reading that fits is tried, each in
+ * its own branch through its own index (list). A name needs a run of ON_BASE_NAME_MIN letters or
+ * digits, which the trigram index can serve; a shorter one read every registration.
+ */
 export interface ParsedQuery {
   baseId: string | null;
   shortId: string | null;
@@ -204,33 +266,40 @@ export interface ParsedQuery {
   txHash: string | null;
   /** A LIKE pattern for the public name (wildcards escaped), or null. */
   name: string | null;
+  notice: OnBaseSearchNotice | null;
 }
 
 export function parseQuery(text: string): ParsedQuery {
-  // Control characters become spaces: Postgres refuses a NUL in the name pattern (a 500).
-  const q = text.replace(/\p{Cc}/gu, ' ').trim();
+  const r = onBaseSearchReadings(text);
   return {
-    baseId: /^#?(0|[1-9][0-9]{0,77})$/.exec(q)?.[1] ?? null,
-    // A short id, alone or as a passport number (CC-<short id>); short ids are case-sensitive.
-    shortId: /^(?:[Cc][Cc]-)?([0-9A-Za-z]{6})$/.exec(q)?.[1] ?? null,
-    address: /^0x[0-9a-fA-F]{40}$/.test(q) ? q.toLowerCase() : null,
-    txHash: /^0x[0-9a-fA-F]{64}$/.test(q) ? q.toLowerCase() : null,
-    name:
-      q.length >= 2 && !/^0x[0-9a-f]*$/i.test(q)
-        ? `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`
-        : null,
+    baseId: r.baseId,
+    shortId: r.shortId,
+    address: r.address,
+    txHash: r.txHash,
+    name: r.name ? `%${r.text.replace(/[\\%_]/g, (c) => `\\${c}`)}%` : null,
+    notice: r.notice,
   };
 }
 
 export interface OnBaseStoreOptions {
-  chainId: BaseChainId;
+  /** A Base network, or Arc (shared/chains.ts) for the explorer's On Arc view. */
+  chainId: number;
   /** The agent URI origin (tests); defaults to https://centralcity.ai. */
   uriOrigin?: string;
 }
 
 export function createOnBaseStore(db: Queryable, options: OnBaseStoreOptions) {
-  const network = BASE_NETWORKS[options.chainId];
-  const registry = network.contracts.identityRegistry ?? '';
+  const registry =
+    (
+      BASE_NETWORKS as Record<
+        number,
+        (typeof BASE_NETWORKS)[keyof typeof BASE_NETWORKS] | undefined
+      >
+    )[options.chainId]?.contracts.identityRegistry ??
+    (ARC_NETWORKS as Record<number, (typeof ARC_NETWORKS)[keyof typeof ARC_NETWORKS] | undefined>)[
+      options.chainId
+    ]?.contracts.identityRegistry ??
+    '';
   const origin = options.uriOrigin ?? AGENT_URI_ORIGIN;
 
   /**
@@ -254,7 +323,7 @@ export function createOnBaseStore(db: Queryable, options: OnBaseStoreOptions) {
           : 'TRUE';
       const candidates: Array<{ agent_id: string; base_id: string }> = (
         await db.query<{ agent_id: string; base_id: string }>(
-        `SELECT i.agent_id, ${BASE_ID}::text AS base_id FROM base_identities i
+          `SELECT i.agent_id, ${BASE_ID}::text AS base_id FROM base_identities i
          WHERE ${LISTED_IDENTITY} AND ${bound}
          ORDER BY ${BASE_ID} DESC, i.agent_id DESC LIMIT ${LIST_CANDIDATES}`,
           params,
@@ -262,23 +331,29 @@ export function createOnBaseStore(db: Queryable, options: OnBaseStoreOptions) {
       ).rows;
       if (candidates.length) {
         const { rows } = await db.query<Row>(
-          `SELECT l.*, p.name FROM (
+          `WITH l AS (
              SELECT ${COLUMNS} ${FROM}
              WHERE ${LISTED} AND i.agent_id = ANY($4::text[])
-             ORDER BY ${BASE_ID} DESC, i.agent_id DESC LIMIT ${limit - found.length}) l
-           ${PUBLIC_NAME}
+             ORDER BY ${BASE_ID} DESC, i.agent_id DESC LIMIT ${limit - found.length}),
+           p AS (${publicManifestsOf('SELECT agent_id FROM l')})
+           SELECT l.*, p.name FROM l LEFT JOIN p ON p.agent_id = l.agent_id
            ORDER BY l.base_id::numeric DESC, l.agent_id DESC`,
           [options.chainId, registry, origin, candidates.map((candidate) => candidate.agent_id)],
         );
         found.push(...rows);
       }
-      if (found.length >= limit || candidates.length < LIST_CANDIDATES) return found.slice(0, limit);
+      if (found.length >= limit || candidates.length < LIST_CANDIDATES)
+        return found.slice(0, limit);
       const last: { agent_id: string; base_id: string } = candidates[candidates.length - 1]!;
       after = { baseId: last.base_id, agentId: last.agent_id };
     }
   }
 
-  /** Newest first, ON_BASE_PAGE_SIZE per page, older than `before` (a base id) when given. */
+  /**
+   * Newest first, ON_BASE_PAGE_SIZE per page, older than `before` (a base id) when given. A search
+   * text with no reading it can answer (routes.ts refuses it first: onBaseUnsupportedReading) reads
+   * nothing and is an empty page with its notice.
+   */
   async function list(input: { before?: string; q?: string }) {
     const params: unknown[] = [options.chainId, registry, origin];
     const p = (value: unknown) => {
@@ -288,45 +363,105 @@ export function createOnBaseStore(db: Queryable, options: OnBaseStoreOptions) {
     const where = [LISTED];
     if (input.before !== undefined) where.push(`${BASE_ID} < ${p(input.before)}::numeric`);
     const query = input.q === undefined ? null : parseQuery(input.q);
-    const hits: string[] = [];
-    if (query?.baseId) hits.push(`${BASE_ID} = ${p(query.baseId)}::numeric`);
-    if (query?.shortId) hits.push(`s.short_id = ${p(query.shortId)}`);
-    // The agent wallet (owner) only: the owner's own wallet is not published, so not searchable.
-    if (query?.address) hits.push(`lower(w.address) = ${p(query.address)}`);
-    if (query?.txHash) {
+    // The exact readings, each its own branch through its own index: the Base ID through
+    // base_identities_base_id (255), the short id through base_short_ids' primary key, the agent
+    // wallet through base_wallets_address_lower (247). In one OR they span base_identities,
+    // base_short_ids and base_wallets, which no index serves: a 6-digit text (a Base ID and a
+    // short id) walked every registration (5.4 s at 1M).
+    const limit = ON_BASE_PAGE_SIZE + 1;
+    const order = `ORDER BY ${BASE_ID} DESC, i.agent_id DESC LIMIT ${limit}`;
+    const branch = (from: string, hit: string) =>
+      `(SELECT ${COLUMNS}, TRUE AS id_hit ${from} WHERE ${where.join(' AND ')} AND ${hit} ${order})`;
+    const exact: string[] = [];
+    if (query?.baseId) exact.push(branch(FROM, `${BASE_ID} = ${p(query.baseId)}::numeric`));
+    if (query?.shortId) exact.push(branch(FROM, `s.short_id = ${p(query.shortId)}`));
+    // The agent wallet (owner) only: the owner's own wallet is not published here, so not
+    // searchable (on Base it is visible as an owner of each deployed agent wallet, CCA-143).
+    if (query?.address) exact.push(branch(FROM, `lower(w.address) = ${p(query.address)}`));
+    // A transaction is not searched until its indexes are built (ON_BASE_TX_SEARCH_AVAILABLE,
+    // migration 291): routes.ts answers it 503 first, and here it reads nothing.
+    if (query?.txHash && ON_BASE_TX_SEARCH_AVAILABLE) {
       const hash = p(query.txHash);
-      hits.push(
-        `lower(${MINT_TX}) = ${hash}`,
-        `lower(i.tx_hash) = ${hash}`,
-        `lower(i.handover_tx_hash) = ${hash}`,
+      exact.push(
+        branch(
+          FROM,
+          `(lower(${MINT_TX}) = ${hash} OR lower(i.tx_hash) = ${hash} OR lower(i.handover_tx_hash) = ${hash})`,
+        ),
       );
     }
-    const limit = ON_BASE_PAGE_SIZE + 1;
+    const notice = query?.notice === 'name-min' ? ('name-min' as const) : undefined;
+    if (query && !exact.length && !query.name) return { ...pageOf([]), notice };
+    const exactRows = exact.join('\n           UNION ALL ');
     let sql: string;
+    // A name reading while agent_public_cards (migration 280) is still being backfilled: the
+    // former fallback (every registration's manifests, then their workspaces) could not finish
+    // within the search's statement timeout at production size, so every search with a name
+    // reading, ids included, answered busy. Now the exact readings are answered in full from
+    // their own indexes, the name from the cards the table already holds, and the page says that
+    // names may be missing (incomplete) until the backfill is ready. Never a full scan.
+    const backfill = query?.name
+      ? (
+          await db.query<{ ready: boolean }>(
+            'SELECT ready FROM agent_public_cards_backfill WHERE id = 1',
+          )
+        ).rows[0]
+      : undefined;
+    if (query?.name && !backfill?.ready) {
+      const name = p(query.name);
+      // A card row, where there is one, is the current public name by the card route's rule (its
+      // triggers keep it on every write since the migration); an agent without one yet (only an
+      // id hit can be) gets its name by that same rule from its workspace (publicManifestsOf).
+      const { rows } = await db.query<Row>(
+        `WITH l AS (
+           (SELECT ${COLUMNS}, FALSE AS id_hit ${FROM}
+             JOIN agent_public_cards c ON c.agent_id = i.agent_id
+             WHERE ${where.join(' AND ')} AND c.name ILIKE ${name} ${order})
+           ${exactRows ? `UNION ALL ${exactRows}` : ''}),
+         u AS (SELECT DISTINCT ON (l.agent_id) l.* FROM l ORDER BY l.agent_id, l.id_hit DESC),
+         k AS MATERIALIZED (
+           SELECT u.*, c.agent_id IS NOT NULL AS carded, c.name AS card_name
+           FROM u LEFT JOIN agent_public_cards c ON c.agent_id = u.agent_id
+           ORDER BY u.base_id::numeric DESC, u.agent_id DESC LIMIT ${limit}),
+         pm AS (${publicManifestsOf('SELECT agent_id FROM k WHERE NOT k.carded')})
+         SELECT k.*, CASE WHEN k.carded THEN k.card_name ELSE pm.name END AS name
+         FROM k LEFT JOIN pm ON pm.agent_id = k.agent_id
+         ORDER BY k.base_id::numeric DESC, k.agent_id DESC LIMIT ${limit}`,
+        params,
+      );
+      return { ...pageOf(rows), incomplete: true as const, notice };
+    }
     if (!query) {
       // No search: newest candidates from base_identities alone (through the base id index), then
       // the join and the card check for those only, then names for the page's rows only. Joining
       // first made every list read join all registrations (862,893 rows, 21 s, 23 Oct 2026).
       const rows = await newestListed(input.before, limit);
       return pageOf(rows);
+    } else if (query.name) {
+      // A name search reads the current public names (agent_public_cards, migration 280) through
+      // their trigram index: the newest `limit` rows the name finds, the newest `limit` each exact
+      // reading finds, then the page of all. A former or private name is not in that table. The
+      // backfill is ready here (read above; it never turns back).
+      sql = `WITH l AS (
+          (SELECT ${COLUMNS}, FALSE AS id_hit ${FROM}
+            JOIN agent_public_cards c ON c.agent_id = i.agent_id
+            WHERE ${where.join(' AND ')} AND c.name ILIKE ${p(query.name)} ${order})
+          ${exactRows ? `UNION ALL ${exactRows}` : ''}),
+        u AS (SELECT DISTINCT ON (l.agent_id) l.* FROM l ORDER BY l.agent_id, l.id_hit DESC)
+        SELECT u.*, c.name FROM u LEFT JOIN agent_public_cards c ON c.agent_id = u.agent_id
+        ORDER BY u.base_id::numeric DESC, u.agent_id DESC LIMIT ${limit}`;
     } else {
-      const idHit = hits.length ? `(${hits.join(' OR ')})` : 'FALSE';
-      // A name search narrows on any revision's name first (an index probe per agent), then keeps
-      // only rows whose CURRENT public name matches, so a former or private name never matches.
-      const name = query.name ? p(query.name) : null;
-      const candidate = name
-        ? `(${idHit} OR EXISTS (SELECT 1 FROM agent_manifests mm WHERE mm.agent_id = i.agent_id
-             AND mm.manifest->'metadata'->>'displayName' ILIKE ${name}))`
-        : idHit;
-      sql = `SELECT l.*, p.name FROM (
-          SELECT ${COLUMNS}, ${idHit} AS id_hit ${FROM}
-          WHERE ${where.join(' AND ')} AND ${candidate}) l
-        ${PUBLIC_NAME}
-        WHERE l.id_hit${name ? ` OR p.name ILIKE ${name}` : ''}
+      // Without a name reading: the exact readings alone, the page first (one agent may be found
+      // by more than one), then the current public names of only those rows (publicManifestsOf,
+      // either state of the backfill).
+      sql = `WITH u AS (SELECT DISTINCT ON (b.agent_id) b.* FROM (${exactRows}) b ORDER BY b.agent_id),
+        l AS MATERIALIZED (
+          SELECT u.* FROM u ORDER BY u.base_id::numeric DESC, u.agent_id DESC LIMIT ${limit}),
+        p AS (${publicManifestsOf('SELECT agent_id FROM l')})
+        SELECT l.*, p.name FROM l LEFT JOIN p ON p.agent_id = l.agent_id
         ORDER BY l.base_id::numeric DESC, l.agent_id DESC LIMIT ${limit}`;
     }
     const { rows } = await db.query<Row>(sql, params);
-    return pageOf(rows);
+    return { ...pageOf(rows), notice };
   }
 
   function pageOf(rows: Row[]) {
@@ -338,6 +473,10 @@ export function createOnBaseStore(db: Queryable, options: OnBaseStoreOptions) {
         agentWallet: getAddress(row.agent_wallet),
       })),
       nextBefore: rows.length > ON_BASE_PAGE_SIZE ? page[page.length - 1].base_id : null,
+      /** True while names may be missing from this page (see list); absent when it is complete. */
+      incomplete: undefined as true | undefined,
+      /** Set when the text was too short to be a name and only its exact readings were read. */
+      notice: undefined as 'name-min' | undefined,
     };
   }
 
@@ -393,15 +532,36 @@ export function createOnBaseStore(db: Queryable, options: OnBaseStoreOptions) {
   ): Promise<Map<string, { name: string; baseId: string }>> {
     const listed = new Map<string, { name: string; baseId: string }>();
     if (addresses.length === 0) return listed;
+    // The matching wallets first, each side through an index production has: lower(address)
+    // through base_wallets_address_lower, the spender as stored (checksummed or lower case, so
+    // both forms are asked for) through base_wallets_spender (spender_address, chain_id); then only
+    // their identities: matching lower(spender_address)
+    // through a VALUES lateral after the join could not use an index and walked every listed
+    // identity for an agent with many raters (24 Oct 2026: passports of rated agents > 60 s).
     const { rows } = await db.query<{ address: string; base_id: string; name: string | null }>(
-      `SELECT l.address, l.base_id, p.name FROM (
-         SELECT DISTINCT ON (x.address) x.address, i.agent_id, ${BASE_ID}::text AS base_id
-         ${FROM}
-         CROSS JOIN LATERAL (VALUES (lower(w.address)), (lower(w.spender_address))) x(address)
-         WHERE ${LISTED} AND x.address = ANY($4::text[])
-         ORDER BY x.address, (i.state = 'confirmed') DESC, i.agent_id) l
-       ${PUBLIC_NAME}`,
-      [options.chainId, registry, origin, [...new Set(addresses.map((a) => a.toLowerCase()))]],
+      `WITH hit AS (
+         SELECT w.agent_id, lower(w.address) AS address FROM base_wallets w
+          WHERE w.chain_id = $1 AND lower(w.address) = ANY($4::text[])
+         UNION
+         SELECT w.agent_id, lower(w.spender_address) FROM base_wallets w
+          WHERE w.spender_address = ANY($5::text[]) AND w.chain_id = $1)
+       , l AS (
+         SELECT DISTINCT ON (hit.address) hit.address, i.agent_id, ${BASE_ID}::text AS base_id
+         FROM hit
+         JOIN base_identities i ON i.agent_id = hit.agent_id AND i.chain_id = $1
+         JOIN base_wallets w ON w.agent_id = i.agent_id AND w.chain_id = i.chain_id
+         JOIN base_short_ids s ON s.agent_id = i.agent_id
+         WHERE ${LISTED}
+         ORDER BY hit.address, (i.state = 'confirmed') DESC, i.agent_id),
+       p AS (${publicManifestsOf('SELECT agent_id FROM l')})
+       SELECT l.address, l.base_id, p.name FROM l LEFT JOIN p ON p.agent_id = l.agent_id`,
+      [
+        options.chainId,
+        registry,
+        origin,
+        [...new Set(addresses.map((a) => a.toLowerCase()))],
+        spenderForms(addresses),
+      ],
     );
     for (const row of rows) listed.set(row.address, { name: row.name ?? '', baseId: row.base_id });
     return listed;
@@ -411,15 +571,56 @@ export function createOnBaseStore(db: Queryable, options: OnBaseStoreOptions) {
    * The rater wallets among these addresses (shared/base/rating-score.ts): the own wallet of a
    * listed agent with a FINAL Base ID (never a finalizing one, never a registration smart
    * account). Lower case; an address of anything else is not in the set.
+   *
+   * `rated`: the rated agent's own wallet. A wallet with the same owner key as the rated wallet is
+   * never its rater (CCA-144): the rating route refuses a person's own agents, and a rating sent
+   * directly on Base between two wallets of one owner key does not count either. Only the owner
+   * key is compared, which Base already shows (CCA-143): leaving a rater out reveals no link
+   * Central City's own records would add.
    */
-  async function raterWallets(addresses: readonly string[]): Promise<Set<string>> {
+  async function raterWallets(
+    addresses: readonly string[],
+    rated: string | null = null,
+  ): Promise<Set<string>> {
     if (addresses.length === 0) return new Set();
     const { rows } = await db.query<{ address: string }>(
       `SELECT DISTINCT lower(w.address) AS address ${FROM}
-       WHERE ${LISTED} AND i.state = 'confirmed' AND lower(w.address) = ANY($4::text[])`,
-      [options.chainId, registry, origin, [...new Set(addresses.map((a) => a.toLowerCase()))]],
+       WHERE ${LISTED} AND i.state = 'confirmed' AND lower(w.address) = ANY($4::text[])
+         AND NOT EXISTS (SELECT 1 FROM base_wallets r
+           WHERE r.chain_id = $1 AND lower(r.address) = $5::text
+             AND lower(r.owner_address) = lower(w.owner_address))`,
+      [
+        options.chainId,
+        registry,
+        origin,
+        [...new Set(addresses.map((a) => a.toLowerCase()))],
+        rated ? rated.toLowerCase() : null,
+      ],
     );
     return new Set(rows.map((row) => row.address));
+  }
+
+  /**
+   * The wallets that rated this Base ID through Central City (base_wallet_withdrawals kind 'rate',
+   * its operation final on Base and not reverted; listScores' rule), lower case, at most `limit`,
+   * the most recent raters first. The passport's feedback read asks these of Base when the
+   * registry's own client list cannot be read (head.ts); raterWallets still decides who counts.
+   */
+  async function recordedRaters(baseId: string, limit: number): Promise<string[]> {
+    const { rows } = await db.query<{ address: string }>(
+      `SELECT lower(rw.address) AS address
+       FROM base_wallet_withdrawals r
+       JOIN base_chain_ops o
+         ON o.idempotency_key = r.chain_op_key AND o.kind = 'rate' AND o.chain_id = r.chain_id
+           AND o.status = 'final' AND o.error_code IS DISTINCT FROM 'USEROP_REVERTED'
+       JOIN base_wallets rw ON rw.wallet_id = r.wallet_id
+       WHERE r.kind = 'rate' AND r.chain_id = $1 AND r.rated_base_id = $2::numeric
+       GROUP BY lower(rw.address)
+       ORDER BY max(o.block_number) DESC NULLS LAST, lower(rw.address)
+       LIMIT $3`,
+      [options.chainId, baseId, limit],
+    );
+    return rows.map((row) => row.address);
   }
 
   /**
@@ -538,8 +739,10 @@ export function createOnBaseStore(db: Queryable, options: OnBaseStoreOptions) {
    * Counted from Central City's own payment records, never from Base directly: a payment counts
    * once it is FINAL (final_at is set in the transaction that records its withdrawal final), in
    * USDC, sent to this agent's own wallet as a Central City payment from another agent's wallet.
-   * Public numbers never depend on who owns the payer: an owner filter would let anyone compare
-   * these counts with Base transfers and learn which agents share an owner. Every such payment is
+   * Public numbers never depend on who owns the payer: an owner filter would add Central City's
+   * own account records to what these counts reveal. That keeps the counts from adding a link; it
+   * does not hide which agents share an owner, which their deployed wallets' shared owner key
+   * already shows on Base (CCA-143). Every such payment is
    * a real, final USDC transfer with its fee, visible on Base, and a wallet can never pay itself
    * (the schema's recipient <> sender check, repeated here). Totals only: no payers, no notes.
    * null when the short id is not a listed agent (the explorer's rule).
@@ -691,6 +894,7 @@ export function createOnBaseStore(db: Queryable, options: OnBaseStoreOptions) {
     paidCounts,
     listedByAddress,
     raterWallets,
+    recordedRaters,
     listScores,
     totals,
     ratedAgents,

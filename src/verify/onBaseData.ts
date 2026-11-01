@@ -1,5 +1,11 @@
 import type { CityScore } from '../../shared/base/rating-score';
-import { ON_BASE_QUERY_MAX } from '../../shared/base/on-base';
+import {
+  ON_BASE_QUERY_MAX,
+  ON_BASE_SEARCH_NOTICES,
+  ON_BASE_TX_SEARCH_UNAVAILABLE_MESSAGE,
+  onBaseTxSearchUnavailable,
+  onBaseUnsupportedReading,
+} from '../../shared/base/on-base';
 import { json } from './countLogClient';
 
 /*
@@ -77,6 +83,10 @@ export type OnBaseList = {
   registry: string;
   /** The cursor for the next (older) page, or null at the end. */
   nextBefore: string | null;
+  /** A name search while the name index is still being built: names may be missing. */
+  incomplete?: true;
+  /** The text was too short to be a name: only its Base ID or other exact reading was searched. */
+  notice?: 'name-min';
 };
 
 /** One feedback entry in Base's Reputation Registry (shared/base/on-base.ts OnBaseFeedback). */
@@ -108,6 +118,12 @@ export type Reputation = {
   score?: CityScore | null;
   /** The rater wallets the score counts, for Verify to read from Base; [] without a score. */
   scoredBy?: string[];
+  /** The feedback was read but Central City's rater records were not, in time: no score shown. */
+  scoreUnread?: true;
+  /** Not every feedback entry on Base was read (the server's read bound). */
+  bounded?: true;
+  /** Rater wallets with feedback whose latest rating the server could not read. */
+  ratersSkipped?: number;
 };
 
 export type Passport = OnBaseRow & {
@@ -201,6 +217,8 @@ export type ScoreClaim = {
   scoredBy: string[];
   agentWallet: string;
   readAtBlock: number | null;
+  /** Rater wallets the server could not read: the score leaves them out. Absent when none. */
+  ratersSkipped?: number;
 };
 
 /**
@@ -210,29 +228,78 @@ export type ScoreClaim = {
 export function scoreClaim(
   passport: Pick<Passport, 'reputation' | 'agentWallet'>,
 ): ScoreClaim | null {
-  const { score, scoredBy, readAtBlock } = passport.reputation;
+  const { score, scoredBy, readAtBlock, ratersSkipped } = passport.reputation;
   return score
-    ? { score, scoredBy: scoredBy ?? [], agentWallet: passport.agentWallet, readAtBlock }
+    ? {
+        score,
+        scoredBy: scoredBy ?? [],
+        agentWallet: passport.agentWallet,
+        readAtBlock,
+        ...(ratersSkipped ? { ratersSkipped } : {}),
+      }
     : null;
 }
 
 /** The Explorer's list read gives up after this (its caller then retries), never loading forever. */
 export const ON_BASE_LIST_TIMEOUT_MS = 15_000;
 
+/** What a search page says when its names may be incomplete, '' when it is complete. */
+export function incompleteNote(page: Pick<OnBaseList, 'incomplete'>): string {
+  return page.incomplete ? 'Name index still building; some names may be missing' : '';
+}
+
+/**
+ * Why this search text is not sent, '' when it is: the list refuses a text it has no reading for
+ * (400 unsupported_reading: a 1-2 character name, "Type at least 3 characters to search names"),
+ * or a transaction hash while transaction search is unavailable (503 tx_search_unavailable).
+ * Base IDs, passport numbers and wallets of any length are searched.
+ */
+export function refusedSearchNote(q: string): string {
+  const text = q.trim().slice(0, ON_BASE_QUERY_MAX);
+  // A transaction hash while the list cannot search transactions (503 tx_search_unavailable).
+  if (onBaseTxSearchUnavailable(text)) return ON_BASE_TX_SEARCH_UNAVAILABLE_MESSAGE;
+  const reading = onBaseUnsupportedReading(text);
+  return reading ? ON_BASE_SEARCH_NOTICES[reading] : '';
+}
+
+/** What a search page says beside its count: names may be missing, names were not searched. */
+export function searchNotes(page: Pick<OnBaseList, 'incomplete' | 'notice'>): string {
+  return [incompleteNote(page), page.notice ? ON_BASE_SEARCH_NOTICES[page.notice] : '']
+    .filter(Boolean)
+    .join(' · ');
+}
+
+/** loadOnBase was given a text the list refuses (refusedSearchNote); nothing was sent. */
+export class OnBaseSearchRefused extends Error {
+  constructor(readonly note: string) {
+    super(note);
+    this.name = 'OnBaseSearchRefused';
+  }
+}
+
 /**
  * One page of the list. With `timeoutMs` the whole exchange (headers and body) must finish in
  * that time, or the request is aborted and the read fails like an error status.
  */
 export async function loadOnBase(
-  query: { q?: string; before?: string | null; timeoutMs?: number } = {},
+  query: {
+    q?: string;
+    before?: string | null;
+    timeoutMs?: number;
+    /** Another chain's list (onChainPaths(slug).list); Base's by default. */
+    listPath?: string;
+  } = {},
 ) {
   const params = new URLSearchParams();
   // The server refuses a longer search (400), and retrying the same text would never clear it.
   const q = query.q?.trim().slice(0, ON_BASE_QUERY_MAX).trim();
+  // A text the server would refuse by type (400) is never sent: retrying could not clear it.
+  const refused = q ? refusedSearchNote(q) : '';
+  if (refused) throw new OnBaseSearchRefused(refused);
   if (q) params.set('q', q);
   if (query.before) params.set('before', query.before);
   const search = params.toString();
-  const path = `${ON_BASE_ROUTES.list}${search ? `?${search}` : ''}`;
+  const path = `${query.listPath ?? ON_BASE_ROUTES.list}${search ? `?${search}` : ''}`;
   const timeoutMs = query.timeoutMs;
   if (timeoutMs === undefined) return json<OnBaseList>(path);
   const controller = new AbortController();
@@ -261,9 +328,20 @@ export async function loadOnBase(
 }
 
 /** One passport by Base ID (decimal); null when no registered agent has it. */
-export async function loadPassport(baseId: string): Promise<Passport | null> {
-  const path = ON_BASE_ROUTES.passport(baseId);
-  const response = await fetch(path, { headers: { accept: 'application/json' } });
+export async function loadPassport(
+  baseId: string,
+  options: {
+    signal?: AbortSignal;
+    /** Another chain's (onChainPaths(slug).passport). */ passportPath?: string;
+  } = {},
+): Promise<Passport | null> {
+  const path = options.passportPath
+    ? `${options.passportPath}/${encodeURIComponent(baseId)}`
+    : ON_BASE_ROUTES.passport(baseId);
+  const response = await fetch(path, {
+    headers: { accept: 'application/json' },
+    signal: options.signal,
+  });
   if (response.status === 404) return null;
   if (!response.ok) throw new Error(`${path} ${response.status}`);
   return (await response.json()) as Passport;

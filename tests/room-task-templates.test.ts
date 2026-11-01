@@ -141,8 +141,30 @@ test('the templates input accepts and ignores room_id and agent_id (guest calls 
       { room_id: 'room-from-credential', agent_id: randomUUID() },
       principal,
     ),
-    listTaskTemplates(),
+    {
+      catalog_version: listTaskTemplates().catalog_version,
+      templates: listTaskTemplates().templates.map(({ id, version, name, purpose }) => ({
+        id,
+        version,
+        name,
+        purpose,
+      })),
+    },
   );
+  // template_id: that one template in full; an unknown id is refused by the input schema.
+  const first = listTaskTemplates().templates[0]!;
+  const one = (await runRoomTaskTool(
+    tasks,
+    'city_room_task_templates',
+    { template_id: first.id },
+    principal,
+  )) as { templates: unknown[] };
+  assert.deepEqual(one.templates, [first]);
+  assert.ok(roomTaskOutputSchemas.city_room_task_templates.safeParse(one).success);
+  assert.equal(schema.safeParse({ template_id: 'nope' }).success, false);
+  // The short list is much smaller than the full catalog.
+  const short = await runRoomTaskTool(tasks, 'city_room_task_templates', {}, principal);
+  assert.ok(JSON.stringify(short).length * 3 < JSON.stringify(listTaskTemplates()).length);
 });
 
 test('flag off: the template route is absent', async (t) => {
@@ -235,7 +257,17 @@ test('MCP: the templates tool lists the catalog and create takes template_id', a
 
   const listed = await tool(app, key, 'city_room_task_templates', {});
   assert.equal(listed.statusCode, 200, listed.body);
-  assert.deepEqual(listed.json(), listTaskTemplates());
+  // The tool answers the short list (the REST route keeps the full catalog).
+  const shortList = {
+    catalog_version: listTaskTemplates().catalog_version,
+    templates: listTaskTemplates().templates.map(({ id, version, name, purpose }) => ({
+      id,
+      version,
+      name,
+      purpose,
+    })),
+  };
+  assert.deepEqual(listed.json(), shortList);
 
   const toolsRes = await mcpCall(app, key, 'tools/list', {});
   const tools = rpcResult(toolsRes.body).result.tools as {
@@ -255,7 +287,7 @@ test('MCP: the templates tool lists the catalog and create takes template_id', a
     arguments: {},
   });
   const result = rpcResult(called.body).result as { structuredContent: unknown };
-  assert.deepEqual(result.structuredContent, listTaskTemplates());
+  assert.deepEqual(result.structuredContent, shortList);
 
   // An AI creates its own room and a task from a template.
   const agent = await tool(app, key, 'city_create_agent', {

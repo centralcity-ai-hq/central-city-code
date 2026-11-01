@@ -16,6 +16,7 @@ import { registerJoinLinksMigration } from '../server/links/schema.js';
 import { registerWakeMigration } from '../server/wake/schema.js';
 import { registerResultsMigration } from '../server/results/schema.js';
 import { registerRoomFormatMigration } from '../server/rooms/format-schema.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 process.env.CITY_INVITE_FLOW = '1';
 process.env.CITY_RATE_LIMIT_KEY ??= 'synthetic-room-cap-test-root-secret-000';
@@ -160,7 +161,7 @@ test('the host changes the member cap (never below the members), logged; others 
       name,
       password: 'Synthetic room cap password',
     });
-    const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+    const cookie = sessionPair(registered.cookies);
     const agent = await post(
       '/api/agents',
       { name: `${name} agent`, capability: 'research', mode: 'hosted' },
@@ -253,7 +254,7 @@ test('a default join link admits as many joins as the room holds (an earlier tes
     name: 'Fifty host',
     password: 'Synthetic room cap password',
   });
-  const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(registered.cookies);
   const agent = await post(
     '/api/agents',
     { name: 'Fifty host agent', capability: 'research', mode: 'hosted' },
@@ -327,7 +328,7 @@ test('a lowered CITY_LIMIT_ROOM_MEMBERS_MAX bounds joins to rooms created under 
       name,
       password: 'Synthetic room cap password',
     });
-    const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+    const cookie = sessionPair(registered.cookies);
     const agent = await post(
       '/api/agents',
       { name: `${name} agent`, capability: 'research', mode: 'hosted' },
@@ -416,7 +417,7 @@ async function capApp(t: { after(fn: () => unknown): void }, first: number) {
       password: 'Synthetic room cap password',
     });
     assert.equal(registered.statusCode, 201, registered.body);
-    const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+    const cookie = sessionPair(registered.cookies);
     const agent = await post(
       '/api/agents',
       { name: `${name} agent`, capability: 'research', mode: 'hosted' },
@@ -565,6 +566,8 @@ test('a join beyond 100 members is refused, even in a room stored with a larger 
   assert.equal(stillFull.statusCode, 409, stillFull.body);
   assert.equal(stillFull.json().code, 'room_full');
   assert.equal(stillFull.json().error, 'The room is full.', 'no member count in the refusal');
+  // No number anywhere in the refusal (message, hint or details).
+  assert.doesNotMatch(stillFull.body, /\d/, stillFull.body);
   // The guest invite path too (its uniform refusal).
   await f.app.city.db.query('UPDATE rooms SET member_cap=100 WHERE id=$1', [roomId]);
   const invite = await f.post(

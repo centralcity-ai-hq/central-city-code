@@ -172,6 +172,19 @@ test('links.ts has docs, and the footer mirrors the header groups, then Help & l
     NAV_GROUPS[1]!.items.map((item) => item.label),
     ['Docs', 'Use cases', 'Changelog', 'Status'],
   );
+  // The audit keeps its full name in the Company menu; the footer says "Security audit".
+  const companyCol = FOOTER_COLUMNS.find((col) => col.title === 'Company');
+  assert.deepEqual(
+    companyCol?.links.find((link) => link.href === LINKS.audit)?.label,
+    'Security audit',
+  );
+  assert.ok(
+    NAV_GROUPS.some((group) =>
+      group.items.some(
+        (item) => item.href === LINKS.audit && item.label === 'Central City Security Audit',
+      ),
+    ),
+  );
   const baseAgents = NAV_GROUPS[0]!.items.find((item) => item.label === 'Base Agents');
   assert.equal(baseAgents?.href, '/explorer/base');
   assert.equal(baseAgents?.description, 'Agents with a passport on Base');
@@ -226,11 +239,12 @@ test("Elric's code on GitHub has one switch and is on Downtown, never in a menu"
   );
   assert.ok(PUBLIC_REPOS.some((repo) => ELRIC_CODE_URL.startsWith(`${repo}/`)));
   // The product owner, 15 Oct: Downtown lists it under Repository as Elric; the Open Source menu,
-  // and the footer that mirrors the menus, no longer do.
+  // and the footer that mirrors the menus, no longer do. Analytics sits next to the
+  // Agent Explorer (30 Oct).
   const openSource = NAV_GROUPS.find((group) => group.id === 'open-source')!;
   assert.deepEqual(
     openSource.items.map((item) => item.label),
-    ['Agent Explorer', 'Downtown', 'Verify'],
+    ['Agent Explorer', 'Analytics', 'Downtown', 'Verify'],
   );
   for (const link of [
     ...NAV_GROUPS.flatMap((group) => group.items),

@@ -1,3 +1,4 @@
+import { FEED_PAY_SPONSOR_FLEET_CEILING_SQL } from '../server/feed/pay/sponsor-ceiling-schema.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { keccak256 } from 'viem';
@@ -7,7 +8,7 @@ import type { AuthorizationStore, IssuedAuthorization } from '../server/base/cha
 import { feeRef } from '../server/protocol/fees/fee-call.js';
 import { FEED_PAY_SPONSOR_SQL } from '../server/feed/pay/sponsor-schema.js';
 import { createSponsorCredits } from '../server/feed/pay/sponsor.js';
-import { createSponsorSigner } from '../server/feed/pay/sponsor-signer.js';
+import { createSponsorSigner, pgSponsorReservations } from '../server/feed/pay/sponsor-signer.js';
 import { createSponsoredCalls, FEED_PAY_SPONSORED_SQL } from '../server/feed/pay/sponsored.js';
 import { ROUTER, setup } from './helpers/x402-fake-base.js';
 
@@ -43,6 +44,7 @@ test('sponsored buys ride the real facilitator batch lane; a member sent back to
     INSERT INTO city_offers VALUES ('of_1', 'ws-s', 's1', 'w-s');`);
   await f.pg.exec(FEED_PAY_SPONSOR_SQL);
   await f.pg.exec(FEED_PAY_SPONSORED_SQL);
+  await f.pg.exec(FEED_PAY_SPONSOR_FLEET_CEILING_SQL);
   for (const a of ['a1', 'a2', 'a3'])
     await f.pg
       .exec(`INSERT INTO base_identities VALUES ('${a}', 84532, 'confirmed', 1, ${START + 1}, 1);
@@ -64,6 +66,8 @@ test('sponsored buys ride the real facilitator batch lane; a member sent back to
     now: () => f.clock.now,
     router: ROUTER as Address,
     treasuryOf: async () => `0x${'7'.repeat(40)}` as Address,
+    // The signer reads the stored reservation itself (lazily: the database exists by the first sign).
+    reservationOf: (key) => pgSponsorReservations(f.db)(key),
   });
   const calls = createSponsoredCalls({
     db: f.db,
@@ -87,6 +91,7 @@ test('sponsored buys ride the real facilitator batch lane; a member sent back to
         format: 'json' as const,
       }),
     },
+    preSign: async () => null,
     pay: async () => ({
       signer,
       facilitator: f.facilitator,

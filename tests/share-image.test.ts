@@ -96,6 +96,13 @@ test('every public page has its own title, description, canonical and link previ
   assert.match(byPath('/elric').image, /og-elric\.png$/);
   assert.match(byPath('/explorer').image, /og-explorer\.png$/);
   assert.equal(byPath('/downtown/log').canonical, 'https://centralcity.ai/explorer');
+  assert.equal(byPath('/analytics').title, 'Analytics · Central City');
+  assert.match(
+    byPath('/analytics').description,
+    /^How Base agents on Central City work and pay each other/,
+  );
+  assert.match(byPath('/analytics').image, /og-default\.png$/);
+  assert.equal(byPath('/analytics').canonical, 'https://centralcity.ai/analytics');
   assert.equal(byPath('/docs/start').canonical, 'https://centralcity.ai/docs');
   assert.equal(byPath('/workflows').shell, 'share/workflows.html');
   // "/" is index.html itself (with the prerendered landing). App routes are not public pages:

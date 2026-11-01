@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createPendingAction } from '../server/elric/pending.js';
+import { checkToolCall } from '../server/elric/tools.js';
 import {
   pendingDetail,
   pendingSummary,
@@ -173,4 +174,36 @@ test('the detail is the task body only, cleaned (line breaks kept) and capped', 
   const long = pendingDetail('room_task_create', { title: 't', body: 'y'.repeat(5_000) })!;
   assert.equal(Array.from(long).length, PENDING_DETAIL_CHARS);
   assert.ok(long.endsWith('…'));
+});
+
+test('a proposed task always shows in full: arguments that NFKC would cut short are refused', () => {
+  const room = 'room-1';
+  const propose = (args: Record<string, unknown>) =>
+    checkToolCall(
+      { id: 'c1', name: 'room_task_create', args: { room_id: room, ...args } },
+      room,
+      true,
+    );
+  // 250 x U+FDFA is 250 characters as written and 4,500 after NFKC: the card would cut the tail.
+  const expanded = `${'ﷺ'.repeat(250)} TAIL-MARKER`;
+  assert.deepEqual(propose({ title: 'Plan', body: expanded }), {
+    ok: false,
+    status: 'refused_args',
+  });
+  assert.deepEqual(propose({ title: 'ﷺ'.repeat(12) }), { ok: false, status: 'refused_args' });
+  // Anything accepted is shown whole: the detail and the summary hold the full stored text.
+  for (const args of [
+    { title: 'x'.repeat(200), body: 'y'.repeat(4_000) },
+    { title: 'ﷺ'.repeat(11), body: `${'ﷺ'.repeat(200)} TAIL-MARKER` },
+  ]) {
+    const checked = propose(args);
+    assert.equal(checked.ok, true);
+    if (!checked.ok || checked.name !== 'room_task_create') continue;
+    const detail = pendingDetail('room_task_create', checked.args)!;
+    assert.equal(detail, checked.args.body!.normalize('NFKC'));
+    assert.equal(
+      pendingSummary('room_task_create', checked.args),
+      checked.args.title.normalize('NFKC'),
+    );
+  }
 });

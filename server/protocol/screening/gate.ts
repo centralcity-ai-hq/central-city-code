@@ -70,7 +70,9 @@ export type ScreeningReason =
   | 'timeout'
   | 'malformed'
   | 'stale'
-  | 'invalid_request';
+  | 'invalid_request'
+  /** The denylist setting holds an entry that is not an address: no decision (CCA-136). */
+  | 'invalid_setting';
 
 export interface ScreeningDecision {
   allowed: boolean;
@@ -110,6 +112,8 @@ export interface ScreeningGateDeps {
   /** Resolved per screening (the configuration is read per call); null = not configured. */
   provider: () => ScreeningProvider | null;
   now?: () => number;
+  /** One JSON line per notable event (console.warn by default). */
+  log?: (line: string) => void;
   timeoutMs?: number;
   ttlMs?: number;
   maxAgeMs?: number;
@@ -122,13 +126,23 @@ const INTENT = /^[A-Za-z0-9_.:-]{1,200}$/;
 
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 
+/**
+ * The denylist setting, read strictly: entries separated by commas, semicolons or white space.
+ * `invalid` counts the non-empty entries that are not an address (a quoted value, a typo): the gate
+ * then decides nothing rather than screen against a list shorter than the one configured.
+ */
+export function parseScreeningDenylist(env: Env): { list: string[]; invalid: number } {
+  const items = (env[SCREENING_DENY_FLAG] ?? '')
+    .split(/[\s,;]+/)
+    .map((item) => item.toLowerCase())
+    .filter((item) => item !== '');
+  const list = items.filter((item) => ADDRESS.test(item));
+  return { list: [...new Set(list)].sort(), invalid: items.length - list.length };
+}
+
 /** The denylist from the environment: valid addresses only, lowercased, sorted, unique. */
 export function screeningDenylist(env: Env): string[] {
-  const items = (env[SCREENING_DENY_FLAG] ?? '')
-    .split(',')
-    .map((item) => item.trim().toLowerCase())
-    .filter((item) => ADDRESS.test(item));
-  return [...new Set(items)].sort();
+  return parseScreeningDenylist(env).list;
 }
 
 /** The policy version: the rules, the provider and the denylist (a change invalidates reuse). */
@@ -339,6 +353,15 @@ export function createScreeningGate(deps: ScreeningGateDeps) {
   async function screen(request: ScreeningRequest): Promise<ScreeningDecision> {
     const binding = bindingOf(request);
     if (!binding) return unavailable('invalid_request');
+    // Before any reuse: a decision made under a list read wrongly is never answered again.
+    const parsed = parseScreeningDenylist(deps.env);
+    if (parsed.invalid > 0) {
+      // The setting's name only, never its value.
+      (deps.log ?? console.warn)(
+        JSON.stringify({ event: 'protocol.setting_invalid', setting: SCREENING_DENY_FLAG }),
+      );
+      return unavailable('invalid_setting');
+    }
     let provider: ScreeningProvider | null;
     try {
       provider = deps.provider();
@@ -351,7 +374,7 @@ export function createScreeningGate(deps: ScreeningGateDeps) {
     const reused = await reusable(hash, binding, policy, providerRef);
     if (reused) return reused;
     const addresses = [...new Set(binding.parties.map((p) => p.address))].sort();
-    const deny = new Set(screeningDenylist(deps.env));
+    const deny = new Set(parsed.list);
     if (addresses.some((address) => deny.has(address)))
       return store(hash, binding, policy, providerRef, 'blocked', 'denylisted');
     if (!provider) return unavailable('not_configured');

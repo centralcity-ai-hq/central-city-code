@@ -672,6 +672,7 @@ test('permissions: non-members get the uniform 404; an invite guest sees members
   const hostRow = (listed.json().members as any[]).find((m) => m.id === hostAgent);
   assert.equal(hostRow.messages_today, 1); // history 'full'
   assert.equal(hostRow.last_active_at, null);
-  const refused = await anon('/api/public/invites/tools/city_room_overview', {}, bearer);
-  assert.notEqual(refused.statusCode, 200);
+  // Invite guests read the overview of their own room, as members do.
+  const overview = await anon('/api/public/invites/tools/city_room_overview', {}, bearer);
+  assert.equal(overview.statusCode, 200, overview.body);
 });

@@ -27,8 +27,9 @@ import { protocolFeesEnabled, protocolRouter3FromEnv } from '../../protocol/fees
 import { feeEventsOf } from '../../protocol/fees/fee-call.js';
 
 /**
- * Router 3's address from the one parser the ledger uses too (protocolRouter3FromEnv:
- * CITY_PROTOCOL_FEE_ROUTER3 and its FROM_BLOCK), checksummed; null when unset or invalid.
+ * Router 3's address from the one parser the ledger uses too (protocolRouter3FromEnv: fixed in code
+ * on Base mainnet, else CITY_PROTOCOL_FEE_ROUTER3 and its FROM_BLOCK), checksummed; null when unset
+ * or invalid on a test network.
  */
 export function router3AddressFromEnv(env: Record<string, string | undefined>): Hex | null {
   const found = protocolRouter3FromEnv(env)[0]?.address;
@@ -58,6 +59,9 @@ export function feeRouter3Live(env: Record<string, string | undefined>): boolean
     router3AddressFromEnv(env) !== null
   );
 }
+
+/** New fee-included payments on Arc may be pinned to its router 3: off unless exactly '1'. */
+export const ARC_ROUTER3_FLAG = 'CITY_ARC_FEE_ROUTER3_ENABLED';
 
 /** Router 3's immutable cap (MAX_TOTAL): 100 USDC, fee included, like router 2. */
 export const MAX_TOTAL_ROUTER3 = 100_000_000n;

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createApp } from '../server/app.js';
 import { rpcResult } from './oauth-helpers.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 /**
  * Room history setting over the console REST route and the invited-AI path (/mcp/open
@@ -47,7 +48,7 @@ async function fixture(t: { after(fn: () => Promise<unknown>): void }) {
       password: 'Synthetic room history password',
     });
     assert.equal(registered.statusCode, 201, registered.body);
-    const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+    const cookie = sessionPair(registered.cookies);
     const agent = await post(
       '/api/agents',
       { name: `${name} desk`, capability: 'research', mode: 'hosted' },
@@ -164,7 +165,7 @@ test('invited AI: city_join_invite says whether earlier messages are readable', 
   })) as { isError?: boolean; structuredContent: Record<string, string> };
   assert.ok(!first.isError, JSON.stringify(first));
   assert.equal(first.structuredContent.history, 'full');
-  assert.match(first.structuredContent.next_step!, /read the earlier conversation/);
+  assert.match(first.structuredContent.next_step!, /the conversation from the start/);
   const read = (await rpc('tools/call', {
     name: 'city_room_read',
     arguments: { room_credential: first.structuredContent.room_credential },
@@ -187,5 +188,5 @@ test('invited AI: city_join_invite says whether earlier messages are readable', 
   })) as { isError?: boolean; structuredContent: Record<string, string> };
   assert.ok(!second.isError, JSON.stringify(second));
   assert.equal(second.structuredContent.history, 'from_join');
-  assert.match(second.structuredContent.next_step!, /earlier messages are not shared/);
+  assert.match(second.structuredContent.next_step!, /messages since you joined/);
 });

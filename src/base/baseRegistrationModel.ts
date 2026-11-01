@@ -4,6 +4,8 @@
  */
 
 /** Base mainnet: the only network the register route serves. */
+import { ARC_MAINNET } from '../../shared/chains';
+
 export const BASE_MAINNET = 8453;
 export const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 export const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
@@ -56,6 +58,8 @@ export interface BoundWallet {
  * when it is missing the panel follows `state` and `erc8004AgentId` as it always did.
  */
 export interface IdentityView {
+  /** The chain it is on, when the answer says: a read of the registration always does. */
+  chainId?: number;
   state: IdentityState;
   /** The final Base ID, once the registration can no longer change. */
   erc8004AgentId: string | null;
@@ -134,3 +138,68 @@ export function pollDelay(identity: IdentityView | null): number {
 export const validAddress = (value: unknown): string | null =>
   typeof value === 'string' && ADDRESS.test(value) ? value : null;
 export const short = (address: string) => `${address.slice(0, 6)}…${address.slice(-4)}`;
+
+// ---- Choose a chain (Operation Arc): Base or Arc, only while the server has Arc on ----
+
+/** Arc mainnet (shared/chains.ts ARC_MAINNET). */
+export const ARC_CHAIN_ID = ARC_MAINNET;
+export type ChainChoice = typeof BASE_MAINNET | typeof ARC_CHAIN_ID;
+
+export const CHAIN_OPTIONS: readonly { chainId: ChainChoice; name: string; line: string }[] = [
+  { chainId: BASE_MAINNET, name: 'Base', line: 'Coinbase’s network. Where most agents are today.' },
+  {
+    chainId: ARC_CHAIN_ID,
+    name: 'Arc',
+    line: 'Circle’s network. Gas paid in USDC, final in about a second.',
+  },
+];
+export const CHAIN_NOTE = 'An agent lives on one chain. You can’t move it later.';
+
+/** The step shows only while Arc is on and the agent has no registration and no wallet yet. */
+export function chainStepShown(input: {
+  arcOn: boolean;
+  identity: IdentityView | null;
+  wallet: BoundWallet | null;
+}): boolean {
+  return input.arcOn && !input.identity && !input.wallet;
+}
+
+/** A chain was chosen but nothing exists on it yet: the owner may still choose the other one. */
+export function chainChangeShown(input: {
+  arcOn: boolean;
+  identity: IdentityView | null;
+  wallet: BoundWallet | null;
+  chosen: number | undefined;
+}): boolean {
+  return input.chosen !== undefined && chainStepShown(input);
+}
+
+/** The register request's chain field: none for Base (byte-identical to before), else chainId. */
+export function chainFields(chainId: number): { chainId?: number } {
+  return chainId === BASE_MAINNET ? {} : { chainId };
+}
+
+const CHAIN_NAMES: Record<number, string> = { [BASE_MAINNET]: 'Base', [ARC_CHAIN_ID]: 'Arc' };
+
+/** 409 other_chain: the agent already lives on another chain. Reads chainId or chain name. */
+export function otherChainMessage(details: unknown): string {
+  const d = (details ?? {}) as { chainId?: unknown; chain?: unknown };
+  const name =
+    (typeof d.chainId === 'number' && CHAIN_NAMES[d.chainId]) ||
+    (typeof d.chain === 'string' && d.chain.trim()) ||
+    'another chain';
+  return `This agent already lives on ${name}.`;
+}
+
+/**
+ * The register button's line for a 409 other_chain: the chain it lives on, and the server's own
+ * message, so the button never just shows the same screen again. The server's first sentence
+ * ("already on another chain") is the one named here, so only the rest of it is added.
+ */
+export function otherChainText(details: unknown, serverMessage: string | undefined): string {
+  const named = otherChainMessage(details);
+  const server = (serverMessage ?? '').trim();
+  if (!server) return named;
+  const rest = server.replace(/^[^.]*another chain\.\s*/i, '').trim();
+  return rest ? `${named} ${rest}` : named;
+}

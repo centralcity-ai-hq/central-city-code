@@ -22,6 +22,7 @@ import {
   pkce,
   registerClient,
 } from './oauth-helpers.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 process.env.CITY_RATE_LIMIT_KEY ??= 'synthetic-test-only-rate-limit-secret-0000';
 
@@ -85,7 +86,7 @@ async function owner(app: App, name: string, { host = true } = {}) {
     remoteAddress: `203.0.${addressCounter++}.21`,
   });
   assert.equal(person.statusCode, 201, person.body);
-  const cookie = `cc_session=${person.cookies.find((item) => item.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(person.cookies);
   const claimed = await app.inject({
     method: 'POST',
     url: '/api/workspaces/claim',
@@ -241,7 +242,7 @@ async function hostedPoolApp(t: { after: (fn: () => Promise<unknown>) => void })
   const account = async (name: string) => {
     const res = await call('', 'POST', '/api/auth/register', { name, password: PASSWORD });
     assert.equal(res.statusCode, 201, res.body);
-    const cookie = `cc_session=${res.cookies.find((item) => item.name === 'cc_session')!.value}`;
+    const cookie = sessionPair(res.cookies);
     const agentId = (
       await call(cookie, 'POST', '/api/agents', {
         name: `${name} desk`,
@@ -319,7 +320,7 @@ test('gate: previews and link reads never consume admission', async (t) => {
       headers: jsonHeaders,
       payload: JSON.stringify({ name, password: PASSWORD }),
     });
-    return `cc_session=${res.cookies.find((item) => item.name === 'cc_session')!.value}`;
+    return sessionPair(res.cookies);
   };
   const cookie = await register('Preview host');
   const api = (method: 'GET' | 'POST', url: string, body?: unknown, headers = {}) =>
@@ -737,7 +738,7 @@ test('gate: a stale backup cannot resurrect rooms, memberships or invites', asyn
     });
   const register = async (name: string) => {
     const res = await api('', 'POST', '/api/auth/register', { name, password: PASSWORD });
-    return `cc_session=${res.cookies.find((item) => item.name === 'cc_session')!.value}`;
+    return sessionPair(res.cookies);
   };
   const hostCookie = await register('Backup host');
   const memberCookie = await register('Backup member');
@@ -780,7 +781,7 @@ test('gate: a stale backup cannot resurrect rooms, memberships or invites', asyn
     name: 'Backup member',
     password: PASSWORD,
   });
-  const cookie = `cc_session=${login.cookies.find((item) => item.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(login.cookies);
   assert.equal((await api(cookie, 'GET', `/api/rooms/${slug}/messages`)).statusCode, 404);
   const rejoin = await api(cookie, 'POST', `/api/rooms/${slug}/join`, {
     token,
@@ -839,9 +840,9 @@ test('gate: spam, storage and fan-out bounds hold with retry guidance', async (t
   );
   assert.ok(Number(results[4]!.headers['retry-after']) >= 1);
   // Oversized payloads are rejected before any seq is used.
-  const big = await say(app, a.key, roomId, 'x'.repeat(20_000));
+  const big = await say(app, a.key, roomId, 'x'.repeat(65_537));
   assert.equal(big.statusCode, 400);
-  const parts = Array.from({ length: 4 }, () => ({ type: 'text', text: 'y'.repeat(10_000) }));
+  const parts = Array.from({ length: 4 }, () => ({ type: 'text', text: 'y'.repeat(33_000) }));
   const tooMany = await tool(app, a.key, 'city_room_post', {
     room_id: roomId,
     parts,
@@ -879,7 +880,7 @@ test('gate: cross-site requests are refused and stored content stays inert', asy
     headers: jsonHeaders,
     payload: JSON.stringify({ name: 'Csrf host', password: PASSWORD }),
   });
-  const cookie = `cc_session=${res.cookies.find((item) => item.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(res.cookies);
   const host = (
     await app.inject({
       method: 'POST',

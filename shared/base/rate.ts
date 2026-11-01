@@ -30,6 +30,7 @@ import {
   zeroHash,
   type Hex,
 } from 'viem';
+import { ARC_NETWORKS, type ArcChainId } from '../chains.js';
 import { BASE_NETWORKS, type Address } from './chains.js';
 import { WALLET_CHAIN_ID } from './wallet-network.js';
 import { walletAbi, type OwnerCallEncoding, type WithdrawalState } from './withdraw.js';
@@ -191,12 +192,28 @@ export const RATE_REGISTRY: Address = getAddress(
   BASE_NETWORKS[WALLET_CHAIN_ID].contracts.reputationRegistry,
 );
 
+/**
+ * The ReputationRegistry a rating on `chainId` goes to: the wallet network's RATE_REGISTRY, or an
+ * Arc network's own (its mainnet shares Base's address, its testnet doesn't). Null for any other chain.
+ */
+export function rateRegistryOf(chainId: number): Address | null {
+  if (chainId === WALLET_CHAIN_ID) return RATE_REGISTRY;
+  const arc = (ARC_NETWORKS as Record<number, (typeof ARC_NETWORKS)[ArcChainId] | undefined>)[
+    chainId
+  ];
+  return arc ? getAddress(arc.contracts.reputationRegistry) : null;
+}
+
 /** The one call of a rating: giveFeedback on the pinned registry, no value. */
-export function rateCall(agentId: bigint, stars: Stars): OwnerCallEncoding {
+export function rateCall(
+  agentId: bigint,
+  stars: Stars,
+  registry: Address = RATE_REGISTRY,
+): OwnerCallEncoding {
   if (typeof agentId !== 'bigint' || agentId <= 0n || agentId > maxUint256)
     throw new Error('A rating names a Base ID above 0.');
   return {
-    target: RATE_REGISTRY,
+    target: registry,
     value: 0n,
     data: encodeFunctionData({
       abi: giveFeedbackAbi,
@@ -207,8 +224,12 @@ export function rateCall(agentId: bigint, stars: Stars): OwnerCallEncoding {
 }
 
 /** A rating's callData: the wallet's one execute of rateCall. */
-export function encodeRateCall(agentId: bigint, stars: Stars): Hex {
-  const call = rateCall(agentId, stars);
+export function encodeRateCall(
+  agentId: bigint,
+  stars: Stars,
+  registry: Address = RATE_REGISTRY,
+): Hex {
+  const call = rateCall(agentId, stars, registry);
   return encodeFunctionData({
     abi: walletAbi,
     functionName: 'execute',
@@ -227,7 +248,7 @@ export interface RateCall {
  * names. On its own this already refuses every other call, field, encoding and trailing byte. It
  * does not look at the wallet.
  */
-function exactRateCall(callData: Hex): RateCall | null {
+function exactRateCall(callData: Hex, registry: Address = RATE_REGISTRY): RateCall | null {
   try {
     const outer = decodeFunctionData({ abi: walletAbi, data: callData });
     if (outer.functionName !== 'execute') return null;
@@ -236,7 +257,9 @@ function exactRateCall(callData: Hex): RateCall | null {
     const [agentId, amount] = inner.args;
     const stars = starsOf(amount);
     if (stars === null) return null;
-    return encodeRateCall(agentId, stars) === callData.toLowerCase() ? { agentId, stars } : null;
+    return encodeRateCall(agentId, stars, registry) === callData.toLowerCase()
+      ? { agentId, stars }
+      : null;
   } catch {
     return null;
   }
@@ -248,7 +271,11 @@ function exactRateCall(callData: Hex): RateCall | null {
  * no shifted or aliased offsets, no dirty padding), and every giveFeedback field what a rating
  * sets. (The `execute` name check is belt and braces: a batch's arguments fail the address check.)
  */
-function checkedRateCall(callData: Hex, wallet: Address): RateCall | null {
+function checkedRateCall(
+  callData: Hex,
+  wallet: Address,
+  registry: Address = RATE_REGISTRY,
+): RateCall | null {
   try {
     const outer = decodeFunctionData({ abi: walletAbi, data: callData });
     if (outer.functionName !== 'execute') return null;
@@ -260,8 +287,8 @@ function checkedRateCall(callData: Hex, wallet: Address): RateCall | null {
     const [target, value, data] = outer.args;
     // The registry, never the wallet itself (calling itself is a cancel's no-op), and no value.
     if (
-      getAddress(target) !== RATE_REGISTRY ||
-      getAddress(wallet) === RATE_REGISTRY ||
+      getAddress(target) !== getAddress(registry) ||
+      getAddress(wallet) === getAddress(registry) ||
       value !== 0n
     )
       return null;
@@ -309,9 +336,13 @@ export const rateCallLayers = { exactRateCall, checkedRateCall } as const;
  * (exactRateCall) and the fields (checkedRateCall). Either one alone refuses every bad case the
  * tests know; both are kept so a slip in one is never enough. Any doubt is null.
  */
-export function decodeRateCall(callData: Hex, wallet: Address): RateCall | null {
-  const exact = exactRateCall(callData);
-  const checked = checkedRateCall(callData, wallet);
+export function decodeRateCall(
+  callData: Hex,
+  wallet: Address,
+  registry: Address = RATE_REGISTRY,
+): RateCall | null {
+  const exact = exactRateCall(callData, registry);
+  const checked = checkedRateCall(callData, wallet, registry);
   if (!exact || !checked || exact.agentId !== checked.agentId || exact.stars !== checked.stars)
     return null;
   return exact;

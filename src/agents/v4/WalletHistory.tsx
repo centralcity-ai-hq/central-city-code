@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { ApiError } from '../../api';
 import type { WalletView } from '../../base/wallet/api';
+import { chainWords } from '../../../shared/base/wallet-chains';
 import { usePasswordLock } from '../../base/wallet/usePasswordLock';
 import {
   askCancel,
+  cancelSignable,
   cancelSignaturePath,
   checkOperation,
   checkSigningWindow,
@@ -263,8 +265,8 @@ function HistoryLine({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const { password, setPassword, alive } = usePasswordLock(busy);
-  // Only one this browser signed, before Base took it, and never once a cancel was asked.
-  const cancellable = !!record && view.state === 'submitted' && !view.cancel;
+  // Only one this browser signed, before Base took it, and never once a cancel was signed.
+  const cancellable = !!record && cancelSignable(view);
 
   async function cancel(event: FormEvent) {
     event.preventDefault();
@@ -285,6 +287,7 @@ function HistoryLine({
         userOpHash: noop.userOpHash,
         entryPoint: noop.entryPoint,
         chainId: asked.chainId,
+        agentChainId: wallet.chainId,
         wallet: wallet.address,
         owner: wallet.ownerAddress,
         agentId,
@@ -313,7 +316,8 @@ function HistoryLine({
       onChange(answer);
     } catch (err) {
       setPassword('');
-      setError(laneRefusal(err, { noun, token: view.token }) ?? signingFailure(err));
+      const held = laneRefusal(err, { noun, token: view.token });
+      setError(held ? chainWords(wallet.chainId).say(held) : signingFailure(err));
     } finally {
       setBusy(false);
     }
@@ -332,9 +336,9 @@ function HistoryLine({
             href={explorer}
             target="_blank"
             rel="noreferrer"
-            aria-label={`View ${textOf(line)} on Basescan`}
+            aria-label={`View ${textOf(line)} on ${chainWords(wallet.chainId).explorer}`}
           >
-            Basescan
+            {chainWords(wallet.chainId).explorer}
           </a>
         ) : null}
         {cancellable && !open ? (
@@ -351,9 +355,9 @@ function HistoryLine({
       {cancellable && open ? (
         <form className="w4-steps w4-hcancel" onSubmit={(event) => void cancel(event)}>
           <p className="w4-hint">
-            To cancel, you sign a no-op at the same place; whichever Base takes first wins, so the{' '}
-            {noun} may still land. If the cancellation fee cannot be covered, nothing is signed or
-            charged for the cancellation.
+            To cancel, you sign a no-op at the same place; whichever {chainWords(wallet.chainId).on}{' '}
+            takes first wins, so the {noun} may still land. If the cancellation fee cannot be
+            covered, nothing is signed or charged for the cancellation.
           </p>
           <PasswordField value={password} onChange={setPassword} />
           <ErrorLine message={error} />

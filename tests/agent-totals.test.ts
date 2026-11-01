@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createApp } from '../server/app.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 /**
  * My agents' Overview totals (GET /api/agents/:id/totals): tasks the agent handed in that were
@@ -45,7 +46,7 @@ test('totals: tasks done for one agent, owner only', async (t) => {
       password: `Synthetic totals test password ${name}`,
     });
     assert.equal(response.statusCode, 201, response.body);
-    return `cc_session=${response.cookies.find((c) => c.name === 'cc_session')!.value}`;
+    return sessionPair(response.cookies);
   };
   const cookie = await register('Totals owner');
   const created = await call('POST', '/api/agents', cookie, {

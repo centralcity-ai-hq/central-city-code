@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { formatUnits } from 'viem';
 import { ApiError } from '../../api';
-import type { WalletView } from '../../base/wallet/api';
+import { chainRefusal, type WalletView } from '../../base/wallet/api';
 import { usePasswordLock } from '../../base/wallet/usePasswordLock';
 import { usdcText } from '../../base/wallet/limits';
 import {
   askCancel,
+  cancelSignable,
   cancelSignaturePath,
   checkOperation,
   clearAnchor,
@@ -25,6 +26,7 @@ import {
   type WithdrawalView,
 } from '../../base/wallet/withdraw';
 import { VaultCryptoError } from '../../base/vault';
+import { chainWords } from '../../../shared/base/wallet-chains';
 import { SettingsLoading } from './settingsShared';
 
 /*
@@ -44,13 +46,14 @@ const SAFE_POLL_MS = 10_000;
 const posted = (view: WithdrawalView): WithdrawalView => ({ ...view, safe: undefined });
 
 export const signingFailure = (error: unknown) =>
-  error instanceof WithdrawalLockedError
+  chainRefusal(error) ??
+  (error instanceof WithdrawalLockedError
     ? error.message
     : error instanceof WithdrawalCheckError
       ? `Not signed: ${error.message}`
       : error instanceof VaultCryptoError || error instanceof ApiError || error instanceof Error
         ? error.message
-        : 'Something went wrong. Try again.';
+        : 'Something went wrong. Try again.');
 
 export const shortHex = (value: string) => `${value.slice(0, 6)}…${value.slice(-4)}`;
 export const shownAmount = (raw: bigint, token: WithdrawalToken) => {
@@ -94,12 +97,12 @@ export function ErrorLine({ message }: { message: string }) {
 }
 
 /** The steps of an operation on its way, as Base reports them. */
-function Steps({ view, label }: { view: WithdrawalView; label: string }) {
+function Steps({ view, label, on }: { view: WithdrawalView; label: string; on: string }) {
   const order = ['submitted', 'included', 'final'] as const;
   const at = order.indexOf(view.state as (typeof order)[number]);
   const steps = [
     { label: 'Signed in your browser', done: true },
-    { label: 'Sent to Base', done: at >= 0 },
+    { label: `Sent to ${on}`, done: at >= 0 },
     {
       label: view.blockNumber
         ? `In block ${view.blockNumber.toLocaleString('en-US')}`
@@ -231,6 +234,7 @@ export function WithdrawalStatus({
         userOpHash: noop.userOpHash,
         entryPoint: noop.entryPoint,
         chainId: asked.chainId,
+        agentChainId: wallet.chainId,
         wallet: wallet.address,
         owner: wallet.ownerAddress,
         agentId,
@@ -259,6 +263,7 @@ export function WithdrawalStatus({
 
   if (!view) return <SettingsLoading />;
   const status = sentStatus(view, noun);
+  const words = chainWords(wallet.chainId);
   return (
     <>
       <p className="w4-lead">
@@ -273,7 +278,7 @@ export function WithdrawalStatus({
       ) : null}
       {status.phase === 'sent' ? (
         // The money arrived; final is minutes away. No countdown: Base decides when.
-        <p className="w4-hint">{status.note}</p>
+        <p className="w4-hint">{status.note && words.say(status.note)}</p>
       ) : view.state === 'failed' ? (
         <p className="w4-error" role="alert">
           It didn’t go through{view.errorCode ? ` (${view.errorCode})` : ''}. Nothing left the
@@ -283,28 +288,30 @@ export function WithdrawalStatus({
         <p className="w4-hint">It wasn’t signed in time, so it can never be sent.</p>
       ) : view.state === 'cancelled' ? (
         <p className="w4-hint" role="status">
-          Cancelled: the cancel is final on Base and the {noun} never landed.
+          Cancelled: the cancel is final on {words.on} and the {noun} never landed.
         </p>
       ) : view.state === 'cancel_pending' ? (
         <p className="w4-hint" role="status">
-          Cancelling. Until Base settles it, the {noun} may still land.
+          {cancelSignable(view)
+            ? `The cancel isn’t signed, so it wasn’t sent. The ${noun} may still land.`
+            : `Cancelling. Until ${words.on} settles it, the ${noun} may still land.`}
         </p>
       ) : (
-        <Steps view={view} label={`${Noun} status`} />
+        <Steps view={view} label={`${Noun} status`} on={words.on} />
       )}
       {after?.(view)}
       {view.explorerUrl ? (
         <a className="w4-link" href={view.explorerUrl} target="_blank" rel="noreferrer">
-          View on Basescan
+          View on {words.explorer}
         </a>
       ) : null}
-      {view.state === 'submitted' && !view.cancel ? (
+      {cancelSignable(view) ? (
         cancelOpen ? (
           <form onSubmit={(event) => void cancel(event)} className="w4-steps">
             <p className="w4-hint">
-              To cancel, you sign a no-op at the same place; whichever Base takes first wins, so the{' '}
-              {noun} may still land. If the cancellation fee cannot be covered, nothing is signed or
-              charged for the cancellation. The original {noun} may still complete.
+              To cancel, you sign a no-op at the same place; whichever {words.on} takes first wins,
+              so the {noun} may still land. If the cancellation fee cannot be covered, nothing is
+              signed or charged for the cancellation. The original {noun} may still complete.
             </p>
             <PasswordField value={password} onChange={setPassword} />
             <ErrorLine message={error} />

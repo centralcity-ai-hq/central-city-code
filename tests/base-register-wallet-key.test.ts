@@ -319,3 +319,21 @@ test('a hand-over finished later (the finalize cron) still goes to the wallet th
   assert.deepEqual(s.calls.handedTo, [WALLET, WALLET]);
   assert.deepEqual(await s.walletRows(), [{ owner_address: KEY_OWNER, owner_account_id: 'p-1' }]);
 });
+
+test('a refused registration assigns no short id, so the agent can still be made private (CCA-116)', async (t) => {
+  const s = await setup(t);
+  const shortIds = async () =>
+    (await s.pg.query('SELECT 1 FROM base_short_ids WHERE agent_id = $1', [AGENT])).rows;
+  const mismatch = await s.register({ expectedWallet: `0x${'9'.repeat(40)}` });
+  assert.equal(mismatch.json().code, 'wallet_mismatch');
+  assert.deepEqual(await shortIds(), [], 'nothing was registered: no short id either');
+  // A frozen wallet is refused the same way.
+  await s.pg.query("UPDATE base_wallets SET state = 'frozen' WHERE agent_id = $1", [AGENT]);
+  const frozen = await s.register({ expectedWallet: WALLET });
+  assert.equal(frozen.json().code, 'wallet_frozen');
+  assert.deepEqual(await shortIds(), []);
+  // Once the checks pass, the registration assigns it before its first chain step.
+  await s.pg.query("UPDATE base_wallets SET state = 'derived' WHERE agent_id = $1", [AGENT]);
+  assert.equal((await s.register({ expectedWallet: WALLET })).statusCode, 200);
+  assert.equal((await shortIds()).length, 1);
+});

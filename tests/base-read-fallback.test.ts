@@ -5,9 +5,11 @@ import test from 'node:test';
 import {
   createPublicClient,
   decodeFunctionData,
+  encodeFunctionData,
   encodeFunctionResult,
   getAddress,
   multicall3Abi,
+  parseAbi,
   type Hex,
 } from 'viem';
 import { BASE_MAINNET, BASE_NETWORKS, BASE_SEPOLIA, MULTICALL3 } from '../shared/base/chains.js';
@@ -343,6 +345,47 @@ test('(b) writes, estimates and unpinned reads never reach the second endpoint',
   assert.equal(mayFallBack({ method: 'eth_blockNumber' }, { headNumberMayFallBack: true }), true);
 });
 
+test('the reads that decide an absence stay on the configured endpoint, pinned or not (CCA-109)', async (t) => {
+  const first = await node(t, () => RATE_LIMITED);
+  const second = await node(t, healthy());
+  const transport = baseReadTransport([first.url, second.url], {
+    chainId: NETWORK.chainId,
+    retry: { retryCount: 0 },
+  })({});
+  const entryPoint = NETWORK.contracts.entryPointV06;
+  const getNonce = encodeFunctionData({
+    abi: parseAbi(['function getNonce(address sender, uint192 key) view returns (uint256)']),
+    functionName: 'getNonce',
+    args: [WALLET, 7n],
+  });
+  const authorizationState = encodeFunctionData({
+    abi: parseAbi([
+      'function authorizationState(address authorizer, bytes32 nonce) view returns (bool)',
+    ]),
+    functionName: 'authorizationState',
+    args: [WALLET, blockHash(9n)],
+  });
+  // isRevoked inside a Multicall3 aggregate3, as the permission reader sends it.
+  const inAggregate = `0x82ad56cb${'00'.repeat(64)}3a3c58e8${'00'.repeat(32)}`;
+  for (const data of [getNonce, authorizationState, inAggregate]) {
+    for (const block of ['0x10', { blockHash: blockHash(1n) }]) {
+      const request = { method: 'eth_call', params: [{ to: entryPoint, data }, block] };
+      assert.equal(mayFallBack(request), false, `${data.slice(0, 10)} ${JSON.stringify(block)}`);
+      await assert.rejects(transport.request(request as never));
+    }
+  }
+  assert.deepEqual(
+    second.methods().filter((m) => m !== 'eth_chainId'),
+    [],
+    'the second endpoint answered none of them',
+  );
+  // Other pinned calls still may.
+  assert.equal(
+    mayFallBack({ method: 'eth_call', params: [{ to: WALLET, data: '0x70a08231' }, '0x10'] }),
+    true,
+  );
+});
+
 test('(a) fee quotes refused by the rate limit (-32002) are answered by the second endpoint', async (t) => {
   // The rate limit as CDP answers it: a JSON-RPC error, not an HTTP 429.
   const first = await node(t, () => ({ error: { code: -32002, message: 'rate limited' } }));
@@ -357,6 +400,23 @@ test('(a) fee quotes refused by the rate limit (-32002) are answered by the seco
     '0x5f5e100',
   );
   assert.ok(second.calls.some((call) => call.method === 'eth_gasPrice'));
+});
+
+test('a fee quote above the cap from the second endpoint is refused: the first endpoint error stands (CCA-111)', async (t) => {
+  const first = await node(t, () => ({ error: { code: -32002, message: 'rate limited' } }));
+  const second = await node(t, (call) =>
+    call.method === 'eth_gasPrice' ? { result: '0x3b9aca01' } : healthy()(call),
+  );
+  const transport = baseReadTransport([first.url, second.url], {
+    chainId: NETWORK.chainId,
+    retry: { retryCount: 0 },
+  })({});
+  await assert.rejects(transport.request({ method: 'eth_gasPrice' } as never), /rate limited/);
+  assert.equal(
+    await transport.request({ method: 'eth_maxPriorityFeePerGas' } as never),
+    '0x5f5e100',
+    'within the cap: taken',
+  );
 });
 
 test('the second endpoint proves presence, never absence', async (t) => {

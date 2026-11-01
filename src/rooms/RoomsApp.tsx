@@ -64,6 +64,8 @@ import './rooms-v2-header.css';
 import './rooms-v3.css';
 // Workspace v3 panels and sheets: last, so they win over the v2 rules they restyle.
 import './rooms-v3-panels.css';
+// Rooms P1 decisions and approvals (RoomCards.tsx).
+import './rooms-p1-cards.css';
 
 const LIST_POLL_MS = 10_000;
 /** Under this width the sidebar is an off-canvas drawer (matches sidebar.css). */

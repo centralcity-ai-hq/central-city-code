@@ -30,7 +30,7 @@ import {
   type FeedRequest,
 } from '../../shared/feed.js';
 import type { Database, Transaction } from '../database.js';
-import { opsAuthorized } from '../elric/ops.js';
+import { opsAuthorizedFor } from '../elric/ops.js';
 import { httpsWebhookTransport, type WebhookTransport } from '../wake/webhooks.js';
 import { feedEnabled } from './flag.js';
 import { endWithResponses, responsesTableCheck } from './respond-schema.js';
@@ -494,7 +494,7 @@ export function registerFeedReviewRoutes(app: FastifyInstance, deps: FeedReviewD
       reply.header('Cache-Control', 'no-store');
       if (
         !feedEnabled(deps.env) ||
-        !opsAuthorized(request.headers.authorization, deps.env.CITY_OPS_SECRET)
+        !opsAuthorizedFor(request.headers.authorization, deps.env, 'review')
       )
         return reply.code(404).send({ error: 'Unknown API route' });
     },

@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Operator } from '../../shared/types.js';
+import { MESSAGE_BODY_MAX_BYTES } from './body-limits.js';
 import {
   MESSAGE_LIMITS,
   contextIdSchema,
@@ -8,6 +9,8 @@ import {
   sendBodySchema,
   sendFields,
   type InboxPage,
+  NO_NUL_MESSAGE,
+  noNul,
 } from './contract.js';
 import type { Messaging } from './service.js';
 
@@ -88,7 +91,7 @@ export function registerMessagingRoutes(app: FastifyInstance, d: MessagingRouteD
           .transform(Number)
           .optional(),
         // Only the threads one of the owner's own members takes part in (the agent pane).
-        agent_id: z.string().min(1).max(128).optional(),
+        agent_id: z.string().min(1).max(128).refine(noNul, NO_NUL_MESSAGE).optional(),
       })
       .strict()
       .parse(request.query);
@@ -119,12 +122,16 @@ export function registerMessagingRoutes(app: FastifyInstance, d: MessagingRouteD
       d.messaging.readInbox(owned(operator), id, { ...query, start: 'latest' }),
     );
   });
-  app.post('/api/agents/:id/messages', async (request, reply) => {
-    const operator = await d.owner(request);
-    const { id } = agentParams.parse(request.params);
-    const body = sendBodySchema.parse(request.body);
-    return reply.code(201).send(await d.messaging.send(owned(operator), id, body));
-  });
+  app.post(
+    '/api/agents/:id/messages',
+    { bodyLimit: MESSAGE_BODY_MAX_BYTES },
+    async (request, reply) => {
+      const operator = await d.owner(request);
+      const { id } = agentParams.parse(request.params);
+      const body = sendBodySchema.parse(request.body);
+      return reply.code(201).send(await d.messaging.send(owned(operator), id, body));
+    },
+  );
   app.post('/api/agents/:id/inbox/ack', async (request) => {
     const operator = await d.owner(request);
     const { id } = agentParams.parse(request.params);
@@ -167,36 +174,46 @@ export function registerMessagingRoutes(app: FastifyInstance, d: MessagingRouteD
       .parse(request.query ?? {});
     return d.messaging.recipients(operator.id);
   });
-  app.post('/api/rooms/:room/direct/messages', async (request, reply) => {
-    const operator = await d.owner(request);
-    const { room } = roomParam.parse(request.params);
-    const { from, to, ...body } = z
-      .object({
-        from: memberId,
-        to: memberId,
-        text: sendFields.text,
-        parts: messagePartsSchema.optional(),
-        reply_to: z.string().uuid().optional(),
-        idempotency_key: sendFields.idempotency_key,
-      })
-      .strict()
-      .refine((value) => (value.text === undefined) !== (value.parts === undefined), {
-        message: 'Pass exactly one of text or parts.',
-      })
-      .parse(request.body ?? {});
-    return reply
-      .code(201)
-      .send(
-        await d.messaging.send(owned(operator), from, { ...body, to_agent_id: to, room_id: room }),
+  app.post(
+    '/api/rooms/:room/direct/messages',
+    { bodyLimit: MESSAGE_BODY_MAX_BYTES },
+    async (request, reply) => {
+      const operator = await d.owner(request);
+      const { room } = roomParam.parse(request.params);
+      const { from, to, ...body } = z
+        .object({
+          from: memberId,
+          to: memberId,
+          text: sendFields.text,
+          parts: messagePartsSchema.optional(),
+          reply_to: z.string().uuid().optional(),
+          idempotency_key: sendFields.idempotency_key,
+        })
+        .strict()
+        .refine((value) => (value.text === undefined) !== (value.parts === undefined), {
+          message: 'Pass exactly one of text or parts.',
+        })
+        .parse(request.body ?? {});
+      return reply.code(201).send(
+        await d.messaging.send(owned(operator), from, {
+          ...body,
+          to_agent_id: to,
+          room_id: room,
+        }),
       );
-  });
+    },
+  );
 
-  app.post('/api/runtime/messages', async (request, reply) => {
-    const identity = await d.runtime(request);
-    const body = sendBodySchema.parse(request.body);
-    const principal = { operatorId: identity.operatorId, runtime: identity };
-    return reply.code(201).send(await d.messaging.send(principal, identity.agentId, body));
-  });
+  app.post(
+    '/api/runtime/messages',
+    { bodyLimit: MESSAGE_BODY_MAX_BYTES },
+    async (request, reply) => {
+      const identity = await d.runtime(request);
+      const body = sendBodySchema.parse(request.body);
+      const principal = { operatorId: identity.operatorId, runtime: identity };
+      return reply.code(201).send(await d.messaging.send(principal, identity.agentId, body));
+    },
+  );
   app.get('/api/runtime/inbox', async (request) => {
     const identity = await d.runtime(request, { query: true });
     const { wait, ...query } = inboxQuery.parse(request.query);

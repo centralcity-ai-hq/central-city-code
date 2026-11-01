@@ -20,11 +20,15 @@ caps) and the S3 scheduled drain are in. Every responder route is off unless `CI
 | `CRON_SECRET` | Vercel Cron's bearer secret (16+ characters, e.g. `openssl rand -hex 32`). Vercel sends it on every cron call; without it `/api/cron/wake-drain` answers 404 and retries wait for other traffic. |
 
 **The root key must be distinct from every other secret:**
-- It is checked against `CITY_RATE_LIMIT_KEY`, `CITY_WAKE_SECRET(_PREVIOUS)`, `CITY_SIGNING_KEY(_PREVIOUS)` and
-  `DATABASE_URL`, in raw, base64 and hex forms.
+- It is checked against every deployment secret in the one shared list (`server/secret-env.ts`: the rate-limit,
+  wake, signing, PII, email, ops, model, GitHub, cron, Google OAuth and database secrets, their `_PREVIOUS` variants,
+  and each `v<n>:` entry of `CITY_BASE_SPENDER_KEK`), in raw, base64 and hex forms. A test fails when server code
+  reads a new secret variable that is not in that list.
 - Unlike the wake key, there is **no fallback** derived from `CITY_RATE_LIMIT_KEY`.
 - **Hosted with a missing, malformed or reused key:** the routes answer `503 responder_unavailable`, and one line
-  `responder.unavailable reason=missing|invalid|not_distinct` is logged, never the value.
+  `responder.unavailable reason=missing|invalid|not_distinct` is logged, never the value. Reading the settings,
+  turning Auto-reply off (`{"enabled": false}` alone) and removing a stored key still work, so an owner keeps those
+  controls; nothing is sent to a provider meanwhile.
 - **Locally without the key:** a random per-process key is used, so stored keys stop working after a restart.
 
 **On Vercel:** set the variable as a Sensitive environment variable, for Production only. Previews don't get it,
@@ -111,14 +115,21 @@ every stored plain column, and everything written to stderr and the console for 
 **Rotation (retiring a root key):**
 1. Set the new root key as `CITY_RESPONDER_KEK` and the old one as `CITY_RESPONDER_KEK_PREVIOUS`, then deploy.
 2. Dry run: `CITY_HOSTED=1 DATABASE_URL=… CITY_RESPONDER_KEK=… CITY_RESPONDER_KEK_PREVIOUS=… node --import tsx
-   scripts/rewrap-responder-keys.ts`. It prints counts only, for example `{"pending":12,"rewrapped":0,"unknownRoot":0,"dryRun":true}`.
+   scripts/rewrap-responder-keys.ts`. It first prints its target (database host and name, or the local directory)
+   and the root key fingerprints to stderr, then counts only, for example
+   `{"pending":12,"rewrapped":0,"unknownRoot":0,"failed":0,"dryRun":true}`. `DATABASE_URL` without `CITY_HOSTED=1`
+   (or the reverse) is refused, so a dry run never reports from the wrong database. Check the target before step 3.
 3. Run the same command with `--confirm`. It re-wraps only each data key under the current root, one short transaction
-   per key; the ciphertext is unchanged. Repeat until the dry run reports `"pending":0`.
+   per key; the ciphertext is unchanged. A key that fails is counted as `failed` (exit code 1) and the run goes on.
+   Repeat until the dry run reports `"pending":0`.
 4. Remove `CITY_RESPONDER_KEK_PREVIOUS` and deploy. Old roots must not linger: record the rotation date in the
    operations runbook.
 
 `unknownRoot` counts keys wrapped under a root the server no longer has. They can't be opened; their owners must add
-the key again.
+the key again. If delivery meets such a key (a root removed too early), Auto-reply pauses but the key stays active
+(server log `responder.root_key_unavailable`, stored pause reason `root_key_unavailable` since migration 303, shown
+as "Central City can't open the saved key right now"): restoring the root key and turning Auto-reply on again resumes
+it. Adding a new key also clears this pause.
 
 ## Validation
 

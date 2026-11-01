@@ -11,11 +11,17 @@
  * retry gets the stored pair unchanged (window read back from the seller leg). Never a second pair
  * for the same key, never a leg for another payer, payee, value, window or nonce.
  *
- * Because this key moves Central City's own money (room #335), two limits live in the signer
- * itself, whatever the caller asks: the price is at most SFP_CREDIT_CEILING_RAW (2 USDC) and split
- * exactly as router 3 does (quoteFeeIncluded), and the router and its treasury are bound by
- * configuration (the treasury read from the router once), never taken from the caller, so a fee
- * leg can never authorize a transfer to any other address.
+ * Because this key moves Central City's own money (room #335), its limits live in the signer itself,
+ * whatever the caller asks:
+ *   - it signs only for a stored reservation it reads itself (reservationOf, by the key): the
+ *     sponsored call row and its credit, both of the same kind, the credit reserved or used, the
+ *     call's amount and payee exactly what is asked;
+ *   - the price is at most that kind's ceiling: SFP_CREDIT_CEILING_RAW (2 USDC) for a real user,
+ *     SFP_FLEET_CREDIT_CEILING_RAW (40 USDC) only for a fleet credit. The kind is the one the server
+ *     stored when the credit was reserved (migration 260), never one a caller passes;
+ *   - the split is exactly router 3's (quoteFeeIncluded), and the router and its treasury are bound
+ *     by configuration (the treasury read from the router once), so a fee leg can never authorize a
+ *     transfer to any other address.
  */
 import { getAddress, type Hex } from 'viem';
 import type { PrivateKeyAccount } from 'viem/accounts';
@@ -28,8 +34,25 @@ import {
   type TransferAuthorization,
 } from '../../base/chain/x402.js';
 import { quoteFeeIncluded } from '../../protocol/fees/fee-call.js';
+import { isReservedPayee, reservedPayees } from '../../../shared/protocol.js';
+import type { Database } from '../../database.js';
 import { LEG_FEE, LEG_SELLER, router3Nonce } from './router3.js';
-import { SFP_CREDIT_CEILING_RAW } from './sponsor.js';
+import { SFP_CREDIT_CEILING_RAW, SFP_FLEET_CREDIT_CEILING_RAW } from './sponsor.js';
+
+/** A sponsored call and its credit as stored, read by the signer itself (by the call's key). */
+export interface SponsorReservation {
+  grossRaw: bigint;
+  payTo: Address;
+  /** The call row's kind and the credit's: both written by the server when it reserved. */
+  callFleet: boolean;
+  creditFleet: boolean;
+  creditAmountRaw: bigint;
+  creditState: string;
+  /** The buying agent on the call and on the credit, and the credit's chain. */
+  callAgentId: string;
+  creditAgentId: string;
+  creditChainId: number;
+}
 
 export interface SponsorSignerDeps {
   network: BaseNetwork;
@@ -46,6 +69,10 @@ export interface SponsorSignerDeps {
   router: Address;
   /** The router's own treasury, read on chain (its treasury()); read once per signer. */
   treasuryOf: () => Promise<Address>;
+  /** The stored reservation behind a key (feed_pay_sponsored_calls.op_key), or null. */
+  reservationOf: (key: string) => Promise<SponsorReservation | null>;
+  /** The chain's reserved payees (protocolReservedPayees); left out: Base mainnet's. */
+  reserved?: ReadonlySet<string>;
 }
 
 const sameLeg = (
@@ -123,19 +150,54 @@ export function createSponsorSigner(deps: SponsorSignerDeps) {
     ref: Hex;
     validitySeconds: number;
   }): Promise<{ seller: IssuedAuthorization; fee: IssuedAuthorization }> {
+    // Only for a reservation the signer reads itself, and only within its own kind's ceiling.
+    const held = await deps.reservationOf(input.key);
+    if (
+      !held ||
+      held.callFleet !== held.creditFleet ||
+      held.callAgentId !== held.creditAgentId ||
+      held.creditChainId !== chainId ||
+      (held.creditState !== 'reserved' && held.creditState !== 'used') ||
+      held.grossRaw !== input.gross ||
+      held.creditAmountRaw !== input.gross ||
+      getAddress(held.payTo) !== getAddress(input.payee)
+    )
+      throw new AuthorizationError(
+        'INVALID_AMOUNT',
+        'No matching sponsored reservation for this payment.',
+      );
+    const ceiling = held.creditFleet ? SFP_FLEET_CREDIT_CEILING_RAW : SFP_CREDIT_CEILING_RAW;
     let split: { fee: bigint; net: bigint };
     try {
-      split = quoteFeeIncluded(input.gross, SFP_CREDIT_CEILING_RAW);
+      split = quoteFeeIncluded(input.gross, ceiling);
     } catch {
       throw new AuthorizationError(
         'INVALID_AMOUNT',
-        'A sponsored price is 0.05 to 2 USDC, fee included.',
+        held.creditFleet
+          ? 'A sponsored fleet price is 0.05 to 40 USDC, fee included.'
+          : 'A sponsored price is 0.05 to 2 USDC, fee included.',
       );
     }
     const router = getAddress(deps.router) as Address;
+    // A payee no payment may name (a router, the treasury, USDC, the facilitator, zero), nor this
+    // router, its token or the sponsor itself: never signed for.
+    const payee = input.payee.toLowerCase();
+    if (
+      isReservedPayee(payee, deps.reserved ?? reservedPayees()) ||
+      [router, deps.token, sponsor].some((a) => a.toLowerCase() === payee)
+    )
+      throw new AuthorizationError('INVALID_AMOUNT', 'This address cannot be paid.');
     const treasury = getAddress(await treasury$()) as Address;
+    if (treasury.toLowerCase() === payee)
+      throw new AuthorizationError('INVALID_AMOUNT', 'This address cannot be paid.');
     const sellerId = `${input.key}:seller`;
     const earlier = await deps.store.get(sellerId);
+    // A used credit (paid) only ever gets back the pair already stored for it, never a new one.
+    if (held.creditState === 'used' && (!earlier || !(await deps.store.get(`${input.key}:fee`))))
+      throw new AuthorizationError(
+        'INVALID_AMOUNT',
+        'No matching sponsored reservation for this payment.',
+      );
     const at = BigInt(Math.floor(deps.now() / 1000));
     const validAfter = earlier ? earlier.authorization.validAfter : 0n;
     const validBefore = earlier
@@ -180,3 +242,40 @@ export function createSponsorSigner(deps: SponsorSignerDeps) {
 }
 
 export type SponsorSigner = ReturnType<typeof createSponsorSigner>;
+
+/** The signer's own read of a reservation: the sponsored call by its key, joined to its credit. */
+export function pgSponsorReservations(db: Database): SponsorSignerDeps['reservationOf'] {
+  return async (key) => {
+    const { rows } = await db.query<{
+      gross_raw: string;
+      pay_to: string;
+      call_fleet: boolean;
+      credit_fleet: boolean;
+      amount_raw: string;
+      state: string;
+      call_agent: string;
+      credit_agent: string;
+      chain_id: number;
+    }>(
+      `SELECT s.gross_raw::text AS gross_raw, s.pay_to, s.fleet AS call_fleet,
+         c.fleet AS credit_fleet, c.amount_raw::text AS amount_raw, c.state,
+         s.agent_id AS call_agent, c.agent_id AS credit_agent, c.chain_id
+       FROM feed_pay_sponsored_calls s JOIN feed_pay_sponsor_credits c ON c.call_id = s.call_id
+       WHERE s.op_key = $1`,
+      [key],
+    );
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      grossRaw: BigInt(row.gross_raw),
+      payTo: row.pay_to as Address,
+      callFleet: row.call_fleet,
+      creditFleet: row.credit_fleet,
+      creditAmountRaw: BigInt(row.amount_raw),
+      creditState: row.state,
+      callAgentId: row.call_agent,
+      creditAgentId: row.credit_agent,
+      creditChainId: Number(row.chain_id),
+    };
+  };
+}

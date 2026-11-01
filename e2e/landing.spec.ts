@@ -19,7 +19,7 @@ const HEADLINE = 'Every AI. One room.';
 /** The link previews' description (index.html). */
 const DESCRIPTION = 'Central City is where the world’s AI agents meet.';
 const SUBLINE =
-  'Claude, ChatGPT, Gemini and your own agents work together in shared rooms, carry a passport on Base and pay each other for services in USDC.';
+  'Claude, ChatGPT, Gemini and your own agents work together in shared rooms, carry a passport onchain and pay each other for services in USDC.';
 
 // An installation with an owner, so the hero shows its live numbers (not the setup copy).
 test.beforeEach(async ({ page }) => {
@@ -50,14 +50,14 @@ test('landing hero: one headline, Sign up and Explore open source, and its calls
   await expect(hero(page).getByText('Open protocol for AI agents', { exact: true })).toBeVisible();
   await expect(hero(page).locator('.cc-landing-sub')).toHaveText(SUBLINE);
 
-  // One filled button in the hero, plus one secondary; the live numbers' "Verify on Base" is the
+  // One filled button in the hero, plus one secondary; the live numbers' "Verify onchain" is the
   // only other link.
   await expect(hero(page).locator('.button.primary')).toHaveCount(1);
-  await expect(hero(page).getByRole('link', { name: 'Verify on Base' })).toHaveAttribute(
+  await expect(hero(page).getByRole('link', { name: 'Verify onchain' })).toHaveAttribute(
     'href',
-    '/explorer/calls',
+    '/explorer',
   );
-  const actions = hero(page).getByRole('link').filter({ hasNotText: 'Verify on Base' });
+  const actions = hero(page).getByRole('link').filter({ hasNotText: 'Verify onchain' });
   await expect(actions).toHaveText(['Sign up', 'Explore open source']);
   await expect(hero(page).getByRole('link', { name: 'Sign up' })).toHaveAttribute(
     'href',
@@ -72,8 +72,9 @@ test('landing hero: one headline, Sign up and Explore open source, and its calls
   // decision (the 29 Sep sub-line); "Downtown" is retired (the page is "Open source"). The demo
   // room may still mention test "districts", so only "Downtown" is banned for it.
   const text = (await page.locator('main').innerText()).toLowerCase();
+  // Whole words only: "router" is fine.
   for (const word of ['circle', 'route', 'operator', 'downtown'])
-    expect(text, word).not.toContain(word);
+    expect(text, word).not.toMatch(new RegExp(`\\b${word}\\b`));
   await expect(page.getByRole('heading', { name: 'Answers', exact: true })).toHaveCount(0);
 
   // Sign up opens the create-account form.
@@ -122,17 +123,19 @@ test('Your room never sleeps: its video on the left, copy and Meet Elric on the 
   await expect(page.getByRole('heading', { level: 1, name: 'Connect your AI' })).toBeVisible();
 });
 
-test('Every agent deserves a passport: copy and Explore agents on Base on the left, its video on the right', async ({
+test('Every agent deserves a passport: copy and Explore agents on the left, its video on the right', async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await gotoMounted(page, '/');
   const section = page.getByRole('region', { name: 'Every agent deserves a passport.' });
   await expect(section).toHaveAttribute('id', 'passport');
-  await expect(section.getByText(/Give your agent its own identity on Base\./)).toBeVisible();
-  await expect(section.getByRole('link', { name: 'Explore agents on Base' })).toHaveAttribute(
+  await expect(
+    section.getByText(/Give your agent its own identity on Base or Arc\./),
+  ).toBeVisible();
+  await expect(section.getByRole('link', { name: 'Explore agents' })).toHaveAttribute(
     'href',
-    '/explorer/base',
+    '/explorer',
   );
   const copy = await box(section.locator('.cc-feat-copy'));
   const media = await box(section.locator('.cc-feat-media'));
@@ -149,7 +152,8 @@ test('Every agent deserves a passport: copy and Explore agents on Base on the le
     .evaluateAll((all) => all.map((el) => el.getAttribute('aria-labelledby')));
   expect(order.indexOf('passport-title')).toBe(order.indexOf('room-title') + 1);
   expect(order.indexOf('how-title')).toBe(order.indexOf('passport-title') + 1);
-  expect(order.indexOf('cta-title')).toBe(order.indexOf('how-title') + 1);
+  expect(order.indexOf('feed-title')).toBe(order.indexOf('how-title') + 1);
+  expect(order.indexOf('cta-title')).toBe(order.indexOf('feed-title') + 1);
 });
 
 test('landing fits 360 px: the two actions fill the column and are tall enough to tap', async ({

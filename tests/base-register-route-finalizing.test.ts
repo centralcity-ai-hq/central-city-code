@@ -1,4 +1,4 @@
-import { bundlerRejection, SponsorError } from '../server/base/chain/rpc-bundler.js';
+import { BundlerError, bundlerRejection, SponsorError } from '../server/base/chain/rpc-bundler.js';
 import { transientChainError } from '../server/base/chain/transient.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -15,6 +15,7 @@ import {
   baseShortIdsMigration,
 } from '../server/base/schema.js';
 import {
+  BUDGET_RETRY_AFTER_S,
   FINALIZE_FRESH_MS,
   IDENTITY_FINALIZE_PATH,
   registerBaseRegistrationRoutes,
@@ -437,6 +438,42 @@ test('Base\'s endpoint saying "not now" (429, timeout, 5xx) answers the stored s
   s.fault(/^\s*UPDATE base_identities SET/, timedOut);
   assert.equal((await s.register()).statusCode, 200);
   await assertConfirmsNext(s);
+});
+
+test('the sponsorship budget refusing answers 503 with its code: nothing signed, the attempt stays open', async (t) => {
+  const s = await setup(t);
+  // As direct-bundler throws it before signing, on Base and on Arc alike.
+  s.chain.registerError = Object.assign(
+    new SponsorError(
+      new BundlerError('RPC_ERROR', 'own paymaster: budget (protected_reserve).', 'busy', -32005),
+    ),
+    { sponsorBudgetNotNow: true },
+  );
+  const refused = await s.register();
+  assert.equal(refused.statusCode, 503, refused.body);
+  assert.equal(refused.json().code, 'sponsorship_budget');
+  assert.match(refused.json().error, /Nothing was signed or charged/);
+  assert.match(refused.json().error, /Try again later/);
+  assert.equal(refused.headers['retry-after'], String(BUDGET_RETRY_AFTER_S));
+  assert.doesNotMatch(refused.body, /protected_reserve|RPC_ERROR/);
+  assert.equal(s.chain.signs.get(R0), undefined, 'nothing signed');
+  assert.ok(s.events.some((e) => e.event === 'identity.register_budget_refused'));
+  assert.ok(!s.events.some((e) => e.event === 'identity.register_transient'));
+  const row = await s.row();
+  assert.equal(row.state, 'pending');
+  // Free again: the same attempt goes on.
+  await s.age();
+  await s.pg.query('UPDATE base_identities SET register_retry_at = 0 WHERE agent_id = $1', [AGENT]);
+  const later = await s.register();
+  assert.equal(later.statusCode, 200, later.body);
+  assert.deepEqual(s.chain.calls.register, [R0, R0]);
+  assert.equal(s.chain.signs.get(R0), 1);
+  // Any other "not now" keeps its answer.
+  const other = await setup(t);
+  other.chain.registerError = new SponsorError(
+    bundlerRejection('pm_getPaymasterStubData', { code: -32005, message: 'x' }),
+  );
+  assert.equal((await other.register()).statusCode, 200);
 });
 
 test('a JSON-RPC rate limit inside an HTTP 200 (-32002) is never a 500, and the cron retries it', async (t) => {

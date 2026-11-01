@@ -7,8 +7,10 @@
  *    endpoint is throttling.
  *
  *    The chain runtime builds it through read-transport.ts, which lets a second endpoint answer
- *    pinned reads, blocks, receipts and logs when this one cannot (never eth_blockNumber there,
- *    never absence, never a bundler, paymaster, fee or unpinned read; see that module).
+ *    pinned reads (not the nonce, authorization and revocation reads that decide an absence),
+ *    blocks (by tag too: 'latest', 'safe', 'finalized'), receipts, logs and capped fee quotes when
+ *    this one cannot; never eth_blockNumber there (unless a reader opts in), never absence, never a
+ *    bundler, paymaster or other unpinned read. See that module for the trust each answer needs.
  *
  * 2. blockTagCache: the head-of-chain reads are shared for a moment, process-wide, per client.
  *    eth_blockNumber and eth_getBlockByNumber('latest') for LATEST_TTL_MS, 'safe' and 'finalized'

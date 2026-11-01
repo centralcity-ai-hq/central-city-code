@@ -25,6 +25,7 @@ import {
   TestProvider,
   type App,
 } from './oauth-helpers.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 const SCOPES = [
   'workspace:read',
@@ -36,6 +37,14 @@ const SCOPES = [
 ];
 const TEAM = 'template:research-team@1.0.0';
 const jsonHeaders = { 'content-type': 'application/json', 'x-city-request': '1' };
+// The platform metrics route is an ops route (read per request).
+const OPS = (process.env.CITY_OPS_SECRET ??= 'metrics-ops-secret-'.padEnd(40, 'x'));
+const opsMetrics = (app: App) =>
+  app.inject({
+    method: 'GET',
+    url: '/api/metrics/agents',
+    headers: { authorization: `Bearer ${OPS}` },
+  });
 
 type ToolResult = { isError?: boolean; structuredContent?: any; content: { text: string }[] };
 async function tool(
@@ -97,7 +106,7 @@ async function register(app: App, name: string) {
     payload: JSON.stringify({ name, password: PASSWORD }),
   });
   assert.equal(res.statusCode, 201, res.body);
-  return `cc_session=${res.cookies.find((entry) => entry.name === 'cc_session')!.value}`;
+  return sessionPair(res.cookies);
 }
 async function count(app: App, sql: string, params: unknown[] = []): Promise<number> {
   return Number(
@@ -491,7 +500,7 @@ test('external runtimes enroll once with a short-lived code; owner rotation stil
   const enrolled = await enroll(first.agent.id, first.enrollment.enrollment_code);
   assert.equal(enrolled.statusCode, 200, enrolled.body);
   const credential = enrolled.json().token as string;
-  assert.match(credential, /^[A-Za-z0-9_-]{43}$/);
+  assert.match(credential, /^ccrt_[A-Za-z0-9_-]{43}$/);
   // Single use.
   assert.equal((await enroll(first.agent.id, first.enrollment.enrollment_code)).statusCode, 401);
   // The credential authenticates the native runtime protocol.
@@ -594,7 +603,7 @@ test('anonymous clients create unclaimed agents that an owner claims once', asyn
   assert.equal(await count(app, "SELECT count(*) FROM operators WHERE kind='unclaimed'"), 1);
   const session = (await app.inject({ method: 'GET', url: '/api/session' })).json();
   assert.equal(session.setupRequired, false);
-  const metrics = (await ownerApi(app, cookie, '/api/metrics/agents')).json();
+  const metrics = (await opsMetrics(app)).json();
   assert.deepEqual(
     [metrics.owned.agents, metrics.unclaimed.agents, metrics.unclaimed.sources],
     [0, 3, 1],
@@ -684,10 +693,10 @@ test('anonymous clients create unclaimed agents that an owner claims once', asyn
   ).rows[0]!.operator_id;
   assert.equal(owner, (await snapshot(app, cookie)).operator.id);
   // Metrics are cached for 60 seconds per instance.
-  const cached = (await ownerApi(app, cookie, '/api/metrics/agents')).json();
+  const cached = (await opsMetrics(app)).json();
   assert.deepEqual(cached, metrics);
   now += 61_000;
-  const after = (await ownerApi(app, cookie, '/api/metrics/agents')).json();
+  const after = (await opsMetrics(app)).json();
   assert.deepEqual(
     [after.owned.agents, after.owned.claimedFromUnclaimed, after.unclaimed.agents],
     [3, 3, 1],
@@ -1177,7 +1186,7 @@ test('N6: the JWKS also publishes CITY_SIGNING_KEY_PREVIOUS for verification', (
   );
   assert.deepEqual(
     signer.jwks().keys.map((key) => key.kid),
-    [signer.key!.kid, signer.previous!.kid],
+    [signer.key!.kid, signer.previous[0]!.kid],
   );
   assert.throws(
     () => loadPlatformSigner({ CITY_SIGNING_KEY: current, CITY_SIGNING_KEY_PREVIOUS: 'x' }, true),
@@ -1297,7 +1306,7 @@ test('metrics report unclaimed capacity pressure and log capacity.pressure once 
   });
   t.after(() => app.close());
   const cookie = await register(app, 'Capacity owner');
-  const metrics = async () => (await ownerApi(app, cookie, '/api/metrics/agents')).json();
+  const metrics = async () => (await opsMetrics(app)).json();
   assert.deepEqual((await metrics()).unclaimed_capacity, {
     agents_used: 0,
     agents_cap: 5,
@@ -1724,6 +1733,18 @@ test('concurrent metrics misses share one aggregation over every workspace', asy
   const app = await createApp({ dataDir: ':memory:', startWorkers: false, now: () => now });
   t.after(() => app.close());
   const cookie = await register(app, 'Metrics owner');
+  // Platform totals are operator data: a signed-in account or a wrong secret sees an unknown route.
+  for (const res of [
+    await ownerApi(app, cookie, '/api/metrics/agents'),
+    await app.inject({
+      method: 'GET',
+      url: '/api/metrics/agents',
+      headers: { authorization: `Bearer ${OPS.slice(0, -1)}y` },
+    }),
+  ]) {
+    assert.equal(res.statusCode, 404, res.body);
+    assert.deepEqual(res.json(), { error: 'Unknown API route' });
+  }
   const db = app.city.db;
   const original = db.query.bind(db);
   let scans = 0;
@@ -1732,8 +1753,7 @@ test('concurrent metrics misses share one aggregation over every workspace', asy
       scans++;
     return original(text as never, params as never);
   }) as typeof db.query;
-  const burst = async () =>
-    Promise.all(Array.from({ length: 6 }, () => ownerApi(app, cookie, '/api/metrics/agents')));
+  const burst = async () => Promise.all(Array.from({ length: 6 }, () => opsMetrics(app)));
   const first = await burst();
   assert.ok(first.every((res) => res.statusCode === 200));
   assert.equal(scans, 1);
@@ -1744,4 +1764,113 @@ test('concurrent metrics misses share one aggregation over every workspace', asy
   now += 61_000;
   await burst();
   assert.equal(scans, 2);
+});
+
+test('CCA-625: a second agents:create credential re-applying a team gets no enrollment code and the first code still enrolls', async (t) => {
+  const { app } = await fixture(t);
+  const first = ok(
+    await tool(app, await ownerGrant(app), 'city_apply_team', {
+      template: TEAM,
+      idempotency_key: randomUUID(),
+    }),
+  );
+  const requester = first.agents.find((agent: any) => agent.name === 'requester');
+  assert.match(requester.enrollment.enrollment_code, /^cce_/);
+  // Another credential of the same owner that may only create agents applies the same team.
+  const other = await ownerGrant(app, ['workspace:read', 'agents:create']);
+  const again = ok(
+    await tool(app, other, 'city_apply_team', { template: TEAM, idempotency_key: randomUUID() }),
+  );
+  const matched = again.agents.find((agent: any) => agent.name === 'requester');
+  assert.equal(matched.agent_id, requester.agent_id);
+  assert.notEqual(matched.action, 'create');
+  assert.ok(
+    again.agents.every((agent: any) => agent.enrollment === null),
+    'a matching apply issues no enrollment code',
+  );
+  const enrolled = await app.inject({
+    method: 'POST',
+    url: '/api/runtime/enroll',
+    headers: { 'content-type': 'application/json' },
+    payload: JSON.stringify({
+      agent_id: requester.agent_id,
+      enrollment_code: requester.enrollment.enrollment_code,
+    }),
+  });
+  assert.equal(enrolled.statusCode, 200, enrolled.body);
+});
+
+test('CCA-618: an agent made private or revoked can no longer be forked from an earlier public revision', async (t) => {
+  const { app } = await fixture(t);
+  const token = await ownerGrant(app);
+  const intruder = await ownerGrant(app); // same owner: forks of its own agents stay allowed
+  const publicAgent = (name: string) =>
+    tool(app, token, 'city_create_agent', {
+      template: 'template:fact-checker@1.0.0',
+      overrides: { metadata: { name }, spec: { visibility: 'public' } },
+      idempotency_key: randomUUID(),
+    }).then(ok);
+  const forkErrors = async (agentId: string, revision: number, as: string | null = null) =>
+    ok(
+      await tool(
+        app,
+        as,
+        'city_plan_team',
+        {
+          manifest: {
+            apiVersion: 'centralcity.agent/v1',
+            kind: 'Agent',
+            metadata: { name: `fork-${randomUUID().slice(0, 8)}` },
+            spec: { extends: `agent:${agentId}@${revision}` },
+          },
+        },
+        '203.0.113.61',
+      ),
+    ).plan.errors.map((issue: any) => issue.code as string);
+
+  // Made private: revision 1 was public, revision 2 is private.
+  const hidden = await publicAgent('later-private');
+  assert.deepEqual(await forkErrors(hidden.agent.id, 1), [], 'a public agent can be forked');
+  const updated = ok(
+    await tool(app, token, 'city_create_agent', {
+      template: 'template:fact-checker@1.0.0',
+      overrides: { metadata: { name: 'later-private' }, spec: { visibility: 'private' } },
+      idempotency_key: randomUUID(),
+    }),
+  );
+  assert.equal(updated.agent.id, hidden.agent.id);
+  assert.ok((await forkErrors(hidden.agent.id, 1)).includes('AGENT_NOT_FOUND'));
+
+  // Revoked while its current revision is still public.
+  const revoked = await publicAgent('later-revoked');
+  assert.deepEqual(await forkErrors(revoked.agent.id, 1), []);
+  ok(await tool(app, token, 'city_control', { agent_id: revoked.agent.id, action: 'revoke' }));
+  assert.ok((await forkErrors(revoked.agent.id, 1)).includes('AGENT_NOT_FOUND'));
+
+  // The owner itself may still build on its own private agent's history.
+  assert.ok(!(await forkErrors(hidden.agent.id, 1, intruder)).includes('AGENT_NOT_FOUND'));
+});
+
+test('CCA-633: a lone surrogate in manifest text is a 400 naming the field, never a 500', async (t) => {
+  const app = await limitedApp(t, {});
+  const create = (overrides: unknown, remoteAddress: string) =>
+    app.inject({
+      method: 'POST',
+      url: '/api/public/agents',
+      remoteAddress,
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify({
+        template: 'template:extractor@1.0.0',
+        overrides,
+        idempotency_key: randomUUID(),
+      }),
+    });
+  const bad = await create({ metadata: { displayName: 'Bad\ud800name' } }, '198.51.100.71');
+  assert.equal(bad.statusCode, 400, bad.body);
+  assert.match(bad.body, /metadata\.displayName/);
+  const badInstructions = await create({ spec: { instructions: 'tail \udc00' } }, '198.51.100.72');
+  assert.equal(badInstructions.statusCode, 400, badInstructions.body);
+  // A well-formed name, astral characters included, still creates the agent.
+  const good = await create({ metadata: { displayName: 'Good \u{1F600} name' } }, '198.51.100.73');
+  assert.equal(good.statusCode, 201, good.body);
 });

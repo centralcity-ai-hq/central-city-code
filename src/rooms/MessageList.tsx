@@ -15,7 +15,7 @@ import { ArrowDown, Check, Copy, Info, LoaderCircle, Pin, Reply, RotateCw } from
 import { Avatar, initialOf, useAvatarColours, type AvatarKind } from './Avatar';
 import type { RoomTask } from './tasks';
 import { pillPlacement, taskPill } from './taskStatusV3';
-import { answersPost, type Member, type RoomMessage } from './api';
+import { answersPost, type Member, type OwnerKind, type RoomMessage } from './api';
 import { agentOwners, mentionNamesFor, ownerNames } from './people';
 import { AgentLabel } from './AgentLabel';
 import { messageFormat, NEW_POST_FORMAT, withoutBidiControls } from './markdown/format';
@@ -478,9 +478,9 @@ function Message({
 }: {
   message: RoomMessage;
   names: string[];
-  owner: (label: string) => string;
+  owner: (label: string, kind?: OwnerKind | null) => string;
   /** An agent's owner by name, or null (people.ts agentOwners). */
-  agentOwner: (label: string) => string | null;
+  agentOwner: (label: string, kind?: OwnerKind | null) => string | null;
   byline: boolean;
   /** The sender hosts the room. */
   host: boolean;
@@ -606,12 +606,12 @@ function Message({
                   <>
                     {host ? null : <span className="rm-role rm-person rm3-tag">person</span>}
                     <span className="rm3-owner" title={message.sender_owner_label}>
-                      · {owner(message.sender_owner_label)}
+                      · {owner(message.sender_owner_label, message.sender_owner_kind)}
                     </span>
                   </>
                 ) : (
                   <AgentLabel
-                    owner={agentOwner(message.sender_owner_label)}
+                    owner={agentOwner(message.sender_owner_label, message.sender_owner_kind)}
                     title={message.sender_owner_label}
                   />
                 )}
@@ -683,6 +683,7 @@ export function MessageList({
   directFor,
   noteFor,
   onPinnedChange,
+  cardFor,
   children,
 }: {
   messages: RoomMessage[];
@@ -733,6 +734,12 @@ export function MessageList({
   noteFor?: (message: RoomMessage) => ReactNode;
   /** Whether the reader follows the bottom (true) or scrolled or jumped away (false), on each change. */
   onPinnedChange?: (pinned: boolean) => void;
+  /**
+   * Rooms P1 cards (RoomCards.tsx): what a server line about a decision or an approval shows
+   * under it (the card), and whether the line itself folds away (a decision event replaces it,
+   * kept for screen readers). Null: the line shows as before.
+   */
+  cardFor?: (message: RoomMessage) => { node: ReactNode; fold: boolean } | null;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
@@ -969,14 +976,21 @@ export function MessageList({
       // A created/claimed line whose pill went under the message before it folds away (the
       // pill says it there); without a placed pill (task not loaded) the line stays.
       const folds = placement.folded.get(message.id);
+      const card = cardFor?.(message) ?? null;
       rows.push(
         <SystemLine
           key={message.id}
           message={message}
           byLength={membersByLength}
-          folded={folds !== undefined && taskByNumber.has(folds)}
+          folded={(folds !== undefined && taskByNumber.has(folds)) || Boolean(card?.fold)}
         />,
       );
+      if (card)
+        rows.push(
+          <li key={`card-${message.id}`} className="rm-card-row" data-testid="room-card-row">
+            {card.node}
+          </li>,
+        );
       const after = pillAfter(message.id);
       if (after)
         rows.push(

@@ -2,10 +2,11 @@ import { createHash } from 'node:crypto';
 import type { Database, Transaction } from './database.js';
 
 /**
- * Versioned, forward-only schema migrations. Each migration runs once, in version order,
- * inside a single transaction that holds the schema advisory lock, and is recorded with a
- * checksum. Editing an applied migration is a startup error: add a new migration instead.
- * The same SQL runs on PGlite and managed PostgreSQL.
+ * Versioned, forward-only schema migrations. Each migration runs once, in version order, in its
+ * own transaction that holds the schema advisory lock, and is recorded with a checksum in that
+ * transaction. A failure rolls back only the failing migration; the ones before it stay applied
+ * and the next start continues from it. Editing an applied migration is a startup error: add a
+ * new migration instead. The same SQL runs on PGlite and managed PostgreSQL.
  */
 export interface Migration {
   version: number;
@@ -21,7 +22,20 @@ export interface Migration {
     event: string;
     measure(tx: Pick<Transaction, 'query'>): Promise<Record<string, number>>;
   };
+  /**
+   * Overrides MIGRATION_TIMEOUTS for this migration only, for a long backfill or a
+   * `VALIDATE CONSTRAINT` after an `ADD CONSTRAINT ... NOT VALID` migration. Not part of the
+   * checksum.
+   */
+  timeouts?: { statementMs?: number; lockMs?: number };
 }
+
+/*
+ * Each migration runs with its own limits instead of the request settings of the connection
+ * (database.ts: 8 s statements). The lock wait stays short: a migration queued behind a long
+ * transaction would otherwise hold every request on that table behind its own lock request.
+ */
+export const MIGRATION_TIMEOUTS = { statementMs: 60_000, lockMs: 5_000 } as const;
 
 /** Where migration reports go: one JSON line on stdout (Vercel runtime logs). */
 export type MigrationLog = (event: string, fields: Record<string, number>) => void;
@@ -239,6 +253,20 @@ CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);
 };
 
 /**
+ * Migration 274: which sign-ins were issued under the __Host- session cookie name
+ * (server/session-cookie.ts). Those sessions are never read from the plain name; sessions from
+ * before the rename (false) still are, until they end (30 days at most after sign-in) or until
+ * LEGACY_COOKIE_READ_UNTIL. Adding a column with a constant default rewrites no rows.
+ */
+export const sessionsHostCookieMigration: Migration = {
+  version: 274,
+  name: 'sessions_host_cookie',
+  sql: `
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS host_cookie boolean NOT NULL DEFAULT false;
+`,
+};
+
+/**
  * Migration 74: the index behind My agents' Overview "Tasks done" (GET /api/agents/:id/totals):
  * tasks an agent handed in that were approved. A messages-sent total waits: an index on
  * room_messages would lock its writes while it builds inside this transaction.
@@ -327,14 +355,62 @@ export function migrationChecksum(migration: Migration): string {
 }
 
 /**
- * Applies pending migrations atomically under the schema advisory lock. Refuses to start when
- * an applied migration's checksum changed or the database has a version this build lacks.
+ * Secrets only production may hold: the key-encryption keys (wallet spenders, personal data,
+ * responder credentials), the platform signing key, the cron, wake and operations secrets, the
+ * email link key, and the email, sign-in, GitHub and model provider credentials, with their
+ * previous keys: every name in DEPLOYMENT_SECRET_NAMES (server/secret-env.ts) except the preview's
+ * own CITY_RATE_LIMIT_KEY and DATABASE_URL (tests/vercel-preview-guard.test.ts). A preview runs branch code before review, so it must hold none
+ * of them; previewIsolated refuses to start one that does. Names only, never values.
  */
-/** Refuses a Vercel preview that has no isolated database of its own (fails closed). */
+export const PRODUCTION_ONLY_SECRETS = [
+  'CITY_BASE_SPENDER_KEK',
+  'CITY_PII_KEK',
+  'CITY_PII_KEK_PREVIOUS',
+  'CITY_RESPONDER_KEK',
+  'CITY_RESPONDER_KEK_PREVIOUS',
+  'CRON_SECRET',
+  'CITY_WAKE_SECRET',
+  'CITY_WAKE_SECRET_PREVIOUS',
+  // The platform signing key (Agent Cards, count checkpoints): a preview signs with an ephemeral
+  // key, never with production's.
+  'CITY_SIGNING_KEY',
+  'CITY_SIGNING_KEY_PREVIOUS',
+  'CITY_OPS_SECRET',
+  'CITY_OPS_SECRET_PREVIOUS',
+  'CITY_OPS_KEYS_SECRET',
+  'CITY_OPS_KEYS_SECRET_PREVIOUS',
+  'CITY_OPS_METRICS_SECRET',
+  'CITY_OPS_METRICS_SECRET_PREVIOUS',
+  'CITY_OPS_EMAIL_SECRET',
+  'CITY_OPS_EMAIL_SECRET_PREVIOUS',
+  'CITY_OPS_ELRIC_SECRET',
+  'CITY_OPS_ELRIC_SECRET_PREVIOUS',
+  'CITY_OPS_REVIEW_SECRET',
+  'CITY_OPS_REVIEW_SECRET_PREVIOUS',
+  'CITY_EMAIL_API_KEY',
+  'CITY_EMAIL_LINK_KEY',
+  'CITY_EMAIL_LINK_KEY_PREVIOUS',
+  'GOOGLE_OAUTH_CLIENT_SECRET',
+  'CITY_GITHUB_APP_PRIVATE_KEY',
+  'CITY_CODE_COUNT_GITHUB_TOKEN',
+  'CITY_ELRIC_ANTHROPIC_KEY',
+  'CITY_ELRIC_MODEL_KEY',
+] as const;
+
+/**
+ * Refuses a Vercel preview that has no isolated database of its own, or that holds any
+ * production-only secret (fails closed; the error names the variables, never their values).
+ */
 export function previewIsolated(env: Record<string, string | undefined> = process.env): void {
-  if (env.VERCEL === '1' && env.VERCEL_ENV === 'preview' && env.CITY_PREVIEW_DB_ISOLATED !== '1')
+  if (env.VERCEL !== '1' || env.VERCEL_ENV !== 'preview') return;
+  if (env.CITY_PREVIEW_DB_ISOLATED !== '1')
     throw new Error(
       'A preview deployment needs its own database branch (CITY_PREVIEW_DB_ISOLATED=1); refusing to start.',
+    );
+  const present = PRODUCTION_ONLY_SECRETS.filter((name) => (env[name] ?? '') !== '');
+  if (present.length)
+    throw new Error(
+      `A preview deployment must not hold production-only secrets (${present.join(', ')}); refusing to start.`,
     );
 }
 
@@ -365,57 +441,100 @@ export async function runMigrations(
   // instances). Anything else (a missing table, a pending, unknown or changed migration) takes
   // the locked path below, which applies or refuses exactly as before.
   if (await schemaCurrent(db, ordered)) return { applied: [] };
-  return db.transaction(async (tx) => {
-    await tx.query('SELECT pg_advisory_xact_lock($1)', [SCHEMA_LOCK_KEY]);
-    await tx.exec(
-      'CREATE TABLE IF NOT EXISTS schema_migrations (version integer PRIMARY KEY, name text NOT NULL, applied_at timestamptz NOT NULL, checksum text NOT NULL)',
-    );
-    const rows = (
-      await tx.query<{ version: number | string; name: string; checksum: string }>(
-        'SELECT version,name,checksum FROM schema_migrations ORDER BY version',
-      )
-    ).rows;
-    const done = new Set<number>();
-    for (const row of rows) {
-      const version = Number(row.version);
-      const known = ordered.find((item) => item.version === version);
-      if (!known)
-        throw new Error(
-          `Database schema migration ${version} is unknown to this build; refusing to start.`,
-        );
-      if (known.name !== row.name || migrationChecksum(known) !== row.checksum)
-        throw new Error(
-          `Applied migration ${version} (${row.name}) checksum mismatch; refusing to start.`,
-        );
-      done.add(version);
-    }
-    const pending = ordered.filter((item) => !done.has(item.version));
-    if (pending.length && !applyPending)
-      throw new Error(
-        `Pending schema migrations ${pending.map((item) => item.version).join(', ')} are only applied by production deployments; refusing to start.`,
+  const applied: number[] = [];
+  // One transaction per migration, each under the schema lock and re-reading the ledger, so
+  // concurrent starts still apply every migration exactly once.
+  for (;;) {
+    const step = await db.transaction(async (tx) => {
+      await tx.query('SELECT pg_advisory_xact_lock($1)', [SCHEMA_LOCK_KEY]);
+      await tx.exec(
+        'CREATE TABLE IF NOT EXISTS schema_migrations (version integer PRIMARY KEY, name text NOT NULL, applied_at timestamptz NOT NULL, checksum text NOT NULL)',
       );
-    const applied: number[] = [];
-    for (const migration of ordered) {
-      if (done.has(migration.version)) continue;
-      const report = migration.report
-        ? { event: migration.report.event, fields: await migration.report.measure(tx) }
-        : null;
-      await tx.exec(migration.sql);
+      const done = await appliedVersions(tx, ordered);
+      const pending = ordered.filter((item) => !done.has(item.version));
+      if (pending.length && !applyPending)
+        throw new Error(
+          `Pending schema migrations ${pending.map((item) => item.version).join(', ')} are only applied by production deployments; refusing to start.`,
+        );
+      const migration = pending[0];
+      if (!migration) return null;
+      const timeouts = { ...MIGRATION_TIMEOUTS, ...migration.timeouts };
       await tx.query(
-        'INSERT INTO schema_migrations(version,name,applied_at,checksum) VALUES($1,$2,$3,$4)',
-        [
-          migration.version,
-          migration.name,
-          new Date(now()).toISOString(),
-          migrationChecksum(migration),
-        ],
+        "SELECT set_config('statement_timeout',$1,true), set_config('lock_timeout',$2,true)",
+        [`${Math.trunc(timeouts.statementMs)}ms`, `${Math.trunc(timeouts.lockMs)}ms`],
       );
-      applied.push(migration.version);
-      // Logged once the migration is recorded; the transaction commits right after the loop.
-      if (report) log(report.event, report.fields);
-    }
-    return { applied };
-  });
+      try {
+        const report = migration.report
+          ? { event: migration.report.event, fields: await migration.report.measure(tx) }
+          : null;
+        await tx.exec(migration.sql);
+        await tx.query(
+          'INSERT INTO schema_migrations(version,name,applied_at,checksum) VALUES($1,$2,$3,$4)',
+          [
+            migration.version,
+            migration.name,
+            new Date(now()).toISOString(),
+            migrationChecksum(migration),
+          ],
+        );
+        return { version: migration.version, report };
+      } catch (error) {
+        throw migrationFailed(migration, error);
+      }
+    });
+    if (!step) return { applied };
+    applied.push(step.version);
+    // Logged once the migration is committed.
+    if (step.report) log(step.report.event, step.report.fields);
+  }
+}
+
+/** The versions schema_migrations records, each checked against this build's migrations. */
+async function appliedVersions(
+  tx: Pick<Transaction, 'query'>,
+  ordered: readonly Migration[],
+): Promise<Set<number>> {
+  const rows = (
+    await tx.query<{ version: number | string; name: string; checksum: string }>(
+      'SELECT version,name,checksum FROM schema_migrations ORDER BY version',
+    )
+  ).rows;
+  const done = new Set<number>();
+  for (const row of rows) {
+    const version = Number(row.version);
+    const known = ordered.find((item) => item.version === version);
+    if (!known)
+      throw new Error(
+        `Database schema migration ${version} is unknown to this build; refusing to start.`,
+      );
+    if (known.name !== row.name || migrationChecksum(known) !== row.checksum)
+      throw new Error(
+        `Applied migration ${version} (${row.name}) checksum mismatch; refusing to start.`,
+      );
+    done.add(version);
+  }
+  return done;
+}
+
+/**
+ * The startup error for a failed migration, naming its version and the SQLSTATE, also written
+ * as one JSON line (the database message is left out: it can quote row values).
+ */
+function migrationFailed(migration: Migration, error: unknown): Error {
+  const code = (error as { code?: unknown } | null)?.code;
+  const sqlstate = typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? code : 'unknown';
+  console.error(
+    JSON.stringify({
+      event: 'schema.migration_failed',
+      version: migration.version,
+      name: migration.name,
+      sqlstate,
+    }),
+  );
+  return new Error(
+    `Schema migration ${migration.version} (${migration.name}) failed with SQLSTATE ${sqlstate}; refusing to start.`,
+    { cause: error },
+  );
 }
 
 /** True only when schema_migrations lists exactly `ordered`, each with its name and checksum. */

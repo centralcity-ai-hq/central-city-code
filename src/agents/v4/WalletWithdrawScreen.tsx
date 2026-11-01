@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { formatUnits, parseUnits } from 'viem';
 import { ApiError } from '../../api';
-import { readWallet, type WalletView } from '../../base/wallet/api';
+import { chainRefusal, readWallet, type WalletView } from '../../base/wallet/api';
 import { usdcText } from '../../base/wallet/limits';
 import {
   addressOrNull,
@@ -44,6 +44,7 @@ import { SentLines, WithdrawalStatus } from './WithdrawalStatus';
 import { WalletHistory, type SignedNow } from './WalletHistory';
 import './wallet-screen.css';
 import { SignWindowClosed, SignWithin, useSecondsLeft } from './SignWindow';
+import { chainWords, walletChain } from '../../../shared/base/wallet-chains';
 
 /*
  * Withdraw from an agent's wallet (Operation Base Wallet W2). The owner types where and how much;
@@ -93,13 +94,14 @@ const statusOf = (anchor: WithdrawalAnchor): Phase => ({
 });
 
 const failure = (error: unknown) =>
-  error instanceof WithdrawalLockedError
+  chainRefusal(error) ??
+  (error instanceof WithdrawalLockedError
     ? error.message
     : error instanceof WithdrawalCheckError
       ? `Not signed: ${error.message}`
       : error instanceof VaultCryptoError || error instanceof ApiError || error instanceof Error
         ? error.message
-        : 'Something went wrong. Try again.';
+        : 'Something went wrong. Try again.');
 
 const short = (value: string) => `${value.slice(0, 6)}…${value.slice(-4)}`;
 const shown = (raw: bigint, token: WithdrawalToken) => {
@@ -306,6 +308,7 @@ export function WalletWithdrawScreen({ agent, onBack, backLabel }: AgentScreenPr
         userOpHash: request.userOpHash,
         entryPoint: request.entryPoint,
         chainId: request.chainId,
+        agentChainId: wallet.chainId,
         wallet: wallet.address,
         owner: wallet.ownerAddress,
         agentId: agent.id,
@@ -318,7 +321,7 @@ export function WalletWithdrawScreen({ agent, onBack, backLabel }: AgentScreenPr
       // Prepared but refused here: dropped, so a corrected withdrawal isn't held behind it.
       if (prepared) await startOver(prepared);
       const held = laneRefusal(err, { noun: 'withdrawal', token }, lanes && !wallet.deployed);
-      if (held) setError(held);
+      if (held) setError(chainWords(wallet.chainId).say(held));
       else if (err instanceof ApiError && err.code === 'operation_pending') {
         const anchor = readAnchor(agent.id);
         if (anchor) setPhase(statusOf(anchor));
@@ -417,7 +420,7 @@ export function WalletWithdrawScreen({ agent, onBack, backLabel }: AgentScreenPr
         );
         return;
       }
-      setError(refusal ?? failure(err));
+      setError(refusal ? chainWords(wallet?.chainId).say(refusal) : failure(err));
     } finally {
       setBusy(false);
     }
@@ -439,6 +442,7 @@ export function WalletWithdrawScreen({ agent, onBack, backLabel }: AgentScreenPr
       {error}
     </p>
   ) : null;
+  const words = chainWords(wallet?.chainId);
 
   return (
     <SettingsFrame
@@ -447,7 +451,7 @@ export function WalletWithdrawScreen({ agent, onBack, backLabel }: AgentScreenPr
       title={phase.k === 'review' ? 'Check and sign' : 'Withdraw'}
       sub={
         phase.k === 'form'
-          ? `Send from ${agent.name}’s wallet to an address of yours on Base.`
+          ? `Send from ${agent.name}’s wallet to an address of yours on ${words.on}.`
           : undefined
       }
     >
@@ -463,20 +467,23 @@ export function WalletWithdrawScreen({ agent, onBack, backLabel }: AgentScreenPr
             </p>
           ) : null}
           {lanes ? null : <SentLines agentId={agent.id} />}
-          <div className="w4-seg" role="radiogroup" aria-label="Token">
-            {(['USDC', 'ETH'] as const).map((each) => (
-              <button
-                key={each}
-                type="button"
-                role="radio"
-                aria-checked={token === each}
-                onClick={() => setToken(each)}
-              >
-                {each}
-                <small>{each === 'USDC' ? wallet.usdc.display : wallet.eth.display}</small>
-              </button>
-            ))}
-          </div>
+          {/* Only where the chain moves its native coin: Arc withdraws USDC only, and has no ETH. */}
+          {walletChain(wallet.chainId)?.owner.nativeWithdrawals === false ? null : (
+            <div className="w4-seg" role="radiogroup" aria-label="Token">
+              {(['USDC', 'ETH'] as const).map((each) => (
+                <button
+                  key={each}
+                  type="button"
+                  role="radio"
+                  aria-checked={token === each}
+                  onClick={() => setToken(each)}
+                >
+                  {each}
+                  <small>{each === 'USDC' ? wallet.usdc.display : wallet.eth.display}</small>
+                </button>
+              ))}
+            </div>
+          )}
           <label className="w4-field">
             <span>Amount in {token}</span>
             <input
@@ -496,7 +503,7 @@ export function WalletWithdrawScreen({ agent, onBack, backLabel }: AgentScreenPr
             Send all the {token} in the wallet
           </label>
           <label className="w4-field">
-            <span>To address on Base</span>
+            <span>To address on {words.on}</span>
             <input
               className="w4-mono"
               autoComplete="off"
@@ -505,7 +512,9 @@ export function WalletWithdrawScreen({ agent, onBack, backLabel }: AgentScreenPr
               value={to}
               onChange={(event) => setTo(event.target.value)}
             />
-            <small>Only an address on Base. Sent anywhere else, it can’t be recovered.</small>
+            <small>
+              {words.say('Only an address on Base. Sent anywhere else, it can’t be recovered.')}
+            </small>
           </label>
           {errorLine}
           <button type="submit" className="ap4-btn w4-wide" disabled={busy} aria-busy={busy}>
@@ -555,7 +564,9 @@ export function WalletWithdrawScreen({ agent, onBack, backLabel }: AgentScreenPr
             </p>
           ) : null}
           {phase.intent.deploysWallet ? (
-            <p className="w4-hint">This also sets up {agent.name}’s wallet on Base.</p>
+            <p className="w4-hint">
+              This also sets up {agent.name}’s wallet on {words.on}.
+            </p>
           ) : null}
           <p className="w4-hint" data-k="checked">
             Checked in this browser: the operation sends exactly this, from this wallet, and nothing

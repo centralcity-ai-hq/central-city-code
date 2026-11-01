@@ -89,6 +89,44 @@ test(
 );
 
 test(
+  'concurrent reserves with the balance read before their transactions never hold more than the balance',
+  { skip: !POSTGRES },
+  async (t) => {
+    const db = await database(t);
+    const ledger = slowLedger(100n);
+    const address = '0x1111111111111111111111111111111111111111' as Address;
+    const results = await Promise.all(
+      Array.from({ length: 20 }, async (_, i) => {
+        // As Agent Pay and the Feed pay float do: the read first, no lock held meanwhile.
+        const read = await ledger.readBalance(address, USDC);
+        return db
+          .transaction((tx) =>
+            ledger.reserve(tx, {
+              walletId: 'w-1',
+              chainId: 84532,
+              token: USDC,
+              amount: 10n,
+              holder: { kind: 'payment', ref: `p-${i}` },
+              intentHash: `0x${i}`,
+              read,
+            }),
+          )
+          .then(
+            () => 'held',
+            (error: unknown) => (error instanceof ReservationError ? error.code : String(error)),
+          );
+      }),
+    );
+    assert.equal(results.filter((r) => r === 'held').length, 10, JSON.stringify(results));
+    assert.equal(results.filter((r) => r === 'INSUFFICIENT_BALANCE').length, 10);
+    const { rows } = await db.query<{ total: string }>(
+      "SELECT COALESCE(SUM(amount), 0)::text AS total FROM base_wallet_reservations WHERE state = 'held'",
+    );
+    assert.equal(rows[0].total, '100');
+  },
+);
+
+test(
   'the same holder reserving concurrently gets exactly one reservation',
   { skip: !POSTGRES },
   async (t) => {

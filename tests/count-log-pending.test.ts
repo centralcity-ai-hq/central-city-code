@@ -6,7 +6,7 @@ import { generateSigningKey } from '../server/manifest/keys.js';
 import { createCountLog, registerCountLogMigration } from '../server/count-log/index.js';
 import { DAY_MS, LIVE_LOG_MINUTE } from '../server/count-log/pending.js';
 import { NEW_24H_CACHE_MS } from '../server/count-log/service.js';
-import { agentLeafHash, toHex } from '../shared/count-log/index.js';
+import { agentLeafHash, nextCheckpointAt, toHex } from '../shared/count-log/index.js';
 
 /**
  * Live log Phase 2: new agents appear in a public pending feed as they are created (fingerprint,
@@ -37,12 +37,6 @@ async function agent(app: App, cookie: string, name: string) {
   });
   assert.equal(res.statusCode, 201, res.body);
   return res.json().agent.id as string;
-}
-function nextCheckpointAt(now: number): number {
-  const next = new Date(now);
-  next.setUTCHours(10, 0, 0, 0);
-  if (next.getTime() <= now) next.setUTCDate(next.getUTCDate() + 1);
-  return next.getTime();
 }
 /** A second log on the same database whose clock is a day ahead (the next day's checkpoint). */
 function createCountLogNextDay(app: App) {
@@ -132,7 +126,7 @@ test('an agent gone before its checkpoint is shown as removed, never hidden', as
   const { app, log, feed } = await fixture(t);
   const alice = await owner(app, 'Drop Alice');
   await agent(app, alice.cookie, 'Drop Alpha');
-  // The agent disappears from the workspace before 10:00 UTC (a purge).
+  // The agent disappears from the workspace before the checkpoint (a purge).
   await app.city.db.query(
     `UPDATE workspaces SET data = jsonb_set(data, '{agents}', '[]'::jsonb) WHERE operator_id=$1`,
     [alice.id],
@@ -159,7 +153,8 @@ test('newest first with a stable cursor; settled pages are cached for a day', as
   assert.equal(new Set(all).size, 5);
   assert.equal(third.next, null);
   // Still pending: a short cache. Confirmed entries may still be removed, so an older page is
-  // cached only until the next 10:00 UTC checkpoint.
+  // cached only until the next checkpoint (12:00 Europe/Berlin: 10:00 UTC in summer time, 11:00
+  // UTC in winter time).
   assert.match(second.headers['cache-control'] as string, /max-age=2,/);
   await log.checkpoint();
   const confirmed = await feed(`?limit=2&before=${first.next}`);
@@ -169,6 +164,39 @@ test('newest first with a stable cursor; settled pages are cached for a day', as
     Date.now() + age * 1000 <= nextCheckpointAt(Date.now()) + 1000,
     'cached no longer than until the next checkpoint',
   );
+  // On both sides of each clock change: the page is cached exactly until that noon in Berlin.
+  for (const entry of [
+    // Summer time, the day before the autumn change: noon is 10:00 UTC.
+    ['2026-10-24T09:30:00Z', '2026-10-24T10:00:00Z'],
+    ['2026-10-24T10:30:00Z', '2026-10-25T11:00:00Z'],
+    // Winter time from the autumn change on: noon is 11:00 UTC, so 10:30 UTC is still before it.
+    ['2026-10-25T10:30:00Z', '2026-10-25T11:00:00Z'],
+    ['2026-10-26T10:59:00Z', '2026-10-26T11:00:00Z'],
+    // Winter time, the day before the spring change; summer time again from that day.
+    ['2027-03-27T10:30:00Z', '2027-03-27T11:00:00Z'],
+    // After that day's cut with that day's checkpoint not listed yet (none exists in 2027 here): the
+    // short sealing cache, never until the next day's noon (server/count-log/routes.ts feedCache).
+    ['2027-03-27T11:30:00Z', '2027-03-28T10:00:00Z', 'sealing'],
+    ['2027-03-28T09:30:00Z', '2027-03-28T10:00:00Z'],
+  ] as ReadonlyArray<readonly [string, string, 'sealing'?]>) {
+    const [at, noon, sealing] = entry;
+    assert.equal(nextCheckpointAt(Date.parse(at)), Date.parse(noon), at);
+    t.mock.timers.enable({ apis: ['Date'], now: Date.parse(at) });
+    try {
+      const cached = await feed(`?limit=2&before=${first.next}`);
+      assert.equal(
+        cached.headers['cache-control'],
+        sealing
+          ? 'public, max-age=5, s-maxage=5'
+          : `public, max-age=${(Date.parse(noon) - Date.parse(at)) / 1000}, s-maxage=${
+              (Date.parse(noon) - Date.parse(at)) / 1000
+            }`,
+        at,
+      );
+    } finally {
+      t.mock.timers.reset();
+    }
+  }
   // The head stays live.
   assert.match((await feed()).headers['cache-control'] as string, /max-age=2,/);
   assert.equal((await feed('?limit=500')).statusCode, 400);
@@ -198,6 +226,44 @@ test('demo seeds and excluded operators are never in the feed; the table is appe
   assert.deepEqual((await excludedLog.feed({})).entries, []);
   await assert.rejects(app.city.db.query("UPDATE count_log_pending SET created_minute='x'"));
   await assert.rejects(app.city.db.query('DELETE FROM count_log_pending'));
+});
+
+test('a cursor of a row left out of the feed reads like an unknown cursor', async (t) => {
+  const { app } = await fixture(t);
+  const bob = await owner(app, 'Shown Bob');
+  const hidden = await owner(app, 'Hidden Carol');
+  await agent(app, bob.cookie, 'Shown Alpha');
+  await agent(app, hidden.cookie, 'Hidden Beta');
+  await agent(app, bob.cookie, 'Shown Gamma');
+  const log = createCountLog({
+    db: app.city.db,
+    clock: () => Date.now(),
+    excludedOperators: [hidden.id],
+  });
+  assert.equal((await log.feed({})).entries.length, 2);
+  // One entry per page around the hidden row: each cursor is the fingerprint the page already
+  // shows, never a sequence number, so consecutive cursors carry no count of what lies between.
+  const first = await log.feed({ limit: 1 });
+  assert.equal(first.next, first.entries[0]!.fingerprint);
+  assert.match(first.next!, /^[0-9a-f]{64}$/);
+  const second = await log.feed({ limit: 1, before: first.next! });
+  assert.equal(second.entries.length, 1);
+  assert.equal(second.next, null);
+  const hiddenHash = Buffer.from(
+    (
+      await app.city.db.query<{ leaf_hash: Buffer }>(
+        'SELECT leaf_hash FROM count_log_pending WHERE operator_id=$1',
+        [hidden.id],
+      )
+    ).rows[0]!.leaf_hash,
+  ).toString('hex');
+  // The hidden row's fingerprint resolves to nothing: the same empty page as an unknown one, and
+  // as a sequence number in the old cursor form.
+  const unknown = await log.feed({ before: 'f'.repeat(64) });
+  const probed = await log.feed({ before: hiddenHash });
+  assert.deepEqual(probed.entries, []);
+  assert.deepEqual({ ...probed, total_now: 0 }, { ...unknown, total_now: 0 });
+  assert.deepEqual((await log.feed({ before: '1' })).entries, []);
 });
 
 test('an odd createdAt never fails the workspace write: the log falls back to now', async (t) => {
@@ -297,19 +363,18 @@ test('running numbers: pending entries get n = checkpoint size + creation order;
   assert.equal(after.total_now, 5);
 });
 
-test('the page cursor carries no time: a bare sequence number, looked up on the server', async (t) => {
+test('the page cursor carries no time: the last entry fingerprint, looked up on the server', async (t) => {
   const { app, feed } = await fixture(t);
   const alice = await owner(app, 'Cursor time Alice');
   for (let i = 0; i < 3; i++) await agent(app, alice.cookie, `Cursor time ${i}`);
   const first = (await feed('?limit=1')).json();
-  assert.match(first.next, /^\d+$/);
-  // No date, minute or millisecond time in it, in any form.
-  assert.ok(!/\d{8}|T\d{2}|Z|\d{13}/.test(first.next), first.next);
+  assert.equal(first.next, first.entries[0].fingerprint);
   const second = (await feed(`?limit=1&before=${first.next}`)).json();
   assert.equal(second.entries.length, 1);
   assert.notEqual(second.entries[0].fingerprint, first.entries[0].fingerprint);
-  // An unknown cursor is an empty page, never the newest page again; a time-shaped one is refused.
-  assert.deepEqual((await feed('?before=999999')).json().entries, []);
+  // An unknown cursor is an empty page, never the newest page again; any other form is refused.
+  assert.deepEqual((await feed(`?before=${'0'.repeat(64)}`)).json().entries, []);
+  assert.equal((await feed('?before=999999')).statusCode, 400);
   assert.equal((await feed('?before=20261001T1200Z.1.1')).statusCode, 400);
 });
 
@@ -358,7 +423,7 @@ test('new in the last 24 h: exact, inclusive at exactly 24 h, older days and exc
   const head = await log.feed({});
   assert.equal(head.new_24h, 3);
   // Only the head page carries it; older pages are cached for longer.
-  assert.equal((await log.feed({ before: '1' })).new_24h, undefined);
+  assert.equal((await log.feed({ before: '0'.repeat(64) })).new_24h, undefined);
 });
 
 test('new in the last 24 h counts agents counted now: withdrawn and never-counted ones are left out', async (t) => {

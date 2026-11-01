@@ -143,11 +143,11 @@ test('hosted app enforces host, origin, request protection and secure sessions',
     payload,
   });
   assert.equal(registration.statusCode, 201, registration.body);
-  const session = registration.cookies.find((cookie) => cookie.name === 'cc_session')!;
+  const session = registration.cookies.find((cookie) => cookie.name === '__Host-cc_session')!;
   assert.equal(session.secure, true);
   assert.equal(session.httpOnly, true);
   assert.equal(session.sameSite, 'Strict');
-  const cookie = `cc_session=${session.value}`;
+  const cookie = `__Host-cc_session=${session.value}`;
   assert.equal(
     (await app.inject({ url: '/api/events', headers: { ...headers, cookie } })).statusCode,
     204,
@@ -174,7 +174,7 @@ test('hosted deterministic jobs advance on owner polling without an interval', a
     headers,
     payload: { name: 'Hosted worker', password: 'a synthetic long password' },
   });
-  const cookie = `cc_session=${registration.cookies[0]!.value}`;
+  const cookie = `${registration.cookies[0]!.name}=${registration.cookies[0]!.value}`;
   const authenticated = { ...headers, cookie };
   assert.equal(
     (
@@ -263,7 +263,10 @@ test('hosted cancel, pause and revoke apply before a running demonstration can c
     headers,
     payload: { name: 'Controls owner', password: 'a synthetic long password' },
   });
-  const authenticated = { ...headers, cookie: `cc_session=${registration.cookies[0]!.value}` };
+  const authenticated = {
+    ...headers,
+    cookie: `${registration.cookies[0]!.name}=${registration.cookies[0]!.value}`,
+  };
   const post = (url: string, payload: unknown = {}) =>
     app.inject({ method: 'POST', url, headers: authenticated, payload: JSON.stringify(payload) });
   const poll = async () =>
@@ -346,7 +349,7 @@ async function headlessFixture(t: { after(fn: () => Promise<unknown>): void }) {
     });
     assert.equal(result.statusCode, 201, result.body);
     return {
-      cookie: `cc_session=${result.cookies[0]!.value}`,
+      cookie: `${result.cookies[0]!.name}=${result.cookies[0]!.value}`,
       id: result.json().operator.id as string,
     };
   };

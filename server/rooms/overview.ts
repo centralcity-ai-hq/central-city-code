@@ -3,6 +3,7 @@ import { iso } from '../model.js';
 import { registerMigration, type Migration } from '../migrations.js';
 import { MEMBER_LOCK_ORDER, MEMBER_STATUS, activeNowSince } from './member-status.js';
 import { pendingSummary } from '../elric/activity.js';
+import { excerptTruncation, mentionFullLength } from '../wake/contract.js';
 
 /**
  * Room overview, member activity and the "Needs you" queue (docs/ROOMS.md "Room overview").
@@ -229,6 +230,30 @@ export async function recordPost(
   );
 }
 
+/**
+ * No wake on a line you caused: a system line posted because of an AI member's own action (it
+ * shared a file or saved a link) moves that owner's cursors at the previous head to `seq`, like
+ * recordPost's `ownPost`, so the AI's own long-poll does not wake on it; others still get it.
+ * Not for a person member (a console action), whose AIs must still read it. Same lock order as
+ * recordPost; call under the room lock, right after `seq` was assigned.
+ */
+export async function skipOwnSystemLine(
+  q: Pick<Tx, 'query'>,
+  roomId: string,
+  agentId: string,
+  seq: number,
+): Promise<void> {
+  const target = `m.room_id=$1 AND m.removed_at IS NULL AND m.last_read_seq = $3::bigint - 1
+        AND m.owner_id = (SELECT a.owner_id FROM room_members a
+                           WHERE a.room_id=$1 AND a.agent_id=$2 AND a.kind <> 'person')`;
+  await q.query(
+    `WITH locked AS (SELECT m.agent_id AS id FROM room_members m WHERE ${target} ${MEMBER_LOCK_ORDER})
+     UPDATE room_members m SET last_read_seq = $3::bigint
+       FROM locked l WHERE m.agent_id = l.id AND ${target}`,
+    [roomId, agentId, seq],
+  );
+}
+
 /** Messages a member posted today (UTC), from its row. */
 export function messagesToday(
   row: { posts_day?: number | string | null; posts_today?: number | string | null },
@@ -399,6 +424,9 @@ export interface NeedsYouItem {
   message_seq?: number;
   from_name?: string;
   excerpt?: string;
+  /** mention: only when the excerpt leaves text out (true, and the full text's length). */
+  truncated?: true;
+  full_length?: number;
   /** approval: Elric's pending action (console only); the arguments never leave the server. */
   approval?: { tool: string; summary: string | null; args_hash: string; expires_at: string };
 }
@@ -689,8 +717,10 @@ async function fetchKind(
       from_name: string;
       excerpt: string;
       created_at: string | number;
+      full_length: string | number | null;
     }>(
-      `SELECT n.agent_id, n.seq, n.source_seq, n.from_name, n.excerpt, n.created_at FROM mentions n
+      `SELECT n.agent_id, n.seq, n.source_seq, n.from_name, n.excerpt, n.created_at,
+              ${mentionFullLength('n')} AS full_length FROM mentions n
          JOIN room_members m ON m.room_id=n.room_id AND m.agent_id=n.agent_id AND m.removed_at IS NULL
         WHERE n.agent_id = ANY($1::text[]) AND n.room_id=$2 AND n.source_kind='room'
           AND n.read_at IS NULL AND n.source_seq > m.visible_from_seq
@@ -721,6 +751,10 @@ async function fetchKind(
         message_seq: Number(row.source_seq),
         from_name: row.from_name,
         excerpt: row.excerpt,
+        ...excerptTruncation(
+          row.excerpt,
+          row.full_length === null ? null : Number(row.full_length),
+        ),
       },
     };
   });

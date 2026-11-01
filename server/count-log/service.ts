@@ -34,6 +34,13 @@ import {
 export const COUNT_LOG_LOCK_KEY = 1128485529;
 export const LEAVES_PAGE_MAX = 10_000;
 /**
+ * The leaf ranges GET /api/public/count-log/leaves serves: an aligned block of one of these sizes
+ * (`from` a multiple of the size, `to` = `from` + size), so the edge holds one copy of each block
+ * and a filled block is immutable. Full pages for a whole-log scan, small blocks for the live
+ * list, single leaves for one entry's link.
+ */
+export const LEAVES_BLOCKS = [LEAVES_PAGE_MAX, 100, 1] as const;
+/**
  * How long one instance reuses the "new in the last 24 h" count: the feed head's edge cache
  * (routes.ts LIVE, s-maxage=2). At most one COUNT per instance per window however many viewers
  * poll; concurrent requests share the one in flight.
@@ -258,11 +265,18 @@ export interface CountLog {
   /** The live pending feed (pending.ts), newest first. */
   feed(options: { before?: string; limit?: number }): Promise<Feed>;
   checkpointOn(date: string): Promise<PublicCheckpoint | null>;
-  /** Public leaves under the latest checkpoint only, [from, to). */
+  /**
+   * Public leaves under the latest checkpoint only, [from, to), with that checkpoint's date (null
+   * before the first one): the leaves change only when a newer checkpoint is listed.
+   */
   leaves(
     from: number,
     to: number,
-  ): Promise<{ tree_size: number; leaves: { idx: number; leaf_hash: string; day: string }[] }>;
+  ): Promise<{
+    tree_size: number;
+    date: string | null;
+    leaves: { idx: number; leaf_hash: string; day: string }[];
+  }>;
   /** Withdrawn leaves with from <= idx < to, in idx order, at most `limit` (LEAVES_PAGE_MAX). */
   withdrawn(
     from?: number,
@@ -680,9 +694,11 @@ export function createCountLog(deps: {
     },
 
     async leaves(from, to) {
-      const size = (await latest(deps.db))?.tree_size ?? 0;
+      const checkpoint = await latest(deps.db);
+      const size = checkpoint?.tree_size ?? 0;
+      const date = checkpoint?.date ?? null;
       const end = Math.min(to, size, from + LEAVES_PAGE_MAX);
-      if (from >= end) return { tree_size: size, leaves: [] };
+      if (from >= end) return { tree_size: size, date, leaves: [] };
       const rows = (
         await deps.db.query<{ idx: number; leaf_hash: Uint8Array; created_day: string }>(
           'SELECT idx, leaf_hash, created_day FROM count_log_leaves WHERE idx >= $1 AND idx < $2 ORDER BY idx',
@@ -691,6 +707,7 @@ export function createCountLog(deps: {
       ).rows;
       return {
         tree_size: size,
+        date,
         leaves: rows.map((row) => ({
           idx: Number(row.idx),
           leaf_hash: toHex(new Uint8Array(row.leaf_hash)),

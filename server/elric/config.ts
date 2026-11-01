@@ -16,6 +16,12 @@ export interface ElricConfig {
    */
   globalDailyUnits: number;
   /**
+   * Cost units one owner may reserve and spend per UTC day, across every kind, checked in the same
+   * reservation as the allowance count: the count alone does not bound cost, so without this a
+   * few owners steering every run to its worst case could use up the global ceiling for everyone.
+   */
+  ownerDailyUnits: number;
+  /**
    * Cost units reserved per adapter step: the worst case of one call on that tier, with the
    * largest context a turn can build (transcript + tool results + system ≈ 76k characters ≈ 25k
    * tokens at 3 characters per token) and maxOutputTokens.
@@ -79,6 +85,12 @@ export interface ElricConfig {
 export const ELRIC_COST_UNIT_USD = 0.000001;
 export const ELRIC_GLOBAL_DAILY_USD = 50;
 export const ELRIC_GLOBAL_DAILY_UNITS = Math.round(ELRIC_GLOBAL_DAILY_USD / ELRIC_COST_UNIT_USD);
+/**
+ * One owner's share of the day: USD 5 (a tenth of the global ceiling). It fits several
+ * worst-case reservations at once (about USD 0.9 each), and a typical answer spends far less.
+ */
+export const ELRIC_OWNER_DAILY_USD = 5;
+export const ELRIC_OWNER_DAILY_UNITS = Math.round(ELRIC_OWNER_DAILY_USD / ELRIC_COST_UNIT_USD);
 
 /**
  * Measured GPU time per 1,000 tokens on each tier (seconds), and the GPU price. Cost units follow
@@ -173,6 +185,7 @@ export function elricRateConfig(
 export const ELRIC_CONFIG: ElricConfig = {
   allowance: { short: 20, summary: 4, tool: 5 },
   globalDailyUnits: ELRIC_GLOBAL_DAILY_UNITS,
+  ownerDailyUnits: ELRIC_OWNER_DAILY_UNITS,
   ...elricRateConfig(ELRIC_DEFAULT_GPU_RATES),
   models: { 1: 'elric-small', 2: 'elric-large' },
   maxSteps: 8,

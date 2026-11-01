@@ -9,6 +9,8 @@ const POLL_VISIBLE_MS = 5_000;
 const POLL_HIDDEN_MS = 30_000;
 /** Bound forward catch-up per poll; a larger backlog restarts at the newest page. */
 const CATCH_UP_PAGES = 5;
+/** Every this many polls (30 s while visible) the newest messages are read again. */
+const RECHECK_EVERY_POLLS = 6;
 /** A jump to a search result fills the gap back to it when it is this close, else opens there. */
 const JUMP_FILL_MAX = 1_000;
 
@@ -142,6 +144,7 @@ export function useRoomThread(client: RoomsClient, roomId: string, latestHint: n
       bump();
     };
 
+    let polls = 0;
     const poll = async () => {
       if (!loaded) return initial();
       let since = bounds().newest || store.current.from;
@@ -153,6 +156,16 @@ export function useRoomThread(client: RoomsClient, roomId: string, latestHint: n
         merge(page.messages);
         since = page.next_since;
         if (!page.has_more) break;
+      }
+      // Now and then the newest loaded messages again: reading from the newest never shows an edit
+      // or a delete, so a pasted secret its sender removed would stay on this screen.
+      // Nothing loaded yet (an empty room): nothing to read again. oldest is Infinity then, and a
+      // read from Infinity is refused (the "Something in this form isn't right" banner).
+      if (++polls % RECHECK_EVERY_POLLS === 0 && store.current.byId.size > 0) {
+        const { oldest, newest } = bounds();
+        const page = await read(Math.max(store.current.from, oldest - 1, newest - 100), 100);
+        if (!active) return;
+        merge(page.messages);
       }
       bump();
     };
@@ -191,10 +204,16 @@ export function useRoomThread(client: RoomsClient, roomId: string, latestHint: n
               if (!(oldest > floor + 1)) return;
               setLoadingOlder(true);
               try {
-                const since = Math.max(floor, oldest - 1 - PAGE);
-                const page = await read(since, oldest - 1 - since);
-                if (!active) return;
-                merge(page.messages);
+                // The server may answer fewer than asked (its size limit): fill up to the loaded
+                // messages, or the rest of this range would never load.
+                let since = Math.max(floor, oldest - 1 - PAGE);
+                while (since < oldest - 1) {
+                  const page = await read(since, oldest - 1 - since);
+                  if (!active) return;
+                  if (!page.messages.length) break;
+                  merge(page.messages);
+                  since = page.messages.at(-1)!.seq;
+                }
                 bump();
               } finally {
                 if (active) setLoadingOlder(false);

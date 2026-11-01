@@ -21,6 +21,8 @@
  */
 import { getAddress } from 'viem';
 import { BASE_MAINNET, type Address } from './chains.js';
+import { ARC_MAINNET } from '../chains.js';
+import { OWN_PAYMASTER_RECORD } from './own-paymaster-record.js';
 
 export type SponsorAllowlist = Readonly<Record<number, readonly Address[]>>;
 
@@ -28,10 +30,13 @@ export const SPONSOR_PAYMASTERS: SponsorAllowlist = {
   [BASE_MAINNET]: [
     '0x2FAEB0760D4230Ef2aC21496Bb4F0b47D634FD4c',
     // Our own instance (Operation Paymaster, deployed 23 Oct 2026, block 53000665): runtime code
-    // byte-identical to Coinbase's above (8,347 bytes), owner our admin, verifyingSigner our
-    // server-held key, entryPoint v0.6. Same layout and the same token-zero rule apply.
-    '0x8Bf5b18b733a864c17Cd92615cD45D833Fcfe105',
+    // byte-identical to Coinbase's above (8,347 bytes), entryPoint v0.6. Same layout and the same
+    // token-zero rule apply. Its public deploy record: shared/base/own-paymaster-record.ts.
+    OWN_PAYMASTER_RECORD.address,
   ],
+  // Arc's own instance (Operation Arc, deployed 31 Oct 2026 by the owner's deploy page, step 4):
+  // the same verifying paymaster, entryPoint v0.6, signer 0x68CeE07C0391682836AaFf59475e70Bc9D91100D.
+  [ARC_MAINNET]: ['0x271BFB75cA5741875F1C69Bf478252133896FAdA'],
 };
 
 /** paymasterAndData of the pinned verifying paymaster: 129 bytes of fields + a 65-byte signature. */
@@ -122,13 +127,19 @@ export function sponsoredValidUntil(paymasterAndData: string | undefined): numbe
 export const SPONSOR_SEND_MARGIN_MS = 10_000;
 
 /**
- * Whether a sponsored operation's sponsorship ends too soon to send it at `now` (milliseconds).
- * Owner-funded ('0x') never; data not in the pinned layout is left to the sponsor checks.
+ * Whether a sponsored operation's sponsorship ends too soon to send it at `now` (milliseconds):
+ * within SPONSOR_SEND_MARGIN_MS of its validUntil, or within `bundlerMarginMs` when its bundler
+ * stops sending earlier than that (our own paymaster's: 120 s, Bundler.sendMarginS). Owner-funded
+ * ('0x') never; data not in the pinned layout is left to the sponsor checks.
  */
-export function sponsorshipEnding(paymasterAndData: string | undefined, now: number): boolean {
+export function sponsorshipEnding(
+  paymasterAndData: string | undefined,
+  now: number,
+  bundlerMarginMs = 0,
+): boolean {
   if (!paymasterAndData || paymasterAndData === '0x') return false;
   const until = sponsoredValidUntil(paymasterAndData);
-  return until !== null && until <= now + SPONSOR_SEND_MARGIN_MS;
+  return until !== null && until <= now + Math.max(SPONSOR_SEND_MARGIN_MS, bundlerMarginMs);
 }
 
 /** The most a caller may tolerate a fast device clock (see sponsoredWithinDeadline). */

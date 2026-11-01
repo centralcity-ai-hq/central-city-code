@@ -3,7 +3,8 @@
  * on these interfaces only, never on each other's internals. Token amounts are integer base units
  * (bigint in code, decimal strings in JSON). No type here ever carries a private key.
  */
-import type { Address, BaseChainId } from './chains.js';
+import type { Address } from './chains.js';
+import type { ChainId } from '../chains.js';
 
 export type Hex = `0x${string}`;
 
@@ -24,7 +25,7 @@ export interface WalletView {
   walletId: string;
   agentId: string;
   workspaceId: string;
-  chainId: BaseChainId;
+  chainId: ChainId;
   /** The agent's counterfactual Coinbase Smart Wallet. */
   address: Address;
   ownerAddress: Address;
@@ -85,7 +86,7 @@ export interface ChainOpRequest {
   /** Includes the chain id; the same key with a different intent hash is refused. */
   idempotencyKey: string;
   intentHash: Hex;
-  chainId: BaseChainId;
+  chainId: ChainId;
   kind: ChainOpKind;
 }
 
@@ -105,7 +106,7 @@ export type IdentityState = 'pending' | 'submitted' | 'confirmed' | 'failed';
 
 export interface IdentityView {
   agentId: string;
-  chainId: BaseChainId;
+  chainId: ChainId;
   registryAddress: Address;
   erc8004AgentId: bigint | null;
   agentCardUri: string;
@@ -139,7 +140,7 @@ export interface AmountByToken {
 export interface EnsureWalletInput {
   workspaceId: string;
   agentId: string;
-  chainId: BaseChainId;
+  chainId: ChainId;
   ownerAddress: Address;
   /**
    * The person account whose vault holds `ownerAddress`'s key (vault wallets only). A wallet
@@ -150,8 +151,8 @@ export interface EnsureWalletInput {
 
 export interface WalletService {
   ensureWallet(input: EnsureWalletInput): Promise<WalletView>;
-  getWallet(agentId: string, chainId: BaseChainId): Promise<WalletView | null>;
-  freeze(agentId: string, chainId: BaseChainId, actorId: string): Promise<WalletView>;
+  getWallet(agentId: string, chainId: ChainId): Promise<WalletView | null>;
+  freeze(agentId: string, chainId: ChainId, actorId: string): Promise<WalletView>;
 }
 
 /** Serialize integer amounts for JSON; parse them back strictly. */

@@ -198,23 +198,81 @@ test('a changed applied migration or an unknown applied version refuses to start
   await assert.rejects(runMigrations(db), /999 is unknown to this build/);
 });
 
-test('a failing migration rolls back entirely and records nothing', async (t) => {
+test('a failing migration rolls back alone, names its version and SQLSTATE, and resumes', async (t) => {
   const db = await fresh(t);
   const broken: Migration[] = [
     ...listMigrations(),
     { version: 50, name: 'broken', sql: 'CREATE TABLE later_table (id text); SELECT missing();' },
   ];
-  await assert.rejects(runMigrations(db, broken));
-  const tables = (
-    await db.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public'")
-  ).rows;
-  assert.deepEqual(tables, []);
+  const lines: string[] = [];
+  t.mock.method(console, 'error', (line: string) => lines.push(line));
+  await assert.rejects(
+    runMigrations(db, broken),
+    /Schema migration 50 \(broken\) failed with SQLSTATE 42883; refusing to start\./,
+  );
+  assert.deepEqual(
+    lines.map((line) => JSON.parse(line)),
+    [{ event: 'schema.migration_failed', version: 50, name: 'broken', sqlstate: '42883' }],
+  );
+  // The migrations before it are committed; nothing of the failing one is left.
+  assert.deepEqual(
+    (await ledger(db)).map((row) => row.version),
+    listMigrations().map((migration) => migration.version),
+  );
+  const later = await db.query(
+    "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='later_table'",
+  );
+  assert.equal(later.rows.length, 0);
+  // The next start applies only the (now fixed) migration.
+  const fixed = [
+    ...listMigrations(),
+    { ...broken.at(-1)!, sql: 'CREATE TABLE later_table (id text);' },
+  ];
+  assert.deepEqual((await runMigrations(db, fixed)).applied, [50]);
+});
+
+test('each migration runs with its own statement and lock timeouts', async (t) => {
+  const db = await fresh(t);
+  await runMigrations(db);
+  const seen: Record<string, string>[] = [];
+  const probe = (version: number, timeouts?: Migration['timeouts']): Migration => ({
+    version,
+    name: `probe_${version}`,
+    sql: `CREATE TABLE IF NOT EXISTS probe_${version} (id text);`,
+    ...(timeouts ? { timeouts } : {}),
+    report: {
+      event: 'probe',
+      async measure(tx) {
+        const row = (
+          await tx.query<{ statement: string; lock: string }>(
+            "SELECT current_setting('statement_timeout') AS statement, current_setting('lock_timeout') AS lock",
+          )
+        ).rows[0]!;
+        seen.push({ ...row });
+        return {};
+      },
+    },
+  });
+  const applied = await runMigrations(
+    db,
+    [...listMigrations(), probe(60), probe(61, { statementMs: 600_000, lockMs: 2_000 })],
+    Date.now,
+    true,
+    () => {},
+  );
+  assert.deepEqual(applied.applied, [60, 61]);
+  assert.deepEqual(seen, [
+    { statement: '1min', lock: '5s' },
+    { statement: '10min', lock: '2s' },
+  ]);
 });
 
 test('concurrent startups apply each migration exactly once', async (t) => {
   const db = await fresh(t);
   const results = await Promise.all([runMigrations(db), runMigrations(db), runMigrations(db)]);
-  assert.deepEqual(results.map((result) => result.applied.length).sort(), [0, 0, 9]);
+  // Each migration is its own locked transaction, so the starts may share the work.
+  const applied = results.flatMap((result) => result.applied).sort((a, b) => a - b);
+  assert.deepEqual(applied, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
   assert.equal((await ledger(db)).length, 9);
 });
 

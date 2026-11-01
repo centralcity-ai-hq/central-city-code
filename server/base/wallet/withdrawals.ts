@@ -57,26 +57,61 @@
  * and at sign) and the same exposure caps (its own cost plus its cancel's headroom, since a signed
  * rating can be cancelled: 409 sponsor_busy), refuses a taken lane (409 lane_collision) and a second
  * deploying operation (409 operation_pending). No balance read, no hold, no funds_held/funds_moved.
+ *
+ * One service per chain (deps.chain; the wallet network without one, exactly as before). On an Arc
+ * chain the service is the same with these differences: USDC is the only token (native gas is never
+ * withdrawn, and a plain send never decodes); sponsored or nothing, cancels too, so the wallet is
+ * never charged gas and its one balance is never held twice; lanes off; no ratings (the route refuses
+ * them and `rate` here too); every sum of gas in Arc's own asset (chain-params.ts ownerOps); and every
+ * create and signature screened through the sanctions oracle on Base (deps.screen), refused if it
+ * cannot answer. Nothing here reads a row of the other chain: wallets, withdrawals, exposure and
+ * holds are all scoped to this service's chain.
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { encodeAbiParameters, formatUnits, getAddress, isAddress, keccak256, type Hex } from 'viem';
 import type { UserOperation } from 'viem/account-abstraction';
 import type { Database, Transaction } from '../../database.js';
-import { BASE_NETWORKS, NATIVE_ETH, type Address } from '../../../shared/base/chains.js';
+import {
+  BASE_NETWORKS,
+  ETH_TOKEN,
+  MULTICALL3,
+  NATIVE_ETH,
+  type Address,
+} from '../../../shared/base/chains.js';
+import {
+  chainFamily,
+  chainView,
+  isRealMoneyChain,
+  usdcRawFromNativeWei,
+  ARC_NATIVE_PER_USDC_RAW,
+  type ChainNetwork,
+} from '../../../shared/chains.js';
+import { chainParams, type ChainParams } from '../chain/chain-params.js';
+import type { ScreeningRequest } from '../../protocol/screening/gate.js';
 import type { WalletDerivation } from '../../../shared/base/types.js';
-import { WALLET_EXPLORER, WALLET_TESTNET } from '../../../shared/base/wallet-network.js';
+import {
+  WALLET_EXPLORER,
+  WALLET_TESTNET,
+  type WalletChainId,
+} from '../../../shared/base/wallet-network.js';
 import { laneKey, LaneKeyError } from '../../../shared/base/lanes.js';
-import { sponsoredValidUntil, sponsorshipEnding } from '../../../shared/base/paymasters.js';
+import {
+  SPONSOR_PAYMASTERS,
+  sponsoredValidUntil,
+  sponsorshipEnding,
+} from '../../../shared/base/paymasters.js';
+import { reservedPayees } from '../../../shared/protocol.js';
 import {
   decodeOwnerCall,
   noopCall,
   ownerOperationHash,
   userOperationFromRpc,
   userOperationToRpc,
-  WITHDRAWAL_CHAIN_ID,
+  WITHDRAWAL_CHAIN,
   WITHDRAWAL_OPEN_STATES,
   WITHDRAWAL_SIGNATURE_TTL_MS,
   withdrawalCall,
+  type OwnerOperationChain,
   type RpcUserOperation,
   type WithdrawalState,
   type WithdrawalToken,
@@ -100,20 +135,32 @@ import {
   RATE_REGISTRY,
   RATE_TAG,
   rateCall,
+  rateRegistryOf,
   starsOf,
   starsValue,
   type Stars,
 } from '../../../shared/base/rate.js';
 import { PUBLIC_NAME } from '../explorer/store.js';
 
-const NETWORK = BASE_NETWORKS[WITHDRAWAL_CHAIN_ID];
+const WALLET_NETWORK = BASE_NETWORKS[WITHDRAWAL_CHAIN.chainId as WalletChainId];
+const WALLET_OWNER_OPS = chainParams(WITHDRAWAL_CHAIN.chainId).ownerOps;
 export const TX_EXPLORER = `${WALLET_EXPLORER}/tx/`;
+
+/** A transaction's link on an Arc chain, or the wallet network's: one chain's, never the other's. */
+export const txExplorerOf = (chainId: number) =>
+  chainFamily(chainId) === 'arc' ? `${chainView(chainId)?.explorerUrl}/tx/` : TX_EXPLORER;
 
 export type WithdrawalErrorCode =
   | 'not_found'
   | 'invalid_body'
   | 'invalid_address'
   | 'invalid_amount'
+  /** Below the smallest sponsored withdrawal (chain-params.ts ownerOps). */
+  | 'amount_too_small'
+  /** Arc: an address in it is on the sanctions list or the denylist; nothing is prepared or sent. */
+  | 'screening_blocked'
+  /** Arc: screening could not answer, which is never clearance; nothing is prepared or sent. */
+  | 'screening_unavailable'
   | 'invalid_signature'
   | 'backup_required'
   | 'destination_not_allowed'
@@ -143,6 +190,9 @@ const STATUS: Record<WithdrawalErrorCode, number> = {
   invalid_body: 400,
   invalid_address: 400,
   invalid_amount: 400,
+  amount_too_small: 400,
+  screening_blocked: 409,
+  screening_unavailable: 503,
   invalid_signature: 400,
   backup_required: 409,
   destination_not_allowed: 409,
@@ -188,11 +238,12 @@ export interface WithdrawalAmount {
 
 /**
  * The network fee: paid by the paymaster when sponsored; otherwise the wallet prefunds it from its
- * own ETH and is charged at most `max` (what is not used comes back to it).
+ * own ETH and is charged at most `max` (what is not used comes back to it). On Arc gas is USDC, and
+ * always sponsored.
  */
 export interface WithdrawalFee {
   paidBy: 'sponsor' | 'wallet';
-  token: 'ETH';
+  token: 'ETH' | 'USDC';
   /** The most the wallet can be charged: zero when the sponsor pays. */
   max: WithdrawalAmount;
 }
@@ -204,7 +255,7 @@ export interface WithdrawalSigningRequest {
   userOperation: RpcUserOperation;
   userOpHash: Hex;
   entryPoint: Address;
-  chainId: typeof WITHDRAWAL_CHAIN_ID;
+  chainId: number;
   expiresAt: number;
   /**
    * Only for an operation in its own nonce lane (pay without waiting): its nonce is
@@ -285,7 +336,7 @@ export interface WithdrawalView {
   from: Address;
   to: Address;
   network: string;
-  chainId: typeof WITHDRAWAL_CHAIN_ID;
+  chainId: number;
   userOpHash: Hex;
   sponsored: boolean;
   fee: WithdrawalFee;
@@ -362,16 +413,30 @@ export function lanesRevertBudget(env: Record<string, string | undefined>): numb
  * owner's decision): 0.1 ETH per wallet, 3 ETH in total (about USD 10k); the settings override
  * them, and a malformed or zero setting is its default.
  */
-export const SPONSOR_INFLIGHT_WALLET_SETTING = 'CITY_BASE_SPONSOR_INFLIGHT_WEI_PER_WALLET';
-export const SPONSOR_INFLIGHT_TOTAL_SETTING = 'CITY_BASE_SPONSOR_INFLIGHT_WEI_TOTAL';
+export const SPONSOR_INFLIGHT_WALLET_SETTING = WALLET_OWNER_OPS.inflightPerWalletSetting;
+export const SPONSOR_INFLIGHT_TOTAL_SETTING = WALLET_OWNER_OPS.inflightTotalSetting;
 /** 0.1 ETH: the default ceiling of sponsored gas in flight per wallet. */
-export const SPONSOR_INFLIGHT_WALLET_DEFAULT_WEI = 100_000_000_000_000_000n;
+export const SPONSOR_INFLIGHT_WALLET_DEFAULT_WEI = WALLET_OWNER_OPS.inflightPerWalletWei;
 /** 3 ETH (about USD 10k): the default ceiling of sponsored gas in flight in total. */
-export const SPONSOR_INFLIGHT_TOTAL_DEFAULT_WEI = 3_000_000_000_000_000_000n;
+export const SPONSOR_INFLIGHT_TOTAL_DEFAULT_WEI = WALLET_OWNER_OPS.inflightTotalWei;
 /** What a refused create is told to wait: about a minute, until something in flight ends. */
 const SPONSOR_RETRY_SECONDS = 60;
-/** The one advisory lock every exposure write takes first ("cc-spons" as a 64-bit key). */
-const EXPOSURE_LOCK_KEY = '7161117711238328179';
+/**
+ * Per owner account, of its operations still waiting for a signature: at most this many
+ * sponsored ones open, and at most this much of the sponsor's exposure held for them, so one owner
+ * cannot hold the total cap with operations it never signs. Operator accounts (the proven fleet
+ * accounts, chain/sponsor-operators.ts) are not limited here; the wallet and total caps still are.
+ */
+export const UNSIGNED_OPEN_PER_ACCOUNT = 10;
+export const UNSIGNED_EXPOSURE_PER_ACCOUNT_WEI = WALLET_OWNER_OPS.unsignedPerAccountWei; // 0.02 ETH
+/**
+ * The smallest withdrawal on the wallet network, in base units: below it the network fee the sponsor
+ * pays is more than what moves (0.01 USDC; 0.00001 ETH). Arc's is its own (chain-params.ts ownerOps).
+ */
+export const WITHDRAWAL_MIN_RAW: Record<WithdrawalToken, bigint> = {
+  USDC: WALLET_OWNER_OPS.withdrawalMinUsdcRaw,
+  ETH: WALLET_OWNER_OPS.withdrawalMinNativeWei as bigint,
+};
 /** Unsigned operations expired per pass when a cap is reached, and per sweep. */
 const STALE_BATCH = 100;
 /** Signed, unfinished operations brought up to date per sweep (least recently checked first). */
@@ -414,15 +479,21 @@ export interface SponsorBudget {
   feeCap: bigint | null;
 }
 
-export function sponsorBudget(env: Record<string, string | undefined>): SponsorBudget {
+export function sponsorBudget(
+  env: Record<string, string | undefined>,
+  chainId: number = WITHDRAWAL_CHAIN.chainId,
+): SponsorBudget {
   const wei = (name: string) => {
     const text = env[name]?.trim();
     return text && /^[1-9][0-9]{0,77}$/.test(text) ? BigInt(text) : null;
   };
-  const feeCap = wei('CITY_BASE_WALLET_FEE_CAP_WEI');
+  // Each chain's settings and defaults, in its own gas asset: never a number of ETH on Arc.
+  const params = chainParams(chainId);
+  const feeCap = wei(params.settings.walletFeeCap);
   return {
-    perWallet: wei(SPONSOR_INFLIGHT_WALLET_SETTING) ?? SPONSOR_INFLIGHT_WALLET_DEFAULT_WEI,
-    total: wei(SPONSOR_INFLIGHT_TOTAL_SETTING) ?? SPONSOR_INFLIGHT_TOTAL_DEFAULT_WEI,
+    perWallet:
+      wei(params.ownerOps.inflightPerWalletSetting) ?? params.ownerOps.inflightPerWalletWei,
+    total: wei(params.ownerOps.inflightTotalSetting) ?? params.ownerOps.inflightTotalWei,
     feeCap,
   };
 }
@@ -445,7 +516,23 @@ export function unsponsoredFallbackEnabled(env: Record<string, string | undefine
 
 export interface WithdrawalDeps {
   db: Database;
-  /** The wallet network's owner-operations port; rejects when the chain is not configured. */
+  /** The chain this service works on: an Arc network; the wallet network without one. */
+  chain?: {
+    network: ChainNetwork;
+    /** This deployment's own addresses on that chain (its paymaster, router): never a destination. */
+    refusedDestinations?: readonly (string | null | undefined)[];
+    /**
+     * This deployment's own server keys on that chain, read at the check: never a destination. A read
+     * that fails refuses the withdrawal. Absent (the wallet network): nothing more is asked.
+     */
+    ownKeyAddresses?: () => Promise<readonly string[]>;
+  };
+  /**
+   * Arc: the screening of an operation, asked before it is prepared and before it is signed. A
+   * refusal, or a failure, stops it. Required on an Arc chain; absent there means refused.
+   */
+  screen?: (request: ScreeningRequest) => Promise<{ allowed: boolean; outcome: string }>;
+  /** This chain's owner-operations port; rejects when the chain is not configured. */
   operations(): Promise<OwnerOperationsPort>;
   /** Fresh balances at one block (never a cached read); absent when no endpoint is configured. */
   balances?: BalanceReader;
@@ -471,6 +558,8 @@ export interface WithdrawalDeps {
   revertBudget?: () => number;
   /** Read per create, lanes on or off: the sponsor's exposure caps in flight (default: none). */
   sponsorBudget?: () => SponsorBudget;
+  /** Operator accounts, not held to the per-account unsigned caps (default: none). */
+  operatorAccounts?: () => ReadonlySet<string>;
   /** A new withdrawal's id (default a random UUID); tests pin it to force a lane collision. */
   newId?: () => string;
   now?: () => number;
@@ -615,87 +704,95 @@ interface Settled {
 }
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
-/** Destinations that would lose the funds or loop them back (contract decision 7). */
-const REFUSED_DESTINATIONS = new Set(
-  [
-    ZERO_ADDRESS,
-    NATIVE_ETH,
-    NETWORK.contracts.spendPermissionManager,
-    NETWORK.contracts.smartWalletFactory,
-    NETWORK.contracts.entryPointV06,
-    NETWORK.contracts.entryPointV07,
-    NETWORK.tokens.USDC.address,
-  ].map((address) => address.toLowerCase()),
-);
+/**
+ * Destinations that would lose the funds or loop them back (contract decision 7): the wallet
+ * infrastructure, the protocol's reserved payees (fee routers, treasury, sanctions oracle, USDC,
+ * facilitator and whatever shared/protocol.ts adds there), the sponsoring paymasters, Multicall3 and the ERC-8004
+ * registries (CCA-142). None of these contracts can send a token back.
+ */
+function refusedDestinations(
+  network: ChainNetwork,
+  extra: readonly (string | null | undefined)[] = [],
+): ReadonlySet<string> {
+  return new Set(
+    [
+      ZERO_ADDRESS,
+      NATIVE_ETH,
+      network.contracts.spendPermissionManager,
+      network.contracts.smartWalletFactory,
+      network.contracts.entryPointV06,
+      network.contracts.entryPointV07,
+      network.tokens.USDC.address,
+      ...reservedPayees(),
+      ...Object.values(SPONSOR_PAYMASTERS).flat(),
+      MULTICALL3,
+      network.contracts.reputationRegistry,
+      ...(network.contracts.identityRegistry ? [network.contracts.identityRegistry] : []),
+      ...extra.filter((address): address is string => Boolean(address)),
+    ].map((address) => address.toLowerCase()),
+  );
+}
 
 const UINT256 = 2n ** 256n;
 const RAW_AMOUNT = /^[1-9][0-9]{0,77}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SIGNATURE = /^0x[0-9a-fA-F]{130}$/;
 
-const tokenInfo = (token: WithdrawalToken) => NETWORK.tokens[token];
 /** More than 10% above a fee: what a same-nonce replacement must offer. */
 const outbid = (fee: bigint) => fee + fee / 10n + 1n;
-/** The reservation ledger's token key: USDC's address, native ETH as the allowlisted constant. */
-const tokenAddress = (token: WithdrawalToken): Address => tokenInfo(token).address;
-
-const amountJson = (token: WithdrawalToken, raw: bigint): WithdrawalAmount => ({
-  raw: raw.toString(10),
-  decimals: tokenInfo(token).decimals,
-  display: formatUnits(raw, tokenInfo(token).decimals),
-});
-
-const feeJson = (sponsored: boolean, maxWei: string | bigint): WithdrawalFee => ({
-  paidBy: sponsored ? 'sponsor' : 'wallet',
-  token: 'ETH',
-  max: amountJson('ETH', sponsored ? 0n : BigInt(maxWei)),
-});
-
-/** The wallet lacks the ETH to prefund an unsponsored operation's gas; nothing is prepared. */
-const unfunded = (fee: bigint, needed: bigint, available: bigint) =>
-  new WithdrawalError(
-    'fee_unfunded',
-    'The network fee is not sponsored right now and the wallet does not hold enough ETH to pay it.',
-    {
-      fee: amountJson('ETH', fee),
-      needed: amountJson('ETH', needed),
-      available: amountJson('ETH', available),
-    },
-  );
 
 const hexOf = (bytes: Uint8Array): Hex => `0x${Buffer.from(bytes).toString('hex')}`;
 const num = (value: string | number | null): number | null =>
   value === null ? null : Number(value);
 
-/** Binds a chain operation key to exactly this withdrawal and the operation the owner signed. */
-function intentHash(
-  kind: 'withdraw' | 'withdraw_cancel' | 'rate',
-  withdrawalId: string,
-  wallet: Address,
-  hash: string,
-) {
-  return keccak256(
-    encodeAbiParameters(
-      [
-        { type: 'string' },
-        { type: 'uint256' },
-        { type: 'address' },
-        { type: 'string' },
-        { type: 'bytes32' },
-      ],
-      [
-        kind === 'withdraw'
-          ? 'base-wallet-withdraw-v1'
-          : kind === 'rate'
-            ? 'base-wallet-rate-v1'
-            : 'base-wallet-withdraw-cancel-v1',
-        BigInt(WITHDRAWAL_CHAIN_ID),
-        wallet,
-        withdrawalId,
-        hash as Hex,
-      ],
-    ),
-  );
+/** What one service knows of its chain, read once when it is built. */
+interface ChainContext {
+  network: ChainNetwork;
+  chainId: number;
+  /** What an operation's hash and its one call are bound to. */
+  owner: OwnerOperationChain;
+  /** Gas is USDC: nothing but USDC moves, and an operation is sponsored or not made. */
+  gasIsUsdc: boolean;
+  testnet: boolean;
+  txExplorer: string;
+  /** The chain's name in a message: exactly 'Base' on the wallet network, as it always said. */
+  place: string;
+  refused: ReadonlySet<string>;
+  params: ChainParams['ownerOps'];
+}
+
+const walletChainContext: ChainContext = {
+  network: WALLET_NETWORK,
+  chainId: WITHDRAWAL_CHAIN.chainId,
+  owner: WITHDRAWAL_CHAIN,
+  gasIsUsdc: false,
+  testnet: WALLET_TESTNET,
+  txExplorer: TX_EXPLORER,
+  place: 'Base',
+  refused: refusedDestinations(WALLET_NETWORK),
+  params: WALLET_OWNER_OPS,
+};
+
+function chainContext(chain: WithdrawalDeps['chain']): ChainContext {
+  if (!chain) return walletChainContext;
+  const { network } = chain;
+  const onArc = chainFamily(network.chainId) === 'arc';
+  return {
+    network,
+    chainId: network.chainId,
+    owner: {
+      chainId: network.chainId,
+      entryPoint: network.contracts.entryPointV06,
+      usdc: network.tokens.USDC.address,
+      nativeWithdrawals: !onArc,
+    },
+    gasIsUsdc: onArc,
+    testnet: !isRealMoneyChain(network.chainId),
+    txExplorer: txExplorerOf(network.chainId),
+    place: onArc ? network.name : 'Base',
+    refused: refusedDestinations(network, chain.refusedDestinations),
+    params: chainParams(network.chainId).ownerOps,
+  };
 }
 
 /** The lane a stored operation (and its cancel) runs in: its own, or (absent) the owner lane. */
@@ -703,21 +800,34 @@ const laneInput = (row: Pick<Row, 'lane_key'>): { nonceKey?: bigint } =>
   row.lane_key === null ? {} : { nonceKey: BigInt(row.lane_key) };
 
 /**
- * Until when a prepared operation can be signed: its fixed signing deadline, or, in its own lane
- * and sponsored, the earlier of that and the paymaster's signed validUntil (prepare refused any
- * sponsorship ending after the deadline). A sponsorship that died frees its slot and exposure
- * then, not minutes later. Only unsigned operations ever expire; a signed one is never freed by it.
+ * Until when a prepared operation can be signed: its fixed signing deadline, or, sponsored, the
+ * earlier of that and the end of its sponsorship (prepare refused any sponsorship ending after the
+ * deadline). In its own lane that end is the paymaster's signed validUntil (the server and the
+ * browser check validUntil against this deadline before a signature). Outside a lane it is the
+ * point its bundler stops sending it (`sendMarginMs` before validUntil: our own paymaster's
+ * VALIDITY_MARGIN_S); a sponsor whose bundler has no margin of its own keeps the fixed deadline
+ * there, and its signature is refused near validUntil at submit (sponsorshipEnding). A sponsorship
+ * that died frees its slot and exposure then, not minutes later. Only unsigned operations ever
+ * expire; a signed one is never freed by it.
  */
 const signableUntil = (
   deadline: number,
   laned: boolean,
   sponsored: boolean,
   operation: Pick<UserOperation<'0.6'>, 'paymasterAndData'>,
+  sendMarginMs = 0,
 ) => {
-  if (!laned || !sponsored) return deadline;
+  if (!sponsored) return deadline;
   const until = sponsoredValidUntil(operation.paymasterAndData);
-  return until === null ? deadline : Math.min(deadline, until);
+  if (until === null) return deadline;
+  if (laned) return Math.min(deadline, until);
+  return sendMarginMs > 0 ? Math.min(deadline, until - sendMarginMs) : deadline;
 };
+/** The send margin of a prepared operation's bundler (OwnerOperationsPort.sendMarginMs), in ms. */
+const sendMarginOf = (
+  port: Pick<OwnerOperationsPort, 'sendMarginMs'>,
+  operation: Pick<UserOperation<'0.6'>, 'paymasterAndData'>,
+) => port.sendMarginMs?.(operation.paymasterAndData) ?? 0;
 
 /** `lanes: true` only for an operation in its own lane; nothing at all otherwise. */
 const lanesFlag = (row: Pick<Row, 'lane_key'>): { lanes?: true } =>
@@ -760,7 +870,7 @@ interface CreateBody {
   to: Address;
 }
 
-function parseCreate(input: unknown): CreateBody {
+function parseCreate(input: unknown, chain: ChainContext): CreateBody {
   if (typeof input !== 'object' || input === null || Array.isArray(input))
     throw new WithdrawalError('invalid_body', 'Send idempotencyKey, token, amount and to.');
   const body = input as Record<string, unknown>;
@@ -775,6 +885,8 @@ function parseCreate(input: unknown): CreateBody {
     throw new WithdrawalError('invalid_body', 'idempotencyKey must be a UUID.');
   if (body.token !== 'USDC' && body.token !== 'ETH')
     throw new WithdrawalError('invalid_body', "token must be 'USDC' or 'ETH'.");
+  if (body.token === 'ETH' && !chain.owner.nativeWithdrawals)
+    throw new WithdrawalError('invalid_body', `On ${chain.place} only USDC can be withdrawn.`);
   const to = body.to;
   // A mixed-case address must carry a valid checksum (EIP-55); all lower case has none to check.
   if (typeof to !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(to) || !isAddress(to, { strict: true }))
@@ -846,6 +958,15 @@ type Outcome =
   | 'failed_replaced'
   | 'failed_other';
 
+/**
+ * Outcomes proven for a signed operation the chain module never stored (unstoredEnd), in place of
+ * what its missing record would say.
+ */
+interface Unstored {
+  original?: Outcome;
+  cancel?: Outcome;
+}
+
 function outcomeOf(op: StoredOperation | null): Outcome {
   if (!op) return 'pending';
   if (op.status === 'final') return 'final';
@@ -885,17 +1006,11 @@ function starsOfRow(row: Row): Stars {
   return stars;
 }
 
-/** The one call a row's own operation makes: its transfer, or its rating. */
-function callOf(row: Row) {
-  if (row.kind === 'rate') return rateCall(BigInt(row.rated_base_id!), starsOfRow(row));
-  return withdrawalCall(row.token!, getAddress(row.destination!), BigInt(row.amount_raw!));
-}
-
-const ratingOf = (row: Row): RatingSummary => {
+const ratingOf = (row: Row, registry: Address): RatingSummary => {
   const stars = starsOfRow(row);
   return {
     kind: 'rate',
-    registry: RATE_REGISTRY,
+    registry,
     agentId: BigInt(row.rated_base_id!).toString(10),
     value: starsValue(stars).toString(10),
     tag1: RATE_TAG,
@@ -903,36 +1018,153 @@ const ratingOf = (row: Row): RatingSummary => {
   };
 };
 
-/**
- * Whether a row's stored operation is exactly what it was prepared as: from its wallet, at its
- * nonce, hashing to its userOpHash, and its callData exactly the row's own call (a withdrawal's
- * transfer, never a rating's giveFeedback, and the other way round). Anything else: false.
- */
-function operationMatches(wallet: Address, row: Row): boolean {
-  let op;
-  try {
-    op = userOperationFromRpc(row.user_operation);
-  } catch {
-    return false;
-  }
-  if (getAddress(op.sender) !== getAddress(wallet) || op.nonce !== BigInt(row.nonce)) return false;
-  if (ownerOperationHash(op).toLowerCase() !== row.user_op_hash.toLowerCase()) return false;
-  const rated = decodeRateCall(op.callData, wallet);
-  const transfer = decodeOwnerCall(op.callData, wallet);
-  if (row.kind === 'rate')
-    return (
-      transfer === null &&
-      rated !== null &&
-      rated.agentId === BigInt(row.rated_base_id!) &&
-      starsValue(rated.stars) === BigInt(row.rating_value ?? -1)
+/** The helpers that name a token, an amount or an operation's chain: each its service's own. */
+function chainTools(chain: ChainContext) {
+  const tokenInfo = (token: WithdrawalToken) =>
+    token === 'ETH' ? ETH_TOKEN : chain.network.tokens.USDC;
+  /** The reservation ledger's token key: USDC's address, native ETH as the allowlisted constant. */
+  const tokenAddress = (token: WithdrawalToken): Address => tokenInfo(token).address;
+
+  const amountJson = (token: WithdrawalToken, raw: bigint): WithdrawalAmount => ({
+    raw: raw.toString(10),
+    decimals: tokenInfo(token).decimals,
+    display: formatUnits(raw, tokenInfo(token).decimals),
+  });
+
+  const feeJson = (sponsored: boolean, maxWei: string | bigint): WithdrawalFee => {
+    const paidBy = sponsored ? 'sponsor' : 'wallet';
+    const max = sponsored ? 0n : BigInt(maxWei);
+    if (!chain.gasIsUsdc) return { paidBy, token: 'ETH', max: amountJson('ETH', max) };
+    // Gas is USDC here: never a number of ETH. Rounded up, so a limit is never understated.
+    return {
+      paidBy,
+      token: 'USDC',
+      max: amountJson('USDC', usdcRawFromNativeWei(max + ARC_NATIVE_PER_USDC_RAW - 1n)),
+    };
+  };
+
+  /** The wallet lacks the ETH to prefund an unsponsored operation's gas; nothing is prepared. */
+  const unfunded = (fee: bigint, needed: bigint, available: bigint) =>
+    new WithdrawalError(
+      'fee_unfunded',
+      'The network fee is not sponsored right now and the wallet does not hold enough ETH to pay it.',
+      {
+        fee: amountJson('ETH', fee),
+        needed: amountJson('ETH', needed),
+        available: amountJson('ETH', available),
+      },
     );
-  return (
-    rated === null &&
-    transfer?.kind === 'withdraw' &&
-    transfer.token === row.token &&
-    transfer.to === getAddress(row.destination!) &&
-    transfer.amount === BigInt(row.amount_raw!)
-  );
+
+  /** The smallest withdrawal of a token on this chain; only USDC is ever asked on Arc. */
+  const minRaw = (token: WithdrawalToken) =>
+    token === 'ETH'
+      ? (chain.params.withdrawalMinNativeWei ?? 0n)
+      : chain.params.withdrawalMinUsdcRaw;
+
+  const tooSmall = (token: WithdrawalToken) =>
+    new WithdrawalError(
+      'amount_too_small',
+      `A withdrawal is at least ${formatUnits(minRaw(token), tokenInfo(token).decimals)} ${token}.`,
+      { min: amountJson(token, minRaw(token)) },
+    );
+
+  /** Binds a chain operation key to exactly this withdrawal and the operation the owner signed. */
+  function intentHash(
+    kind: 'withdraw' | 'withdraw_cancel' | 'rate',
+    withdrawalId: string,
+    wallet: Address,
+    hash: string,
+  ) {
+    return keccak256(
+      encodeAbiParameters(
+        [
+          { type: 'string' },
+          { type: 'uint256' },
+          { type: 'address' },
+          { type: 'string' },
+          { type: 'bytes32' },
+        ],
+        [
+          kind === 'withdraw'
+            ? 'base-wallet-withdraw-v1'
+            : kind === 'rate'
+              ? 'base-wallet-rate-v1'
+              : 'base-wallet-withdraw-cancel-v1',
+          BigInt(chain.chainId),
+          wallet,
+          withdrawalId,
+          hash as Hex,
+        ],
+      ),
+    );
+  }
+
+  /** The one call a row's own operation makes: its transfer, or its rating. */
+  function callOf(row: Row) {
+    if (row.kind === 'rate')
+      return rateCall(
+        BigInt(row.rated_base_id!),
+        starsOfRow(row),
+        rateRegistryOf(chain.chainId) ?? RATE_REGISTRY,
+      );
+    return withdrawalCall(
+      row.token!,
+      getAddress(row.destination!),
+      BigInt(row.amount_raw!),
+      chain.owner,
+    );
+  }
+
+  /**
+   * Whether a row's stored operation is exactly what it was prepared as: from its wallet, at its
+   * nonce, hashing to its userOpHash on this chain, and its callData exactly the row's own call (a
+   * withdrawal's transfer, never a rating's giveFeedback, and the other way round). Anything else:
+   * false.
+   */
+  function operationMatches(wallet: Address, row: Row): boolean {
+    let op;
+    try {
+      op = userOperationFromRpc(row.user_operation);
+    } catch {
+      return false;
+    }
+    if (getAddress(op.sender) !== getAddress(wallet) || op.nonce !== BigInt(row.nonce))
+      return false;
+    if (ownerOperationHash(op, chain.owner).toLowerCase() !== row.user_op_hash.toLowerCase())
+      return false;
+    const rated = decodeRateCall(
+      op.callData,
+      wallet,
+      rateRegistryOf(chain.chainId) ?? RATE_REGISTRY,
+    );
+    const transfer = decodeOwnerCall(op.callData, wallet, chain.owner);
+    if (row.kind === 'rate')
+      return (
+        transfer === null &&
+        rated !== null &&
+        rated.agentId === BigInt(row.rated_base_id!) &&
+        starsValue(rated.stars) === BigInt(row.rating_value ?? -1)
+      );
+    return (
+      rated === null &&
+      transfer?.kind === 'withdraw' &&
+      transfer.token === row.token &&
+      transfer.to === getAddress(row.destination!) &&
+      transfer.amount === BigInt(row.amount_raw!)
+    );
+  }
+
+  return {
+    tokenAddress,
+    amountJson,
+    feeJson,
+    unfunded,
+    minRaw,
+    tooSmall,
+    intentHash,
+    callOf,
+    operationMatches,
+  };
 }
 
 function cancelStateOf(outcome: Outcome): CancelState {
@@ -945,9 +1177,70 @@ function cancelStateOf(outcome: Outcome): CancelState {
 export function createWithdrawalService(deps: WithdrawalDeps) {
   const now = deps.now ?? Date.now;
   const db = deps.db;
+  const chain = chainContext(deps.chain);
+  const chainId = chain.chainId;
+  /** The registry this chain's ratings call: Base's as ever, Arc's own on Arc. */
+  const rateRegistry = rateRegistryOf(chainId) ?? RATE_REGISTRY;
+  const {
+    tokenAddress,
+    amountJson,
+    feeJson,
+    unfunded,
+    minRaw,
+    tooSmall,
+    intentHash,
+    callOf,
+    operationMatches,
+  } = chainTools(chain);
+  const cannotReach = () =>
+    new WithdrawalError('chain_unavailable', `${chain.place} cannot be reached right now.`);
+  const cannotRead = () =>
+    new WithdrawalError('chain_unavailable', `${chain.place} cannot be read right now.`);
+  /**
+   * Arc: the operation's addresses screened through the Base oracle. Anything but an allowed answer
+   * stops it, whatever CITY_PROTOCOL_SCREENING says: a chain without an oracle of its own never runs
+   * unscreened. On the wallet network nothing is asked, as ever.
+   */
+  async function screen(input: {
+    withdrawalId: string;
+    token: Address;
+    amount: bigint;
+    from: Address;
+    to: Address;
+  }) {
+    if (!chain.gasIsUsdc) return;
+    const refused = () =>
+      new WithdrawalError(
+        'screening_unavailable',
+        "Payment screening wasn't available, so nothing was prepared or sent. Try again later.",
+      );
+    if (!deps.screen) throw refused();
+    let decision;
+    try {
+      decision = await deps.screen({
+        chainId,
+        token: input.token,
+        amountRaw: input.amount,
+        intentId: `withdrawal:${input.withdrawalId}`,
+        parties: [
+          { role: 'payer', address: input.from },
+          { role: 'payee', address: input.to },
+        ],
+      });
+    } catch {
+      throw refused();
+    }
+    if (decision.allowed) return;
+    if (decision.outcome === 'blocked')
+      throw new WithdrawalError(
+        'screening_blocked',
+        "An address in this operation didn't pass payment screening; nothing was sent.",
+      );
+    throw refused();
+  }
   // Consume and release only; holds are placed in `create` with the read it already made.
   const ledger = createReservationLedger({
-    chainId: WITHDRAWAL_CHAIN_ID,
+    chainId,
     balanceOf: async () => {
       throw new Error('No balance read here.');
     },
@@ -963,7 +1256,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
     const { rows } = await db.query<WalletRow>(
       `SELECT ${WALLET_COLUMNS}
        WHERE w.agent_id = $1 AND w.chain_id = $2 AND w.owner_account_id = $3`,
-      [agentId, WITHDRAWAL_CHAIN_ID, accountId],
+      [agentId, chainId, accountId],
     );
     // Not the wallet's owner (a co-owner, a stranger) or no such wallet: not disclosed.
     if (!rows[0]) throw new WithdrawalError('not_found', 'Not found.');
@@ -992,8 +1285,36 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
     try {
       return await deps.operations();
     } catch {
-      throw new WithdrawalError('chain_unavailable', 'Base cannot be reached right now.');
+      throw cannotReach();
     }
+  }
+  /**
+   * Sponsored operations that will never be signed now (discarded, or expired by time): what the
+   * paymaster's budget still reserves for them is given back at once instead of at their validUntil
+   * (OwnerOperationsPort.release). Best effort: a failure leaves it to lapse by time.
+   */
+  async function releaseSponsorships(hashes: readonly string[]) {
+    if (!hashes.length) return;
+    let port: OwnerOperationsPort;
+    try {
+      port = await operations();
+    } catch {
+      return;
+    }
+    for (const hash of hashes) await port.release?.(hash as Hex).catch(() => {});
+  }
+  /**
+   * Expired by time inside a transaction (expireStale, expireStaleEverywhere): released after it
+   * (releaseLapsed), whether or not it commits, as no signature past expires_at is ever accepted.
+   */
+  const lapsed = new Set<string>();
+  const noteLapsed = (rows: readonly Row[]) => {
+    for (const row of rows) if (row.sponsored) lapsed.add(row.user_op_hash);
+  };
+  async function releaseLapsed() {
+    const hashes = [...lapsed];
+    lapsed.clear();
+    await releaseSponsorships(hashes);
   }
 
   async function audit(
@@ -1053,7 +1374,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
         throw new WithdrawalError('not_cancellable', 'The withdrawal already used its nonce.');
     }
     if (error instanceof WithdrawalError) throw error;
-    throw new WithdrawalError('chain_unavailable', 'Base cannot be reached right now.');
+    throw cannotReach();
   };
 
   /**
@@ -1099,7 +1420,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
    * other in opposite orders. The sums below are exact across wallets under it.
    */
   async function exposureLock(tx: Pick<Transaction, 'query'>) {
-    await tx.query('SELECT pg_advisory_xact_lock($1::bigint)', [EXPOSURE_LOCK_KEY]);
+    await tx.query('SELECT pg_advisory_xact_lock($1::bigint)', [chain.params.exposureLockKey]);
   }
 
   /**
@@ -1116,7 +1437,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
        WHERE e.chain_id = $2 AND e.state = 'held'
          AND (w.state IN ('submitted','included','cancel_pending')
            OR (w.state = 'awaiting_signature' AND w.expires_at > $3))`,
-      [walletId, WITHDRAWAL_CHAIN_ID, now()],
+      [walletId, chainId, now()],
     );
     return { wallet: BigInt(rows[0]?.wallet ?? '0'), total: BigInt(rows[0]?.total ?? '0') };
   }
@@ -1134,8 +1455,9 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
          WHERE chain_id = $2 AND state = 'awaiting_signature' AND expires_at <= $1
          ORDER BY expires_at, withdrawal_id LIMIT $3)
        RETURNING ${COLUMNS}`,
-      [now(), WITHDRAWAL_CHAIN_ID, limit],
+      [now(), chainId, limit],
     );
+    noteLapsed(rows);
     for (const old of rows) {
       await settleHolds(tx, old, false);
       await settleExposure(tx, old);
@@ -1213,7 +1535,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
        ON CONFLICT (holder) DO NOTHING`,
       [
         randomUUID(),
-        WITHDRAWAL_CHAIN_ID,
+        chainId,
         input.walletId,
         input.withdrawalId,
         input.holder,
@@ -1250,18 +1572,67 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
     return BigInt(rows[0]?.total ?? '0');
   }
 
+  /**
+   * The owner account's operations still waiting for a signature: how many hold the sponsor's
+   * exposure, and how much. An unsigned operation past its time never counts.
+   */
+  async function unsignedSums(tx: Pick<Transaction, 'query'>, accountId: string) {
+    const { rows } = await tx.query<{ open: number; held: string }>(
+      `SELECT count(DISTINCT w.withdrawal_id)::int AS open, coalesce(sum(e.amount), 0)::text AS held
+       FROM base_wallet_withdrawals w
+       JOIN base_sponsor_exposure e ON e.withdrawal_id = w.withdrawal_id AND e.state = 'held'
+       WHERE w.owner_account_id = $1 AND w.chain_id = $2 AND w.state = 'awaiting_signature'
+         AND w.expires_at > $3`,
+      [accountId, chainId, now()],
+    );
+    return { open: Number(rows[0]?.open ?? 0), held: BigInt(rows[0]?.held ?? '0') };
+  }
+
+  /**
+   * One owner's unsigned operations hold at most UNSIGNED_OPEN_PER_ACCOUNT of them and
+   * UNSIGNED_EXPOSURE_PER_ACCOUNT_WEI of the sponsor's exposure (under the exposure lock, before
+   * anything is written): over either, 409 sponsor_busy, which signing or cancelling one, or its
+   * expiry, frees. Operator accounts are not limited here.
+   */
+  async function checkUnsigned(tx: Transaction, accountId: string, need: bigint) {
+    if (deps.operatorAccounts?.().has(accountId)) return;
+    await exposureLock(tx);
+    const sums = await unsignedSums(tx, accountId);
+    if (
+      sums.open < UNSIGNED_OPEN_PER_ACCOUNT &&
+      sums.held + need <= chain.params.unsignedPerAccountWei
+    )
+      return;
+    const roomLater = need <= chain.params.unsignedPerAccountWei;
+    throw new WithdrawalError(
+      'sponsor_busy',
+      roomLater
+        ? 'Too many of your operations are waiting for a signature; sign or cancel one, or try again in a few minutes.'
+        : 'This operation is more than the network fee sponsorship allows right now.',
+      roomLater
+        ? {
+            retryAfterSeconds: SPONSOR_RETRY_SECONDS,
+            details: { retryAfterSeconds: SPONSOR_RETRY_SECONDS },
+          }
+        : { details: {} },
+    );
+  }
+
   /** Reserves a sponsored operation's own cost and its cancel headroom, both under the caps. */
   async function reserveWithHeadroom(
     tx: Transaction,
     input: {
       walletId: string;
       withdrawalId: string;
+      /** The owner account whose unsigned operations it joins (checkUnsigned). */
+      accountId: string;
       operation: UserOperation<'0.6'>;
       cost: bigint;
     },
   ) {
     // Both parts checked together, once, against the current sums; then both written.
     const headroom = headroomFor(input.operation);
+    await checkUnsigned(tx, input.accountId, input.cost + headroom);
     await reserveExposure(tx, {
       walletId: input.walletId,
       withdrawalId: input.withdrawalId,
@@ -1379,6 +1750,8 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
       await audit(tx, wallet, rows[0], errorCode ? 'withdrawal_discarded' : 'withdrawal_expired');
       return rows[0];
     });
+    // Committed: it can never be signed now.
+    if (updated?.sponsored) await releaseSponsorships([updated.user_op_hash]);
     return updated ?? reload(row);
   }
 
@@ -1391,6 +1764,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
        RETURNING ${COLUMNS}`,
       [wallet.wallet_id, now()],
     );
+    noteLapsed(rows);
     for (const old of rows) {
       await settleHolds(tx, old, false);
       await settleExposure(tx, old);
@@ -1476,7 +1850,12 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
   ): Promise<StoredOperation | null> {
     const input = submission(wallet, row, kind);
     if (!input) return null;
-    let op = await port.refresh(input.idempotencyKey);
+    // Laned (its own lane): only it and its cancel are ever signed there (CCA-108).
+    const peer = kind === 'withdraw' ? row.cancel_chain_op_key : row.chain_op_key;
+    let op = await port.refresh(
+      input.idempotencyKey,
+      row.lane_key === null ? undefined : { key: BigInt(row.lane_key), peers: peer ? [peer] : [] },
+    );
     if (!op || op.status === 'queued') {
       try {
         op = await port.submit(input);
@@ -1489,15 +1868,79 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
   }
 
   /**
+   * A signed operation of this withdrawal (or its cancel) that the chain module has no record of at
+   * all: its submit was refused before anything was stored (follow), so it was never sent by us. A
+   * refresh that cannot read the database throws, and one that cannot read Base answers what is
+   * stored; only a missing record answers null.
+   */
+  async function neverStored(
+    port: OwnerOperationsPort,
+    wallet: WalletRow,
+    row: Row,
+    kind: 'withdraw' | 'withdraw_cancel',
+  ) {
+    const input = submission(wallet, row, kind);
+    if (!input) return null;
+    return (await port.refresh(input.idempotencyKey)) === null ? input : null;
+  }
+
+  /**
+   * MPR-2: how a signed withdrawal whose own operation was never stored ends, when that is proven;
+   * null while it is not (it stays as it is, as before). Its operation never went out from here,
+   * but the owner holds its signature, so only the chain decides:
+   * - its cancel (the no-op at the same sender and nonce) recorded final, or recorded failed as a
+   *   revert (a revert uses the nonce too): the original can never land, it was replaced, exactly
+   *   as decide() concludes for a stored original whose nonce the cancel used;
+   * - its sponsorship provably lapsed (port.unstoredLapsed: a settled canonical block past its
+   *   validUntil, its nonce still unused there): it never landed and never can; failed, not sent.
+   *   Only while no signed cancel may still land: none signed, its cancel ended without using the
+   *   nonce, or its cancel was never stored either and lapsed the same way.
+   * Nothing else is concluded: a cancel in flight, a used nonce, an unreadable chain all wait.
+   */
+  async function unstoredEnd(
+    port: OwnerOperationsPort,
+    wallet: WalletRow,
+    row: Row,
+    cancel: StoredOperation | null,
+  ): Promise<Unstored | null> {
+    const input = await neverStored(port, wallet, row, 'withdraw');
+    if (!input) return null;
+    const cancelOutcome = cancel ? outcomeOf(cancel) : null;
+    if (row.cancel_signature !== null && cancel) {
+      const sameNonce =
+        getAddress(cancel.sender) === input.wallet &&
+        BigInt(cancel.nonce) === BigInt(input.operation.nonce);
+      if (sameNonce && (cancelOutcome === 'final' || cancelOutcome === 'failed_reverted'))
+        return { original: 'failed_replaced' };
+      // A cancel that may still land, or one that ended in a way this cannot place: wait.
+      if (cancelOutcome !== 'failed_other') return null;
+    }
+    let lapsedCancel = false;
+    if (row.cancel_signature !== null && !cancel) {
+      const cancelInput = await neverStored(port, wallet, row, 'withdraw_cancel');
+      if (!cancelInput || (await port.unstoredLapsed?.(cancelInput.operation)) !== true)
+        return null;
+      lapsedCancel = true;
+    }
+    if ((await port.unstoredLapsed?.(input.operation)) !== true) return null;
+    return { original: 'failed_other', ...(lapsedCancel ? { cancel: 'failed_other' } : {}) };
+  }
+
+  /**
    * The state a signed, unfinished withdrawal is in, from its operation and its cancel's (gate 2):
    * the original landing decides everything; 'cancelled' needs the no-op final AND the original
    * failed because its nonce was used.
    */
-  function decide(row: Row, original: StoredOperation | null, cancel: StoredOperation | null) {
+  function decide(
+    row: Row,
+    original: StoredOperation | null,
+    cancel: StoredOperation | null,
+    proven: Unstored = {},
+  ) {
     const at = now();
-    const outcome = outcomeOf(original);
+    const outcome = proven.original ?? outcomeOf(original);
     const cancelSigned = row.cancel_signature !== null;
-    const cancelOutcome = cancelSigned ? outcomeOf(cancel) : null;
+    const cancelOutcome = cancelSigned ? (proven.cancel ?? outcomeOf(cancel)) : null;
     const cancelLive =
       cancelSigned || (row.cancel_user_op_hash !== null && Number(row.cancel_expires_at) > at);
     let state: WithdrawalState;
@@ -1548,11 +1991,22 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
     } catch {
       return row;
     }
-    const original = await follow(port, wallet, row, 'withdraw');
+    let original = await follow(port, wallet, row, 'withdraw');
     const cancel = row.cancel_signature ? await follow(port, wallet, row, 'withdraw_cancel') : null;
-    // The chain could not be read: keep what is stored rather than guess.
-    if (!original) return row;
-    const next = decide(row, original, cancel);
+    // Laned: the original's used nonce counts as replaced only once its cancel is recorded landed
+    // (CCA-108), and the cancel was brought up to date just now: decide the original again.
+    if (
+      row.lane_key !== null &&
+      original?.status === 'reconciling' &&
+      original.errorCode === 'NONCE_CONSUMED' &&
+      (cancel?.status === 'included' || cancel?.status === 'final')
+    )
+      original = (await follow(port, wallet, row, 'withdraw')) ?? original;
+    // Never stored (its submit refused): ended only when the chain proves how (unstoredEnd).
+    // Otherwise, as when the chain could not be read: keep what is stored rather than guess.
+    const proven = original ? {} : await unstoredEnd(port, wallet, row, cancel);
+    if (!proven) return row;
+    const next = decide(row, original, cancel, proven);
     const txHash = next.landed?.txHash ?? null;
     const blockNumber = next.landed ? Number(next.landed.blockNumber) : null;
     const cancelTx = next.cancelLanded?.txHash ?? null;
@@ -1623,6 +2077,16 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
       }
       return done;
     });
+    // An unsigned sponsored cancel that lapsed, or that can no longer land (the withdrawal ended or
+    // its nonce is used): it will never be signed now.
+    if (
+      updated?.cancel_user_op_hash &&
+      updated.cancel_signature === null &&
+      updated.cancel_sponsored !== false &&
+      (updated.cancel_state === 'expired' ||
+        (updated.state !== 'submitted' && updated.state !== 'cancel_pending'))
+    )
+      await releaseSponsorships([updated.cancel_user_op_hash]);
     if (updated) return updated;
     // Written meanwhile (a cancel requested or signed, another read): decide again from the row
     // as it is now, never from the older one.
@@ -1671,7 +2135,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
         ? {
             kind: 'rate' as const,
             rating: {
-              ...ratingOf(row),
+              ...ratingOf(row, rateRegistry),
               ratedAgentId: row.rated_agent_id!,
               name: await ratedName(row.rated_agent_id!),
             },
@@ -1682,9 +2146,9 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
       token: rating ? null : row.token,
       amount: rating ? RATING_AMOUNT : amountJson(row.token!, BigInt(row.amount_raw!)),
       from: getAddress(wallet.address),
-      to: rating ? RATE_REGISTRY : getAddress(row.destination!),
-      network: NETWORK.name,
-      chainId: WITHDRAWAL_CHAIN_ID,
+      to: rating ? rateRegistry : getAddress(row.destination!),
+      network: chain.network.name,
+      chainId,
       userOpHash: row.user_op_hash as Hex,
       sponsored: row.sponsored,
       fee: feeJson(row.sponsored, row.max_fee_wei),
@@ -1692,7 +2156,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
       blockNumber: num(row.block_number),
       safe,
       errorCode: row.error_code,
-      explorerUrl: txHash ? `${TX_EXPLORER}${txHash}` : null,
+      explorerUrl: txHash ? `${chain.txExplorer}${txHash}` : null,
       expiresAt: row.state === 'awaiting_signature' ? Number(row.expires_at) : null,
       cancel:
         row.cancel_user_op_hash === null
@@ -1705,12 +2169,12 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
                   : row.cancel_state!,
               userOpHash: row.cancel_user_op_hash as Hex,
               userOperation: cancelOpen ? row.cancel_user_operation : null,
-              entryPoint: NETWORK.contracts.entryPointV06,
+              entryPoint: chain.network.contracts.entryPointV06,
               expiresAt: cancelOpen ? Number(row.cancel_expires_at) : null,
               sponsored: row.cancel_sponsored !== false,
               fee: feeJson(row.cancel_sponsored !== false, row.cancel_max_fee_wei ?? '0'),
               txHash: cancelTx,
-              explorerUrl: cancelTx ? `${TX_EXPLORER}${cancelTx}` : null,
+              explorerUrl: cancelTx ? `${chain.txExplorer}${cancelTx}` : null,
             },
       ...lanesFlag(row),
       createdAt: Number(row.created_at),
@@ -1728,8 +2192,8 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
       state: row.state,
       userOperation: row.user_operation,
       userOpHash: row.user_op_hash as Hex,
-      entryPoint: NETWORK.contracts.entryPointV06,
-      chainId: WITHDRAWAL_CHAIN_ID,
+      entryPoint: chain.network.contracts.entryPointV06,
+      chainId,
       expiresAt: Number(row.expires_at),
       ...lanesFlag(row),
       summary: {
@@ -1738,8 +2202,8 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
         amount: amountJson(row.token!, BigInt(row.amount_raw!)),
         from: getAddress(wallet.address),
         to: getAddress(row.destination!),
-        network: NETWORK.name,
-        testnet: WALLET_TESTNET,
+        network: chain.network.name,
+        testnet: chain.testnet,
         sponsored: row.sponsored,
         fee: feeJson(row.sponsored, row.max_fee_wei),
         deploysWallet: row.user_operation.initCode !== '0x',
@@ -1755,15 +2219,15 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
       state: row.state,
       userOperation: row.user_operation,
       userOpHash: row.user_op_hash as Hex,
-      entryPoint: NETWORK.contracts.entryPointV06,
-      chainId: WITHDRAWAL_CHAIN_ID,
+      entryPoint: chain.network.contracts.entryPointV06,
+      chainId,
       expiresAt: Number(row.expires_at),
       ...lanesFlag(row),
       summary: {
-        ...ratingOf(row),
+        ...ratingOf(row, rateRegistry),
         from: getAddress(wallet.address),
-        network: NETWORK.name,
-        testnet: WALLET_TESTNET,
+        network: chain.network.name,
+        testnet: chain.testnet,
         sponsored: row.sponsored,
         fee: feeJson(row.sponsored, row.max_fee_wei),
         deploysWallet: row.user_operation.initCode !== '0x',
@@ -2021,13 +2485,12 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
     row: Row,
     fee: bigint,
   ): Promise<{ eth: bigint; blockNumber: bigint; own: bigint }> {
-    if (!deps.balances)
-      throw new WithdrawalError('chain_unavailable', 'Base cannot be read right now.');
+    if (!deps.balances) throw cannotRead();
     let read;
     try {
       read = await deps.balances.balances(getAddress(wallet.address));
     } catch {
-      throw new WithdrawalError('chain_unavailable', 'Base cannot be read right now.');
+      throw cannotRead();
     }
     const held = await unavailableAmount(db, {
       walletId: wallet.wallet_id,
@@ -2051,13 +2514,12 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
   async function checkStillFunded(wallet: WalletRow, row: Row) {
     // A rating moves no money and holds nothing.
     if (row.kind === 'rate' || row.amount_raw === null) return;
-    if (!deps.balances)
-      throw new WithdrawalError('chain_unavailable', 'Base cannot be read right now.');
+    if (!deps.balances) throw cannotRead();
     let read;
     try {
       read = await deps.balances.balances(getAddress(wallet.address));
     } catch {
-      throw new WithdrawalError('chain_unavailable', 'Base cannot be read right now.');
+      throw cannotRead();
     }
     const settled = await settledIncluded(wallet);
     const amount = BigInt(row.amount_raw);
@@ -2118,7 +2580,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
       const retryAt = Number(rows[budget - 1].reverted_at) + REVERT_WINDOW_MS;
       throw new WithdrawalError(
         'sponsor_paused',
-        'Several operations from this wallet failed on Base; new ones pause for a while.',
+        `Several operations from this wallet failed on ${chain.place}; new ones pause for a while.`,
         { reverted: rows.length, retryAt, details: { reverted: rows.length, retryAt } },
       );
     }
@@ -2180,7 +2642,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
     const { rows } = await tx.query(
       `SELECT 1 FROM base_wallet_withdrawals
        WHERE chain_id = $1 AND wallet_id = $2 AND lane_key = $3::numeric`,
-      [WITHDRAWAL_CHAIN_ID, walletId, lane.toString(10)],
+      [chainId, walletId, lane.toString(10)],
     );
     return rows.length > 0;
   }
@@ -2210,16 +2672,42 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
       'This operation’s lane is already in use; nothing was prepared. Try again.',
     );
 
-  return {
-    /** `payment` only from the pay service (a payment to a re-verified recipient), never a request. */
-    async create(
+  /**
+   * The sponsored operations a create prepared (`handed`) that no stored withdrawal or rating
+   * carries once it is done: refused after the prepare (a cap reached under the lock, a parallel
+   * create, a failed check), they are never handed out, so their sponsorships are given back now.
+   */
+  async function releaseUnstored(handed: readonly string[]) {
+    if (!handed.length) return;
+    const hashes = handed.map((hash) => hash.toLowerCase());
+    let stored: Set<string>;
+    try {
+      const { rows } = await db.query<{ hash: string }>(
+        `SELECT lower(user_op_hash) AS hash FROM base_wallet_withdrawals
+         WHERE lower(user_op_hash) = ANY($1::text[])
+         UNION SELECT lower(cancel_user_op_hash) FROM base_wallet_withdrawals
+         WHERE lower(cancel_user_op_hash) = ANY($1::text[])`,
+        [hashes],
+      );
+      stored = new Set(rows.map((row) => row.hash));
+    } catch {
+      return; // unknown: left to lapse by time
+    }
+    await releaseSponsorships(hashes.filter((hash) => !stored.has(hash)));
+  }
+
+  /** The two creates that prepare a sponsored owner operation (service.create, service.rate). */
+  const creates = {
+    async withdrawal(
+      /** Every sponsored operation this create prepares (released if none is stored). */
+      handed: string[],
       accountId: string,
       agentId: string,
       input: unknown,
       payment?: PaymentHooks,
     ): Promise<WithdrawalSigningRequest> {
       const wallet = await walletOf(accountId, agentId);
-      const body = parseCreate(input);
+      const body = parseCreate(input, chain);
       if (payment && (body.token !== 'USDC' || body.amount === 'max'))
         throw new WithdrawalError('invalid_body', 'A payment is an exact amount of USDC.');
       const hash = requestHash(agentId, body, payment);
@@ -2234,7 +2722,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
       )
         throw new WithdrawalError('backup_required', 'Confirm your backup key first.');
       if (
-        REFUSED_DESTINATIONS.has(body.to.toLowerCase()) ||
+        chain.refused.has(body.to.toLowerCase()) ||
         walletRecipientRefusal(
           { address: wallet.address, spenderAddress: wallet.spender_address },
           body.to,
@@ -2244,6 +2732,21 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
           'destination_not_allowed',
           'Funds sent to that address would be lost or come straight back.',
         );
+      if (deps.chain?.ownKeyAddresses) {
+        const own = await deps.chain.ownKeyAddresses().catch(() => {
+          throw new WithdrawalError(
+            'chain_unavailable',
+            `${chain.place} cannot be read right now.`,
+          );
+        });
+        if (own.some((address) => address.toLowerCase() === body.to.toLowerCase()))
+          throw new WithdrawalError(
+            'destination_not_allowed',
+            'Funds sent to that address would be lost or come straight back.',
+          );
+      }
+      // Below the smallest withdrawal: refused before anything is read or prepared ('max' below).
+      if (body.amount !== 'max' && body.amount < minRaw(body.token)) throw tooSmall(body.token);
       // Pay without waiting, decided once per request (CITY_BASE_LANES).
       const laned = deps.lanes?.() === true;
       const cap = laned ? (deps.openCap?.() ?? LANES_CAP_DEFAULT) : 0;
@@ -2273,14 +2776,15 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
         if (open) throw pending(open);
       }
 
+      // Already at its unsigned caps: refused before anything is prepared or sponsored.
+      await db.transaction((tx) => checkUnsigned(tx, accountId, 0n));
       const port = await operations();
-      if (!deps.balances)
-        throw new WithdrawalError('chain_unavailable', 'Base cannot be read right now.');
+      if (!deps.balances) throw cannotRead();
       let read;
       try {
         read = await deps.balances.balances(getAddress(wallet.address));
       } catch {
-        throw new WithdrawalError('chain_unavailable', 'Base cannot be read right now.');
+        throw cannotRead();
       }
       const token = tokenAddress(body.token);
       const balance = body.token === 'USDC' ? read.usdc : read.eth;
@@ -2296,6 +2800,8 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
           'The wallet does not hold that much right now.',
           { available: amountJson(body.token, available) },
         );
+      // 'max' of less than the smallest withdrawal.
+      if (amount < minRaw(body.token)) throw tooSmall(body.token);
       // The ETH free for gas, if no paymaster sponsors the operation.
       const ethHeld =
         body.token === 'ETH'
@@ -2309,31 +2815,44 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
         const input = {
           wallet: walletAddress,
           recipe: recipeOf(wallet),
-          calls: [withdrawalCall(body.token, body.to, value)],
+          calls: [withdrawalCall(body.token, body.to, value, chain.owner)],
           // Our own paymaster: a payment is ordinary work; a withdrawal may use the protected budget.
           sponsorFlow: payment ? ('ownerPay' as const) : ('exit' as const),
+          sponsorAccountId: accountId,
           // Its own lane, first sequence: a lane Base has seen used is refused (NONCE_MOVED).
           ...(lane === null
             ? {}
             : { nonceKey: lane, pinnedNonce: lane << 64n, sponsorshipDeadline: signingDeadline }),
         };
         try {
-          // A payment: sponsored or nothing, whatever the fallback setting says.
-          if (payment) return await port.prepare(input);
+          // A payment, and anything on Arc: sponsored or nothing, whatever the fallback setting says.
           // Re-preparing an owner-funded 'max' stays owner-funded (only reached with the fallback on).
-          return ownerFunded
-            ? await port.prepare({ ...input, ownerFunded })
-            : await prepareOwnerOperation(port, input);
+          const made =
+            payment || chain.gasIsUsdc
+              ? await port.prepare(input)
+              : ownerFunded
+                ? await port.prepare({ ...input, ownerFunded })
+                : await prepareOwnerOperation(port, input);
+          if (made.sponsored) handed.push(made.userOpHash);
+          return made;
         } catch (error) {
           if (lane !== null && error instanceof OwnerOperationError && error.code === 'NONCE_MOVED')
             throw laneCollision();
           return operationError(error);
         }
       };
+      // Arc: both addresses screened before anything is prepared or sponsored.
+      await screen({
+        withdrawalId,
+        token,
+        amount,
+        from: getAddress(wallet.address),
+        to: body.to,
+      });
       // The recipient of a payment, checked again on Base right before anything is prepared.
       if (payment) await payment.beforePrepare();
       let prepared: PreparedOwnerOperation = await prepareFor(amount);
-      if (payment && !prepared.sponsored)
+      if ((payment || chain.gasIsUsdc) && !prepared.sponsored)
         throw new WithdrawalError(
           'sponsorship_unavailable',
           'The network fee cannot be covered right now; nothing was prepared. Try again later.',
@@ -2358,7 +2877,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
         }
       }
       // What the owner will sign must decode to exactly this withdrawal.
-      const decoded = decodeOwnerCall(prepared.operation.callData, walletAddress);
+      const decoded = decodeOwnerCall(prepared.operation.callData, walletAddress, chain.owner);
       if (
         decoded?.kind !== 'withdraw' ||
         decoded.token !== body.token ||
@@ -2400,14 +2919,14 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
                   ? pending(deploying.withdrawalId)
                   : new WithdrawalError(
                       'operation_pending',
-                      'This wallet is being set up on Base; try again in a moment.',
+                      `This wallet is being set up on ${chain.place}; try again in a moment.`,
                       deploying,
                     );
             }
           }
           // The read made above, for both tokens: one block for everything held here.
           const holds = createReservationLedger({
-            chainId: WITHDRAWAL_CHAIN_ID,
+            chainId,
             // What this read already shows spent by operations settled at the safe head is added
             // back, as their holds still count in the ledger's own sum (settledHeld).
             balanceOf: async (_address, held) => ({
@@ -2421,7 +2940,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
           const hold = (heldToken: Address, value: bigint) =>
             holds.reserve(tx, {
               walletId: wallet.wallet_id,
-              chainId: WITHDRAWAL_CHAIN_ID,
+              chainId,
               token: heldToken,
               amount: value,
               holder: { kind: 'withdrawal', ref: withdrawalId },
@@ -2444,6 +2963,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
             await reserveWithHeadroom(tx, {
               walletId: wallet.wallet_id,
               withdrawalId,
+              accountId,
               operation: prepared.operation,
               cost: prepared.maxCostWei,
             });
@@ -2463,7 +2983,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
               withdrawalId,
               wallet.wallet_id,
               accountId,
-              WITHDRAWAL_CHAIN_ID,
+              chainId,
               body.token,
               amount.toString(10),
               body.to,
@@ -2472,7 +2992,13 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
               prepared.operation.nonce.toString(10),
               JSON.stringify(userOperationToRpc(prepared.operation)),
               userOpHash,
-              signableUntil(signingDeadline, lane !== null, prepared.sponsored, prepared.operation),
+              signableUntil(
+                signingDeadline,
+                lane !== null,
+                prepared.sponsored,
+                prepared.operation,
+                sendMarginOf(port, prepared.operation),
+              ),
               reservation.reservationId,
               at,
               prepared.sponsored,
@@ -2535,7 +3061,9 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
      * balance read and no hold. The same key and request again answers the same rating as it is
      * now, without any check; another one is refused.
      */
-    async rate(
+    async rating(
+      /** As for a withdrawal. */
+      handed: string[],
       accountId: string,
       agentId: string,
       hooks: RatingHooks,
@@ -2581,6 +3109,8 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
         const open = await openOn(db, wallet.wallet_id, settled);
         if (open) throw pending(open);
       }
+      // Already at its unsigned caps: refused before anything is prepared or sponsored.
+      await db.transaction((tx) => checkUnsigned(tx, accountId, 0n));
       const port = await operations();
       // Both agents checked again on Base right before anything is prepared.
       const target = await hooks.beforePrepare();
@@ -2594,13 +3124,15 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
         prepared = await port.prepare({
           wallet: walletAddress,
           recipe: recipeOf(wallet),
-          calls: [rateCall(target.baseId, target.stars)],
+          calls: [rateCall(target.baseId, target.stars, rateRegistry)],
           sponsorFlow: 'rate' as const,
+          sponsorAccountId: accountId,
           // Its own lane, first sequence: a lane Base has seen used is refused (NONCE_MOVED).
           ...(lane === null
             ? {}
             : { nonceKey: lane, pinnedNonce: lane << 64n, sponsorshipDeadline: signingDeadline }),
         });
+        if (prepared.sponsored) handed.push(prepared.userOpHash);
       } catch (error) {
         if (lane !== null && error instanceof OwnerOperationError && error.code === 'NONCE_MOVED')
           throw laneCollision();
@@ -2612,7 +3144,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
           'The network fee cannot be covered right now; nothing was prepared. Try again later.',
         );
       // What the owner will sign must decode to exactly this rating, and never to a transfer.
-      const decoded = decodeRateCall(prepared.operation.callData, walletAddress);
+      const decoded = decodeRateCall(prepared.operation.callData, walletAddress, rateRegistry);
       if (
         decodeOwnerCall(prepared.operation.callData, walletAddress) !== null ||
         decoded?.agentId !== target.baseId ||
@@ -2647,7 +3179,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
                   ? pending(deploying.withdrawalId)
                   : new WithdrawalError(
                       'operation_pending',
-                      'This wallet is being set up on Base; try again in a moment.',
+                      `This wallet is being set up on ${chain.place}; try again in a moment.`,
                       deploying,
                     );
             }
@@ -2660,6 +3192,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
           await reserveWithHeadroom(tx, {
             walletId: wallet.wallet_id,
             withdrawalId,
+            accountId,
             operation: prepared.operation,
             cost: prepared.maxCostWei,
           });
@@ -2675,7 +3208,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
               withdrawalId,
               wallet.wallet_id,
               accountId,
-              WITHDRAWAL_CHAIN_ID,
+              chainId,
               target.agentId,
               target.baseId.toString(10),
               Number(starsValue(target.stars)),
@@ -2684,13 +3217,19 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
               prepared.operation.nonce.toString(10),
               JSON.stringify(userOperationToRpc(prepared.operation)),
               userOpHash,
-              signableUntil(signingDeadline, lane !== null, true, prepared.operation),
+              signableUntil(
+                signingDeadline,
+                lane !== null,
+                true,
+                prepared.operation,
+                sendMarginOf(port, prepared.operation),
+              ),
               at,
               lane === null ? null : lane.toString(10),
             ],
           );
           await audit(tx, wallet, rows[0], 'withdrawal_created', {
-            registry: RATE_REGISTRY,
+            registry: rateRegistry,
             ratedAgentId: target.agentId,
             ratedBaseId: target.baseId.toString(10),
             value: Number(starsValue(target.stars)),
@@ -2719,6 +3258,37 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
       }
       return ratingSigningRequest(wallet, row);
     },
+  };
+
+  const service = {
+    /** `payment` only from the pay service (a payment to a re-verified recipient), never a request. */
+    async create(
+      accountId: string,
+      agentId: string,
+      input: unknown,
+      payment?: PaymentHooks,
+    ): Promise<WithdrawalSigningRequest> {
+      const handed: string[] = [];
+      try {
+        return await creates.withdrawal(handed, accountId, agentId, input, payment);
+      } finally {
+        await releaseUnstored(handed);
+      }
+    },
+
+    /** A rating from the agent's wallet (rate/service.ts only): see creates.rating. */
+    async rate(
+      accountId: string,
+      agentId: string,
+      hooks: RatingHooks,
+    ): Promise<RatingSigningRequest> {
+      const handed: string[] = [];
+      try {
+        return await creates.rating(handed, accountId, agentId, hooks);
+      } finally {
+        await releaseUnstored(handed);
+      }
+    },
 
     /**
      * The scheduled sweep (WALLET_SWEEP_PATH): unsigned operations of any wallet past their time
@@ -2734,7 +3304,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
         `SELECT ${COLUMNS} FROM base_wallet_withdrawals
          WHERE chain_id = $1 AND state = ANY($2::text[])
          ORDER BY checked_at ASC NULLS FIRST, created_at, withdrawal_id LIMIT $3`,
-        [WITHDRAWAL_CHAIN_ID, [...SIGNED_OPEN], SWEEP_BATCH],
+        [chainId, [...SIGNED_OPEN], SWEEP_BATCH],
       );
       if (rows.length)
         await db.query(
@@ -2814,8 +3384,8 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
     async refresh(withdrawalId: string): Promise<WithdrawalState | null> {
       if (!UUID.test(withdrawalId)) return null;
       const { rows } = await db.query<Row>(
-        `SELECT ${COLUMNS} FROM base_wallet_withdrawals WHERE withdrawal_id = $1`,
-        [withdrawalId.toLowerCase()],
+        `SELECT ${COLUMNS} FROM base_wallet_withdrawals WHERE withdrawal_id = $1 AND chain_id = $2`,
+        [withdrawalId.toLowerCase(), chainId],
       );
       if (!rows[0]) return null;
       const wallets = await db.query<WalletRow>(`SELECT ${WALLET_COLUMNS} WHERE w.wallet_id = $1`, [
@@ -2842,10 +3412,11 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
       if (!ids.length || !max) return [];
       const { rows } = await db.query<Row>(
         `SELECT ${COLUMNS} FROM base_wallet_withdrawals
-         WHERE withdrawal_id = ANY($1::text[]) AND state = 'included' AND error_code IS NULL
-           AND safe_at IS NULL AND tx_hash IS NOT NULL AND block_number IS NOT NULL
+         WHERE withdrawal_id = ANY($1::text[]) AND chain_id = $3 AND state = 'included'
+           AND error_code IS NULL AND safe_at IS NULL AND tx_hash IS NOT NULL
+           AND block_number IS NOT NULL
          ORDER BY created_at, withdrawal_id LIMIT $2`,
-        [ids, max],
+        [ids, max, chainId],
       );
       // Proven side by side, so one read waits at most one proof's time limit (owner-ops.ts).
       const recorded = await Promise.all(
@@ -2895,6 +3466,16 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
           'This signature is not the wallet owner key over this withdrawal.',
         );
       if (row.state === 'awaiting_signature') {
+        // Never taken once its bundler would no longer send it (our own paymaster's: 120 s before
+        // validUntil): refused here, before anything is stored or sent, never "submitted" and then
+        // lapsed. Owner-funded ('0x') has no sponsorship to end.
+        const sendMarginMs =
+          row.sponsored === false ? 0 : sendMarginOf(await operations(), row.user_operation);
+        if (sponsorshipEnding(row.user_operation.paymasterAndData, now(), sendMarginMs))
+          throw new WithdrawalError(
+            'sponsorship_expired',
+            'The sponsorship is no longer valid; nothing was sent. Prepare again.',
+          );
         if (
           row.lane_key !== null &&
           row.sponsored !== false &&
@@ -2914,6 +3495,15 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
             'operation_mismatch',
             'This operation is not the one prepared; nothing was signed or sent.',
           );
+        // Arc: screened again now that it is about to go out (a decision within its time is reused).
+        if (row.kind === 'withdraw')
+          await screen({
+            withdrawalId: row.withdrawal_id,
+            token: tokenAddress(row.token!),
+            amount: BigInt(row.amount_raw!),
+            from: getAddress(wallet.address),
+            to: getAddress(row.destination!),
+          });
         // With its own lane: never signed for a balance the owner spent elsewhere meanwhile, and a
         // payment or a rating (sponsored or nothing) not while the sponsor's revert budget for
         // this wallet is spent.
@@ -2939,7 +3529,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
               'sponsorship_expired',
               'The sponsorship is no longer valid; nothing was sent. Prepare again.',
             );
-          if (sponsorshipEnding(row.user_operation.paymasterAndData, at))
+          if (sponsorshipEnding(row.user_operation.paymasterAndData, at, sendMarginMs))
             throw new WithdrawalError(
               'sponsorship_expired',
               'The sponsorship is no longer valid; nothing was sent. Prepare again.',
@@ -2998,9 +3588,11 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
       const original = userOperationFromRpc(row.user_operation);
       const cancelDeadline = now() + WITHDRAWAL_SIGNATURE_TTL_MS;
       // A payment's (or a rating's) cancel: sponsored or nothing, like the operation itself.
-      // A rating's cancel too: it is never charged to the wallet.
+      // A rating's cancel too: it is never charged to the wallet. And everything on Arc.
       const sponsoredOnly =
-        row.kind === 'rate' || (await deps.sponsoredOnly?.(row.withdrawal_id)) === true;
+        chain.gasIsUsdc ||
+        row.kind === 'rate' ||
+        (await deps.sponsoredOnly?.(row.withdrawal_id)) === true;
       let prepared: PreparedOwnerOperation;
       try {
         const input = {
@@ -3008,6 +3600,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
           recipe: recipeOf(wallet),
           calls: [noopCall(walletAddress)],
           sponsorFlow: 'exit' as const,
+          sponsorAccountId: accountId,
           // Exactly the original's full nonce, in its lane: only one of the two can ever land.
           pinnedNonce: BigInt(row.nonce),
           ...laneInput(row),
@@ -3031,7 +3624,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
         }
         return operationError(error);
       }
-      if (decodeOwnerCall(prepared.operation.callData, walletAddress)?.kind !== 'noop')
+      if (decodeOwnerCall(prepared.operation.callData, walletAddress, chain.owner)?.kind !== 'noop')
         throw new Error('The prepared cancel is not the wallet no-op.');
       if (sponsoredOnly && !prepared.sponsored)
         throw new WithdrawalError(
@@ -3043,6 +3636,9 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
         prepared.sponsored &&
         cancelExtra(row, prepared.maxCostWei) > (await headroomOf(db, row.withdrawal_id))
       ) {
+        // Never handed out: its sponsorship is given back whether it is refused or replaced.
+        if (prepared.userOpHash.toLowerCase() !== row.cancel_user_op_hash)
+          await releaseSponsorships([prepared.userOpHash]);
         if (sponsoredOnly || deps.unsponsoredFallback?.() !== true)
           throw new WithdrawalError(
             'cancel_over_headroom',
@@ -3055,6 +3651,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
             recipe: recipeOf(wallet),
             calls: [noopCall(walletAddress)],
             sponsorFlow: 'exit' as const,
+            sponsorAccountId: accountId,
             pinnedNonce: BigInt(row.nonce),
             ...laneInput(row),
             feeFloor: {
@@ -3066,7 +3663,9 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
         } catch (error) {
           return operationError(error);
         }
-        if (decodeOwnerCall(prepared.operation.callData, walletAddress)?.kind !== 'noop')
+        if (
+          decodeOwnerCall(prepared.operation.callData, walletAddress, chain.owner)?.kind !== 'noop'
+        )
           throw new Error('The prepared cancel is not the wallet no-op.');
       }
       const funded = prepared.sponsored
@@ -3093,6 +3692,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
               row.lane_key !== null,
               prepared.sponsored,
               prepared.operation,
+              sendMarginOf(port, prepared.operation),
             ),
             prepared.sponsored,
             (prepared.sponsored ? 0n : prepared.maxCostWei).toString(10),
@@ -3116,7 +3716,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
           // Its gas is held on the wallet's ETH like any other operation's, until the cancel ends.
           // The withdrawal's own ETH counts as free for it: only one of the two can be charged.
           const holds = createReservationLedger({
-            chainId: WITHDRAWAL_CHAIN_ID,
+            chainId,
             balanceOf: async () => ({
               balance: funded.eth + funded.own,
               blockNumber: funded.blockNumber,
@@ -3127,7 +3727,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
             feeReservation = (
               await holds.reserve(tx, {
                 walletId: wallet.wallet_id,
-                chainId: WITHDRAWAL_CHAIN_ID,
+                chainId,
                 token: NATIVE_ETH,
                 amount: prepared.maxCostWei,
                 holder: { kind: 'withdrawal', ref: `${row.withdrawal_id}:cancel:${randomUUID()}` },
@@ -3159,8 +3759,21 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
         });
         return asked;
       });
-      if (updated) return present(wallet, updated);
+      if (updated) {
+        // The earlier cancel it replaces lapsed unsigned: it will never be signed now.
+        if (
+          row.cancel_user_op_hash &&
+          row.cancel_user_op_hash !== cancelHash &&
+          row.cancel_sponsored !== false
+        )
+          await releaseSponsorships([row.cancel_user_op_hash]);
+        return present(wallet, updated);
+      }
       const current = await reload(row);
+      // Another request was first: this sponsored cancel is never handed out (unless it is the
+      // very one that request stored).
+      if (prepared.sponsored && current.cancel_user_op_hash !== cancelHash)
+        await releaseSponsorships([cancelHash]);
       if (current.state === 'cancel_pending') return present(wallet, current);
       throw new WithdrawalError(
         'not_cancellable',
@@ -3198,6 +3811,16 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
           throw new WithdrawalError('not_cancellable', 'The withdrawal is already in a block.', {
             state: row.state,
           });
+        // As for the withdrawal: never taken once its bundler would no longer send it.
+        const cancelMarginMs =
+          row.cancel_user_operation && row.cancel_sponsored !== false
+            ? sendMarginOf(await operations(), row.cancel_user_operation)
+            : 0;
+        if (sponsorshipEnding(row.cancel_user_operation?.paymasterAndData, at, cancelMarginMs))
+          throw new WithdrawalError(
+            'sponsorship_expired',
+            'The cancellation sponsorship is no longer valid; nothing was sent. Prepare again.',
+          );
         if (
           row.lane_key !== null &&
           row.cancel_sponsored !== false &&
@@ -3225,7 +3848,7 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
               'sponsorship_expired',
               'The cancellation sponsorship is no longer valid; nothing was sent. Prepare again.',
             );
-          if (sponsorshipEnding(row.cancel_user_operation?.paymasterAndData, at))
+          if (sponsorshipEnding(row.cancel_user_operation?.paymasterAndData, at, cancelMarginMs))
             throw new WithdrawalError(
               'sponsorship_expired',
               'The cancellation sponsorship is no longer valid; nothing was sent. Prepare again.',
@@ -3260,6 +3883,18 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
       return present(wallet, await advance(wallet, row));
     },
   };
+  // Every entry point gives back, once it is done, what its transactions expired by time.
+  for (const name of Object.keys(service) as (keyof typeof service)[]) {
+    const call = service[name] as (...args: never[]) => Promise<unknown>;
+    (service as Record<string, unknown>)[name] = async (...args: never[]) => {
+      try {
+        return await call(...args);
+      } finally {
+        await releaseLapsed();
+      }
+    };
+  }
+  return service;
 }
 
 export type WithdrawalService = ReturnType<typeof createWithdrawalService>;

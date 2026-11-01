@@ -4,7 +4,7 @@ import {
   type DirectoryPage,
   type DirectorySort,
 } from '../../shared/directory';
-import { loadOnBase, type OnBaseRow } from './onBaseData';
+import { loadOnBase, refusedSearchNote, searchNotes, type OnBaseRow } from './onBaseData';
 
 /*
  * The Base Agents directory's data (Operation Directory D1, docs/design/directory.html): one read,
@@ -98,7 +98,7 @@ function registryCard(row: OnBaseRow): DirectoryCard {
 export async function findAgents(
   q: string,
   signal?: AbortSignal,
-): Promise<{ source: 'directory' | 'registry'; agents: DirectoryCard[] }> {
+): Promise<{ source: 'directory' | 'registry'; agents: DirectoryCard[]; note?: string }> {
   let page: DirectoryPage | null = null;
   try {
     page = await searchDirectory({ q }, signal);
@@ -106,11 +106,17 @@ export async function findAgents(
     if (signal?.aborted) throw err;
   }
   if (page && page.agents.length > 0) return { source: 'directory', agents: page.agents };
+  // The registry refuses a text it cannot search (a 1-2 character name, a transaction hash while
+  // that search is unavailable): nothing is asked, and the reason is the note, never "no match".
+  const refused = refusedSearchNote(q);
+  if (refused) return { source: 'registry', agents: [], note: refused };
   const list = await loadOnBase({ q });
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+  const note = searchNotes(list);
   return {
     source: 'registry',
     agents: list.rows.filter((row) => row.name.trim()).map(registryCard),
+    ...(note ? { note } : {}),
   };
 }
 

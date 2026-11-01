@@ -11,6 +11,7 @@ import {
   STRESS_TEST_MAX_GUESTS_ENV,
   STRESS_TEST_OPERATORS_ENV,
 } from '../server/stress-allowlist.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 /**
  * Invite joins under concurrency: no host-wide lock on the join path, every limit still exact.
@@ -132,7 +133,7 @@ async function setup(t: TestContext, limits: Partial<CityLimits> = {}) {
       address,
     );
     assert.equal(registered.statusCode, 201, registered.body);
-    const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+    const cookie = sessionPair(registered.cookies);
     const agent = await post(
       '/api/agents',
       { name: `${name} agent`, capability: 'research', mode: 'hosted' },
@@ -164,7 +165,11 @@ async function setup(t: TestContext, limits: Partial<CityLimits> = {}) {
         address,
       );
       assert.equal(link.statusCode, 201, link.body);
-      return { roomId, code: (link.json().url as string).split('/j/')[1]! };
+      return {
+        roomId,
+        code: (link.json().url as string).split('/j/')[1]!,
+        roomLink: created.json().link.link as string,
+      };
     };
     const remove = (roomId: string, agentId: string) =>
       post(`/api/rooms/${roomId}/members/${agentId}/remove`, {}, { cookie }, address);
@@ -318,6 +323,41 @@ test('a removal racing joins from the removed source never lets one in after the
   }
 });
 
+test('room-link pickups racing room-link joins into one room never deadlock', async (t) => {
+  const { host, post, members } = await setup(t);
+  const h = await host('Room link race host');
+  const room = await h.room(60);
+  // A room link stands for the room's default join code on both paths: bootstrap and redeem
+  // each lock the room and its link, and must take them in the same order as the admission.
+  const pickupWith = async (address: string) => {
+    const start = await post('/api/public/invites/bootstrap', { code: room.roomLink }, {}, address);
+    assert.equal(start.statusCode, 200, start.body);
+    return start.json().handle as string;
+  };
+  const early = [];
+  for (let i = 0; i < 12; i++) {
+    const address = nextAddress();
+    early.push({ address, handle: await pickupWith(address) });
+  }
+  let guest = 0;
+  const results = await Promise.all([
+    ...early.map(({ address, handle }) =>
+      post(
+        '/api/public/invites/redeem',
+        { code: room.roomLink, handle, name: `Link guest ${++guest}` },
+        {},
+        address,
+      ),
+    ),
+    ...Array.from({ length: 12 }, () =>
+      post('/api/public/invites/bootstrap', { code: room.roomLink }, {}, nextAddress()),
+    ),
+  ]);
+  assert.deepEqual(tally(results), { ok: 24 });
+  // The host agent, the host as a person and the twelve guests.
+  assert.equal(await members(room.roomId), 14);
+});
+
 test('benchmark: 200 parallel joins for one host, across rooms and into one room', async (t) => {
   const { host, pickup, liveGuests } = await setup(t);
   const h = await host('Benchmark host');
@@ -369,7 +409,7 @@ test('posts and reads of one owner with two AIs in a room never deadlock on memb
       from,
     );
     assert.equal(person.statusCode, 201, person.body);
-    const cookie = `cc_session=${person.cookies.find((c) => c.name === 'cc_session')!.value}`;
+    const cookie = sessionPair(person.cookies);
     const claimed = await post(
       '/api/workspaces/claim',
       { claim_token: created.json().claim_token },

@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { createApp } from '../server/app.js';
 import { ASSISTANT_SCOPES } from '../shared/assistant.js';
 import type { RoomLimits } from '../server/rooms/contract.js';
+import { fixture as invitationsFixture } from './room-invitations-fixture.js';
 
 /**
  * Room system lines: leave, remove, close and task changes appear as short plain-language
@@ -264,8 +265,94 @@ test('task changes write plain-language lines without ids or tokens', async (t) 
     'Bravo created task #2: Second task',
     'The host cancelled task #2: Second task',
   ]);
+  // by_you (migration 334): each owner sees its own actions marked, never the other's.
+  const byYou = (view: Line[]) =>
+    view.filter((line) => (line as { by_you?: boolean }).by_you === true).map((line) => line.text);
+  assert.deepEqual(
+    byYou(lines),
+    systemTexts(lines).filter((text) => text.startsWith('Bravo')),
+  );
+  const hostView = await thread(app, a.key, roomId);
+  assert.deepEqual(
+    byYou(hostView),
+    systemTexts(hostView).filter((text) => !text.startsWith('Bravo')),
+  );
   for (const text of systemTexts(lines)) {
     assert.doesNotMatch(text, UUID);
     assert.doesNotMatch(text, SECRET);
   }
+});
+
+// by_you (migration 334) on member lines: join, leave and rename name their author; a removal
+// names the remover, never the removed member.
+const byYouTexts = (lines: Line[]) =>
+  lines.filter((line) => (line as { by_you?: boolean }).by_you === true).map((line) => line.text);
+
+test('leave, remove and rename lines carry their actor, never the removed member', async (t) => {
+  const app = await fixture(t);
+  const a = await owner(app, 'Host workspace');
+  const b = await owner(app, 'Member workspace');
+  const c = await owner(app, 'Other workspace');
+  const host = await agent(app, a.key, 'Host desk');
+  const bravo = await agent(app, b.key, 'Bravo');
+  const charlie = await agent(app, c.key, 'Charlie');
+  const created = await createRoom(app, a.key, host);
+  const roomId = created.room.id as string;
+  for (const [key, id] of [
+    [b.key, bravo],
+    [c.key, charlie],
+  ] as const)
+    assert.equal((await join(app, key, created.link.link, id)).statusCode, 200);
+  await ok(app, a.key, 'city_room_update', { room_id: roomId, name: 'Renamed room' });
+  // Charlie reads before it is removed (a removed member no longer reads the room).
+  await ok(app, a.key, 'city_room_remove', { room_id: roomId, agent_id: charlie });
+  const bravoView = await thread(app, b.key, roomId);
+  await ok(app, b.key, 'city_room_leave', { room_id: roomId, agent_id: bravo });
+
+  const hostView = await thread(app, a.key, roomId);
+  assert.deepEqual(systemTexts(hostView), [
+    'The host renamed the room.',
+    'Charlie was removed by the host.',
+    'Bravo left the room.',
+  ]);
+  assert.deepEqual(byYouTexts(hostView), [
+    'The host renamed the room.',
+    'Charlie was removed by the host.',
+  ]);
+  assert.deepEqual(byYouTexts(bravoView), [], 'the host actions are not the member own');
+  const stored = (
+    await app.city.db.query<{ text: string; actor_owner_id: string | null }>(
+      `SELECT parts->0->>'text' AS text, actor_owner_id FROM room_messages
+        WHERE room_id=$1 AND sender_kind='system' ORDER BY seq`,
+      [roomId],
+    )
+  ).rows;
+  const actorOf = (text: string) => stored.find((row) => row.text === text)!.actor_owner_id;
+  assert.equal(actorOf('The host renamed the room.'), a.id);
+  assert.equal(actorOf('Charlie was removed by the host.'), a.id);
+  assert.notEqual(actorOf('Charlie was removed by the host.'), c.id);
+  assert.equal(actorOf('Bravo left the room.'), b.id);
+});
+
+test('an accepted invitation writes a join line by the joining agent', async (t) => {
+  const f = await invitationsFixture(t);
+  const guest = await f.account('Guest');
+  const sent = (await f.invite(await f.baseAgent(guest))).json() as { id: string };
+  assert.equal((await f.decide(guest, sent.id, 'accept')).statusCode, 200);
+  const rows = (
+    await f.db.query<{ text: string; actor_owner_id: string | null }>(
+      `SELECT parts->0->>'text' AS text, actor_owner_id FROM room_messages
+        WHERE room_id=$1 AND sender_kind='system' AND parts->0->>'text' LIKE '%joined.'`,
+      [f.roomId],
+    )
+  ).rows;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.actor_owner_id, guest.operatorId);
+  const view = (res: { json(): { messages: Array<Record<string, unknown>> } }) =>
+    res.json().messages.filter((m) => m.sender_kind === 'system' && m.by_you === true);
+  assert.equal(view(await f.messages(guest)).length, 1);
+  assert.equal(
+    view(await f.messages(f.host)).filter((m) => String(m.text).endsWith('joined.')).length,
+    0,
+  );
 });

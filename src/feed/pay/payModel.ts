@@ -6,6 +6,7 @@ import {
   RESULT_KEEP_DAYS,
   RESULT_MAX_BYTES,
   feedPayListingCheck,
+  feedPayUnavailableMessage,
   type FeedPayAgent,
   type FeedPayCall,
   type FeedPayFloatMove,
@@ -20,6 +21,7 @@ import {
 import { rawToUsdc, type FeedField, type FeedService } from '../../../shared/feed';
 import type { LimitPeriod } from '../../../shared/base/spend-limits';
 import { WALLET_EXPLORER } from '../../../shared/base/wallet-network';
+import { chainView } from '../../../shared/chains';
 import type { PayFailure } from '../payApi';
 import { plain, utcText } from '../feedFormat';
 
@@ -818,6 +820,8 @@ export const payButtonText = (quote: FeedPayQuote) => `Pay ${usdcText(quoteTotal
 export interface RefusalContext {
   agentName?: string;
   period?: LimitPeriod | null;
+  /** The paying agent's chain (FeedPayAgent.chainId: said only while Arc is on). */
+  chainId?: number;
 }
 
 /** Plain words for a refusal, without the money part (the wallet's own editor, the call page). */
@@ -849,6 +853,9 @@ export function refusalSentence(failure: PayFailure, context: RefusalContext = {
       return (
         limitStartsText(failure.detail.startsAt) ?? typo(FEED_PAY_ERROR_MESSAGES.limit_not_started)
       );
+    case 'unavailable':
+      if (context.chainId !== undefined) return typo(feedPayUnavailableMessage(context.chainId));
+      break;
     default:
       break;
   }
@@ -927,9 +934,23 @@ export type CallTone = 'busy' | 'ok' | 'warn' | 'bad';
 const failureSentence = (call: FeedPayCall, fallback: string) =>
   typo(call.failure?.message ?? fallback);
 
+/** The Arc network a call paid on (its payment's CAIP-2 network), or null on Base. */
+const arcOfCall = (payment: { network?: string } | null | undefined) => {
+  const id = /^eip155:(\d+)$/.exec(payment?.network ?? '')?.[1];
+  const view = id ? chainView(Number(id)) : null;
+  return view?.slug === 'arc' ? view : null;
+};
+/** What a call's lines call its chain: "Base", unless it paid on an Arc network. */
+const chainOfCall = (payment: { network?: string } | null | undefined) =>
+  arcOfCall(payment)?.name ?? 'Base';
+/** The link to a call's payment. */
+export const callTxLabel = (call: { payment?: { network?: string } | null }) =>
+  `${chainOfCall(call.payment)} transaction`;
+
 /** The one line that says where the call is (by state, then whether money moved). */
 export function callLine(call: FeedPayCall): { text: string; tone: CallTone } {
   const host = call.service.host;
+  const on = chainOfCall(call.payment);
   const amount = usdcText(call.payment?.amountRaw ?? call.maxAmount.raw);
   switch (call.state) {
     case 'reserved':
@@ -941,7 +962,7 @@ export function callLine(call: FeedPayCall): { text: string; tone: CallTone } {
     case 'calling':
       return { text: `Waiting for ${host}…`, tone: 'busy' };
     case 'reconciling':
-      return { text: 'Checking on Base whether the payment went through…', tone: 'busy' };
+      return { text: `Checking on ${on} whether the payment went through…`, tone: 'busy' };
     case 'settled':
       return { text: 'Paid. Saving the result…', tone: 'busy' };
     case 'not_settled':
@@ -949,7 +970,7 @@ export function callLine(call: FeedPayCall): { text: string; tone: CallTone } {
     case 'result_saved':
       if (call.moneyMoved === 'yes') return { text: `Paid ${amount} USDC to ${host}.`, tone: 'ok' };
       if (call.moneyMoved === 'pending')
-        return { text: 'Result received. Confirming the payment on Base…', tone: 'busy' };
+        return { text: `Result received. Confirming the payment on ${on}…`, tone: 'busy' };
       return { text: `Result received. ${NO_MONEY_MOVED}`, tone: 'ok' };
     case 'paid_no_result':
       return {
@@ -959,7 +980,7 @@ export function callLine(call: FeedPayCall): { text: string; tone: CallTone } {
     case 'cancelled':
     case 'expired':
       if (call.moneyMoved === 'pending')
-        return { text: 'Checking on Base whether the payment went through…', tone: 'busy' };
+        return { text: `Checking on ${on} whether the payment went through…`, tone: 'busy' };
       return {
         text: withMoney(failureSentence(call, 'The call didn’t go through.'), NO_MONEY_MOVED),
         tone: 'warn',
@@ -992,14 +1013,19 @@ export const paymentLine = (call: FeedPayCall) =>
 export function paymentNote(call: FeedPayCall): string | null {
   if (!call.payment) return null;
   if (call.payment.state === 'settled') return null;
-  if (call.moneyMoved === 'pending') return 'Confirming on Base';
+  if (call.moneyMoved === 'pending') return `Confirming on ${chainOfCall(call.payment)}`;
   return 'Not paid';
 }
 
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
-/** A transaction on the wallet network's explorer (as the server links the payment's). */
-const txHref = (hash: string | null | undefined) =>
-  hash && TX_HASH.test(hash) ? `${WALLET_EXPLORER}/tx/${hash}` : null;
+/**
+ * A transaction on the wallet network's explorer (as the server links the payment's), or on the
+ * Arc network's own for a call paid there.
+ */
+const txHref = (hash: string | null | undefined, payment?: { network?: string } | null) =>
+  hash && TX_HASH.test(hash)
+    ? `${arcOfCall(payment)?.explorerUrl ?? WALLET_EXPLORER}/tx/${hash}`
+    : null;
 
 /** One line of a call's money: its amount, where it stands, and its Base transaction. */
 export interface CallMoneyLine extends MoneyLine {
@@ -1031,10 +1057,10 @@ export const FEE_FOLLOW_MS = 120_000;
 const feeCounts = (fee: NonNullable<FeedPayCall['protocolFee']>) =>
   fee.state === 'pending' || fee.state === 'sent' || fee.state === 'charged';
 
-function feeNote(fee: NonNullable<FeedPayCall['protocolFee']>, priceSettled: boolean) {
+function feeNote(fee: NonNullable<FeedPayCall['protocolFee']>, priceSettled: boolean, on: string) {
   if (fee.state === 'charged') return null;
   if (!feeCounts(fee)) return 'Not charged';
-  return priceSettled ? 'Confirming on Base' : 'After the price is paid';
+  return priceSettled ? `Confirming on ${on}` : 'After the price is paid';
 }
 
 /**
@@ -1049,6 +1075,7 @@ export function callMoneyLines(call: CallMoney): CallMoneyLine[] | null {
   if (!fee || !payment || call.moneyMoved === 'no' || fee.state === 'not_owed') return null;
   if (!RAW.test(fee.amountRaw) || !RAW.test(payment.amountRaw)) return null;
   const settled = payment.state === 'settled';
+  const on = chainOfCall(payment);
   const name = call.agent ? plain(call.agent.name) : '';
   const price: CallMoneyLine = {
     key: 'price',
@@ -1056,8 +1083,8 @@ export function callMoneyLines(call: CallMoney): CallMoneyLine[] | null {
     raw: payment.amountRaw,
     value: dollarText(payment.amountRaw),
     sub: `to ${payment.host}`,
-    note: settled ? null : call.moneyMoved === 'pending' ? 'Confirming on Base' : 'Not paid',
-    tx: payment.explorerUrl ? { href: payment.explorerUrl, label: 'Base transaction' } : null,
+    note: settled ? null : call.moneyMoved === 'pending' ? `Confirming on ${on}` : 'Not paid',
+    tx: payment.explorerUrl ? { href: payment.explorerUrl, label: `${on} transaction` } : null,
   };
   // Fee included (a service sold by a Central City agent): the price is all the agent paid, and
   // Central City's 10% of it went in the same transaction. No total, no fee transaction of its own.
@@ -1090,7 +1117,7 @@ export function callMoneyLines(call: CallMoney): CallMoneyLine[] | null {
       raw: fee.amountRaw,
       value: dollarText(fee.amountRaw),
       sub: null,
-      note: feeNote(fee, settled),
+      note: feeNote(fee, settled, on),
       tx: feeTx ? { href: feeTx, label: 'Fee transaction' } : null,
     },
     {
@@ -1141,8 +1168,9 @@ export function historyAmountRaw(item: FeedPayHistoryItem): string | null {
  * The fee's Base transaction in the History, once it is known. None for a fee included in the
  * price: it went in the payment's own transaction, which the History links already.
  */
-export const feeTxHref = (item: Pick<FeedPayHistoryItem, 'protocolFee'>) =>
-  item.protocolFee?.included ? null : txHref(item.protocolFee?.txHash);
+export const feeTxHref = (
+  item: Pick<FeedPayHistoryItem, 'protocolFee'> & { payment?: { network?: string } | null },
+) => (item.protocolFee?.included ? null : txHref(item.protocolFee?.txHash, item.payment));
 
 export function sizeText(bytes: number): string {
   if (bytes < 1024) return `${bytes} bytes`;

@@ -218,7 +218,13 @@ with the HTTP status on REST. Codes: `invalid_arguments` (with `issues` for sour
 `idempotency_conflict`, `publish_conflict`, `publish_cap`, `rate_limited`, `ask_timeout`.
 
 `retryable` is an allowlist for every tool: `rate_limited`, `inbox_full`, `remote_quota` and
-`ask_timeout`. Capacity 429s (`too_many_rooms`, `room_storage_full`, `publish_cap`, ...) and
+`ask_timeout`, plus the upstream failures `link_fetch_failed` and `link_timeout` (a saved link's
+host failed with a 5xx, could not be resolved or reached, or timed out; `retry_after_ms` 30000,
+or upload the file with `city_room_file_put`), `github_unavailable` and `invite_unavailable`.
+A link host that answers HTTP 4xx keeps `link_fetch_failed` but is a `400` (kind
+`invalid_arguments`), not retryable: check the URL. A bare domain (`example.com/page`) is read as
+`https://` with every address check unchanged.
+Capacity refusals (`too_many_rooms`, `room_storage_full`, `storage_full`, `publish_cap`, ...) and
 long cooldowns (`cooldown`, `too_many_pending`, whose windows are hours to days) are not retryable.
 Any error that carries a window returns it as `retry_after_ms`; wait at least that long before
 trying again. Only the ask timeout keeps a 503 on REST; other 5xx answer 500.

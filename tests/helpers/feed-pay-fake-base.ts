@@ -46,7 +46,7 @@ import {
 } from '../../server/base/chain/rpc-bundler.js';
 import { pgAuthorizationStore, pgChainOperationStore } from '../../server/base/chain/stores.js';
 import type { Bundler, ChainOperationStore } from '../../server/base/chain/submit.js';
-import type { Address } from '../../shared/base/chains.js';
+import type { Address, BaseNetwork } from '../../shared/base/chains.js';
 import { SPONSOR_DATA_BYTES, SPONSOR_PAYMASTERS } from '../../shared/base/paymasters.js';
 import { WALLET_CHAIN_ID } from '../../shared/base/wallet-network.js';
 import { WALLET_NET } from '../wallet-network-fixture.js';
@@ -60,12 +60,8 @@ import {
   type Router3Settlement,
 } from '../../server/feed/pay/router3.js';
 
-const NETWORK = WALLET_NET;
-const CHAIN_ID = WALLET_CHAIN_ID;
-const USDC = getAddress(NETWORK.tokens.USDC.address);
-const ENTRY_POINT = NETWORK.contracts.entryPointV06;
-const SPM = getAddress(NETWORK.contracts.spendPermissionManager);
-const PINNED = (SPONSOR_PAYMASTERS[CHAIN_ID] ?? [])[0]!;
+const NETWORK_DEFAULT: BaseNetwork = WALLET_NET;
+const PINNED = (SPONSOR_PAYMASTERS[WALLET_CHAIN_ID] ?? [])[0]!;
 /** How far behind the head the fake node's safe and finalized blocks are. */
 export const SETTLE = 3n;
 
@@ -146,7 +142,13 @@ interface AuthEvent {
   blockNumber: bigint;
 }
 
-export function feedPayFakeBase(clock: () => number) {
+export function feedPayFakeBase(clock: () => number, network: BaseNetwork = NETWORK_DEFAULT) {
+  // The chain this fake is (an Arc test passes Arc's network): the wallet network by default.
+  const NETWORK = network;
+  const CHAIN_ID = network.chainId;
+  const USDC = getAddress(network.tokens.USDC.address);
+  const ENTRY_POINT = network.contracts.entryPointV06;
+  const SPM = getAddress(network.contracts.spendPermissionManager);
   const SPENDER_KEY = privateKeyToAccount(generatePrivateKey());
   const spender = deriveAddressLocal(spenderAccountRecipe(NETWORK, SPENDER_KEY.address));
   const state = {
@@ -210,8 +212,16 @@ export function feedPayFakeBase(clock: () => number) {
           held?: { settlement: Router3Settlement; db: () => Database };
         }
       >(),
-      /** Every submit asked (a retry of a stored key included). */
-      submits: [] as { key: string; settlement: Router3Settlement }[],
+      /** Every submit asked (a retry of a stored key included); `batched`: it asked for the batch lane. */
+      submits: [] as { key: string; settlement: Router3Settlement; batched: boolean }[],
+      /**
+       * The batch lane (as a facilitator built with a batch config): null, none (every submit is
+       * sent alone). Set, a 'land' submit that asks for it waits until `maxItems` wait, then they
+       * all go out in ONE settleBatch (one broadcast; its member keys in `batches`).
+       */
+      batch: null as null | { maxItems: number },
+      batchLane: [] as string[],
+      batches: [] as string[][],
       /** Settlements that reached Base (landed or reverted). */
       broadcasts: 0,
       crashBeforeSubmit: null as null | ((key: string) => boolean),
@@ -259,6 +269,11 @@ export function feedPayFakeBase(clock: () => number) {
      * off, it stays in a block above the finalized head until a test moves `head` on.
      */
     finalizeOnLand: true,
+    /**
+     * With finalizeOnLand: an x402 settlement is final at once too. Off, it stays in a block above
+     * the safe block until a test moves `head` on (a settlement a reorg could still take away).
+     */
+    settlementFinalAtOnce: true,
     /** Runs before each USDC balance read of the chain side (a test can change things meanwhile). */
     beforeBalanceRead: null as null | ((address: Address) => Promise<void>),
     head: 1000n,
@@ -824,6 +839,8 @@ export function feedPayFakeBase(clock: () => number) {
     state.head += 1n;
     const txHash = keccak256(toHex(`feed-pay-settle-${key}`));
     state.used.set(key, { txHash, blockNumber: state.head });
+    // As for a landed operation: final at once (past the safe block) while finalizeOnLand is set.
+    if (state.finalizeOnLand && state.settlementFinalAtOnce) state.head += SETTLE;
     return txHash;
   }
 
@@ -1015,8 +1032,8 @@ export function feedPayFakeBase(clock: () => number) {
         }
         return rec.op.neverSent;
       },
-      async submit({ key, intentHash, settlement, beforeBroadcast }) {
-        f.submits.push({ key, settlement });
+      async submit({ key, intentHash, settlement, beforeBroadcast, batch }) {
+        f.submits.push({ key, settlement, batched: !!batch });
         if (f.crashBeforeSubmit?.(key)) throw new Error('synthetic crash before submit');
         await f.beforeSubmit?.(key);
         const earlier = f.ops.get(key);
@@ -1040,6 +1057,23 @@ export function feedPayFakeBase(clock: () => number) {
         } catch (error) {
           rec.op = opOf(key, { status: 'failed', neverSent: true, errorCode: 'ABANDONED' });
           throw error;
+        }
+        if (f.batch && batch && f.mode === 'land') {
+          // Waits on the lane; the member that fills it sends the whole batch in one transaction.
+          rec.op = opOf(key, { status: 'submitted' });
+          rec.held = { settlement, db };
+          f.batchLane.push(key);
+          if (f.batchLane.length < f.batch.maxItems) return rec.op;
+          const members = f.batchLane.splice(0);
+          f.broadcasts++;
+          f.batches.push(members);
+          for (const member of members) {
+            const held = f.ops.get(member)!;
+            const landed = await landRouter3(held.held!.db(), member, held.held!.settlement);
+            held.op = { ...held.op, status: 'included', ...landed };
+            held.held = undefined;
+          }
+          return rec.op;
         }
         if (f.mode === 'neverSent') {
           rec.op = opOf(key, { status: 'failed', neverSent: true, errorCode: 'SEND_FAILED' });
@@ -1105,7 +1139,7 @@ export function feedPayFakeBase(clock: () => number) {
       usdcBalance,
       authorizations: pgAuthorizationStore(db()),
       maxCostWeiCap: 10n ** 15n,
-      sponsors: SPONSOR_PAYMASTERS,
+      sponsors: { [CHAIN_ID]: [PINNED] },
       now: clock,
     });
   }
@@ -1134,6 +1168,11 @@ export function feedPayFakeBase(clock: () => number) {
     credit,
     /** Marks an authorization used by someone else (a service that settles late). */
     useLater: settle,
+    /**
+     * Someone other than our facilitator submits a stored router-3 settlement to the router itself
+     * (the pair is public once it was broadcast): the same effects and receipt as a landed one.
+     */
+    router3SettledBy: (db: Database, key: string, s: Router3Settlement) => landRouter3(db, key, s),
   };
 }
 

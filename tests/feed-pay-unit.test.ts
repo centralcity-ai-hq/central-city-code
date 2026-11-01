@@ -14,7 +14,12 @@ import {
 } from '../server/feed/pay/x402-buyer.js';
 import { serviceCallOutput, serviceCallToolInput } from '../server/feed/pay/tool.js';
 import type { CallRow } from '../server/feed/pay/store.js';
-import { FEED_PAY_LIMITS, FEED_PAY_NOTICE, type FeedPayAlert } from '../shared/feed-pay.js';
+import {
+  FEED_PAY_LIMITS,
+  FEED_PAY_NOTICE,
+  FEED_PAY_SCREENING_ALERT_EVERY_MS,
+  type FeedPayAlert,
+} from '../shared/feed-pay.js';
 import type { FeedSchemaSummary } from '../shared/feed.js';
 import { acceptOption, BASE_USDC, paymentRequiredV2 } from './helpers/fake-x402-service.js';
 
@@ -496,6 +501,31 @@ test('results as stored: JSON and text kept, files and empty answers not', () =>
 
 test('ops alerts: ids and amounts only, at most one per kind and service an hour, never throw', async () => {
   let clock = 1_000_000;
+  const screeningPosts: string[] = [];
+  const screeningAlert = createFeedPayAlerts({
+    env: { CITY_OPS_ALERT_WEBHOOK: 'https://hooks.example.com/ops' },
+    transport: async (_url, body) => {
+      screeningPosts.push(body);
+      return { status: 200 };
+    },
+    log: () => undefined,
+    now: () => clock,
+  });
+  const onBase: FeedPayAlert = {
+    kind: 'screening_unavailable',
+    at: clock,
+    detail: 'chain_8453:provider_unavailable',
+  };
+  await screeningAlert(onBase);
+  await screeningAlert(onBase);
+  // Each chain is heard; the same chain again only after its few minutes.
+  await screeningAlert({ ...onBase, detail: 'chain_5042:provider_unavailable' });
+  assert.equal(screeningPosts.length, 2);
+  assert.match(screeningPosts[0]!, /Payment screening is unavailable/);
+  clock += FEED_PAY_SCREENING_ALERT_EVERY_MS;
+  await screeningAlert(onBase);
+  assert.equal(screeningPosts.length, 3);
+
   const lines: string[] = [];
   const posts: Array<{ url: string; body: string }> = [];
   const alert = createFeedPayAlerts({

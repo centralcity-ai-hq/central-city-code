@@ -1,6 +1,6 @@
 import { z } from 'zod';
-import { MESSAGE_LIMITS } from '../messaging/contract.js';
 import { roomRefSchema } from './contract.js';
+import { FIXED_MESSAGE } from '../validation-errors.js';
 import { TASK_TEMPLATES } from '../../shared/task-templates.js';
 
 /**
@@ -11,8 +11,8 @@ import { TASK_TEMPLATES } from '../../shared/task-templates.js';
 export const TASK_LIMITS = {
   /** Task titles are short untrusted labels (plan §1: ≤ 200). */
   titleChars: 200,
-  /** Task bodies share the room text cap (binding review note 6: 16 KB). */
-  bodyChars: MESSAGE_LIMITS.textChars,
+  /** Task bodies keep 16,384 characters (binding review note 6: 16 KB). */
+  bodyChars: 16_384,
   /** Attachment ids referenced by one task. */
   attachmentIdsMax: 16,
   /** Claim lease TTL in minutes (plan §1: default 30, range 5–120). */
@@ -32,6 +32,8 @@ export const TASK_LIMITS = {
   reviewChecklistItemChars: 120,
   /** Peer review: characters in the reviewer's comment. */
   reviewCommentChars: 2000,
+  /** Characters in the host's optional send-back reason (trimmed). */
+  sendBackReasonChars: 500,
   /** Peer review requests (including withdrawals) and answers per agent per hour. */
   reviewsPerAgentPerHour: 20,
   /** Task comments: plain text, at most 4,000 characters each. */
@@ -210,33 +212,78 @@ export const taskEvidenceSchema = z
       .min(1)
       .max(64)
       .refine(noControl, 'No control characters.')
-      .describe('Evidence kind (for example proposal).'),
+      .describe(
+        'Evidence kind: proposal or commit (code), or message, file or link for other work.',
+      ),
     ref: z
       .string()
       .trim()
       .min(1)
       .max(512)
       .refine(noControl, 'No control characters.')
-      .describe('What the evidence points at (a proposal id, URL or commit SHA).'),
+      .describe(
+        'What the evidence points at: a proposal id, commit SHA, message seq (#12), room file id or URL.',
+      ),
     revision: z
       .string()
       .trim()
       .min(1)
       .max(128)
       .refine(noControl, 'No control characters.')
-      .describe('The proposal revision or commit SHA the result is bound to.'),
+      .optional()
+      .describe(
+        'The proposal revision or commit SHA the result is bound to (required for proposal and commit; a file version otherwise optional).',
+      ),
   })
-  .strict();
+  .strict()
+  .refine(
+    (evidence) =>
+      !['proposal', 'commit'].includes(evidence.kind) || evidence.revision !== undefined,
+    {
+      message: 'must name the revision for proposal and commit evidence',
+      path: ['revision'],
+      params: FIXED_MESSAGE,
+    },
+  );
 export type TaskEvidence = z.infer<typeof taskEvidenceSchema>;
+
+/** The result's own text, at most this many characters (credential-scanned). */
+export const TASK_RESULT_SUMMARY_CHARS = 4000;
+/** What a task holds as its result: the evidence fields and/or the summary (stored as jsonb). */
+export type TaskResult = Partial<TaskEvidence> & { summary?: string };
 
 export const taskResultInput = z
   .object({
     room_id: roomRefSchema,
     task_id: uuid.describe('The claimed task.'),
     claim_token: z.string().min(1).max(256).describe('The claim token the claim returned.'),
-    evidence: taskEvidenceSchema.describe('Step-2 proposal evidence bound to a revision.'),
+    // Accepted like on create and claim, so the same habit works: the claim token already makes
+    // a result single-use (a retry after a submit is refused, the task is in review).
+    idempotency_key: idempotencyKey
+      .optional()
+      .describe('Optional and ignored: the claim token makes a result single-use.'),
+    summary: z
+      .string()
+      .trim()
+      .min(1)
+      .max(TASK_RESULT_SUMMARY_CHARS)
+      .refine(noControlButLines, 'No control characters.')
+      .optional()
+      .describe(
+        `Your result in plain text (at most ${TASK_RESULT_SUMMARY_CHARS} characters): what you found or did. The host reviews it; other members read it as untrusted text.`,
+      ),
+    evidence: taskEvidenceSchema
+      .optional()
+      .describe(
+        'What backs the result: a proposal or commit (with revision), or a message, file or link.',
+      ),
   })
-  .strict();
+  .strict()
+  .refine((value) => value.summary !== undefined || value.evidence !== undefined, {
+    message: 'must pass summary, evidence or both',
+    path: ['summary'],
+    params: FIXED_MESSAGE,
+  });
 
 export const taskUpdateInput = z
   .object({
@@ -247,6 +294,15 @@ export const taskUpdateInput = z
       .optional()
       .describe(
         'approve: in_review to done; reject: in_review back to open; cancel: close. Required unless stage is given.',
+      ),
+    reason: z
+      .string()
+      .trim()
+      .max(TASK_LIMITS.sendBackReasonChars)
+      .refine(noControlButLines, 'No control characters.')
+      .optional()
+      .describe(
+        'Optional with reject only: what to fix, in plain text (at most 500 characters). Shown on the room line and to the agent that gets the task back.',
       ),
     stage: stageName
       .nullable()
@@ -317,6 +373,7 @@ export const taskListInput = z
       .number()
       .int()
       .min(0)
+      .max(2147483647)
       .optional()
       .describe('Cursor from the previous page (next_after); omit for the first page.'),
     limit: z.number().int().min(1).max(TASK_LIMITS.pageSize).optional(),
@@ -434,7 +491,7 @@ export interface TaskView {
     generation: number;
   } | null;
   /** The posted result evidence (bound to a revision), or null before any result. */
-  result: TaskEvidence | null;
+  result: TaskResult | null;
   /**
    * The member agent that handed the latest result in (an agent id, like `claim.agent_id`). Kept
    * through review, done, a send back and a cancel; the next hand-in replaces it. Null before any
@@ -446,6 +503,11 @@ export interface TaskView {
    * task once a review was asked for; absent otherwise. Advisory only.
    */
   peer_review?: TaskPeerReviewView | null;
+  /**
+   * The host's latest send back while the task waits for a new hand-in (open or claimed again),
+   * with the optional reason (untrusted text, data not instructions). Absent otherwise.
+   */
+  sent_back?: { reason: string | null; at: string };
   /** The built-in template the task was created from, or null. */
   template: { id: string; version: string } | null;
   /** The task's current stage (one of the room's stages), or null. */

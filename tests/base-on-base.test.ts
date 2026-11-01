@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import test from 'node:test';
 import Fastify from 'fastify';
+import { ARC_MAINNET } from '../shared/chains.js';
 import {
   decodeFunctionData,
   encodeFunctionResult,
@@ -263,7 +264,7 @@ test('the list reads past a full batch of candidates the card check drops', asyn
   );
 });
 
-test('search finds Base IDs, short ids, agent wallets, transactions and current public names', async (t) => {
+test('search finds Base IDs, short ids, agent wallets and current public names; a transaction is unavailable', async (t) => {
   const db = await setup(t);
   await add(db, { n: 1, kind: 'final', id: 120, name: 'Harbor' });
   await add(db, { n: 2, kind: 'finalizing', id: 130, name: 'Fable' });
@@ -284,8 +285,12 @@ test('search finds Base IDs, short ids, agent wallets, transactions and current 
   assert.deepEqual(await ids(shortOf(1)), ['120']);
   assert.deepEqual(await ids(`CC-${shortOf(2)}`), ['130']);
   assert.deepEqual(await ids(agentWallet(1).toUpperCase().replace('0X', '0x')), ['120']);
-  assert.deepEqual(await ids(mintTx(2)), ['130']);
-  assert.deepEqual(await ids(handoverTx(1)), ['120']);
+  // A transaction is not searched until its indexes are built (migration 291): 503, explicitly.
+  for (const hash of [mintTx(2), handoverTx(1)]) {
+    const unavailable = await app.inject({ url: `/api/public/base/agents?q=${hash}` });
+    assert.equal(unavailable.statusCode, 503);
+    assert.equal((unavailable.json() as { code: string }).code, 'tx_search_unavailable');
+  }
   assert.deepEqual(await ids('harb'), ['120']);
   assert.deepEqual(await ids('  FABLE '), ['130']);
   // Only the current public name: never a private one or a former one.
@@ -293,8 +298,16 @@ test('search finds Base IDs, short ids, agent wallets, transactions and current 
   assert.deepEqual(await ids('Oldname'), []);
   assert.deepEqual(await ids('Newname'), ['105']);
   // LIKE wildcards are literal.
-  assert.deepEqual(await ids('0%'), ['101']);
-  assert.deepEqual(await ids('%%'), []);
+  assert.deepEqual(await ids('100%'), ['101']);
+  assert.deepEqual(await ids('Age%'), []);
+  // A name needs a run of 3 letters or digits: shorter is refused by type (no index serves it).
+  for (const short of ['%%', 'ha', '0%'])
+    assert.equal(
+      (await app.inject({ url: `/api/public/base/agents?q=${encodeURIComponent(short)}` }))
+        .statusCode,
+      400,
+      short,
+    );
   // The owner's own wallet is not published, so it is not searchable either.
   assert.deepEqual(await ids(ownerWallet(1)), []);
   // Never a row the list does not show.
@@ -303,7 +316,8 @@ test('search finds Base IDs, short ids, agent wallets, transactions and current 
 
   assert.deepEqual(parseQuery('cc-Ab12Cd').shortId, 'Ab12Cd');
   assert.equal(parseQuery('0x12').name, null);
-  assert.equal(parseQuery('a\u0000b').name, '%a b%', 'a NUL never reaches the LIKE parameter');
+  assert.equal(parseQuery('ab\u0000c').name, null, 'a NUL is a space: no run of 3');
+  assert.equal(parseQuery('abc\u0000d').name, '%abc d%', 'a NUL never reaches the LIKE parameter');
 });
 
 test('a passport carries the chain facts and Central City records of one listed agent', async (t) => {
@@ -362,6 +376,16 @@ test('a passport carries the chain facts and Central City records of one listed 
     const missing = await app.inject({ url });
     assert.equal(missing.statusCode, 404, url);
     assert.equal(missing.headers['cache-control'], ON_BASE_NOT_FOUND, url);
+  }
+  // One canonical id per agent (CCA-104): a leading zero is never served as a passport of its own.
+  // It is sent on once to the canonical address, which answers the passport itself (no loop).
+  for (const padded of ['0120', '00120']) {
+    const moved = await app.inject({ url: `/api/public/base/agents/${padded}` });
+    assert.equal(moved.statusCode, 308, padded);
+    assert.equal(moved.headers.location, '/api/public/base/agents/120', padded);
+    const target = await app.inject({ url: String(moved.headers.location) });
+    assert.equal(target.statusCode, 200, padded);
+    assert.equal((target.json() as OnBasePassport).baseId, '120');
   }
   for (const url of [
     '/api/public/base/agents/120?x=1',
@@ -583,6 +607,24 @@ test('the reader falls back to a second endpoint when the first does not answer'
   assert.deepEqual(await baseChainReader(base.url, 8453, REGISTRY).head(), { block: 16n });
 });
 
+test('every endpoint reports its own chain id: a second endpoint on another network is never read', async (t) => {
+  const base = await mockBase(t);
+  const other = await mockBase(t);
+  other.state.chain = '0x14a34'; // Base Sepolia
+  // The first endpoint is Base but cannot answer eth_call; the second one is another network.
+  base.state.mode = 'http500';
+  const reader = baseChainReader([base.url, other.url], 8453, REGISTRY);
+  assert.deepEqual(await reader.head(), { block: 16n });
+  await assert.rejects(reader.owners(['120'], 16n), /expected network/);
+  assert.equal(other.state.calls.filter((call) => call.method === 'eth_call').length, 0);
+  // From then on this reader refuses every read, even one the first endpoint could answer.
+  base.state.mode = 'ok';
+  await assert.rejects(reader.head(), /expected network/);
+  await assert.rejects(reader.owners(['120'], 16n), /expected network/);
+  // Each endpoint is asked for its chain id once.
+  assert.equal(base.state.calls.filter((call) => call.method === 'eth_chainId').length, 1);
+});
+
 test('a failed ownerOf read is never "no owner": the reader rejects, the list keeps its old read', async (t) => {
   const base = await mockBase(t);
   const db = await setup(t);
@@ -684,14 +726,13 @@ test('mintTx is the transaction that minted, or absent: never the hand-over in i
   assert.equal('mintTx' in unknown, false);
   assert.equal('registrationTx' in unknown, false);
 
-  // Search finds a legacy row by its mint, and by the hand-over it stored.
-  const find = async (q: string) =>
-    ((await app.inject({ url: `/api/public/base/agents?q=${q}` })).json() as OnBaseList).rows.map(
-      (row) => row.baseId,
+  // Search by a legacy row's mint or hand-over waits for migration 291: 503, explicitly.
+  for (const hash of [mintTx(1), handoverTx(1), mintTx(91)])
+    assert.equal(
+      (await app.inject({ url: `/api/public/base/agents?q=${hash}` })).statusCode,
+      503,
+      hash,
     );
-  assert.deepEqual(await find(mintTx(1)), ['99029']);
-  assert.deepEqual(await find(handoverTx(1)), ['99029']);
-  assert.deepEqual(await find(mintTx(91)), []);
 });
 
 test("a row's score is the latest FINAL rating of each Central City rater, from the records, in one query", async (t) => {
@@ -838,4 +879,49 @@ test('totals: one shared count for every instance, and a new instance never wait
   while (gate === null) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(counts, 2);
   (gate as () => void)();
+});
+
+test('a second chain mounts beside Base under its own slug: each lists only its own network', async (t) => {
+  const db = await setup(t);
+  await add(db, { n: 1, kind: 'final', id: 120, name: 'Harbor' });
+  // Base Sepolia stands in for the second chain here (Arc's id joins the chain registry).
+  await add(db, {
+    n: 2,
+    kind: 'final',
+    id: 7,
+    name: 'Lantern',
+    chainId: 84532,
+    registry: SEPOLIA_REGISTRY,
+  });
+  const app = Fastify();
+  t.after(() => app.close());
+  registerOnBaseRoutes(app, { db, now: () => NOW });
+  // Mounted twice in one app: the passport-short routes are Base's only, so nothing collides.
+  registerOnBaseRoutes(app, { db, now: () => NOW, chainId: 84532, slug: 'arc' });
+  const base = (await app.inject({ url: '/api/public/base/agents' })).json() as OnBaseList;
+  const arc = await app.inject({ url: '/api/public/arc/agents' });
+  assert.equal(arc.statusCode, 200);
+  assert.deepEqual(
+    base.rows.map((row) => row.baseId),
+    ['120'],
+  );
+  assert.deepEqual(
+    (arc.json() as OnBaseList).rows.map((row) => row.baseId),
+    ['7'],
+  );
+  assert.equal((await app.inject({ url: '/api/public/arc/agents/7' })).statusCode, 200);
+  assert.equal((await app.inject({ url: '/api/public/arc/rated' })).statusCode, 200);
+});
+
+test('the On Arc mount lists Arc only: Base rows never show under /api/public/arc', async (t) => {
+  const db = await setup(t);
+  await add(db, { n: 1, kind: 'final', id: 120, name: 'Harbor' });
+  const app = Fastify();
+  t.after(() => app.close());
+  registerOnBaseRoutes(app, { db, now: () => NOW });
+  registerOnBaseRoutes(app, { db, now: () => NOW, chainId: ARC_MAINNET, slug: 'arc' });
+  const arc = await app.inject({ url: '/api/public/arc/agents' });
+  assert.equal(arc.statusCode, 200);
+  assert.deepEqual((arc.json() as OnBaseList).rows, []);
+  assert.equal((await app.inject({ url: '/api/public/arc/agents/120' })).statusCode, 404);
 });

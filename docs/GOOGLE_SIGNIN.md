@@ -75,8 +75,8 @@ not an identity or age verification.
   The response never repeats the date.
 - **The lock follows the Google account:** a locked account's Google account is recorded in
   `google_age_locks` (only a keyed hash of its subject and the time, never deleted; the hash
-  key is derived from `CITY_PII_KEK` with its own label, so rotating `CITY_PII_KEK` needs a plan
-  for these locks: the subjects are not stored, so they cannot be re-hashed). Linking that
+  key is derived from `CITY_PII_KEK` with its own label; the subjects are not stored, so the locks
+  cannot be re-hashed in bulk: see Rotation below). Linking that
   Google account to any account locks that account too, and a locked account that links another
   Google account locks it as well. A person who uses a different Google account cannot be
   prevented: this is a self-declared age confirmation.
@@ -103,7 +103,16 @@ not an identity or age verification.
   account.
 - **Rotation:** set the new key as `CITY_PII_KEK` and the old one as `CITY_PII_KEK_PREVIOUS`, then
   run `node --import tsx scripts/rewrap-pii-keys.ts` (dry run) and `--confirm` until it reports
-  `"pending":0`; then remove the previous key. It prints counts only.
+  `"pending":0`; then remove the previous key. It prints counts only, including
+  `ageLocksNotRewrapped` (every Google age lock: the script cannot re-key them, see below).
+- **Age locks during a rotation:** a lock is looked up under both keys while
+  `CITY_PII_KEK_PREVIOUS` is set, and one found under the previous key is recorded under the new
+  key too, the moment its Google account signs in, links or is checked again. Locks of Google
+  accounts not seen while both keys are set stop matching once the previous key is removed (the
+  script cannot carry them over, because only hashes are kept). Keep the previous key for as long
+  as those locks should hold. When no valid key is configured, a lock on a Google account is not
+  recorded (the account lock itself still applies); each skipped record logs
+  `google.age_lock_not_recorded`.
 
 ### The Google birthday (off)
 

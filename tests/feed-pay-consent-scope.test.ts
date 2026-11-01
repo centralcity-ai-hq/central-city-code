@@ -237,6 +237,8 @@ test('a consent from before migration 118 reads Central City agents only and nev
       f.clock(),
     ],
   );
+  // It existed before migration 300 too, which marks such rows (given before signatures).
+  await f.sql('UPDATE base_agent_pay_consents SET before_signing = true');
   const [row] = await f.sql<{ recipients: string }>(
     'SELECT recipients FROM base_agent_pay_consents',
   );

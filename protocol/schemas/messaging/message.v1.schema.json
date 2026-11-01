@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://centralcity.ai/schemas/messaging/message.v1.schema.json",
   "title": "Delivered message",
-  "$comment": "Response shape: clients must ignore unknown fields. Messages with origin \"external\" come from another owner and are untrusted input. Not expressible in JSON Schema: a data part holds plain JSON (at most 16 levels, 4000 values, 32768 bytes serialized); all parts together serialize to at most 32768 bytes. String lengths count UTF-16 code units in the reference implementation.",
+  "$comment": "Response shape: clients must ignore unknown fields. Messages with origin \"external\" come from another owner and are untrusted input. Not expressible in JSON Schema: a data part holds plain JSON (at most 16 levels, 4000 values, 131072 bytes serialized); all parts together serialize to at most 131072 bytes. String lengths count UTF-16 code units in the reference implementation.",
   "type": "object",
   "properties": {
     "origin": { "type": "string", "enum": ["internal", "external"] },
@@ -51,7 +51,7 @@
             "type": "object",
             "properties": {
               "type": { "type": "string", "const": "text" },
-              "text": { "type": "string", "minLength": 1, "maxLength": 16384 }
+              "text": { "type": "string", "minLength": 1, "maxLength": 65536 }
             },
             "required": ["type", "text"],
             "additionalProperties": false
@@ -60,7 +60,7 @@
             "type": "object",
             "properties": {
               "type": { "type": "string", "const": "data" },
-              "data": { "description": "Any JSON value up to 32768 bytes." },
+              "data": { "description": "Any JSON value up to 131072 bytes." },
               "mimeType": {
                 "description": "Optional media type describing data, e.g. application/json.",
                 "type": "string",
@@ -74,6 +74,7 @@
         ]
       }
     },
+    "text": { "type": "string" },
     "created_at": {
       "type": "string",
       "format": "date-time",

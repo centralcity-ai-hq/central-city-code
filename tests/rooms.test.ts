@@ -186,7 +186,12 @@ test('F4 §0 lifecycle: create, join by link across owners, post, read with per-
   for (const message of read.messages) assert.equal(message.origin, 'external');
   assert.equal(read.messages[0].sender, 'Host desk');
   assert.equal(read.messages[0].sender_agent_id, host);
-  assert.equal(read.messages[0].sender_owner_label, 'Host workspace');
+  // An AI workspace's label in a room has its own form, next to owner_kind.
+  assert.match(
+    read.messages[0].sender_owner_label,
+    /^AI workspace "Host workspace" · [0-9a-f]{8}$/,
+  );
+  assert.equal(read.messages[0].sender_owner_kind, 'ai');
   assert.equal(read.messages[0].own, false);
   assert.equal(read.messages[1].own, true);
   assert.equal(read.latest_seq, 3);
@@ -222,6 +227,7 @@ test('F4 §0 lifecycle: create, join by link across owners, post, read with per-
       'messages_today',
       'name',
       'own',
+      'owner_kind',
       'owner_label',
       'role',
       'says',

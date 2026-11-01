@@ -9,6 +9,7 @@ import {
 } from '../server/base/schema.js';
 import { basePassport } from '../server/base/identity/passport.js';
 import { PASSPORT_EXTENSION, passportExtension } from '../shared/base/passport.js';
+import { BASE_IDENTITY_MOVES_SQL } from '../server/base/identity/moves.js';
 
 async function setup(t: { after: (fn: () => Promise<unknown>) => void }): Promise<Database> {
   const pg = await PGlite.create('memory://');
@@ -17,6 +18,7 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }): Promis
     "CREATE TABLE operators (id text PRIMARY KEY); INSERT INTO operators VALUES ('ws');",
   );
   await pg.exec(BASE_MIGRATION_SQL);
+  await pg.exec(BASE_IDENTITY_MOVES_SQL);
   await pg.exec(BASE_PAYMENTS_MIGRATION_SQL);
   await pg.exec(baseShortIdsMigration.sql);
   return {
@@ -77,4 +79,23 @@ test('only Base agents get a passport; mainnet wins', async (t) => {
   // An identity without a wallet on that chain is not a Base agent.
   await identity(db, 'a2', 8453, 'confirmed', 9);
   assert.equal(await basePassport(db, 'a2'), null);
+});
+
+test('the passport extension names the chain the agent is registered on', () => {
+  const input = {
+    shortId: 'abc123',
+    chainId: 5042,
+    registry: '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432',
+    erc8004AgentId: '7',
+    wallet: WALLET,
+    issuedAt: 1,
+  };
+  assert.equal(
+    passportExtension(input).description,
+    'Central City passport: this agent is a registered Arc agent.',
+  );
+  assert.equal(
+    passportExtension({ ...input, chainId: 8453 }).description,
+    'Central City passport: this agent is a registered Base agent.',
+  );
 });

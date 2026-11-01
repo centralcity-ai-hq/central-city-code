@@ -12,8 +12,10 @@ import {
   type FeeChain,
   type FeeLedgerConfig,
 } from '../server/protocol/fees/ledger.js';
+import { bloomReads } from './fee-chain-bloom.js';
 import { PROTOCOL_FEE_ROUTER_STARTS_SQL } from '../server/protocol/fees/router-starts-schema.js';
 import { protocolFeeConfigFromEnv, protocolRouter2FromEnv } from '../server/protocol/fees/cron.js';
+import { PROTOCOL_BASE_MAINNET } from '../shared/protocol.js';
 
 // Operation Fee Contract: the ledger counts FeeCharged from router 1 and router 2 (the same event,
 // another address), dedupes on chain + tx + log index, and reads router 2 from its deploy block
@@ -102,6 +104,7 @@ function fakeChain(state: { latest: bigint; finalized: bigint; logs: ChainLog[] 
     latestBlock: async () => state.latest,
     finalizedBlock: async () => state.finalized,
     block: async (n) => ({ timestamp: 1_791_936_000n + n * 2n, hash: blockHash(n) }),
+    ...bloomReads(() => state.logs, blockHash),
     getLogs: async ({ address, fromBlock, toBlock }) =>
       state.logs.filter(
         (l) =>
@@ -182,7 +185,8 @@ test('router 2 configured after the scan passed its deploy block: its early fees
 
   // The rewind happens once: later scans read only the tail, and nothing is counted twice.
   const later = await scanFees(db, chain, config);
-  assert.ok(later!.from > 2_000n);
+  // Everything is final through the head: nothing is read again (null), never the old range.
+  assert.ok(later === null || later.from > 2_000n);
   assert.equal((await rowsOf(db)).length, 4);
 });
 
@@ -202,21 +206,25 @@ test('router 2 config from env: both values valid, else none (router 1 alone, as
   assert.deepEqual(protocolFeeConfigFromEnv(set)?.addedRouters, [
     { address: ROUTER2, fromBlock: 2_000n },
   ]);
-  assert.deepEqual(protocolRouter2FromEnv({ CITY_PROTOCOL_FEE_ROUTER2: ROUTER2 }), []);
+  assert.deepEqual(protocolRouter2FromEnv({ ...env, CITY_PROTOCOL_FEE_ROUTER2: ROUTER2 }), []);
   assert.deepEqual(
     protocolRouter2FromEnv({
+      ...env,
       CITY_PROTOCOL_FEE_ROUTER2: 'not-an-address',
       CITY_PROTOCOL_FEE_ROUTER2_FROM_BLOCK: '1',
     }),
     [],
   );
-  // Base mainnet (the deployment fixed in code) reads router 2 from env too.
+  // Base mainnet: router 2 is fixed in code, the environment's address and block are ignored.
   assert.deepEqual(
     protocolFeeConfigFromEnv({
       CITY_PROTOCOL_FEE_ROUTER2: ROUTER2,
       CITY_PROTOCOL_FEE_ROUTER2_FROM_BLOCK: '52800000',
-    })?.addedRouters,
-    [{ address: ROUTER2, fromBlock: 52_800_000n }],
+    })?.addedRouters?.[0],
+    {
+      address: PROTOCOL_BASE_MAINNET.feeRouter2,
+      fromBlock: PROTOCOL_BASE_MAINNET.feeRouter2DeployBlock,
+    },
   );
 });
 
@@ -228,6 +236,64 @@ test('router 2 rows below its configured start block are excluded', () => {
   assert.deepEqual(
     rows.map((r) => r.blockNumber),
     [200n],
+  );
+});
+
+test('a fee the treasury pays to itself is no revenue: the row is left out, the same payment from anyone else counts', () => {
+  const asTreasury = (tx: string): ChainLog[] => {
+    const [event, fee] = payment(tx, 210n, ROUTER2, 100_000n);
+    return [
+      {
+        ...event,
+        topics: encodeEventTopics({
+          abi: FEE_EVENTS_ABI,
+          eventName: 'FeeCharged',
+          args: { payer: TREASURY, payee: SELLER, ref: ref(tx) },
+        }) as Hex[],
+      },
+      {
+        ...fee,
+        topics: encodeEventTopics({
+          abi: FEE_EVENTS_ABI,
+          eventName: 'Transfer',
+          args: { from: TREASURY, to: TREASURY },
+        }) as Hex[],
+      },
+    ];
+  };
+  const rows = feeRowsFromLogs(withRouter2(200n), [
+    ...asTreasury('self-paid'),
+    ...payment('paid', 211n, ROUTER2, 100_000n),
+  ]);
+  assert.deepEqual(
+    rows.map((r) => [r.payer, r.blockNumber]),
+    [[PAYER.toLowerCase(), 211n]],
+  );
+});
+
+test('a payer paying itself through router 1 or 2 is no revenue: the row is left out (CCA-122)', () => {
+  const selfPaid = (tx: string, block: bigint, emitter: Hex): ChainLog[] => {
+    const [event, fee] = payment(tx, block, emitter, 100_000n);
+    return [
+      {
+        ...event!,
+        topics: encodeEventTopics({
+          abi: FEE_EVENTS_ABI,
+          eventName: 'FeeCharged',
+          args: { payer: PAYER, payee: PAYER, ref: ref(tx) },
+        }) as Hex[],
+      },
+      fee!,
+    ];
+  };
+  const rows = feeRowsFromLogs(withRouter2(200n), [
+    ...selfPaid('self-1', 210n, ROUTER),
+    ...selfPaid('self-2', 211n, ROUTER2),
+    ...payment('paid', 212n, ROUTER2, 100_000n),
+  ]);
+  assert.deepEqual(
+    rows.map((r) => [r.payer, r.payee, r.blockNumber]),
+    [[PAYER.toLowerCase(), SELLER.toLowerCase(), 212n]],
   );
 });
 

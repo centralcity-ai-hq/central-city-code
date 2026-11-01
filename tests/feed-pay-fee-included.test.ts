@@ -913,6 +913,16 @@ for (const [outcome, failure] of [
     const row = await callRow(f, callId);
     assert.equal(row.fee_state, 'not_owed');
     assert.equal(row.fee_op_key, null, 'no payment key was ever taken');
+    const outages = f.alerts.filter((a) => a.kind === 'screening_unavailable');
+    if (outcome === 'blocked') assert.equal(outages.length, 0, 'a block is an answer, no outage');
+    else {
+      assert.equal(outages.length, 1);
+      assert.match(outages[0]!.detail ?? '', /^chain_\d+:/);
+      // Another call in the same outage: refused again, not alerted again.
+      const { id: next } = await listOffer(f, { priceRaw: '60000' });
+      await done(f, (await payOffer(f, next)).json().callId);
+      assert.equal(f.alerts.filter((a) => a.kind === 'screening_unavailable').length, 1);
+    }
     assert.equal(row.delivered_at, null);
 
     // No router.pay operation stored, none sent, no money moved to the seller or the treasury.

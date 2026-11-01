@@ -9,6 +9,7 @@
  */
 import type { FastifyReply } from 'fastify';
 import { FEED_BUSY_MESSAGE, FEED_ERRORS, type FeedError } from '../../shared/feed.js';
+import { alertDatabaseBusy } from '../busy.js';
 
 /** Seconds a busy answer asks the caller to wait before trying again. */
 export const FEED_BUSY_RETRY_AFTER_S = 5;
@@ -76,6 +77,7 @@ function logBusy(reply: FastifyReply, error: unknown) {
  */
 export function sendFeedBusy(reply: FastifyReply, error?: unknown) {
   logBusy(reply, error);
+  alertDatabaseBusy('feed');
   const retryAfterS = error instanceof FeedBusyError ? error.retryAfterS : FEED_BUSY_RETRY_AFTER_S;
   return reply
     .code(FEED_ERRORS.busy)

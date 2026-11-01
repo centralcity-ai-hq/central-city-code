@@ -1,4 +1,5 @@
 import { createHash, hkdfSync, randomBytes } from 'node:crypto';
+import { decode32, otherSecretForms } from '../secret-env.js';
 
 /**
  * The root key (KEK) for personal data stored by Sign in with Google: today only the date of
@@ -25,35 +26,8 @@ export function piiKeyId(key: Buffer): string {
   return `p_${createHash('sha256').update('central-city/pii-kid:').update(key).digest('hex').slice(0, 12)}`;
 }
 
-export const PII_OTHER_SECRETS = [
-  'CITY_RATE_LIMIT_KEY',
-  'CITY_WAKE_SECRET',
-  'CITY_WAKE_SECRET_PREVIOUS',
-  'CITY_SIGNING_KEY',
-  'CITY_SIGNING_KEY_PREVIOUS',
-  'CITY_RESPONDER_KEK',
-  'CITY_RESPONDER_KEK_PREVIOUS',
-  'DATABASE_URL',
-  'CRON_SECRET',
-  'GOOGLE_OAUTH_CLIENT_SECRET',
-] as const;
-
-/** 32 bytes from standard or URL-safe base64, else null. */
-function decode32(value: string): Buffer | null {
-  const text = value.trim();
-  if (!/^[A-Za-z0-9+/_-]{43}=?$/.test(text)) return null;
-  const bytes = Buffer.from(text.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
-  return bytes.length === 32 ? bytes : null;
-}
-
-/** Every byte form another secret could take, to compare the KEK against. */
-function forms(value: string): Buffer[] {
-  const out: Buffer[] = [Buffer.from(value, 'utf8'), Buffer.from(value.trim(), 'utf8')];
-  const b64 = decode32(value);
-  if (b64) out.push(b64);
-  if (/^[0-9a-f]{64}$/i.test(value.trim())) out.push(Buffer.from(value.trim(), 'hex'));
-  return out;
-}
+/** This keyring's own variables; every other deployment secret must differ (server/secret-env.ts). */
+const OWN_SECRETS = ['CITY_PII_KEK', 'CITY_PII_KEK_PREVIOUS'] as const;
 
 export function derivePiiKek(root: Buffer): Buffer {
   return Buffer.from(hkdfSync('sha256', root, Buffer.alloc(0), 'central-city/pii-kek/v1', 32));
@@ -79,13 +53,9 @@ export function piiKeys(
   if (!current || (env.CITY_PII_KEK_PREVIOUS && !previous))
     return { available: false, reason: 'invalid' };
   const mine = [current, ...(previous ? [previous] : [])];
-  for (const name of PII_OTHER_SECRETS) {
-    const other = env[name];
-    if (!other) continue;
-    for (const form of forms(other))
-      if (mine.some((key) => form.equals(key)) || form.equals(Buffer.from(raw)))
-        return { available: false, reason: 'not_distinct' };
-  }
+  for (const form of otherSecretForms(env, OWN_SECRETS))
+    if (mine.some((key) => form.equals(key)) || form.equals(Buffer.from(raw)))
+      return { available: false, reason: 'not_distinct' };
   const keys = [current, ...(previous && !previous.equals(current) ? [previous] : [])].map(
     (root) => {
       const key = derivePiiKek(root);

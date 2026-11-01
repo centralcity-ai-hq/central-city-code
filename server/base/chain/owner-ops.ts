@@ -25,6 +25,7 @@
  *
  * The bundler URL carries a key: no error from here repeats an RPC or bundler message.
  */
+import { isRealMoneyChain } from '../../../shared/chains.js';
 import type { SponsorFlow } from './own-paymaster-policy.js';
 import {
   decodeFunctionResult,
@@ -35,7 +36,7 @@ import {
   type PublicClient,
 } from 'viem';
 import { getUserOperationHash, type UserOperation } from 'viem/account-abstraction';
-import { BASE_MAINNET, type Address, type BaseNetwork } from '../../../shared/base/chains.js';
+import { type Address, type BaseNetwork } from '../../../shared/base/chains.js';
 import { usableLaneKey } from '../../../shared/base/lanes.js';
 import {
   SPONSOR_PAYMASTERS,
@@ -54,6 +55,7 @@ import {
   refreshFinality,
   submitOperation,
   SubmitError,
+  unstoredSponsorshipLapsed,
   type Bundler,
   type Call,
   type ChainOperationStore,
@@ -120,6 +122,12 @@ export interface OwnerOperationsPort {
   readonly entryPoint: Address;
   /** Checks a stored sponsorship against its original deadline before accepting a signature. */
   sponsorshipValid?(paymasterAndData: string | undefined, deadline: number): boolean;
+  /**
+   * How long before a sponsorship's validUntil its bundler stops sending it, in milliseconds (our
+   * own paymaster's VALIDITY_MARGIN_S; 0 for any other sponsor or none): a signature is never taken
+   * past that point, and an unsigned one is never signable past it (wallet/withdrawals.ts).
+   */
+  sendMarginMs?(paymasterAndData: string | undefined): number;
   prepare(input: {
     wallet: Address;
     recipe: DerivationRecipe;
@@ -148,7 +156,14 @@ export interface OwnerOperationsPort {
      * revoke (it may use the protected budget), 'ownerPay' for a payment, 'rate' for a rating.
      */
     sponsorFlow?: SponsorFlow;
+    /** With sponsorFlow: the owner's account, whose sponsorship budget it counts against. */
+    sponsorAccountId?: string;
   }): Promise<PreparedOwnerOperation>;
+  /**
+   * The prepared, sponsored operation will never be signed (cancelled or lapsed unsigned): what
+   * its sponsorship still holds is given back now (Bundler.release). Best effort; idempotent.
+   */
+  release?(userOpHash: Hex): Promise<void>;
   /** Whether an address has code (null when the chain cannot tell right now). */
   isContract(address: Address): Promise<boolean | null>;
   /**
@@ -189,8 +204,21 @@ export interface OwnerOperationsPort {
     /** The lane it was prepared in (default the one owner lane); its nonce must be in it. */
     nonceKey?: bigint;
   }): Promise<StoredOperation>;
-  /** The stored operation with its inclusion and finality brought up to date; never signs. */
-  refresh(idempotencyKey: string): Promise<StoredOperation | null>;
+  /**
+   * The stored operation with its inclusion and finality brought up to date; never signs. `lane`:
+   * the operation's own lane and the other operations signed there (refreshFinality's lane).
+   */
+  refresh(
+    idempotencyKey: string,
+    lane?: { key: bigint; peers: readonly string[] },
+  ): Promise<StoredOperation | null>;
+  /**
+   * A signed operation this port never stored (its submit was refused): true only when it provably
+   * can never land, its sponsorship past validUntil at a settled canonical block with its nonce still
+   * unused there (submit.ts unstoredSponsorshipLapsed). False when not, null when Base cannot tell.
+   * Optional: without it such an operation is never concluded lapsed.
+   */
+  unstoredLapsed?(operation: UserOperation<'0.6'>): Promise<boolean | null>;
 }
 
 export interface OwnerOperationsDeps {
@@ -239,7 +267,7 @@ export function createOwnerOperationsPort(deps: OwnerOperationsDeps): OwnerOpera
     );
   /** Real money is never spent without a fee budget: on mainnet a cost cap is mandatory. */
   function requireBudget() {
-    if (chainId === BASE_MAINNET && deps.maxCostWeiCap === undefined)
+    if (isRealMoneyChain(chainId) && deps.maxCostWeiCap === undefined)
       throw new OwnerOperationError(
         'FEE_BUDGET_REQUIRED',
         'Owner operations on Base need a fee budget.',
@@ -275,6 +303,12 @@ export function createOwnerOperationsPort(deps: OwnerOperationsDeps): OwnerOpera
     sponsorshipValid: (data, deadline) =>
       sponsoredWithinDeadline(chainId, data, { now: (deps.now ?? Date.now)(), deadline }, sponsors),
 
+    sendMarginMs: (data) => (deps.bundler.sendMarginS?.((data ?? '0x') as Hex) ?? 0) * 1000,
+
+    async release(userOpHash) {
+      await deps.bundler.release?.(userOpHash);
+    },
+
     async prepare(input) {
       requireBudget();
       const wallet = checkWallet(input.wallet, input.recipe);
@@ -289,7 +323,9 @@ export function createOwnerOperationsPort(deps: OwnerOperationsDeps): OwnerOpera
           maxCostWeiCap: deps.maxCostWeiCap,
           feeFloor: input.feeFloor,
           sponsor,
-          ...(input.sponsorFlow ? { sponsorFlow: input.sponsorFlow } : {}),
+          ...(input.sponsorFlow
+            ? { sponsorFlow: input.sponsorFlow, sponsorAccountId: input.sponsorAccountId ?? null }
+            : {}),
         });
       const sponsored = input.ownerFunded !== true;
       let prepared;
@@ -451,7 +487,15 @@ export function createOwnerOperationsPort(deps: OwnerOperationsDeps): OwnerOpera
       }
     },
 
-    async refresh(idempotencyKey) {
+    async unstoredLapsed(operation) {
+      try {
+        return await unstoredSponsorshipLapsed(deps, operation);
+      } catch {
+        return null;
+      }
+    },
+
+    async refresh(idempotencyKey, lane) {
       const readOnly: SubmitDeps = {
         ...deps,
         signer: {
@@ -462,7 +506,10 @@ export function createOwnerOperationsPort(deps: OwnerOperationsDeps): OwnerOpera
         },
       };
       try {
-        return await refreshFinality(readOnly, idempotencyKey, { retireLapsed: true });
+        return await refreshFinality(readOnly, idempotencyKey, {
+          retireLapsed: true,
+          ...(lane ? { lane } : {}),
+        });
       } catch {
         // An RPC hiccup leaves the stored state as it is; the next read tries again.
         return deps.store.get(idempotencyKey);

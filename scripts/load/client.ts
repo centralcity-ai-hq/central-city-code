@@ -144,10 +144,12 @@ export class OwnerSession {
     readonly name: string,
     readonly ip: string,
   ) {}
+  /** Keeps the session pair as set: `__Host-cc_session` when hosted, `cc_session` otherwise. */
   absorb(setCookie: string[]): void {
     for (const line of setCookie) {
       const pair = line.split(';')[0]!;
-      if (pair.startsWith('cc_session=')) this.cookie = pair;
+      // __Host-cc_session on the hosted site, cc_session on the local server.
+      if (/^(?:__Host-)?cc_session=./.test(pair)) this.cookie = pair;
     }
   }
 }

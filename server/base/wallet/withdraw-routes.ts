@@ -1,6 +1,6 @@
 /*
  * Operation Base Wallet W2: owner withdrawals over HTTP (service: withdrawals.ts). Registered by the
- * wallet routes, behind the same CITY_BASE_WALLET flag (404 while off), on the wallet network only.
+ * wallet routes, behind the same CITY_BASE_WALLET flag (404 while off), on the agent's chain.
  *
  *   POST /api/base/agents/:agentId/wallet/withdrawals                          201 to sign
  *   GET  /api/base/agents/:agentId/wallet/withdrawals?open=1                   200 unfinished ones
@@ -29,7 +29,11 @@ export interface WithdrawalRouteDeps {
   person(
     request: FastifyRequest,
   ): Promise<{ ok: true; accountId: string } | { ok: false; code: number }>;
-  service: WithdrawalService;
+  /** The agent's chain's service (wallet/routes.ts), the sweep each chain's. */
+  service: Pick<
+    WithdrawalService,
+    'create' | 'read' | 'open' | 'sign' | 'cancel' | 'signCancel' | 'sweep'
+  >;
   /** Pay without waiting (CITY_BASE_LANES): the open list exists only while it is on. */
   lanes(): boolean;
   /** The shared rate limiter (server/app.ts); absent in unit tests. */
@@ -53,10 +57,13 @@ export const retryable = (error: unknown) => {
 export const OPEN_LIST_RATE = { prefix: 'wallet-open', max: 30, windowMs: 60_000 } as const;
 /**
  * Per person: one withdrawal read brings its operation (and its cancel) up to date from Base and
- * proves its settled block, all on the shared Base endpoint. The status screen polls every 3 s,
+ * proves its settled block, all on the shared Base endpoint. The POSTs on one withdrawal
+ * (signature, cancel, cancel signature) do the same and take this same budget. The status screen polls every 3 s,
  * so this leaves room for a few at once while one person cannot drain the endpoint for everyone.
  */
 export const READ_RATE = { prefix: 'wallet-read', max: 120, windowMs: 60_000 } as const;
+/** Per person, like a payment: a create reads Base and prepares a sponsored operation. */
+export const CREATE_RATE = { prefix: 'wallet-withdraw-create', max: 20, windowMs: 60_000 } as const;
 
 const params = z.object({
   agentId: z.string().uuid(),
@@ -102,9 +109,14 @@ export function registerWithdrawalRoutes(app: FastifyInstance, deps: WithdrawalR
   }
 
   app.post(WITHDRAWALS_PATH, (request, reply) =>
-    handle(request, reply, 201, (accountId, agentId) =>
-      deps.service.create(accountId, agentId, request.body ?? {}),
-    ),
+    handle(request, reply, 201, async (accountId, agentId) => {
+      await deps.limit?.(
+        `${CREATE_RATE.prefix}:${accountId}`,
+        CREATE_RATE.max,
+        CREATE_RATE.windowMs,
+      );
+      return deps.service.create(accountId, agentId, request.body ?? {});
+    }),
   );
 
   // The scheduled sweep (every minute): Vercel Cron's bearer secret, else 404 like an unknown path.
@@ -138,14 +150,21 @@ export function registerWithdrawalRoutes(app: FastifyInstance, deps: WithdrawalR
     }),
   );
 
+  // The POSTs on one withdrawal bring it up to date from Base too (advance, the safe-head proof):
+  // the same per-person budget as its read, charged before the service runs (MPR-2).
+  const readBudget = (accountId: string) =>
+    deps.limit?.(`${READ_RATE.prefix}:${accountId}`, READ_RATE.max, READ_RATE.windowMs);
+
   app.post(`${WITHDRAWALS_PATH}/:withdrawalId/signature`, (request, reply) =>
-    handle(request, reply, 202, (accountId, agentId, withdrawalId) =>
-      deps.service.sign(accountId, agentId, withdrawalId, request.body ?? {}),
-    ),
+    handle(request, reply, 202, async (accountId, agentId, withdrawalId) => {
+      await readBudget(accountId);
+      return deps.service.sign(accountId, agentId, withdrawalId, request.body ?? {});
+    }),
   );
 
   app.post(`${WITHDRAWALS_PATH}/:withdrawalId/cancel`, (request, reply) =>
     handle(request, reply, 200, async (accountId, agentId, withdrawalId) => {
+      await readBudget(accountId);
       if (!emptyBody.safeParse(request.body ?? {}).success)
         throw new WithdrawalError('invalid_body', 'A cancel takes no settings.');
       return deps.service.cancel(accountId, agentId, withdrawalId);
@@ -153,8 +172,9 @@ export function registerWithdrawalRoutes(app: FastifyInstance, deps: WithdrawalR
   );
 
   app.post(`${WITHDRAWALS_PATH}/:withdrawalId/cancel/signature`, (request, reply) =>
-    handle(request, reply, 202, (accountId, agentId, withdrawalId) =>
-      deps.service.signCancel(accountId, agentId, withdrawalId, request.body ?? {}),
-    ),
+    handle(request, reply, 202, async (accountId, agentId, withdrawalId) => {
+      await readBudget(accountId);
+      return deps.service.signCancel(accountId, agentId, withdrawalId, request.body ?? {});
+    }),
   );
 }

@@ -1,3 +1,4 @@
+import { FEED_PAY_SPONSOR_FLEET_CEILING_SQL } from '../server/feed/pay/sponsor-ceiling-schema.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
@@ -20,7 +21,7 @@ import {
 } from '../server/protocol/x402/facilitator.js';
 import { FEED_PAY_SPONSOR_SQL } from '../server/feed/pay/sponsor-schema.js';
 import { createSponsorCredits } from '../server/feed/pay/sponsor.js';
-import { createSponsorSigner } from '../server/feed/pay/sponsor-signer.js';
+import { createSponsorSigner, pgSponsorReservations } from '../server/feed/pay/sponsor-signer.js';
 import {
   createSponsoredCalls,
   FEED_PAY_SPONSORED_SQL,
@@ -88,6 +89,7 @@ async function world(t: Parameters<typeof setup>[0], agents = 8) {
     INSERT INTO city_offers VALUES ('of_1', 'ws-s', 's1', 'w-s');`);
   await f.pg.exec(FEED_PAY_SPONSOR_SQL);
   await f.pg.exec(FEED_PAY_SPONSORED_SQL);
+  await f.pg.exec(FEED_PAY_SPONSOR_FLEET_CEILING_SQL);
   for (let i = 1; i <= agents; i++)
     await f.pg
       .exec(`INSERT INTO base_identities VALUES ('a${i}', 84532, 'confirmed', 1, ${START + 1}, 1);
@@ -109,6 +111,8 @@ async function world(t: Parameters<typeof setup>[0], agents = 8) {
     now: () => f.clock.now,
     router: ROUTER as Address,
     treasuryOf: async () => `0x${'7'.repeat(40)}` as Address,
+    // The signer reads the stored reservation itself (lazily: the database exists by the first sign).
+    reservationOf: (key) => pgSponsorReservations(f.db)(key),
   });
   // The sponsor's own facilitator (its own key and lane, its whole batch lane sponsored).
   const own = createRouter3Facilitator({
@@ -169,6 +173,7 @@ async function world(t: Parameters<typeof setup>[0], agents = 8) {
       }),
     },
     pay: async () => pay,
+    preSign: async () => null,
   });
   const ask = (agentId: string) => ({
     serviceId: 'svc',

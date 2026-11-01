@@ -81,6 +81,7 @@ export type PublicPage =
   | 'docs'
   | 'workflows'
   | 'usecases'
+  | 'dashboard'
   | 'notfound';
 
 /** The page each header item stands for, so the item (and its group) can show "current". */
@@ -89,6 +90,7 @@ const CURRENT_HREF: Partial<Record<PublicPage, string>> = {
   downtown: '/downtown',
   workflows: '/workflows',
   usecases: '/use-cases',
+  dashboard: '/analytics',
 };
 
 /** Hover intent: a trigger opens the panel only after the pointer rests on it this long. */

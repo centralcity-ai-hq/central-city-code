@@ -6,6 +6,7 @@ import { recordPost } from '../overview.js';
 import { roomPosted } from '../../wake/hooks.js';
 import { refuseIfMuted } from '../service.js';
 import { refuse, type MemberRow } from './access.js';
+import { storedOwnerKind } from '../owner-labels.js';
 
 /**
  * Room messages for code objects (docs/ROOM_REPOS.md). Creating a proposal or a review posts a Markdown room message in the
@@ -95,8 +96,8 @@ export async function postObjectMessage(
       parts: typeof parts;
       created_at: string | number;
     }>(
-      `INSERT INTO room_messages(room_id,seq,id,sender_agent_id,sender_owner_id,sender_name,sender_owner_label,parts,created_at,format,sender_kind,ref)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,'markdown','agent',$10::jsonb) RETURNING *`,
+      `INSERT INTO room_messages(room_id,seq,id,sender_agent_id,sender_owner_id,sender_name,sender_owner_label,parts,created_at,format,sender_kind,ref,sender_owner_kind)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,'markdown','agent',$10::jsonb,$11) RETURNING *`,
       [
         input.roomId,
         seq,
@@ -108,6 +109,7 @@ export async function postObjectMessage(
         JSON.stringify(parts),
         input.time,
         JSON.stringify(input.ref),
+        storedOwnerKind(input.member.owner_kind, input.member.owner_label),
       ],
     )
   ).rows[0]!;

@@ -6,6 +6,8 @@ import {
   ON_BASE_LIST_LIVE,
   ON_BASE_LIST_LIVE_EDGE,
   RATED_KEYS,
+  RATED_IDS_RETRY_MS,
+  RATED_IDS_TTL_MS,
   RATED_TTL_MS,
   registerOnBaseRoutes,
 } from '../server/base/explorer/routes.js';
@@ -13,6 +15,7 @@ import { RATED_AGENTS_SQL } from '../server/base/explorer/store.js';
 import { BASE_MAINNET, BASE_NETWORKS, type BaseChainId } from '../shared/base/chains.js';
 import type { OnBaseList } from '../shared/base/on-base.js';
 import { NOW, add, addRating, setup } from './on-base-fixture.js';
+import { ARC_TESTNET } from '../shared/chains.js';
 
 /*
  * The Agent Explorer's "Rated agents" number (totals.ratedAgents): distinct Base IDs with at least
@@ -298,4 +301,94 @@ test('rated agents: every network has its own public_stats key', () => {
   const keys = Object.keys(BASE_NETWORKS).map((id) => RATED_KEYS[Number(id) as BaseChainId]);
   assert.equal(new Set(keys).size, keys.length);
   for (const key of keys) assert.match(key, /^[a-z_]{1,64}$/);
+});
+
+test('rated Base IDs: highest first, final on this network only, kept a minute, no query', async (t) => {
+  const db = await setup(t);
+  for (let n = 1; n <= 6; n++) await add(db, { n, kind: 'final', id: 119 + n });
+  const rate = (id: string, rater: number, baseId: number, more: Record<string, unknown> = {}) =>
+    addRating(db, { id, rater, baseId, rated: baseId - 119, stars: 5, ...more });
+  await rate('a', 2, 120);
+  await rate('b', 1, 122, { status: 'included' });
+  await rate('c', 1, 123, { chainId: 84532 });
+  await rate('d', 3, 124);
+  let now = NOW;
+  const app = routes(t, db, () => now);
+  const first = await app.inject({ url: '/api/public/base/rated' });
+  assert.equal(first.statusCode, 200, first.body);
+  assert.deepEqual(first.json().baseIds, ['124', '120']);
+  assert.match(String(first.headers['cache-control']), /s-maxage=60/);
+  // A new final rating shows after the instance's minute, not before.
+  await rate('e', 2, 125);
+  assert.deepEqual((await app.inject({ url: '/api/public/base/rated' })).json().baseIds, [
+    '124',
+    '120',
+  ]);
+  now += RATED_IDS_TTL_MS;
+  await app.inject({ url: '/api/public/base/rated' });
+  const later = await app.inject({ url: '/api/public/base/rated' });
+  assert.deepEqual(later.json().baseIds, ['125', '124', '120']);
+  assert.equal((await app.inject({ url: '/api/public/base/rated?x=1' })).statusCode, 400);
+});
+
+test('rated Base IDs: a failed read backs off, keeps the last good answer and its time', async (t) => {
+  const db = await setup(t);
+  await add(db, { n: 1, kind: 'final', id: 120 });
+  await add(db, { n: 2, kind: 'final', id: 121 });
+  await addRating(db, { id: 'a', rater: 2, baseId: 120, rated: 1, stars: 5 });
+  const state = { reads: 0, fail: true };
+  const wrapped: Database = {
+    ...db,
+    transaction: (action) =>
+      db.transaction((tx) =>
+        action({
+          ...tx,
+          query: ((sql: string, params?: unknown[]) => {
+            if (/FROM base_rated_agents WHERE chain_id = \$1\s+ORDER BY/.test(sql)) {
+              state.reads++;
+              if (state.fail) return Promise.reject(new Error('statement timeout'));
+            }
+            return tx.query(sql, params as never);
+          }) as Database['query'],
+        }),
+      ),
+  };
+  let now = NOW;
+  const app = Fastify();
+  t.after(() => app.close());
+  registerOnBaseRoutes(app, { db: wrapped, now: () => now });
+  const get = () => app.inject({ url: '/api/public/base/rated' });
+  // Cold failure: 503, and no new read on every request during the backoff.
+  assert.equal((await get()).statusCode, 503);
+  assert.equal((await get()).statusCode, 503);
+  assert.equal(state.reads, 1, 'one read per backoff, not one per request');
+  now += RATED_IDS_RETRY_MS;
+  state.fail = false;
+  const ok = await get();
+  assert.equal(ok.statusCode, 200);
+  assert.equal(state.reads, 2);
+  const asOf = ok.json().asOf;
+  assert.equal(asOf, now);
+  // The refresh fails: the last good answer is served with its own time, then a backoff.
+  now += RATED_IDS_TTL_MS;
+  state.fail = true;
+  await get();
+  const kept = await get();
+  assert.equal(kept.statusCode, 200);
+  assert.deepEqual(kept.json(), { baseIds: ['120'], asOf });
+  assert.equal(state.reads, 3, 'the failed refresh is not repeated within the backoff');
+});
+
+test('a 404 names the chain mounted: Base reads as ever, Arc as Arc', async (t) => {
+  const db = await setup(t);
+  const base = routes(t, db, () => NOW);
+  const onBase = await base.inject({ url: '/api/public/base/agents/999999' });
+  assert.equal(onBase.statusCode, 404);
+  assert.equal(onBase.json().error, 'No registered agent on Base with that id.');
+  const app = Fastify();
+  t.after(() => app.close());
+  registerOnBaseRoutes(app, { db, now: () => NOW, chainId: ARC_TESTNET, slug: 'arc' });
+  const onArc = await app.inject({ url: '/api/public/arc/agents/999999' });
+  assert.equal(onArc.statusCode, 404);
+  assert.equal(onArc.json().error, 'No registered agent on Arc Testnet with that id.');
 });

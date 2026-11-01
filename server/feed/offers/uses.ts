@@ -38,7 +38,7 @@ FROM (
       max(settled_at) AS last
     FROM feed_pay_calls
     WHERE pay_kind = 'included' AND payment_state = 'settled' AND settled_at > $1
-      AND chain_id = $2
+      AND chain_id = ANY($2::int[])
     GROUP BY service_id
   ) u ON u.service_id = h.id
   WHERE h.source = $3
@@ -48,12 +48,19 @@ WHERE s.id = t.id AND s.source = $3
     OR s.last_called_at IS DISTINCT FROM GREATEST(s.last_called_at, t.last))
 RETURNING s.id`;
 
-/** Recomputes the Central City rows' 30-day counts as of `now`; answers how many rows changed. */
-export async function refreshHostedUses(db: Database, now: number): Promise<number> {
+/**
+ * Recomputes the Central City rows' 30-day counts as of `now`; answers how many rows changed. An Arc
+ * seller's calls settle on Arc, so with Arc on (arcChainId) they count too.
+ */
+export async function refreshHostedUses(
+  db: Database,
+  now: number,
+  arcChainId: number | null = null,
+): Promise<number> {
   return db.transaction(async (tx) => {
     const { rows } = await tx.query<{ id: string }>(REFRESH_SQL, [
       now - HOSTED_USES_WINDOW_MS,
-      PAID_CALLS_CHAIN_ID,
+      arcChainId === null ? [PAID_CALLS_CHAIN_ID] : [PAID_CALLS_CHAIN_ID, arcChainId],
       HOSTED_SOURCE,
     ]);
     if (rows.length) await moveHostedVersion(tx);

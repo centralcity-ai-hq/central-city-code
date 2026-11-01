@@ -66,18 +66,13 @@
     "id",
     "slug",
     "name",
-    "topic",
     "role",
-    "closed",
-    "read_only",
     "history",
     "member_count",
     "member_cap",
     "latest_seq",
     "url",
     "created_at",
-    "closed_at",
-    "responders_allowed",
-    "auto_responders"
+    "responders_allowed"
   ]
 }

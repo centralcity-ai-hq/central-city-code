@@ -5,6 +5,7 @@ import type { Database, Transaction as Tx } from '../database.js';
 import { registerMigration, type Migration } from '../migrations.js';
 import { registerElricPrivateChatMigration } from './chat-schema.js';
 import { elricKilledByEnv, type ElricConfig, type ElricKind } from './config.js';
+import { stressTestOperators } from '../stress-allowlist.js';
 
 /**
  * Elric's money controls (docs/ELRIC.md; THREAT_PRIVACY_REVIEW §10.4). Fail-closed:
@@ -12,12 +13,17 @@ import { elricKilledByEnv, type ElricConfig, type ElricKind } from './config.js'
  * - the kill switch (CITY_ELRIC_KILL=1 or the `elric_flags` row 'kill') refuses before any
  *   reservation or adapter call, and is checked again inside the reservation transaction;
  * - one transaction locks the owner's day row and the global day row (always in that order) and
- *   reserves the per-owner allowance count AND the global cost units together, or neither;
+ *   reserves the per-owner allowance count, the owner's cost units and the global cost units
+ *   together, or none of them (internal load-test operators, CITY_STRESS_TEST_OPERATORS, skip
+ *   the owner's cost units only; the count and the global ceiling still bound them);
  * - a database error while reserving is a refusal, never a free pass.
  */
 export type ReserveResult =
   | { ok: true; units: number; day: string }
-  | { ok: false; reason: 'owner_allowance' | 'global_ceiling' | 'kill' | 'unavailable' };
+  | {
+      ok: false;
+      reason: 'owner_allowance' | 'owner_units' | 'global_ceiling' | 'kill' | 'unavailable';
+    };
 
 type Env = Record<string, string | undefined>;
 type Q = Pick<Tx, 'query'>;
@@ -121,13 +127,19 @@ const KIND_COLUMN: Record<ElricKind, string> = { short: 'short', summary: 'summa
  * Reserves one `kind` from the owner's allowance and `units` of the global ceiling for the
  * invocation holding `lease`. Everything happens in one transaction under row locks; when the
  * lease is gone the transaction rolls back and nothing stays reserved.
+ *
+ * `kind: null` reserves cost units only, for a model call that is not an answer (a conversation
+ * title, titles.ts, CCA-627): no allowance check, no answer count, no invocation count; the owner's
+ * cost units and the global ceiling are checked and reserved under the same locks as an answer's,
+ * so a title and an answer (or two titles) can never both pass on the same last units.
  */
 export async function reserve(
   db: Pick<Database, 'transaction'>,
-  config: ElricConfig,
+  config: Pick<ElricConfig, 'ownerDailyUnits' | 'globalDailyUnits'> &
+    Partial<Pick<ElricConfig, 'allowance'>>,
   input: {
     ownerId: string;
-    kind: ElricKind;
+    kind: ElricKind | null;
     units: number;
     day: string;
     /**
@@ -138,7 +150,8 @@ export async function reserve(
   },
   env: Env = process.env,
 ): Promise<ReserveResult> {
-  const column = KIND_COLUMN[input.kind];
+  const kind = input.kind;
+  const column = kind === null ? null : KIND_COLUMN[kind];
   let crossed: CeilingAlert | null = null;
   try {
     const result = await db.transaction(async (tx) => {
@@ -152,8 +165,13 @@ export async function reserve(
         input.day,
       ]);
       const owner = (
-        await tx.query<{ used: number }>(
-          `SELECT ${column} AS used FROM elric_usage WHERE owner_id=$1 AND day=$2 FOR UPDATE`,
+        await tx.query<{
+          used: number;
+          reserved_units: string | number;
+          spent_units: string | number;
+        }>(
+          `SELECT ${column ?? '0'} AS used,reserved_units,spent_units FROM elric_usage
+            WHERE owner_id=$1 AND day=$2 FOR UPDATE`,
           [input.ownerId, input.day],
         )
       ).rows[0]!;
@@ -167,20 +185,27 @@ export async function reserve(
           [input.day],
         )
       ).rows[0]!;
-      if (Number(owner.used) >= config.allowance[input.kind])
+      // A missing allowance is zero (fail closed); a non-answer (kind null) takes no count.
+      if (kind !== null && Number(owner.used) >= (config.allowance?.[kind] ?? 0))
         return { ok: false, reason: 'owner_allowance' } as const;
+      if (
+        Number(owner.reserved_units) + Number(owner.spent_units) + input.units >
+          config.ownerDailyUnits &&
+        !stressTestOperators(env).has(input.ownerId)
+      )
+        return { ok: false, reason: 'owner_units' } as const;
       if (
         Number(global.reserved_units) + Number(global.spent_units) + input.units >
         config.globalDailyUnits
       )
         return { ok: false, reason: 'global_ceiling' } as const;
       await tx.query(
-        `UPDATE elric_usage SET ${column}=${column}+1, reserved_units=reserved_units+$3
+        `UPDATE elric_usage SET ${column ? `${column}=${column}+1, ` : ''}reserved_units=reserved_units+$3
           WHERE owner_id=$1 AND day=$2`,
         [input.ownerId, input.day, input.units],
       );
       await tx.query(
-        `UPDATE elric_global_usage SET reserved_units=reserved_units+$2, invocations=invocations+1
+        `UPDATE elric_global_usage SET reserved_units=reserved_units+$2${column ? ', invocations=invocations+1' : ''}
           WHERE day=$1`,
         [input.day, input.units],
       );
@@ -238,13 +263,14 @@ export async function reserve(
  * Settles a reservation: the reservation is released and the TRUE `spent` units are recorded,
  * even above the reservation (the overage is returned and audited in the turn, never hidden);
  * `refund` also gives the allowance count back (cancelled or failed before a useful answer).
- * Runs in the caller's transaction.
+ * Runs in the caller's transaction. `kind: null` settles a cost-only reservation (no count to give
+ * back; `refund` only releases the units).
  */
 export async function settle(
   tx: Q,
   input: {
     ownerId: string;
-    kind: ElricKind;
+    kind: ElricKind | null;
     day: string;
     reserved: number;
     spent: number;
@@ -252,13 +278,19 @@ export async function settle(
   },
 ): Promise<{ overage: number }> {
   const spent = Math.max(0, Math.ceil(input.spent));
-  const column = KIND_COLUMN[input.kind];
+  const column = input.kind === null ? null : KIND_COLUMN[input.kind];
   await tx.query(
     `UPDATE elric_usage SET reserved_units=GREATEST(0, reserved_units-$3),
-       spent_units=spent_units+$4,
-       ${column}=CASE WHEN $5 THEN GREATEST(0, ${column}-1) ELSE ${column} END
+       spent_units=spent_units+$4${
+         column
+           ? `,
+       ${column}=CASE WHEN $5 THEN GREATEST(0, ${column}-1) ELSE ${column} END`
+           : ''
+       }
      WHERE owner_id=$1 AND day=$2`,
-    [input.ownerId, input.day, input.reserved, spent, input.refund],
+    column
+      ? [input.ownerId, input.day, input.reserved, spent, input.refund]
+      : [input.ownerId, input.day, input.reserved, spent],
   );
   await tx.query(
     `UPDATE elric_global_usage SET reserved_units=GREATEST(0, reserved_units-$2),

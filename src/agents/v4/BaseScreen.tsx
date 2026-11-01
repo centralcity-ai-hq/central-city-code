@@ -1,5 +1,12 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { arcEnabled } from '../../explorer/chain';
 import {
+  BASE_MAINNET,
+  CHAIN_NOTE,
+  CHAIN_OPTIONS,
+  chainChangeShown,
+  chainStepShown,
+  type ChainChoice,
   FINALIZING_INFO,
   TX_HASH,
   retryAllowed,
@@ -16,12 +23,14 @@ import {
   baseIdOf,
   baseRowSummary,
   baseScreenState,
+  baseScreenTitle,
   finalizingLine,
   finalizingSince,
   mayHaveBase,
   msUntilFinalizingLong,
   msUntilSlow,
   openRetryOffered,
+  IDENTITY_ROW_LABEL,
   passportCode,
   publicForBase,
   type BaseScreenState,
@@ -35,7 +44,10 @@ import {
 } from '../../base/useRegisterWithKey';
 import { useCityScore } from '../../base/useCityScore';
 import { scoreLine, type CityScore } from '../../../shared/base/rating-score';
+import { chainWords, type ChainWords } from '../../../shared/base/wallet-chains';
+import { chainView } from '../../../shared/chains';
 import { DirectoryGroup } from './DirectoryGroup';
+import { rememberChain, rememberedChain } from '../../base/chosenChain';
 import './base-screen.css';
 
 /* The mockup's own icons (docs/design/my-agents-v4-mockup.html), drawn the same way. */
@@ -186,14 +198,47 @@ export function BaseScreen({
   // An agent without a profile is "Not available" without asking the server.
   const idle = !mayHaveBase({ isPublic, hasProfile });
   const registration = useBaseRegistration(agentId, idle, { ownerModePending: true });
-  const key = useRegisterWithKey(agentId, idle);
+  const arcOn = useArcOn(idle);
+  // The choice is remembered for the agent, so it holds across the wallet key's setup (the Wallet
+  // screen reads it and makes no Base wallet for an agent going to Arc) and back here again.
+  const [chosenChain, setChosenChain] = useState<ChainChoice | undefined>(
+    () => rememberedChain(agentId) as ChainChoice | undefined,
+  );
+  // The agent's registration chain: as the server says, else as chosen (a register answer
+  // need not name it). Undefined while neither has: no registration, nothing chosen.
+  const chainId = registration.identity?.chainId ?? chosenChain;
+  const serverChain = registration.identity?.chainId;
+  useEffect(() => {
+    if (serverChain !== undefined) rememberChain(agentId, serverChain);
+  }, [agentId, serverChain]);
+  // A chosen chain the registration controller hasn't heard yet (the screen opened again).
+  useEffect(() => {
+    if (chosenChain !== undefined) registration.setChain(chosenChain);
+  }, [chosenChain, registration.setChain]);
+  // The wallet the key makes on the agent's chain is the one sent and checked.
+  const key = useRegisterWithKey(agentId, idle, chainId);
   // Wallets on: the owner is the person's wallet key, never a typed address (decision A).
   useOwnerModeFromKey(registration.setMode, key.state);
   const now = useSlowTick(registration);
   const { state, id, since } = screenOf(registration, { isPublic, hasProfile }, now);
-  const score = useCityScore(state === 'final' ? id : null);
+  const words = chainWords(chainId);
+  const score = useCityScore(state === 'final' ? id : null, false, chainId);
+  const [changingChain, setChangingChain] = useState(false);
+  const chooseChain =
+    state === 'start' &&
+    (chosenChain === undefined || changingChain) &&
+    chainStepShown({ arcOn, identity: registration.identity, wallet: registration.wallet });
+  const chainChange =
+    state === 'start' &&
+    !chooseChain &&
+    chainChangeShown({
+      arcOn,
+      identity: registration.identity,
+      wallet: registration.wallet,
+      chosen: chosenChain,
+    });
   return (
-    <section className="v4b" aria-label={`${agentName} · Base`}>
+    <section className="v4b" aria-label={`${agentName} · ${baseScreenTitle(chainId, arcOn)}`}>
       <div className="v4b-top">
         <button type="button" className="v4b-back" onClick={onBack}>
           <BackIcon />
@@ -202,25 +247,109 @@ export function BaseScreen({
       </div>
       <div className="v4b-scroll">
         <div className="v4b-wrap">
-          <h3 className="v4b-title">Base</h3>
+          <h3 className="v4b-title">{baseScreenTitle(chainId, arcOn)}</h3>
           <div className="v4b-body" aria-busy={state === 'loading' || undefined}>
-            <BaseBody
-              state={state}
-              id={id}
-              finalizing={finalizingLine(since, now)}
-              agentName={agentName}
-              agentId={agentId}
-              registration={registration}
-              isPublic={publicForBase({ isPublic, madePublic: registration.madePublic })}
-              onChanged={onChanged}
-              walletKey={key}
-              onOpenWallet={onOpenWallet}
-              score={score}
-            />
+            {chooseChain ? (
+              <ChainStep
+                initial={chosenChain}
+                onContinue={(picked) => {
+                  registration.setChain(picked);
+                  rememberChain(agentId, picked);
+                  setChosenChain(picked);
+                  setChangingChain(false);
+                }}
+              />
+            ) : (
+              <BaseBody
+                state={state}
+                id={id}
+                finalizing={finalizingLine(since, now, chainId)}
+                chainId={chainId}
+                words={words}
+                arcOn={arcOn}
+                agentName={agentName}
+                agentId={agentId}
+                registration={registration}
+                isPublic={publicForBase({ isPublic, madePublic: registration.madePublic })}
+                onChanged={onChanged}
+                walletKey={key}
+                onOpenWallet={onOpenWallet}
+                score={score}
+              />
+            )}
+            {chainChange ? (
+              <button
+                type="button"
+                className="v4b-quiet"
+                data-k="change-chain"
+                onClick={() => setChangingChain(true)}
+              >
+                Choose another chain
+              </button>
+            ) : null}
           </div>
         </div>
       </div>
     </section>
+  );
+}
+
+/** Whether the server has Arc on (the Explorer's cached once-per-session probe). */
+function useArcOn(paused: boolean): boolean {
+  const [on, setOn] = useState(false);
+  useEffect(() => {
+    if (paused) return;
+    let live = true;
+    void arcEnabled().then((value) => {
+      if (live) setOn(value);
+    });
+    return () => {
+      live = false;
+    };
+  }, [paused]);
+  return on;
+}
+
+/** Choose a chain (Operation Arc): Base or Arc, before today's start. Base is preselected. */
+function ChainStep({
+  initial,
+  onContinue,
+}: {
+  /** The chain chosen before, when the owner is changing it. */
+  initial?: number;
+  onContinue: (chainId: ChainChoice) => void;
+}) {
+  const [picked, setPicked] = useState<ChainChoice>(
+    CHAIN_OPTIONS.find((option) => option.chainId === initial)?.chainId ?? BASE_MAINNET,
+  );
+  const name = useId();
+  return (
+    <div className="v4b-body" data-k="chain-step">
+      <b className="v4b-step">Choose a chain</b>
+      <div className="v4b-chains" role="radiogroup" aria-label="Choose a chain">
+        {CHAIN_OPTIONS.map((option) => (
+          <label
+            key={option.chainId}
+            className="v4b-chain"
+            data-on={picked === option.chainId || undefined}
+          >
+            <input
+              type="radio"
+              name={name}
+              value={option.chainId}
+              checked={picked === option.chainId}
+              onChange={() => setPicked(option.chainId)}
+            />
+            <b>{option.name}</b>
+            <span>{option.line}</span>
+          </label>
+        ))}
+      </div>
+      <p className="v4b-note alone">{CHAIN_NOTE}</p>
+      <button type="button" className="v4b-btn" onClick={() => onContinue(picked)}>
+        Continue
+      </button>
+    </div>
   );
 }
 
@@ -272,6 +401,7 @@ type ReadyKey = Extract<RegisterKey, { k: 'ready' }>;
 
 function KeyForm({
   keyState,
+  words,
   agentName,
   busy,
   problem,
@@ -281,6 +411,8 @@ function KeyForm({
   onOpenWallet,
 }: {
   keyState: RegisterKey;
+  /** The agent's chain, as this screen names it. */
+  words: ChainWords;
   agentName: string;
   busy: boolean;
   problem: ReactNode;
@@ -294,7 +426,7 @@ function KeyForm({
   const [password, setPassword] = useState('');
   const [unlocking, setUnlocking] = useState(false);
   const [unlockError, setUnlockError] = useState('');
-  const label = starting ? `Register ${agentName} on Base` : 'Continue';
+  const label = starting ? `Register ${agentName} on ${words.on}` : 'Continue';
   async function unlock(event: FormEvent) {
     event.preventDefault();
     setUnlockError('');
@@ -316,8 +448,8 @@ function KeyForm({
       return (
         <div className="v4b-body" data-k="key-setup">
           <p className="v4b-note">
-            First, set up your wallet key. It controls the wallets of all your agents, including the
-            Base ID {agentName} gets. It’s made and locked in this browser.
+            First, set up your wallet key. It controls the wallets of all your agents, including the{' '}
+            {words.id} {agentName} gets. It’s made and locked in this browser.
           </p>
           <button type="button" className="v4b-btn" onClick={onOpenWallet}>
             Set up your wallet key
@@ -328,8 +460,8 @@ function KeyForm({
       return (
         <div className="v4b-body" data-k="key-backup">
           <p className="v4b-note v4b-bad">
-            Confirm your backup key first. {agentName}’s Base ID will be in a wallet only that key
-            controls.
+            Confirm your backup key first. {agentName}’s {words.id} will be in a wallet only that
+            key controls.
           </p>
           <button type="button" className="v4b-btn" onClick={onOpenWallet}>
             Finish the backup
@@ -384,7 +516,7 @@ function KeyForm({
             </div>
             <div className="v4b-row">
               <span className="v4b-k">{agentName}’s wallet</span>
-              <span className="v4b-v">Holds its Base ID and its money</span>
+              <span className="v4b-v">Holds its {words.id} and its money</span>
             </div>
           </div>
           {problem}
@@ -409,6 +541,9 @@ function BaseBody({
   state,
   id,
   finalizing,
+  chainId,
+  words,
+  arcOn,
   agentName,
   agentId,
   registration,
@@ -420,8 +555,14 @@ function BaseBody({
 }: {
   state: BaseScreenState;
   id: string | null;
-  /** The quiet line while Base finalizes. */
+  /** The quiet line while the agent's chain finalizes. */
   finalizing: string;
+  /** The agent's registration chain; undefined while it isn't known. */
+  chainId: number | undefined;
+  /** That chain, as this screen names it. */
+  words: ChainWords;
+  /** The server has Arc on: a chain not known may be either, so it isn't named. */
+  arcOn: boolean;
   agentName: string;
   agentId: string;
   registration: BaseRegistrationState;
@@ -520,6 +661,7 @@ function BaseBody({
   const walletForm = keyMode ? (
     <KeyForm
       keyState={keyState}
+      words={words}
       agentName={agentName}
       busy={busy}
       problem={problem}
@@ -597,6 +739,7 @@ function BaseBody({
       {keyMode && keyState.k !== 'ready' ? (
         <KeyForm
           keyState={keyState}
+          words={words}
           agentName={agentName}
           busy={busy}
           problem={problem}
@@ -626,7 +769,9 @@ function BaseBody({
       return (
         <>
           <p className="v4b-note alone v4b-bad" role="alert">
-            The Base registration status couldn’t be loaded.
+            {chainId === undefined && arcOn
+              ? 'The registration status couldn’t be loaded.'
+              : words.say('The Base registration status couldn’t be loaded.')}
           </p>
           <button type="button" className="v4b-btn" onClick={registration.reloadStatus}>
             Try again
@@ -641,8 +786,10 @@ function BaseBody({
             <div className="v4b-mark">
               <BaseIcon />
             </div>
-            <b>Give {agentName} a Base identity</b>
-            <span>Its own ID and wallet on Base. Free.</span>
+            <b>
+              Give {agentName} {words.say('a Base identity')}
+            </b>
+            <span>{words.say('Its own ID and wallet on Base. Free.')}</span>
           </div>
           {state === 'confirm' ? (
             <ConfirmPublic registration={registration} problem={problem} onChanged={onChanged} />
@@ -657,7 +804,7 @@ function BaseBody({
           <div className="v4b-group">
             <div className="v4b-row" role="status">
               <span className="v4b-spin" aria-hidden="true" />
-              <span className="v4b-k">Registering on Base</span>
+              <span className="v4b-k">Registering on {words.on}</span>
               <span className="v4b-v">{stuck ? 'taking long' : 'a few seconds'}</span>
             </div>
           </div>
@@ -682,7 +829,7 @@ function BaseBody({
               )}
             </div>
           </div>
-          {stuck ? null : <p className="v4b-note">Base is busy. It continues by itself.</p>}
+          {stuck ? null : <p className="v4b-note">{words.on} is busy. It continues by itself.</p>}
           {continueIfStalled}
         </>
       );
@@ -691,12 +838,12 @@ function BaseBody({
         <>
           <div className="v4b-group">
             <div className="v4b-row">
-              <span className="v4b-k">Base ID</span>
+              <span className="v4b-k">{words.id}</span>
               <span className="v4b-v strong">{id}</span>
             </div>
             <div className="v4b-row v4b-sub">
               <span className="v4b-pulse" aria-hidden="true" />
-              {finalizing} <InfoTip text={FINALIZING_INFO} />
+              {finalizing} <InfoTip text={words.say(FINALIZING_INFO)} />
             </div>
           </div>
           {wallets}
@@ -706,11 +853,13 @@ function BaseBody({
     case 'final': {
       // The public passport and the final transaction exist only once Base has finalized.
       const txHash = identity?.txHash && TX_HASH.test(identity.txHash) ? identity.txHash : null;
+      // Its transaction is on the agent's own chain: an Arc agent's links to Arc's explorer.
+      const finalArc = chainId === undefined ? null : chainView(chainId);
       return (
         <>
           <div className="v4b-group">
             <div className="v4b-row">
-              <span className="v4b-k">Base ID</span>
+              <span className="v4b-k">{words.id}</span>
               <span className="v4b-v strong">
                 {id}{' '}
                 <span className="v4b-okc" role="img" aria-label="Confirmed">
@@ -734,13 +883,13 @@ function BaseBody({
             {txHash ? (
               <a
                 className="v4b-row"
-                href={`https://basescan.org/tx/${txHash}`}
+                href={`${finalArc?.slug === 'arc' ? finalArc.explorerUrl : 'https://basescan.org'}/tx/${txHash}`}
                 target="_blank"
                 rel="noreferrer"
               >
                 <span className="v4b-k">Transaction</span>
                 <span className="v4b-v">
-                  Basescan <ExtIcon />
+                  {words.explorer} <ExtIcon />
                 </span>
               </a>
             ) : null}
@@ -751,7 +900,7 @@ function BaseBody({
           wallet?.address?.toLowerCase() === keyState.expectedWallet.toLowerCase() ? (
             <p className="v4b-note" data-k="derived">
               Checked in this browser: this is the wallet your own key makes for {agentName}. It
-              holds the Base ID and the money.
+              holds the {words.id} and the money.
             </p>
           ) : null}
           <p className="v4b-note">
@@ -766,7 +915,7 @@ function BaseBody({
           <div className="v4b-group">
             <div className="v4b-row" role="status">
               <span className="v4b-spin" aria-hidden="true" />
-              <span className="v4b-k">Re-checking on Base</span>
+              <span className="v4b-k">Re-checking on {words.on}</span>
               {stuck ? null : <span className="v4b-v">nothing to do</span>}
             </div>
           </div>
@@ -797,6 +946,7 @@ function BaseBody({
           {canRetry && keyMode && keyState.k !== 'ready' ? (
             <KeyForm
               keyState={keyState}
+              words={words}
               agentName={agentName}
               busy={busy}
               problem={problem}
@@ -851,15 +1001,16 @@ export function BaseRowSummary({
   );
   const now = useSlowTick(registration);
   const { state, id, since } = screenOf(registration, { isPublic, hasProfile }, now);
-  const row = baseRowSummary(state, id, since, now);
-  const score = useCityScore(state === 'final' ? id : null, paused);
+  const chainId = registration.identity?.chainId;
+  const row = baseRowSummary(state, id, since, now, chainId);
+  const score = useCityScore(state === 'final' ? id : null, paused, chainId);
   // While unknown the value keeps its place, empty, and fades in once known; a value known at
   // once (the agent's last answer, or "Not available") shows without a fade.
   const pending = row.text === null;
   return (
     <>
       <button type="button" className="v4b-row" onClick={onOpen}>
-        <span className="v4b-k">Base</span>
+        <span className="v4b-k">{IDENTITY_ROW_LABEL}</span>
         <span
           className={`v4b-v v4b-sum${row.tone === 'strong' ? ' strong' : row.tone === 'bad' ? ' v4b-bad' : ''}`}
           data-pending={pending || undefined}

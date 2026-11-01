@@ -29,6 +29,15 @@ const SLUG_CHAR = /[\p{L}\p{N}._-]/u;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 const fold = (value: string) => value.normalize('NFKC').toLowerCase();
 
+/**
+ * Whether an `@` right after `before` (the last code unit before it in the folded text, '' at
+ * the start) is part of an e-mail address and so not a mention. Shared with Elric's mention
+ * stripping (elric/reply.ts), so the two can never disagree.
+ */
+export function emailAt(before: string): boolean {
+  return !!before && (WORD.test(before) || '.-+'.includes(before));
+}
+
 export function slugOf(name: string): string {
   return fold(name)
     .replace(/[^\p{L}\p{N}]+/gu, '-')
@@ -76,8 +85,7 @@ export function mentionKeys(text: string): MentionKeys {
   let scanned = 0;
   for (let at = folded.indexOf('@'); at >= 0; at = folded.indexOf('@', at + 1)) {
     if (++scanned > WAKE_LIMITS.mentionScan) break;
-    const before = at > 0 ? folded[at - 1]! : '';
-    if (before && (WORD.test(before) || '.-+'.includes(before))) continue;
+    if (emailAt(at > 0 ? folded[at - 1]! : '')) continue;
     const rest = folded.slice(at + 1, at + 1 + 200);
     if (rest.startsWith('"')) {
       const end = rest.indexOf('"', 1);
@@ -126,8 +134,7 @@ export function findMentions(
   let scanned = 0;
   for (let at = folded.indexOf('@'); at >= 0; at = folded.indexOf('@', at + 1)) {
     if (++scanned > WAKE_LIMITS.mentionScan || result.ids.length >= max) break;
-    const before = at > 0 ? folded[at - 1]! : '';
-    if (before && (WORD.test(before) || '.-+'.includes(before))) continue;
+    if (emailAt(at > 0 ? folded[at - 1]! : '')) continue;
     const rest = folded.slice(at + 1, at + 1 + 200);
     let hits: string[] = [];
     let label = '';

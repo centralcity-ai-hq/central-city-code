@@ -1,8 +1,13 @@
 import type { Database } from '../database.js';
 import { registerMigration, type Migration } from '../migrations.js';
-import { AdapterError, type ModelAdapter, type ModelRequest } from './adapter.js';
+import {
+  AdapterError,
+  type ModelAdapter,
+  type ModelRequest,
+  type ModelResponse,
+} from './adapter.js';
 import { elricEligibility } from './access.js';
-import { killSwitchOn } from './budget.js';
+import { killSwitchOn, reserve, settle } from './budget.js';
 import { DAY_MS, dayOf, type ElricConfig } from './config.js';
 import { containsCredential } from './reply.js';
 import { anthropicUnits, anthropicWorstUnits, estimateTokens } from './token-cost.js';
@@ -15,9 +20,14 @@ import { anthropicUnits, anthropicWorstUnits, estimateTokens } from './token-cos
  *
  * - Once per conversation: only while the title is still the fallback (`title_source` is
  *   'fallback'); a title the owner chose ('user') is never overwritten, and an 'auto' title stays.
- * - Not part of the owner's daily answer allowance (no `elric_usage` count). Its cost goes to the
- *   global daily total (`elric_global_usage.spent_units`, so the ceiling sees it) and to the
- *   anonymous `elric_title_costs` day row, which the operator's cost report shows as `titles`.
+ * - Not part of the owner's daily answer count. Its worst case is reserved before the call with
+ *   the answers' own reservation (budget.ts reserve, `kind: null`: owner cost units against
+ *   ownerDailyUnits and the global ceiling, atomically, CCA-627) and settled after it: the true
+ *   cost goes to the owner's daily cost units (`elric_usage.spent_units`), to the global daily
+ *   total (`elric_global_usage.spent_units`) and to the anonymous `elric_title_costs` day row,
+ *   which the operator's cost report shows as `titles`.
+ * - Only after a model-written reply: a Tier 0 answer (no model, no allowance) is never followed
+ *   by a title call (service.ts).
  * - Skipped (the fallback stays) when the kill switch is on, the Elric is not active, the owner
  *   is not eligible, the global ceiling has no room for the worst case, the run has too little time
  *   left (the call never outlives it), or the model fails. One attempt only, never a retry.
@@ -153,7 +163,7 @@ export function titleWorstUnits(
 export interface TitleRun {
   db: Pick<Database, 'query' | 'transaction'>;
   adapter: ModelAdapter;
-  config: Pick<ElricConfig, 'globalDailyUnits'>;
+  config: Pick<ElricConfig, 'globalDailyUnits'> & Partial<Pick<ElricConfig, 'ownerDailyUnits'>>;
   clock: () => number;
   env: Record<string, string | undefined>;
   /** GPU-second units for a self-hosted answer (service.ts unitsOf, tier 1). */
@@ -170,22 +180,31 @@ export interface TitleRun {
 export type TitleResult =
   { ok: true; title: string; units: number } | { ok: false; reason: string; units?: number };
 
-/** Adds one title call to the global day total and the anonymous title cost row. */
-async function recordCost(
+/**
+ * Settles a title call's reservation (budget.ts settle, cost units only, never an answer count):
+ * the worst case leaves `reserved_units` and the true cost goes to the owner's and the global
+ * `spent_units`. A call that reached the model also adds its anonymous title cost row; one that
+ * never left (`usage` null) only releases the units.
+ */
+async function settleTitle(
   db: Pick<Database, 'transaction'>,
   time: number,
-  usage: { inputTokens: number; outputTokens: number },
+  ownerId: string,
+  reserved: number,
   units: number,
+  usage: { inputTokens: number; outputTokens: number } | null,
 ) {
   const spent = Math.max(0, Math.ceil(units));
   await db.transaction(async (tx) => {
-    await tx.query(`INSERT INTO elric_global_usage(day) VALUES($1) ON CONFLICT DO NOTHING`, [
-      dayOf(time),
-    ]);
-    await tx.query('UPDATE elric_global_usage SET spent_units=spent_units+$2 WHERE day=$1', [
-      dayOf(time),
+    await settle(tx, {
+      ownerId,
+      kind: null,
+      day: dayOf(time),
+      reserved,
       spent,
-    ]);
+      refund: usage === null,
+    });
+    if (!usage) return;
     await tx.query(
       `INSERT INTO elric_title_costs(day_index,calls,input_tokens,output_tokens,cost_units)
        VALUES($1,1,$2,$3,$4)
@@ -234,41 +253,78 @@ export async function titleConversation(r: TitleRun): Promise<TitleResult> {
     const request = titleRequest(r.userText, r.replyText);
     if (!/[\p{L}\p{N}]/u.test(withoutMentions(r.userText)))
       return { ok: false, reason: 'no_user_text' };
-    const worst = titleWorstUnits(request, r.adapter, r.gpuUnits);
-    const time = r.clock();
-    const global = (
-      await r.db.query<{ reserved_units: string | number; spent_units: string | number }>(
-        'SELECT reserved_units,spent_units FROM elric_global_usage WHERE day=$1',
-        [dayOf(time)],
-      )
-    ).rows[0];
-    const used = Number(global?.reserved_units ?? 0) + Number(global?.spent_units ?? 0);
-    if (used + worst > r.config.globalDailyUnits) return { ok: false, reason: 'global_ceiling' };
-
+    const worst = Math.max(0, Math.ceil(titleWorstUnits(request, r.adapter, r.gpuUnits)));
     const timeoutMs = Math.min(TITLE_TIMEOUT_MS, r.remainingMs?.() ?? TITLE_TIMEOUT_MS);
     if (timeoutMs < TITLE_MIN_MS) return { ok: false, reason: 'time_budget' };
-    let response;
-    try {
-      response = await r.adapter.complete({ ...request, timeoutMs });
-    } catch (error) {
-      // Sent but failed: the request may have cost something; charge the worst case.
-      if (error instanceof AdapterError && error.sent) {
-        await recordCost(r.db, time, { inputTokens: 0, outputTokens: 0 }, worst);
-        return { ok: false, reason: `model_${error.code}`, units: worst };
-      }
+    const time = r.clock();
+
+    // CCA-627: the worst case is reserved BEFORE the call, atomically, with the answers' own
+    // reservation (budget.ts reserve: owner and global day rows locked in one transaction, cost
+    // units only, no answer count). Two titles of the same owner, or a title and an answer, can
+    // never both pass on the same last units; the owner's cap applies unless the config has none
+    // (internal load-test operators skip it inside reserve(), as for answers).
+    const reserved = await reserve(
+      r.db,
+      {
+        globalDailyUnits: r.config.globalDailyUnits,
+        ownerDailyUnits: r.config.ownerDailyUnits ?? Number.POSITIVE_INFINITY,
+      },
+      { ownerId: r.ownerId, kind: null, units: worst, day: dayOf(time) },
+      r.env,
+    );
+    if (!reserved.ok)
       return {
         ok: false,
-        reason: error instanceof AdapterError ? `model_${error.code}` : 'model_error',
+        reason:
+          reserved.reason === 'kill'
+            ? 'kill_switch'
+            : reserved.reason === 'unavailable'
+              ? 'budget_unavailable'
+              : reserved.reason,
       };
+
+    // From here on the reservation is always settled: to the true cost, to the worst case when
+    // the request may have cost something, or released when it never left (every outcome,
+    // including a throw).
+    let response: ModelResponse | null = null;
+    let failure: TitleResult | null = null;
+    let units = 0;
+    let usage: { inputTokens: number; outputTokens: number } | null = null;
+    try {
+      try {
+        response = await r.adapter.complete({ ...request, timeoutMs });
+      } catch (error) {
+        // Sent but failed: the request may have cost something; charge the worst case.
+        if (error instanceof AdapterError && error.sent) {
+          units = worst;
+          usage = { inputTokens: 0, outputTokens: 0 };
+          failure = { ok: false, reason: `model_${error.code}`, units: worst };
+        } else
+          failure = {
+            ok: false,
+            reason: error instanceof AdapterError ? `model_${error.code}` : 'model_error',
+          };
+      }
+      if (response) {
+        const pricing = response.pricing ?? r.adapter.pricing;
+        usage = response.usage;
+        units =
+          response.usage.reported === false
+            ? worst
+            : pricing === 'anthropic'
+              ? anthropicUnits(response.usage)
+              : r.gpuUnits(response.usage.inputTokens, response.usage.outputTokens);
+      }
+    } finally {
+      // One retry, as the catch-up does; a settle that fails twice leaves the units held until
+      // the day rolls over (never released early, so never an overspend).
+      try {
+        await settleTitle(r.db, time, r.ownerId, worst, units, usage);
+      } catch {
+        await settleTitle(r.db, time, r.ownerId, worst, units, usage).catch(() => undefined);
+      }
     }
-    const pricing = response.pricing ?? r.adapter.pricing;
-    const units =
-      response.usage.reported === false
-        ? worst
-        : pricing === 'anthropic'
-          ? anthropicUnits(response.usage)
-          : r.gpuUnits(response.usage.inputTokens, response.usage.outputTokens);
-    await recordCost(r.db, time, response.usage, units);
+    if (failure || !response) return failure ?? { ok: false, reason: 'model_error' };
     const title = cleanTitle(response.text);
     if (!title) return { ok: false, reason: 'unusable_title', units };
     // Only over the fallback: a rename that landed meanwhile wins.

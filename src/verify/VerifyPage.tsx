@@ -22,6 +22,7 @@ import {
   SIGNATURE_WORDS,
   count,
   json,
+  leavesBetween,
   load,
   number,
   plural,
@@ -60,15 +61,14 @@ function LeavesCheck({ latest }: { latest: Checkpoint }) {
   async function run() {
     setState('running');
     try {
-      const leaves: Uint8Array[] = [];
-      while (leaves.length < latest.tree_size) {
-        const page = await json<{ leaves: { idx: number; leaf_hash: string }[] }>(
-          `/api/public/count-log/leaves?from=${leaves.length}&to=${latest.tree_size}`,
-        );
-        if (!page.leaves.length) break;
-        for (const leaf of page.leaves) leaves.push(fromHex(leaf.leaf_hash));
-        setProgress(leaves.length);
-      }
+      const leaves = (
+        await leavesBetween<{ idx: number; leaf_hash: string }>(
+          0,
+          latest.tree_size,
+          json,
+          setProgress,
+        )
+      ).map((leaf) => fromHex(leaf.leaf_hash));
       const root = toHex(await merkleRoot(leaves));
       setState(leaves.length === latest.tree_size && root === latest.root ? 'ok' : 'bad');
     } catch {
@@ -284,18 +284,9 @@ function EntryCheck({
     setBusy(true);
     setResult('');
     try {
-      const leaves: Uint8Array[] = [];
-      const hexes: string[] = [];
-      while (leaves.length < latest.tree_size) {
-        const page = await json<{ leaves: { idx: number; leaf_hash: string }[] }>(
-          `/api/public/count-log/leaves?from=${leaves.length}&to=${latest.tree_size}`,
-        );
-        if (!page.leaves.length) break;
-        for (const leaf of page.leaves) {
-          leaves.push(fromHex(leaf.leaf_hash));
-          hexes.push(leaf.leaf_hash.toLowerCase());
-        }
-      }
+      const all = await leavesBetween<{ idx: number; leaf_hash: string }>(0, latest.tree_size);
+      const leaves = all.map((leaf) => fromHex(leaf.leaf_hash));
+      const hexes = all.map((leaf) => leaf.leaf_hash.toLowerCase());
       const index = /^\d+$/.test(text) ? Number(text) - 1 : hexes.indexOf(text);
       if (index < 0 || index >= leaves.length)
         return setResult(

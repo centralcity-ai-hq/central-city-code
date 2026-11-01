@@ -35,13 +35,20 @@ import {
   type Hex,
 } from 'viem';
 import type { UserOperation } from 'viem/account-abstraction';
-import type { Address } from '../../../shared/base/chains.js';
+import { BASE_MAINNET, type Address } from '../../../shared/base/chains.js';
+import { PROTOCOL_BASE_MAINNET } from '../../../shared/protocol.js';
+import { chainParams } from './chain-params.js';
 
 export type SponsorFlow = 'exit' | 'ownerPay' | 'rate' | 'registration' | 'feedPay' | 'agentPay';
 /** Flows refused whatever their calls (none: ratings were resumed once the budget was funded). */
 export const PAUSED_FLOWS: ReadonlySet<SponsorFlow> = new Set();
 /** Flows that may use the protected exit budget. */
 export const PROTECTED_FLOWS: ReadonlySet<SponsorFlow> = new Set(['exit']);
+/**
+ * Flows handed out to an owner, who signs them in the browser (withdrawals, cancels, revokes,
+ * payments, ratings). Every other flow is signed by the server itself right after it is prepared.
+ */
+export const OWNER_SIGNED_FLOWS: ReadonlySet<SponsorFlow> = new Set(['exit', 'ownerPay', 'rate']);
 
 export interface PolicyAddresses {
   usdc: Address;
@@ -63,14 +70,8 @@ export interface GasCeilings {
   maxFeePerGas: bigint;
   maxPriorityFeePerGas: bigint;
 }
-export const GAS_CEILINGS: GasCeilings = {
-  callGasLimit: 1_500_000n,
-  verificationGasLimit: 300_000n,
-  verificationGasLimitWithInit: 700_000n,
-  preVerificationGas: 200_000n,
-  maxFeePerGas: 500_000_000n, // 0.5 gwei (Base runs around 0.006 gwei), like the router-3 facilitator
-  maxPriorityFeePerGas: 50_000_000n, // 0.05 gwei
-};
+/** Base's ceilings (chain-params.ts holds every chain's). */
+export const GAS_CEILINGS: GasCeilings = chainParams(BASE_MAINNET).gasCeilings;
 
 export class PolicyRefusal extends Error {
   constructor(
@@ -244,7 +245,14 @@ export function checkSponsorship(
   checkInitCode(op, a);
   const spenderFlow = flow === 'registration' || flow === 'feedPay' || flow === 'agentPay';
   const calls = walletCalls(op, spenderFlow);
-  const never = [a.spendPermissionManager, a.smartWalletFactory, a.usdc, op.sender];
+  // The pinned sanctions oracle too: it moves no token, an exit there is lost (MPR-2).
+  const never = [
+    a.spendPermissionManager,
+    a.smartWalletFactory,
+    a.usdc,
+    op.sender,
+    PROTOCOL_BASE_MAINNET.sanctionsOracle,
+  ];
 
   for (const call of calls) {
     // ETH value only in an exit's plain ETH transfer (execute(to, value, 0x)).

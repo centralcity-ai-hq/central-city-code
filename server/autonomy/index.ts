@@ -13,6 +13,7 @@ import { cardAgent, compileCardFor } from '../manifest/card-agent.js';
 import { builtinTemplates } from '../manifest/templates.js';
 import type { PlatformSigner } from './signing.js';
 import { revokeResponderCredentials } from '../responder/revoke.js';
+import { opsAuthorizedFor } from '../elric/ops.js';
 import {
   AutonomyError,
   CLAIM_TOKEN,
@@ -271,6 +272,8 @@ export interface AutonomyDependencies {
   ): Promise<T>;
   /** AI-owned workspace capacity (server/workspaces), reported next to unclaimed capacity. */
   aiCapacity?: () => Promise<unknown>;
+  /** Where the ops secrets are read, per request; guards the platform metrics route ('metrics'). */
+  opsEnv?: () => Record<string, string | undefined>;
   /** Locks several workspace rows in a fixed (sorted) order within one transaction. */
   mutateMany<T>(
     operatorIds: string[],
@@ -508,12 +511,20 @@ export async function registerAutonomy(
     };
   }
   let lastPressureCheck = -Infinity;
-  /** Emits one structured `capacity.pressure` line per instance per minute while high. */
+  /**
+   * Emits one structured `capacity.pressure` line per instance per minute while high. It runs
+   * after the create committed, so a failed read is skipped rather than answered as an error.
+   */
   async function signalPressure(): Promise<void> {
     const now = d.clock();
     if (now - lastPressureCheck < 60_000) return;
     lastPressureCheck = now;
-    const capacity = await readCapacity();
+    let capacity: Awaited<ReturnType<typeof readCapacity>>;
+    try {
+      capacity = await readCapacity();
+    } catch {
+      return;
+    }
     if (capacity.pressure !== 'ok')
       log(JSON.stringify({ event: 'capacity.pressure', at: iso(now), ...capacity }));
   }
@@ -630,7 +641,13 @@ export async function registerAutonomy(
       await releaseHold(hold, ids);
       throw error;
     }
-    await releaseHold(hold, ids);
+    // The agents exist: returning the hold's unused part is best effort, as reconcile reclaims an
+    // abandoned hold, so a failure here never turns the committed create into an error.
+    try {
+      await releaseHold(hold, ids);
+    } catch {
+      log(JSON.stringify({ event: 'capacity.hold_release_failed', at: iso(d.clock()) }));
+    }
     await signalPressure();
     return result;
   }
@@ -870,10 +887,14 @@ export async function registerAutonomy(
   // Honest metrics: owned and unclaimed agents are counted separately, never summed.
   // N7: cached per instance for 60 seconds; the query aggregates every workspace.
   // Concurrent misses share one in-flight computation instead of each scanning every workspace.
+  // Platform totals and capacity are operator data: `Authorization: Bearer <secret>` for the
+  // 'metrics' capability (CITY_OPS_METRICS_SECRET, else CITY_OPS_SECRET; server/elric/ops.ts); without it the route answers 404, exactly like an unknown path.
   let metricsCache: { at: number; value: unknown } | null = null;
   let metricsInflight: Promise<unknown> | null = null;
-  app.get('/api/metrics/agents', async (request) => {
-    await d.owner(request);
+  app.get('/api/metrics/agents', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!opsAuthorizedFor(request.headers.authorization, d.opsEnv?.() ?? {}, 'metrics'))
+      return reply.code(404).send({ error: 'Unknown API route' });
     const now = d.clock();
     if (metricsCache && now - metricsCache.at < 60_000) return metricsCache.value;
     metricsInflight ??= computeMetrics(now).finally(() => {
@@ -967,7 +988,9 @@ export async function registerAutonomy(
     const key = d.signer.key;
     return sendCard(
       reply,
-      key ? signAgentCard(card, key, { jku: `${origin}/.well-known/jwks.json` }) : card,
+      key
+        ? signAgentCard(card, key, { jku: `${origin}/.well-known/jwks.json`, now: d.clock() })
+        : card,
       Boolean(key),
       publicCard,
     );

@@ -161,7 +161,11 @@ test('owner completes a real hosted handoff and accepts the result after review'
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await register(page, 'Browser-Owner');
-  const cookie = (await context.cookies()).find((item) => item.name === 'cc_session');
+  // __Host-cc_session on a secure deployment, cc_session on the plain-HTTP local server.
+  const cookie = (await context.cookies()).find((item) =>
+    /^(?:__Host-)?cc_session$/.test(item.name),
+  );
+  expect(cookie).toBeDefined();
   expect(cookie?.httpOnly).toBe(true);
   expect(cookie?.sameSite).toBe('Strict');
   await expect.poll(async () => (await snapshot(page)).stats.registered).toBe(0);

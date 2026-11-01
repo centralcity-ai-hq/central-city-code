@@ -358,7 +358,7 @@ test('the calendar counter: what counts, DST days, and a retry never counted twi
     utc(2026, 10, 25, 12),
     'consumed',
     'payment',
-    NETWORK.tokens.ETH.address,
+    NETWORK.tokens.ETH!.address,
   );
   await reserve('before', 9_000_000n, utc(2026, 10, 24, 21, 59));
   await reserve('next', 9_000_000n, utc(2026, 10, 25, 23));
@@ -427,6 +427,21 @@ async function spendPath(
       model,
     ],
   );
+  // Counts the transactions open, so a balance read can say whether it ran inside one.
+  const open = { transactions: 0 };
+  const watched: Database = {
+    ...db,
+    async transaction(action) {
+      open.transactions++;
+      try {
+        return await db.transaction(action);
+      } finally {
+        open.transactions--;
+      }
+    },
+  };
+  /** One entry per balance read of the paying wallet: whether a transaction was open. */
+  const balanceReads: Array<{ address: string; inTransaction: boolean }> = [];
   const periodReads: number[] = [];
   const onchain: { spend: bigint; onRead?: () => Promise<void> } = { spend: 0n };
   const client = {
@@ -462,7 +477,7 @@ async function spendPath(
   const chain = createPaymentChain({
     network: NETWORK,
     client,
-    db,
+    db: watched,
     operations,
     bundler: {} as never,
     keystore: {} as never,
@@ -475,7 +490,10 @@ async function spendPath(
     },
     ledger: createReservationLedger({
       chainId: CHAIN_ID,
-      balanceOf: async () => ({ balance: 10n ** 12n, blockNumber: 1n }),
+      balanceOf: async (address) => {
+        balanceReads.push({ address, inTransaction: open.transactions > 0 });
+        return { balance: 10n ** 12n, blockNumber: 1n };
+      },
       now: () => clock.now,
     }),
     now: () => clock.now,
@@ -490,7 +508,7 @@ async function spendPath(
     intentHash: keccak256(toHex(ref)) as Hex,
     operationKey: ref,
   });
-  return { pg, chain, reserve, intent, periodReads, signed, onchain };
+  return { pg, chain, reserve, intent, periodReads, signed, onchain, wallet, balanceReads };
 }
 
 for (const model of ['full', 'half'] as const)
@@ -697,4 +715,18 @@ test('a revoke request blocks the agent at once', async (t) => {
       return true;
     },
   );
+});
+
+test('an agent payment reads its Base balance before the wallet row is locked', async (t) => {
+  const clock = { now: utc(2026, 10, 21, 10) * 1000 };
+  const { pg, chain, intent, wallet, balanceReads } = await spendPath(t, 'half', clock);
+  // It reaches the reservation (this test stops it before anything is signed).
+  await assert.rejects(chain.submit(intent('payment:read', 1_000_000n)), /no signing in this test/);
+  const held = await pg.query(
+    `SELECT 1 FROM base_wallet_reservations WHERE holder_ref = 'payment:read'`,
+  );
+  assert.equal(held.rows.length, 1, 'reserved');
+  // One read of the paying wallet, made with no transaction open: nothing waits on Base while
+  // the wallet row is locked.
+  assert.deepEqual(balanceReads, [{ address: getAddress(wallet), inTransaction: false }]);
 });

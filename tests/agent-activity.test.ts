@@ -367,3 +367,28 @@ test('a confirmed Base registration adds one base.registered line, not before', 
   );
   assert.equal((await types()).filter((type: string) => type === 'base.registered').length, 1);
 });
+
+test('a confirmed Arc registration says Arc, never Base', async (t) => {
+  const app = await fixture(t);
+  const cookie = await account(app, 'Arc owner');
+  const scout = await agent(app, cookie, 'Arc Scout');
+  const operatorId = await operatorOf(app, cookie);
+  await app.city.db.query(
+    `INSERT INTO base_identities (agent_id, chain_id, operator_id, registry_address,
+       agent_card_uri, owner_of_identity, state, updated_at)
+     VALUES ($1, 5042, $2, '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432', 'u', '0x1', 'pending', $3)`,
+    [scout, operatorId, T0],
+  );
+  await app.city.db.query(
+    `UPDATE base_identities SET state='submitted', provisional_agent_id=2916 WHERE agent_id=$1`,
+    [scout],
+  );
+  await app.city.db.query(
+    `UPDATE base_identities SET state='confirmed', erc8004_agent_id=2916, handover_id=2916,
+       transfer_op_id='identity:transfer:5042:' || agent_id WHERE agent_id=$1`,
+    [scout],
+  );
+  const items = (await call(app, cookie, 'GET', `/api/agents/${scout}/activity`)).json().items;
+  const line = items.find((item: any) => item.type === 'base.registered');
+  assert.equal(line.text, 'Registered on Arc as agent #2916.');
+});

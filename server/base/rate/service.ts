@@ -53,7 +53,9 @@ import {
   type RatingsGiven,
   type Stars,
 } from '../../../shared/base/rate.js';
-import { WALLET_CHAIN_ID, WALLET_NETWORK } from '../../../shared/base/wallet-network.js';
+import { WALLET_NETWORK } from '../../../shared/base/wallet-network.js';
+import { chainWords } from '../../../shared/base/wallet-chains.js';
+import { chainFamily, chainView, type ChainNetwork } from '../../../shared/chains.js';
 import type { PayChainReader } from '../pay/chain.js';
 import { CLOCK_SLACK_MS } from '../pay/service.js';
 import { createPayStore, type RecipientRecord } from '../pay/store.js';
@@ -129,32 +131,36 @@ export class RateError extends Error {
   }
 }
 
-const notRateable = (message = 'Only Central City agents on Base can be rated.') =>
-  new RateError('not_rateable', message);
-const mismatch = () =>
+/** Base's sentence in the words of the service's chain (shared/base/wallet-chains.ts). */
+type Say = (text: string) => string;
+const notRateableOn = (chain: string, message?: string) =>
+  new RateError('not_rateable', message ?? `Only Central City agents on ${chain} can be rated.`);
+const mismatchOn = (say: Say) =>
   new RateError(
     'lookup_mismatch',
-    'This Base ID and passport number don’t belong to the same Central City agent.',
+    say('This Base ID and passport number don’t belong to the same Central City agent.'),
   );
-const raterNotEligible = () =>
+const raterNotEligibleOn = (say: Say) =>
   new RateError(
     'rater_not_eligible',
-    'This agent cannot rate yet: it needs its own wallet with the backup confirmed, a final Base ID and a Central City passport.',
+    say(
+      'This agent cannot rate yet: it needs its own wallet with the backup confirmed, a final Base ID and a Central City passport.',
+    ),
   );
-const changed = () =>
+const changedOn = (chain: string) =>
   new RateError(
     'lookup_changed',
-    'This agent is no longer the one looked up on Base. Look it up again.',
+    `This agent is no longer the one looked up on ${chain}. Look it up again.`,
   );
 const expired = () =>
   new RateError(
     'lookup_expired',
     'This lookup has expired or is not yours. Look the agent up again and confirm.',
   );
-const unavailable = () =>
+const unavailableOn = (chain: string) =>
   new RateError(
     'chain_unavailable',
-    'Base cannot be read right now, so the agent is not verified.',
+    `${chain} cannot be read right now, so the agent is not verified.`,
   );
 const limitReached = (max: number) =>
   new RateError(
@@ -165,9 +171,11 @@ const limitReached = (max: number) =>
 
 export interface RateDeps {
   db: Database;
-  withdrawals: WithdrawalService;
-  /** The wallet network's Base reader (ownersOf); absent when not configured (verifying is 503). */
+  withdrawals: Pick<WithdrawalService, 'rate'>;
+  /** The chain's reader (ownersOf); absent when not configured (verifying is 503). */
   chain?: PayChainReader;
+  /** The network ratings go on: an Arc network's, with its own registries. The wallet network's by default. */
+  network?: ChainNetwork;
   /** Ratings per account per Berlin day (rateDailyMax); RATE_DAILY_MAX without it. */
   dailyMax?: () => number;
   now?: () => number;
@@ -193,8 +201,8 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
 /** The lookup body: exactly {baseId, passport}, both well formed. Nothing is trimmed or guessed. */
-function parseLookup(input: unknown): RateLookup {
-  const shape = 'Send baseId and passport: the agent’s Base ID and its passport number, both.';
+export function parseLookup(input: unknown, say: Say = (text) => text): RateLookup {
+  const shape = say('Send baseId and passport: the agent’s Base ID and its passport number, both.');
   if (!isPlainObject(input)) throw new RateError('invalid_body', shape);
   const keys = Object.keys(input).sort().join(',');
   if (keys !== 'baseId,passport') throw new RateError('invalid_body', shape);
@@ -204,7 +212,7 @@ function parseLookup(input: unknown): RateLookup {
   if (!BASE_ID.test(baseId) || BigInt(baseId) > maxUint256)
     throw new RateError(
       'invalid_query',
-      'A Base ID is a whole number above 0, digits only (for example 99515).',
+      say('A Base ID is a whole number above 0, digits only (for example 99515).'),
     );
   if (!SHORT.test(passport))
     throw new RateError(
@@ -256,7 +264,7 @@ function requestHash(agentId: string, body: RateBody): string {
 }
 
 /** A stored rating as RatingsGiven lists it; null for a row that is not a whole rating. */
-function givenOf(row: GivenRow): RatingGiven | null {
+function givenOf(row: GivenRow, txExplorer: string): RatingGiven | null {
   const stars = starsOf(BigInt(row.rating_value));
   if (stars === null) return null;
   const txHash = row.tx_hash ?? null;
@@ -270,7 +278,7 @@ function givenOf(row: GivenRow): RatingGiven | null {
     state: row.state,
     txHash,
     blockNumber: row.block_number === null ? null : Number(row.block_number),
-    explorerUrl: txHash ? `${TX_EXPLORER}${txHash}` : null,
+    explorerUrl: txHash ? `${txExplorer}${txHash}` : null,
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
   };
@@ -278,17 +286,26 @@ function givenOf(row: GivenRow): RatingGiven | null {
 
 export function createRateService(deps: RateDeps) {
   const now = deps.now ?? Date.now;
-  const registry = WALLET_NETWORK.contracts.identityRegistry;
+  const network = deps.network ?? WALLET_NETWORK;
+  const chainId = network.chainId;
+  const onArc = chainFamily(chainId) === 'arc';
+  const txExplorer = onArc ? `${chainView(chainId)!.explorerUrl}/tx/` : TX_EXPLORER;
+  const notRateable = (message?: string) => notRateableOn(network.name, message);
+  const { say } = chainWords(chainId);
+  const mismatch = () => mismatchOn(say);
+  const raterNotEligible = () => raterNotEligibleOn(say);
+  const changed = () => changedOn(network.name);
+  const unavailable = () => unavailableOn(network.name);
+  const registry = network.contracts.identityRegistry;
   if (!registry) throw new Error('The wallet network has no identity registry.');
   // A reader for another network or registry would verify against the wrong records.
   if (
     deps.chain &&
-    (deps.chain.chainId !== WALLET_CHAIN_ID ||
-      deps.chain.registry.toLowerCase() !== registry.toLowerCase())
+    (deps.chain.chainId !== chainId || deps.chain.registry.toLowerCase() !== registry.toLowerCase())
   )
     throw new Error('The Base reader is not the wallet network canonical registry.');
-  const pay = createPayStore({ chainId: WALLET_CHAIN_ID, registry, network: WALLET_NETWORK });
-  const store = createRateStore({ chainId: WALLET_CHAIN_ID, registry });
+  const pay = createPayStore({ chainId, registry, network });
+  const store = createRateStore({ chainId, registry });
   const db = deps.db;
 
   /** The rating agent's own wallet, only for its owner account; 404 otherwise (not disclosed). */
@@ -406,14 +423,16 @@ export function createRateService(deps: RateDeps) {
         limit: RATINGS_GIVEN_MAX,
       });
       return {
-        ratings: rows.map(givenOf).filter((rating): rating is RatingGiven => rating !== null),
+        ratings: rows
+          .map((row) => givenOf(row, txExplorer))
+          .filter((rating): rating is RatingGiven => rating !== null),
       };
     },
 
     /** Who a rating would rate, checked with the rater on Base at one block; for this rater. */
     async lookup(accountId: string, agentId: string, input: unknown): Promise<RateTarget> {
       const sender = await senderOf(accountId, agentId);
-      const typed = parseLookup(input);
+      const typed = parseLookup(input, say);
       const rater = await raterOf(agentId, sender);
       const rated = await agentNamedBy(typed);
       await refuseOwn(accountId, rater, rated);
@@ -421,7 +440,9 @@ export function createRateService(deps: RateDeps) {
       if (!evidence.raterHolds) throw raterNotEligible();
       if (!evidence.ratedHolds)
         throw notRateable(
-          "This Base ID is not held by its Central City agent's wallet on Base right now.",
+          say(
+            `This Base ID is not held by its Central City agent's wallet on ${network.name} right now.`,
+          ),
         );
       const lookup = await store.issueLookup(db, {
         lookupId: `rl_${randomBytes(24).toString('base64url')}`,
@@ -447,7 +468,7 @@ export function createRateService(deps: RateDeps) {
       const body = parseRate(input);
       // One cap for both counts of this request, read once.
       const dailyMax = deps.dailyMax?.() ?? RATE_DAILY_MAX;
-      return deps.withdrawals.rate(accountId, agentId, {
+      const signing = await deps.withdrawals.rate(accountId, agentId, {
         request: requestHash(agentId, body),
         idempotencyKey: body.idempotencyKey,
         // Only for a new rating (a replay is a read): the lookup this account was issued for this
@@ -496,6 +517,13 @@ export function createRateService(deps: RateDeps) {
           if ((await store.today(tx, accountId, now())) > dailyMax) throw limitReached(dailyMax);
         },
       });
+      // On Arc, nothing goes to the owner to sign unless it goes to Arc's own registry.
+      if (
+        onArc &&
+        getAddress(signing.summary.registry) !== getAddress(network.contracts.reputationRegistry)
+      )
+        throw unavailable();
+      return signing;
     },
   };
 }

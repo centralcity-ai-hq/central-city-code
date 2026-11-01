@@ -41,6 +41,8 @@ import {
   buildInputs,
   CALL_GONE,
   callLine,
+  callTxLabel,
+  feeTxHref,
   callPageSub,
   confirmText,
   draftFromExample,
@@ -1325,4 +1327,57 @@ test('History lines: paid, paying, didn’t go through, and moves between the ag
     moveLine({ ...history.moves[1]!, state: 'failed' }),
     'Moving 0.98 USDC back to the wallet didn’t go through',
   );
+});
+
+test('a call on Arc names Arc; a call on Base reads as ever', () => {
+  const on = (network: string, overrides: Record<string, unknown> = {}) =>
+    ({
+      state: 'reconciling',
+      moneyMoved: 'pending',
+      service: { host: 'www.ax1.vc' },
+      maxAmount: { raw: '10000' },
+      payment: { amountRaw: '10000', state: 'authorized', network },
+      ...overrides,
+    }) as unknown as Parameters<typeof callLine>[0];
+  const arc = on('eip155:5042002');
+  assert.equal(callLine(arc).text, 'Checking on Arc Testnet whether the payment went through…');
+  assert.equal(paymentNote(arc), 'Confirming on Arc Testnet');
+  assert.equal(callTxLabel(arc), 'Arc Testnet transaction');
+  const base = on('eip155:8453');
+  assert.equal(callLine(base).text, 'Checking on Base whether the payment went through…');
+  assert.equal(paymentNote(base), 'Confirming on Base');
+  assert.equal(callTxLabel(base), 'Base transaction');
+  // The fee's own transaction: on the chain the call paid on.
+  const fee = { txHash: `0x${'ab'.repeat(32)}`, state: 'charged', amountRaw: '1000' };
+  assert.equal(
+    feeTxHref({ protocolFee: fee, payment: { network: 'eip155:5042002' } } as never),
+    `https://explorer.testnet.arc.io/tx/${fee.txHash}`,
+  );
+  assert.doesNotMatch(
+    feeTxHref({ protocolFee: fee, payment: { network: 'eip155:8453' } } as never) ?? '',
+    /arc\.io/,
+  );
+});
+
+test('the unavailable refusal: Base’s sentence unless the agent is on Arc', () => {
+  const failure = new PayFailure(503, 'unavailable', false);
+  const base = 'Payments on Base are not available right now. Try again in a moment.';
+  assert.equal(refusalSentence(failure), base);
+  assert.equal(refusalSentence(failure, { chainId: 8453 }), base);
+  assert.equal(
+    refusalSentence(failure, { chainId: 5042002 }),
+    'Payments on Arc Testnet are not available right now. Try again in a moment.',
+  );
+});
+
+test('the price is checked for the agent that would pay: the server can say other_chain then', async () => {
+  const { seen, fetcher } = recorder(() => json(200, { payable: false, reason: 'own_service' }));
+  const s = service();
+  await quoteService(s.id, { query: { domain: 'a' } }, { fetcher, agentId: 'agent-1' });
+  assert.deepEqual(JSON.parse(String(seen[0]!.init.body)), {
+    inputs: { query: { domain: 'a' } },
+    agentId: 'agent-1',
+  });
+  await quoteService(s.id, {}, { fetcher });
+  assert.deepEqual(JSON.parse(String(seen[1]!.init.body)), { inputs: {} });
 });

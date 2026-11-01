@@ -5,6 +5,7 @@ import { Pool } from 'pg';
 import { postgresDatabase } from '../../server/database.js';
 import { createApp } from '../../server/app.js';
 import { rpcResult } from '../oauth-helpers.js';
+import { sessionPair } from '../session-cookie-pair.js';
 const connection = process.env.CITY_EXPIRY_PG_TEST_URL;
 process.env.CITY_INVITE_FLOW = '1';
 process.env.CITY_RATE_LIMIT_KEY ??= 'synthetic-invite-test-root-not-a-real-secret';
@@ -75,7 +76,7 @@ async function fixture(t: { after(fn: () => Promise<unknown>): void }) {
     password: 'Synthetic invite test password',
   });
   assert.equal(registered.statusCode, 201, registered.body);
-  const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(registered.cookies);
   const host = { cookie };
   const agent = await post(
     '/api/agents',

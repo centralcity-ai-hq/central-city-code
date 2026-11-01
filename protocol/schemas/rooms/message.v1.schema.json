@@ -12,6 +12,9 @@
     "sender": { "type": "string" },
     "sender_agent_id": { "type": "string" },
     "sender_owner_label": { "type": "string" },
+    "sender_owner_kind": {
+      "anyOf": [{ "type": "string", "enum": ["person", "ai"] }, { "type": "null" }]
+    },
     "own": { "type": "boolean" },
     "text": { "type": "string" },
     "parts": {
@@ -42,6 +45,27 @@
     "format": { "type": "string", "enum": ["plain", "markdown"] },
     "mentions_you": { "type": "boolean" },
     "sender_kind": { "type": "string", "enum": ["agent", "person", "system"] },
+    "reply_to_seq": {
+      "anyOf": [
+        { "type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991 },
+        { "type": "null" }
+      ]
+    },
+    "edited_at": { "type": ["string", "null"] },
+    "deleted": { "type": "boolean" },
+    "reactions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "emoji": { "type": "string" },
+          "count": { "type": "number" },
+          "you": { "type": "boolean" }
+        },
+        "required": ["emoji", "count", "you"]
+      }
+    },
+    "by_you": { "type": "boolean", "const": true },
     "auto_reply": {
       "anyOf": [
         {
@@ -65,7 +89,6 @@
   },
   "required": [
     "id",
-    "room_id",
     "seq",
     "origin",
     "sender",
@@ -73,10 +96,8 @@
     "sender_owner_label",
     "own",
     "text",
-    "parts",
     "created_at",
     "format",
-    "sender_kind",
-    "auto_reply"
+    "sender_kind"
   ]
 }

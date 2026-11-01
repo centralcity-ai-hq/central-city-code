@@ -1,8 +1,9 @@
 import { assertOnboarded } from './onboarding.js';
+import { ASSISTANT_GRANT_PREFIX } from './credential-prefixes.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { Database, Transaction as Tx } from './database.js';
 import type { CityLimits } from './limits.js';
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import {
   ASSISTANT_SCOPES,
@@ -24,7 +25,10 @@ import {
   readInboxToolInput,
   sendMessageToolInput,
 } from './messaging/contract.js';
+// A leaf module: read at route registration (no import cycle in the bundle).
+import { MESSAGE_BODY_MAX_BYTES, MESSAGE_SEND_TOOLS } from './messaging/body-limits.js';
 import { ROOM_TOOLS, type RoomToolName } from './rooms/contract.js';
+import { ROOM_MANIFEST_TOOL, type RoomManifestToolName } from './rooms/manifest-tool-names.js';
 import {
   ROOM_TASK_TOOLS,
   ROOM_TASK_TOOL_SCOPES,
@@ -40,6 +44,20 @@ import {
   runRoomPinTool,
   type RoomPinToolName,
 } from './rooms/pins-tools.js';
+import type { RoomCards } from './rooms/cards.js';
+import type { RoomArtifacts } from './rooms/artifacts.js';
+import {
+  ROOM_FILE_TOOLS,
+  ROOM_FILE_TOOL_SCOPES,
+  runRoomFileTool,
+  type RoomFileToolName,
+} from './rooms/artifacts-tools.js';
+import {
+  ROOM_CARD_TOOLS,
+  ROOM_CARD_TOOL_SCOPES,
+  runRoomCardTool,
+  type RoomCardToolName,
+} from './rooms/cards-tools.js';
 import {
   ROOM_REPO_TOOLS,
   ROOM_REPO_TOOL_SCOPES,
@@ -93,12 +111,17 @@ import {
   type InvitationToolName,
   type InvitationToolService,
 } from './rooms/invitations-tools.js';
-import { WAKE_TOOLS, roomReadWaitToolInput, type WakeToolName } from './wake/contract.js';
+import {
+  WAKE_LIMITS,
+  WAKE_TOOLS,
+  roomReadWaitToolInput,
+  type WakeToolName,
+} from './wake/contract.js';
 import { idleKeys, type Wake } from './wake/service.js';
 import { RESULT_TOOLS, type ResultToolName } from './results/contract.js';
 import type { Results } from './results/service.js';
 import { ELRIC_RESERVED_NAME_MESSAGE, reservedName } from './elric/names.js';
-import type { InboxPage } from './messaging/contract.js';
+import { NO_NUL_MESSAGE, noNul, storableJson, type InboxPage } from './messaging/contract.js';
 import {
   event,
   hasPermission,
@@ -106,6 +129,7 @@ import {
   publicAgent,
   publicJob,
   stopJob,
+  active,
   type Workspace,
   type StoredAgent,
 } from './model.js';
@@ -141,8 +165,15 @@ export const assistantAgentSchema = z
       .trim()
       .min(1)
       .max(AGENT_NAME_MAX)
-      .regex(NO_CONTROL, 'Remove control characters.'),
-    description: z.string().trim().max(300).regex(NO_NUL, 'Remove control characters.').default(''),
+      .regex(NO_CONTROL, 'Remove control characters.')
+      .refine(noNul, NO_NUL_MESSAGE),
+    description: z
+      .string()
+      .trim()
+      .max(300)
+      .regex(NO_NUL, 'Remove control characters.')
+      .refine(noNul, NO_NUL_MESSAGE)
+      .default(''),
     capability: z.enum(['research', 'extract', 'verify']),
     mode: z.enum(['hosted', 'external']),
   })
@@ -151,11 +182,18 @@ export const assistantJobSchema = z
   .object({
     requesterId: z.string().uuid(),
     providerId: z.string().uuid(),
-    input: z.string().trim().min(1).max(12000).regex(NO_NUL, 'Remove control characters.'),
+    input: z
+      .string()
+      .trim()
+      .min(1)
+      .max(12000)
+      .regex(NO_NUL, 'Remove control characters.')
+      .refine(noNul, NO_NUL_MESSAGE),
     idempotencyKey: z
       .string()
       .min(8)
       .max(128)
+      .refine(noNul, NO_NUL_MESSAGE)
       .refine(
         (key) =>
           !['a2a:', 'workflow:', 'assistant:', 'xw:'].some((prefix) => key.startsWith(prefix)),
@@ -250,6 +288,10 @@ interface Dependencies {
   tasks: RoomTasks;
   /** Room pins and the handoff brief (docs/ROOMS.md "Pins and the handoff brief"). */
   pins: RoomPins;
+  /** Room decisions, approvals and task results (docs/ROOMS.md "Decisions and approvals"). */
+  cards: RoomCards;
+  /** Room files (docs/ROOMS.md "Room files"); no delete tool (console only). */
+  files: RoomArtifacts;
   /** Room repos (docs/ROOM_REPOS.md); the tools are behind CITY_ROOM_REPOS=1. */
   repos: RoomRepos;
   /** Mentions, long-poll and wake-up webhooks (docs/WAKE.md). */
@@ -325,9 +367,19 @@ export const ASSISTANT_TOOL_SCOPES = {
   city_room_leave: 'rooms:join',
   city_room_search: 'rooms:join',
   city_room_overview: 'rooms:join',
+  city_room_session: 'rooms:join',
+  city_room_manifest: 'rooms:join',
   city_room_update: 'rooms:host',
+  city_room_message_edit: 'rooms:join',
+  city_room_message_delete: 'rooms:join',
+  city_room_react: 'rooms:join',
+  city_room_handoff: 'rooms:join',
   // Room pins and the handoff brief: the same scope as posting (rooms:join).
   ...ROOM_PIN_TOOL_SCOPES,
+  // Room cards: the same scope as posting; answering an approval is console-only (no tool).
+  ...ROOM_CARD_TOOL_SCOPES,
+  // Room files: the same scope as posting; deleting a file is console-only (no tool).
+  ...ROOM_FILE_TOOL_SCOPES,
   // Room tasks: rooms:join; host-only actions are enforced in the service.
   ...ROOM_TASK_TOOL_SCOPES,
   // Room repos: reads need rooms:join; bind/unbind need rooms:apply, and the
@@ -461,7 +513,7 @@ export async function registerAssistantAccess(
       )`,
       [operatorId, time],
     );
-    const token = randomBytes(32).toString('base64url');
+    const token = `${ASSISTANT_GRANT_PREFIX}${randomBytes(32).toString('base64url')}`;
     const row = (
       await tx.query<GrantRow>(
         'INSERT INTO assistant_grants(id,operator_id,token_hash,label,scopes,created_at,expires_at) VALUES($1,$2,$3,$4,$5::jsonb,$6,$7) RETURNING *',
@@ -523,20 +575,46 @@ export async function registerAssistantAccess(
   });
 
   const scopes: Record<string, AssistantScope> = ASSISTANT_TOOL_SCOPES;
-  app.post('/api/assistant/tools/:tool', async (request) =>
-    runToolRoute(request, z.object({ tool: z.string() }).parse(request.params).tool),
+  app.post('/api/assistant/tools/:tool', async (request, reply) =>
+    runToolRoute(request, reply, z.object({ tool: z.string() }).parse(request.params).tool),
   );
   // The offer batch tools take up to 1 MiB (OFFER_LIMITS.batchBytesMax) on their own static
   // routes, which win over /:tool; every other tool keeps the app's 64 KiB body limit.
   for (const tool of OFFER_BATCH_TOOLS)
-    app.post(`/api/assistant/tools/${tool}`, { bodyLimit: OFFER_LIMITS.batchBytesMax }, (request) =>
-      runToolRoute(request, tool),
+    app.post(
+      `/api/assistant/tools/${tool}`,
+      { bodyLimit: OFFER_LIMITS.batchBytesMax },
+      (request, reply) => runToolRoute(request, reply, tool),
     );
-  async function runToolRoute(request: FastifyRequest, tool: string) {
+  // The message tools take one whole message (MESSAGE_BODY_MAX_BYTES).
+  for (const tool of MESSAGE_SEND_TOOLS)
+    app.post(
+      `/api/assistant/tools/${tool}`,
+      { bodyLimit: MESSAGE_BODY_MAX_BYTES },
+      (request, reply) => runToolRoute(request, reply, tool),
+    );
+  /**
+   * Transport context of one REST tool call. As on /mcp (server/remote-mcp/index.ts), a client
+   * that disconnects before the answer aborts the call: a long-poll (wait=) stops waiting instead
+   * of holding the function to its deadline (audit R1-10). Called only after authentication, so
+   * an authenticated wait also gets a socket idle timeout that outlasts it (extendForWait).
+   */
+  function restContext(request: FastifyRequest, reply: FastifyReply): ToolContext {
+    const disconnect = new AbortController();
+    reply.raw.once('close', () => {
+      if (!reply.raw.writableFinished) disconnect.abort();
+    });
+    const wait = (request.body as { wait?: unknown } | null | undefined)?.wait;
+    if (typeof wait === 'number' && wait > 0 && wait <= WAKE_LIMITS.maxWaitSeconds)
+      request.raw.socket?.setTimeout?.((wait + 15) * 1000);
+    return { origin: d.originOf(request), signal: disconnect.signal };
+  }
+  async function runToolRoute(request: FastifyRequest, reply: FastifyReply, tool: string) {
     const authorization = request.headers.authorization;
     if (
       typeof authorization !== 'string' ||
-      !/^Bearer (?:ccw_)?[A-Za-z0-9_-]{43}$/.test(authorization)
+      // Grant tokens issued before the ccag_ prefix stay valid until they are rotated.
+      !/^Bearer (?:ccw_|ccag_)?[A-Za-z0-9_-]{43}$/.test(authorization)
     )
       d.fail(401, 'Invalid assistant credential.');
     const presented = authorization.slice(7);
@@ -555,7 +633,7 @@ export async function registerAssistantAccess(
         },
         tool,
         request.body,
-        { origin: d.originOf(request) },
+        restContext(request, reply),
       );
     }
     const tokenHash = hash(presented);
@@ -572,7 +650,7 @@ export async function registerAssistantAccess(
       { grantId: identity.id, operatorId: identity.operator_id, tokenHash, address: request.ip },
       tool,
       request.body,
-      { origin: d.originOf(request) },
+      restContext(request, reply),
     );
   }
 
@@ -608,7 +686,12 @@ export async function registerAssistantAccess(
    * only a lookup): a revoked, expired or rotated grant or key fails here with 401. This check
    * runs on every call; only the `last_used_at` write is throttled (touchLastUsed).
    */
-  async function loadAuthority(tx: Tx, identity: GrantIdentity, time: number): Promise<Authority> {
+  async function loadAuthority(
+    tx: Tx,
+    identity: GrantIdentity,
+    time: number,
+    touch = true,
+  ): Promise<Authority> {
     // The shared onboarding gate (server/onboarding.ts): grants and AI workspace keys (through
     // the AI workspace's human co-owners) on every path that acts with them.
     await assertOnboarded(tx, identity.operatorId);
@@ -626,7 +709,7 @@ export async function registerAssistantAccess(
         )
       ).rows[0];
       if (!key || key.revoked_at !== null) d.fail(401, 'Workspace key revoked.');
-      await touchLastUsed(tx, 'workspace_keys', key.id, key.last_used_at, time);
+      if (touch) await touchLastUsed(tx, 'workspace_keys', key.id, key.last_used_at, time);
       return {
         id: key.id,
         label: key.label,
@@ -647,7 +730,7 @@ export async function registerAssistantAccess(
     ).rows[0];
     if (!grant || grant.revoked_at !== null || Number(grant.expires_at) <= time)
       d.fail(401, 'Assistant grant expired or revoked.');
-    await touchLastUsed(tx, 'assistant_grants', grant.id, grant.last_used_at, time);
+    if (touch) await touchLastUsed(tx, 'assistant_grants', grant.id, grant.last_used_at, time);
     return {
       id: grant.id,
       label: grant.label,
@@ -718,6 +801,14 @@ export async function registerAssistantAccess(
     context: ToolContext,
   ): Promise<unknown> {
     if (!Object.hasOwn(scopes, tool)) d.fail(404, 'Assistant tool not found.');
+    // Before any tool runs: a credential without the right gets no replay and spends nothing of
+    // the workspace's budgets. A plain read; each tool checks again inside its own transaction.
+    permit(
+      await loadAuthority(d.db as unknown as Tx, identity, (d.now ?? Date.now)(), false),
+      tool,
+    );
+    // Every tool's input, whatever its schema: text the database can't store is a 400, not a 500.
+    if (!storableJson(body)) d.fail(400, NO_NUL_MESSAGE);
     if (tool === 'city_send_message' || tool === 'city_read_inbox' || tool === 'city_ack_inbox')
       return messageTool(identity, tool, body, context.signal);
     if ((WAKE_TOOLS as readonly string[]).includes(tool))
@@ -749,10 +840,14 @@ export async function registerAssistantAccess(
       tool === 'city_revoke_connection'
     )
       return connectionTool(identity, tool, body);
-    if ((ROOM_TOOLS as readonly string[]).includes(tool))
-      return roomTool(identity, tool as RoomToolName, body, context);
+    if ((ROOM_TOOLS as readonly string[]).includes(tool) || tool === ROOM_MANIFEST_TOOL)
+      return roomTool(identity, tool as RoomToolName | RoomManifestToolName, body, context);
     if ((ROOM_PIN_TOOLS as readonly string[]).includes(tool))
       return pinTool(identity, tool as RoomPinToolName, body, context);
+    if ((ROOM_CARD_TOOLS as readonly string[]).includes(tool))
+      return cardTool(identity, tool as RoomCardToolName, body, context);
+    if ((ROOM_FILE_TOOLS as readonly string[]).includes(tool))
+      return fileTool(identity, tool as RoomFileToolName, body, context);
     if ((INVITATION_TOOLS as readonly string[]).includes(tool))
       return invitationTool(identity, tool as InvitationToolName, body, context);
     if ((ROOM_TASK_TOOLS as readonly string[]).includes(tool)) {
@@ -963,6 +1058,9 @@ export async function registerAssistantAccess(
         const { id } = idSchema.parse(body),
           found = job(id);
         if (tool === 'city_cancel_job') {
+          // A repeat cancel changes nothing; a job that finished another way can't be canceled.
+          if (found.status !== 'canceled' && !active(found))
+            d.fail(409, 'This job already finished, so it can no longer be canceled.');
           stopJob(workspace, found, time, `${capital(authority.who)} canceled the job.`);
           response = { ok: true };
         } else {
@@ -1091,6 +1189,8 @@ export async function registerAssistantAccess(
         );
         if (!found) d.fail(404, 'Job not found.');
         if (tool === 'city_cancel_job') {
+          if (found.status !== 'canceled' && !active(found))
+            d.fail(409, 'This job already finished, so it can no longer be canceled.');
           stopJob(other, found, time, 'The requester in another workspace canceled the job.');
           event(own, time, 'assistant.tool_used', `${capital(authority.who)} used ${tool}.`);
           return { ok: true };
@@ -1171,7 +1271,7 @@ export async function registerAssistantAccess(
    */
   async function roomTool(
     identity: GrantIdentity,
-    tool: RoomToolName,
+    tool: RoomToolName | RoomManifestToolName,
     body: unknown,
     context: ToolContext,
   ): Promise<unknown> {
@@ -1182,6 +1282,9 @@ export async function registerAssistantAccess(
           ? `workspace key ${identity.grantId}`
           : `assistant grant ${identity.grantId}`,
       origin: context.origin,
+      // CCA-623: short-code joins from /mcp and the tool API spend the same per-address tiers as
+      // /j, bootstrap and the console join, not only the account and global budgets.
+      ...(identity.address ? { address: identity.address } : {}),
     };
     const creates =
       tool === 'city_join_room' &&
@@ -1228,7 +1331,14 @@ export async function registerAssistantAccess(
     if (tool === 'city_room_leave') return d.rooms.leave(principal, body, guard);
     if (tool === 'city_room_search') return d.rooms.search(principal, body, guard);
     if (tool === 'city_room_overview') return d.rooms.overview(principal, body, guard);
+    if (tool === 'city_room_session') return d.rooms.session(principal, body, guard);
+    if (tool === ROOM_MANIFEST_TOOL) return d.rooms.manifest(principal, body, guard);
     if (tool === 'city_room_update') return d.rooms.update(principal, body, guard);
+    if (tool === 'city_room_message_edit') return d.rooms.editMessage(principal, body, guard);
+    if (tool === 'city_room_message_delete') return d.rooms.deleteMessage(principal, body, guard);
+    if (tool === 'city_room_react') return d.rooms.react(principal, body, guard);
+    if (tool === 'city_room_handoff') return d.rooms.handoff(principal, body, guard);
+    if (tool !== 'city_room_close') throw new Error(`Unrouted room tool ${tool}`);
     return d.rooms.close(principal, body, guard);
   }
   /**
@@ -1274,6 +1384,44 @@ export async function registerAssistantAccess(
     const guard = guardFor(identity, tool);
     await d.db.transaction((tx) => guard(tx, (d.now ?? Date.now)()));
     return runRoomPinTool(d.pins, tool, body, principal);
+  }
+  /** Room card tools: the grant or key is rechecked first, as for pins. Never console. */
+  async function cardTool(
+    identity: GrantIdentity,
+    tool: RoomCardToolName,
+    body: unknown,
+    context: ToolContext,
+  ): Promise<unknown> {
+    const principal = {
+      operatorId: identity.operatorId,
+      actor:
+        identity.keyHash !== undefined
+          ? `workspace key ${identity.grantId}`
+          : `assistant grant ${identity.grantId}`,
+      origin: context.origin,
+    };
+    const guard = guardFor(identity, tool);
+    await d.db.transaction((tx) => guard(tx, (d.now ?? Date.now)()));
+    return runRoomCardTool(d.cards, tool, body, principal);
+  }
+  /** Room file tools: the grant or key is rechecked first, as for cards. Never console. */
+  async function fileTool(
+    identity: GrantIdentity,
+    tool: RoomFileToolName,
+    body: unknown,
+    context: ToolContext,
+  ): Promise<unknown> {
+    const principal = {
+      operatorId: identity.operatorId,
+      actor:
+        identity.keyHash !== undefined
+          ? `workspace key ${identity.grantId}`
+          : `assistant grant ${identity.grantId}`,
+      origin: context.origin,
+    };
+    const guard = guardFor(identity, tool);
+    await d.db.transaction((tx) => guard(tx, (d.now ?? Date.now)()));
+    return runRoomFileTool(d.files, tool, body, principal);
   }
   /**
    * Room invitation tools: the current grant or key is rechecked in a small

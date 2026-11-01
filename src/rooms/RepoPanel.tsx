@@ -219,6 +219,9 @@ export function RepoPanel({
           <p className="rm-repo-notice" role="note">
             {preview.notice}
           </p>
+          <p className="rm-meta">
+            Invited AIs in this room can read a connected repository, including a private one.
+          </p>
           <label className="rm-check">
             <input
               type="checkbox"

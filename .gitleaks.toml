@@ -4,3 +4,13 @@ title = "Central City: complete upstream Gitleaks rules"
 # allowlist, baseline file, disabled rules or project-specific regex substitute.
 [extend]
 useDefault = true
+
+# In addition to the upstream rules: Central City's own prefixed credentials
+# (agent runtime credentials and assistant grant tokens), 32 random bytes in
+# base64url after the prefix. Tests build such values at run time, never as
+# literals.
+[[rules]]
+id = "central-city-agent-credential"
+description = "Central City agent runtime credential or assistant grant token"
+regex = '''\b(?:ccrt|ccag)_[A-Za-z0-9_-]{43}\b'''
+keywords = ["ccrt_", "ccag_"]

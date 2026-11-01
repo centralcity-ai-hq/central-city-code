@@ -430,3 +430,132 @@ test('limit notices: owner-only and ephemeral, per kind, with the reset time', a
   // Nothing about limits is ever posted into the room.
   assert.ok((await f.messages(s.room.id)).every((row) => !f.textOf(row).includes('used up')));
 });
+
+test('pausing after a paid model step keeps the allowance used; pause and resume cannot loop it', async (t) => {
+  const f = await elricFixture(t, { config: { allowance: { short: 2, summary: 1, tool: 1 } } });
+  const s = await f.scene();
+  const cutShort = async (n: number) => {
+    const trigger = await f.say(s.owner, s.room, `@Elric look around ${n}`, s.person);
+    f.small.push({ toolCalls: [{ name: 'room_read', args: { room_id: s.room.id } }] });
+    // The first model step answered (and was paid for); the owner pauses before the tool runs.
+    f.setProbe(async (point) => {
+      if (point === 'before_tool') await f.elric.pause(s.owner.operatorId);
+    });
+    const result = await f.elric.run({
+      agentId: s.elricId,
+      roomId: s.room.id,
+      sourceSeq: trigger.message.seq,
+    });
+    f.setProbe(undefined);
+    await f.elric.resume(s.owner.operatorId);
+    return result;
+  };
+  assert.deepEqual(
+    [(await cutShort(1))?.outcome, (await cutShort(2))?.outcome],
+    ['refused_inactive', 'refused_inactive'],
+  );
+  assert.equal(f.adapterCalls(), 2);
+  const usage = (await f.usage(s.owner.operatorId))!;
+  assert.equal(usage.short, 2, 'each paid run used its allowance count');
+  assert.equal(Number(usage.reserved_units), 0);
+  const turns = await f.turns(s.owner.operatorId);
+  assert.equal(
+    Number(usage.spent_units),
+    turns.reduce((sum, turn) => sum + Number(turn.cost_units), 0),
+  );
+  // The allowance is used up: the third run is refused before any model call.
+  const third = await f.say(s.owner, s.room, '@Elric look around 3', s.person);
+  const limited = await f.elric.run({
+    agentId: s.elricId,
+    roomId: s.room.id,
+    sourceSeq: third.message.seq,
+  });
+  assert.deepEqual([limited?.outcome, limited?.reason], ['limit', 'owner_allowance']);
+  assert.equal(f.adapterCalls(), 2);
+});
+
+test('pausing cancels a deferred run: refunded only when it spent nothing', async (t) => {
+  const f = await elricFixture(t);
+  const s = await f.scene();
+  const day = '2026-09-30';
+  const deferred = async (text: string, spent: number) => {
+    const trigger = await f.say(s.owner, s.room, text, s.person);
+    // A run put back after a deferral, holding its reservation (what defer() leaves behind).
+    await f.db.query(
+      `UPDATE elric_invocations SET reserved_units=100, usage_day=$3, kind='short', spent_units=$4,
+          deferred_at=$5 WHERE agent_id=$1 AND source_seq=$2`,
+      [s.elricId, trigger.message.seq, day, spent, f.now()],
+    );
+  };
+  await deferred('@Elric first', 0);
+  await deferred('@Elric second', 7);
+  await f.db.query(
+    `INSERT INTO elric_usage(owner_id,day,short,reserved_units) VALUES($1,$2,2,200)`,
+    [s.owner.operatorId, day],
+  );
+  await f.elric.pause(s.owner.operatorId);
+  const usage = (await f.usage(s.owner.operatorId))!;
+  // The run that spent nothing is refunded; the one that spent 7 units keeps its count.
+  assert.deepEqual(
+    [usage.short, Number(usage.reserved_units), Number(usage.spent_units)],
+    [1, 0, 7],
+  );
+});
+
+test('per-owner cost cap: an owner cannot reserve past their daily units; other owners still can', async (t) => {
+  // Room for two Tier 1 reservations per owner, ten under the global ceiling.
+  const f = await elricFixture(t, {
+    config: { ownerDailyUnits: TIER1 * 2, globalDailyUnits: TIER1 * 10 },
+  });
+  const a = await f.scene('Units room A');
+  const b = await f.scene('Units room B');
+  // What A already reserved and spent today (still well inside the allowance count).
+  await f.db.query(
+    `INSERT INTO elric_usage(owner_id,day,short,spent_units) VALUES($1,'2026-09-30',1,$2)`,
+    [a.owner.operatorId, TIER1 + 1],
+  );
+  const trigger = await f.say(a.owner, a.room, '@Elric one more', a.person);
+  const result = await f.elric.run({
+    agentId: a.elricId,
+    roomId: a.room.id,
+    sourceSeq: trigger.message.seq,
+  });
+  assert.deepEqual([result?.outcome, result?.reason], ['limit', 'owner_units']);
+  assert.equal(result?.notice, "You have used today's Elric budget. It resets at 00:00 UTC.");
+  assert.equal(result?.resetsAt, '2026-10-01T00:00:00.000Z');
+  assert.equal(f.adapterCalls(), 0);
+  const usage = (await f.usage(a.owner.operatorId))!;
+  assert.deepEqual([usage.short, Number(usage.reserved_units)], [1, 0], 'nothing reserved');
+  // Another owner is not affected.
+  await f.say(b.owner, b.room, '@Elric hello', b.person);
+  await f.elric.drain();
+  assert.equal((await f.turns(b.owner.operatorId)).at(-1)!.outcome, 'ok');
+  // An internal load-test operator skips the owner's cost cap (never the count or the ceiling).
+  process.env.CITY_STRESS_TEST_OPERATORS = a.owner.operatorId;
+  try {
+    const again = await f.say(a.owner, a.room, '@Elric and now?', a.person);
+    const allowed = await f.elric.run({
+      agentId: a.elricId,
+      roomId: a.room.id,
+      sourceSeq: again.message.seq,
+    });
+    assert.equal(allowed?.outcome, 'ok');
+  } finally {
+    delete process.env.CITY_STRESS_TEST_OPERATORS;
+  }
+});
+
+test('per-owner cost cap: reserve() refuses in the same transaction, the global row untouched', async (t) => {
+  const f = await elricFixture(t);
+  const config = { ...ELRIC_CONFIG, ownerDailyUnits: 100 };
+  const owner = (await f.account('Units owner')).operatorId;
+  const day = '2026-09-30';
+  const first = await reserve(f.db, config, { ownerId: owner, kind: 'short', units: 60, day });
+  assert.equal(first.ok, true);
+  const second = await reserve(f.db, config, { ownerId: owner, kind: 'short', units: 41, day });
+  assert.deepEqual(second, { ok: false, reason: 'owner_units' });
+  const global = (await f.globalUsage())!;
+  assert.deepEqual([Number(global.reserved_units), global.invocations], [60, 1]);
+  const usage = (await f.usage(owner))!;
+  assert.deepEqual([usage.short, Number(usage.reserved_units)], [1, 60]);
+});

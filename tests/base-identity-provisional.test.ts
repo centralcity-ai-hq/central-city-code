@@ -29,6 +29,7 @@ import { registerShortLinks } from '../server/base/identity/short-links.js';
 import { BASE_SEPOLIA, baseNetwork } from '../shared/base/chains.js';
 import { shortAgentUri } from '../shared/base/short-id.js';
 import { FakeIdentityChain, hashOf, type FakeMint } from './base-identity-fake-chain.js';
+import { BASE_IDENTITY_MOVES_SQL } from '../server/base/identity/moves.js';
 
 const WALLET = `0x${'1'.repeat(40)}`;
 const SPENDER = `0x${'3'.repeat(40)}`;
@@ -78,6 +79,7 @@ async function setup(
     "CREATE TABLE operators (id text PRIMARY KEY); INSERT INTO operators VALUES ('ws');",
   );
   await pg.exec(BASE_MIGRATION_SQL);
+  await pg.exec(BASE_IDENTITY_MOVES_SQL);
   await pg.exec(BASE_PAYMENTS_MIGRATION_SQL);
   await pg.exec(baseShortIdsMigration.sql);
   const db: Database = {
@@ -1157,10 +1159,13 @@ test('D3: the 30-minute retry goes through register() with the next attempt key 
       uri: await svcUri(ctx),
       spenderKeyRef: 'v1:k',
       spender: SPENDER,
+      accountId: 'ws',
     },
   ]);
+  // The agent's workspace is named for the sponsorship budget; nothing else is added.
   for (const input of chain.registerInputs)
     assert.deepEqual(Object.keys(input).sort(), [
+      'accountId',
       'chainId',
       'operationKey',
       'spender',
@@ -1259,6 +1264,7 @@ for (const [name, first] of neverVerified) {
         uri: await svcUri(ctx),
         spenderKeyRef: 'v1:k',
         spender: SPENDER,
+        accountId: 'ws',
       },
     ]);
     r = await ctx.row();

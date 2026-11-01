@@ -16,8 +16,10 @@ import {
   type WebhookTransport,
 } from '../server/wake/webhooks.js';
 import { decodeCursor } from '../server/wake/routes.js';
+import { STREAM_PREVIEW_BYTES, streamPreview } from '../server/wake/contract.js';
 import type { AssistantScope } from '../shared/assistant.js';
 import type { WakeOptions } from '../server/wake/service.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 process.env.CITY_RATE_LIMIT_KEY ??= 'synthetic-test-only-rate-limit-secret-0000';
 
@@ -56,7 +58,7 @@ let accounts = 0;
 async function account(app: App, name = `Wake owner ${++accounts}`) {
   const res = await http(app, '', 'POST', '/api/auth/register', { name, password: PASSWORD });
   assert.equal(res.statusCode, 201, res.body);
-  return `cc_session=${res.cookies.find((cookie) => cookie.name === 'cc_session')!.value}`;
+  return sessionPair(res.cookies);
 }
 async function agent(app: App, cookie: string, name: string) {
   const res = await http(app, cookie, 'POST', '/api/agents', {
@@ -229,8 +231,14 @@ test('room mentions: only active members that can read the post; removal hides t
   assert.equal(mention.source_seq, posted.json().message.seq);
   assert.equal(mention.origin, 'external');
   assert.equal(mention.from_agent_name, 'Host desk');
+  // Where the work starts: the exact reply and acknowledgement.
+  assert.deepEqual(bravo.json().next_actions, [
+    `Mention ${mention.seq}: reply with city_room_post room_id: ${scene.roomId}, reply_to: ${mention.source_seq}`,
+    `A reply with reply_to (or a ✅ on the message) marks a mention read; city_ack_mentions seq: ${mention.seq} then moves your cursor past them`,
+  ]);
   const scout = await http(app, scene.hostCookie, 'GET', `/api/agents/${scene.bystander}/mentions`);
   assert.deepEqual(scout.json().mentions, [], 'non-members are never mentioned');
+  assert.equal(scout.json().next_actions, undefined, 'no next step on an empty page');
   // Self-mention by the sender does not count.
   await scene.post(scene.memberCookie, 'I am @Bravo');
   assert.equal(
@@ -1214,7 +1222,7 @@ test(
       password: PASSWORD,
     });
     assert.equal(res.statusCode, 201, res.body);
-    const cookie = `cc_session=${res.cookies.find((item) => item.name === 'cc_session')!.value}`;
+    const cookie = sessionPair(res.cookies);
     const ids: string[] = [];
     for (const name of ['Sender', 'Reader 1', 'Reader 2', 'Reader 3']) {
       const created = await call(cookie, 'POST', '/api/agents', {
@@ -1275,3 +1283,23 @@ test(
     );
   },
 );
+
+test('stream events carry a 16 KiB preview of a long message, with truncated and full_length', () => {
+  const small = { seq: 1, parts: [{ type: 'text', text: 'hello' }] };
+  assert.equal(streamPreview(small), small);
+  const long = {
+    seq: 2,
+    parts: [
+      { type: 'text', text: '€'.repeat(20_000) },
+      { type: 'data', data: { blob: 'y'.repeat(20_000) } },
+    ],
+  };
+  const preview = streamPreview(long) as typeof long & { truncated: true; full_length: number };
+  assert.equal(preview.truncated, true);
+  assert.equal(preview.full_length, Buffer.byteLength(JSON.stringify(long.parts)));
+  assert.equal(preview.parts.length, 1);
+  const text = (preview.parts[0] as { text: string }).text;
+  assert.ok(Buffer.byteLength(text) <= STREAM_PREVIEW_BYTES);
+  assert.ok(/^€+$/.test(text), 'cut on a character boundary');
+  assert.equal(preview.seq, 2);
+});

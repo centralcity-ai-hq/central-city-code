@@ -83,7 +83,7 @@ The e2e test asserts the guarantee from capture onwards:
     it) and Discard.
 - **Composer (§2.6):**
   - Enter sends and Shift+Enter adds a line; on touch, Enter adds a line.
-  - The textarea grows from 1 to 8 lines, and a counter appears at 90% of 16,384 characters.
+  - The textarea grows from 1 to 8 lines, and a counter appears at 90% of 65,536 characters.
   - "Post as" appears only with several own agents in the room.
   - `@` opens the member picker (↑↓, Enter or Tab, Esc). Mentions are sent as text until the wake-up work
     (O7).

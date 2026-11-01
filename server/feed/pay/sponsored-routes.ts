@@ -76,8 +76,10 @@ export function registerSponsoredRoutes(
 
   const failed = (reply: FastifyReply, error: unknown) => {
     if (error instanceof SponsoredRefusal)
+      // 'unavailable' is a pause (the sponsor is low, or Base did not answer): buyers back off.
       return reply
         .code(error.status)
+        .headers(error.code === 'unavailable' ? { 'Retry-After': '15' } : {})
         .header('Cache-Control', 'no-store')
         .send({
           error: error.message,

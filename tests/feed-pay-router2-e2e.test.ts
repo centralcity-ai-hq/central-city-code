@@ -18,7 +18,8 @@ import { BODY, setup, type FeedPayApp } from './helpers/feed-pay-app.js';
  */
 
 const ROUTER = PROTOCOL_BASE_MAINNET.feeRouter;
-const ROUTER2 = getAddress(`0x${'42'.repeat(20)}`);
+// Base mainnet: router 2 is fixed in code (shared/protocol.ts); its setting is ignored there.
+const ROUTER2 = PROTOCOL_BASE_MAINNET.feeRouter2;
 const TREASURY = PROTOCOL_BASE_MAINNET.treasury;
 const SELLER = getAddress(`0x${'5e'.repeat(20)}`);
 const ORIGIN = 'https://centralcity.ai';
@@ -219,15 +220,20 @@ async function externalCallHeldAtTopUp(f: FeedPayApp, amount: string) {
   return f.pay();
 }
 
-test('external above 0.10: router 2 removed after reservation, the call is held: no signature, no seller request', async (t) => {
+/** A router address the code does not know (neither router 1, 2 nor 3). */
+const UNKNOWN_ROUTER = getAddress(`0x${'42'.repeat(20)}`);
+
+test('external above 0.10: pinned to a router the code does not know, the call is held: no signature, no seller request', async (t) => {
   const f = await app(t, true);
   const res = await externalCallHeldAtTopUp(f, '1000000');
   assert.equal(res.statusCode, 200, res.body);
   assert.equal(res.json().state, 'float_topup', res.body);
   assert.equal(await routerOf(f, res.json().callId), ROUTER2.toLowerCase(), 'pinned to router 2');
-  // Router 2's configuration is removed while the top-up is on its way (post-top-up proceed).
-  delete process.env.CITY_PROTOCOL_FEE_ROUTER2;
-  delete process.env.CITY_PROTOCOL_FEE_ROUTER2_FROM_BLOCK;
+  // The pinned router stops being one the code knows while the top-up is on its way.
+  await f.sql('UPDATE feed_pay_calls SET fee_router = $2 WHERE call_id = $1', [
+    res.json().callId,
+    UNKNOWN_ROUTER.toLowerCase(),
+  ]);
   const pending = [...f.base.state.sends].at(-1)!;
   f.base.land(pending);
   f.base.state.autoLand = true;
@@ -238,7 +244,23 @@ test('external above 0.10: router 2 removed after reservation, the call is held:
   assert.equal(f.service.paid().length, 0, 'no paid request reached the seller');
   assert.equal(f.base.state.feeCharges.length, 0, 'no fee charged, on either router');
   // Never re-routed to router 1.
-  assert.equal(await routerOf(f, call.callId), ROUTER2.toLowerCase());
+  assert.equal(await routerOf(f, call.callId), UNKNOWN_ROUTER.toLowerCase());
+});
+
+test('external above 0.10 on Base mainnet: router 2 settings removed after reservation are ignored, the call is paid through router 2', async (t) => {
+  const f = await app(t, true);
+  const res = await externalCallHeldAtTopUp(f, '1000000');
+  assert.equal(res.statusCode, 200, res.body);
+  assert.equal(await routerOf(f, res.json().callId), ROUTER2.toLowerCase(), 'pinned to router 2');
+  delete process.env.CITY_PROTOCOL_FEE_ROUTER2;
+  delete process.env.CITY_PROTOCOL_FEE_ROUTER2_FROM_BLOCK;
+  const pending = [...f.base.state.sends].at(-1)!;
+  f.base.land(pending);
+  f.base.state.autoLand = true;
+  const call = await settle(f, res.json().callId);
+  assert.equal(call.state, 'result_saved', JSON.stringify(call));
+  assert.equal(f.service.paid().length, 1, 'the seller was paid');
+  assert.equal(f.base.state.feeCharges.at(-1)?.router, ROUTER2);
 });
 
 test('fresh engine, router 2 binding unreadable on chain: nothing above 0.10 is quoted, signed or sent', async (t) => {
@@ -295,8 +317,15 @@ async function confirmedBody(f: FeedPayApp) {
   };
 }
 
-for (const removeRouter2 of [true, false])
-  test(`external above 0.10 signed but never sent, resumed by a same-key retry: ${removeRouter2 ? 'router 2 removed -> never sent' : 'control, router 2 kept -> sent'}`, async (t) => {
+for (const mode of ['unknown', 'unset', 'kept'] as const)
+  test(`external above 0.10 signed but never sent, resumed by a same-key retry: ${
+    mode === 'unknown'
+      ? 'pinned router unknown to the code -> never sent'
+      : mode === 'unset'
+        ? 'router 2 settings removed on Base mainnet (ignored) -> sent'
+        : 'control, router 2 kept -> sent'
+  }`, async (t) => {
+    const removeRouter2 = mode === 'unknown';
     const f = await app(t, true);
     await f.limit(200_000_000n);
     await allowPerCall(f, 100_000_000n);
@@ -328,7 +357,12 @@ for (const removeRouter2 of [true, false])
     assert.equal(row!.state, 'authorized', 'signed, never sent');
     assert.equal(row!.fee_router, ROUTER2.toLowerCase());
     assert.equal(f.service.paid().length, 0);
-    if (removeRouter2) {
+    if (removeRouter2)
+      await f.sql('UPDATE feed_pay_calls SET fee_router = $2 WHERE call_id = $1', [
+        callId,
+        UNKNOWN_ROUTER.toLowerCase(),
+      ]);
+    if (mode === 'unset') {
       delete process.env.CITY_PROTOCOL_FEE_ROUTER2;
       delete process.env.CITY_PROTOCOL_FEE_ROUTER2_FROM_BLOCK;
     }

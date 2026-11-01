@@ -16,32 +16,32 @@ export const markRatingsOff = () => {
 };
 export const ratingsOff = () => off;
 
-export async function readRater(agentId: string): Promise<Rater | null> {
+export async function readRater(agentId: string, chainId?: number): Promise<Rater | null> {
   try {
     const read = await api<{ identities?: RegistrationRow[] }>(
       `/api/base/agents/${encodeURIComponent(agentId)}/registration`,
       undefined,
       'GET',
     );
-    return raterOf(read?.identities);
+    return raterOf(read?.identities, chainId);
   } catch {
     return null;
   }
 }
 
 /** The agent as a rater, or null (not one, not known yet, or ratings are off). */
-export function useRater(agentId: string | null): Rater | null {
+export function useRater(agentId: string | null, chainId?: number): Rater | null {
   const [rater, setRater] = useState<Rater | null>(null);
   useEffect(() => {
     setRater(null);
     if (!agentId || off) return;
     let live = true;
-    void readRater(agentId).then((value) => {
+    void readRater(agentId, chainId).then((value) => {
       if (live) setRater(value);
     });
     return () => {
       live = false;
     };
-  }, [agentId]);
+  }, [agentId, chainId]);
   return off ? null : rater;
 }

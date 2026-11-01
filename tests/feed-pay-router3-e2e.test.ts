@@ -12,7 +12,7 @@ import { offerInputSummary, offerOutputSummary } from '../shared/feed-offers.js'
 import type { FeedPayCall } from '../shared/feed-pay.js';
 import { PROTOCOL_BASE_MAINNET } from '../shared/protocol.js';
 import { WALLET_CHAIN_ID } from '../shared/base/wallet-network.js';
-import { BODY, setup, type FeedPayApp } from './helpers/feed-pay-app.js';
+import { BODY, setup, withEnv, type FeedPayApp } from './helpers/feed-pay-app.js';
 
 /*
  * Fee router 3, end to end (docs/protocol/FEE_ROUTER_3.md): the real engine and chain side over
@@ -27,8 +27,9 @@ import { BODY, setup, type FeedPayApp } from './helpers/feed-pay-app.js';
  */
 
 const ROUTER = PROTOCOL_BASE_MAINNET.feeRouter;
-const ROUTER2 = getAddress(`0x${'42'.repeat(20)}`);
-const ROUTER3 = getAddress(`0x${'43'.repeat(20)}`);
+// Base mainnet: routers 2 and 3 are fixed in code (shared/protocol.ts); their settings are ignored.
+const ROUTER2 = PROTOCOL_BASE_MAINNET.feeRouter2;
+const ROUTER3 = PROTOCOL_BASE_MAINNET.feeRouter3;
 const TREASURY = PROTOCOL_BASE_MAINNET.treasury;
 const SELLER = getAddress(`0x${'5e'.repeat(20)}`);
 const ORIGIN = 'https://centralcity.ai';
@@ -305,6 +306,46 @@ test('router 3 on: a 1 USDC hosted service is pinned to router 3, settled by the
   assert.equal(await heldNow(f), 0n, 'nothing held once paid');
 });
 
+// The batch lane (CITY_PAY_BATCH_WORKSPACES): a router-3 Feed call of an allowlisted workspace
+// asks the facilitator for it, so its settlement waits and goes out in one settleBatch with others.
+for (const allowlisted of [true, false])
+  test(`router 3, buyer ${allowlisted ? 'on' : 'NOT on'} the batch allowlist: two paid calls go out in ${allowlisted ? 'ONE settleBatch' : 'two single settles'}, each 90/10 and delivered`, async (t) => {
+    const f = await app(t);
+    f.base.state.facilitator.batch = { maxItems: 2 };
+    withEnv(t, { CITY_PAY_BATCH_WORKSPACES: allowlisted ? `ws-other,${f.owner.id}` : 'ws-other' });
+    const id = await listOffer(f, '1000000');
+    const seller0 = f.base.balanceOf(SELLER);
+    const treasury0 = f.base.balanceOf(TREASURY);
+    // The spender's float holds both prices, so the second call never waits for the first to land.
+    f.base.credit(f.base.spender, 2_000_000n);
+    const first = (await buy(f, id)).call;
+    const second = (await buy(f, id)).call;
+    const calls = [];
+    for (const c of [first, second]) calls.push(c.done ? c : await cronUntilDone(f, c.callId));
+    for (const call of calls) {
+      assert.equal(call.state, 'result_saved', JSON.stringify(call));
+      assert.equal(JSON.parse(call.result!.text!).hex, HELLO_HEX);
+      assert.equal((await rowOf(f, call.callId)).fee_router, ROUTER3.toLowerCase());
+    }
+    assert.equal(f.base.balanceOf(SELLER) - seller0, 1_800_000n, 'seller +0.90 twice');
+    assert.equal(f.base.balanceOf(TREASURY) - treasury0, 200_000n, 'treasury +0.10 twice');
+    assert.deepEqual(routerUserOps(f), [], 'no UserOperation paid a call');
+    const fac = f.base.state.facilitator;
+    assert.deepEqual(
+      [...new Set(fac.submits.map((s) => s.batched))],
+      [allowlisted],
+      'the batch lane asked exactly for the allowlisted buyer',
+    );
+    if (allowlisted) {
+      assert.equal(fac.broadcasts, 1, 'one settleBatch');
+      assert.equal(fac.batches.length, 1);
+      assert.equal(fac.batches[0]!.length, 2, 'both calls in it');
+    } else {
+      assert.equal(fac.broadcasts, 2, 'each call its own settle');
+      assert.equal(fac.batches.length, 0);
+    }
+  });
+
 for (const [price, perCall] of [
   [50_000n, 100_000_000n],
   [50_000_000n, 100_000_000n],
@@ -428,6 +469,148 @@ test('a crash between the legs and submit: every retry gets the SAME pair, no se
   assert.equal(await heldNow(f), 0n, 'the float is free again');
 });
 
+test('CCA-731: a router-3 call planned again never signs a new pair while the earlier pair is open; its legs are cancelled on USDC first, then it is paid once', async (t) => {
+  const f = await app(t);
+  const id = await listOffer(f, '1000000');
+  f.base.state.facilitator.crashBeforeSubmit = () => true;
+  const seller0 = f.base.balanceOf(SELLER);
+  const { body, call: first } = await buy(f, id);
+  const legs = await legsOf(f, first.callId);
+  assert.equal(legs.length, 2, 'the first pair was signed and stored');
+  assert.ok(f.clock() < Number(legs[0]!.valid_before) * 1000, 'still inside the window');
+  // The call as planPayAgain leaves it: back to 'reserved', no operation key, attempt 1.
+  await f.sql(
+    `UPDATE feed_pay_calls SET state = 'reserved', payment_state = NULL, fee_state = 'pending',
+       fee_op_key = NULL, pay_attempts = 1, pay_retry_at = NULL, updated_at = updated_at + 1
+     WHERE call_id = $1`,
+    [first.callId],
+  );
+  await f.sql(
+    `UPDATE base_payments SET state = 'created' WHERE payment_id = (
+       SELECT payment_id FROM feed_pay_calls WHERE call_id = $1)`,
+    [first.callId],
+  );
+  f.base.state.facilitator.crashBeforeSubmit = null;
+  // The same-key call resumes it (the cron never plans a new payment).
+  await callAndWait(f, id, body);
+  const call = await cronUntilDone(f, first.callId);
+  const canceled = (nonce: string) =>
+    f.base.state.canceled.has(`${payer(f).toLowerCase()}:${nonce}`);
+  assert.ok(
+    legs.every((leg) => canceled(leg.nonce.toLowerCase())),
+    'both earlier legs cancelled on USDC before a new pair',
+  );
+  assert.equal(call.state, 'result_saved', JSON.stringify(call));
+  assert.equal(await authorizationCount(f), 4, 'one new pair, signed after the cancels');
+  assert.equal(f.base.balanceOf(SELLER) - seller0, 900_000n, 'paid exactly once');
+});
+
+/** The engine's log lines (console.info, its default sink) for the rest of the test. */
+function engineLines(t: test.TestContext) {
+  const lines: string[] = [];
+  const original = console.info;
+  console.info = (...args: unknown[]) => void lines.push(args.map(String).join(' '));
+  t.after(() => {
+    console.info = original;
+  });
+  return lines;
+}
+
+/** A router-3 call whose first pair is stored and unsent, then planned again (attempt 1). */
+async function plannedAgain(f: FeedPayApp, id: string) {
+  f.base.state.facilitator.crashBeforeSubmit = () => true;
+  const { body, call } = await buy(f, id);
+  const legs = await legsOf(f, call.callId);
+  assert.equal(legs.length, 2);
+  await f.sql(
+    `UPDATE feed_pay_calls SET state = 'reserved', payment_state = NULL, fee_state = 'pending',
+       fee_op_key = NULL, pay_attempts = 1, pay_retry_at = NULL, updated_at = updated_at + 1
+     WHERE call_id = $1`,
+    [call.callId],
+  );
+  await f.sql(
+    `UPDATE base_payments SET state = 'created' WHERE payment_id = (
+       SELECT payment_id FROM feed_pay_calls WHERE call_id = $1)`,
+    [call.callId],
+  );
+  f.base.state.facilitator.crashBeforeSubmit = null;
+  return { body, callId: call.callId, legs };
+}
+
+test('CCA-731: when cancelAuthorization cannot be sent, no new pair is signed; the call stays reserved, then ends unpaid past the window', async (t) => {
+  const f = await app(t);
+  const lines = engineLines(t);
+  const id = await listOffer(f, '1000000');
+  const seller0 = f.base.balanceOf(SELLER);
+  const { body, callId, legs } = await plannedAgain(f, id);
+  // Every cancel is refused by the provider (nothing is stored or sent).
+  f.base.state.prepareErrors.push(
+    ...Array.from({ length: 200 }, () => new Error('paymaster refused')),
+  );
+  await callAndWait(f, id, body);
+  const row = (
+    await f.sql<{ state: string; pay_attempts: number; fee_op_key: string | null }>(
+      'SELECT state, pay_attempts, fee_op_key FROM feed_pay_calls WHERE call_id = $1',
+      [callId],
+    )
+  )[0]!;
+  assert.deepEqual(
+    { state: row.state, attempts: Number(row.pay_attempts), key: row.fee_op_key },
+    { state: 'reserved', attempts: 1, key: null },
+    'held before anything new is signed',
+  );
+  assert.equal(await authorizationCount(f), 2, 'no second pair');
+  assert.equal(f.base.state.effects.filter((e) => e === 'cancel').length, 0, 'no cancel landed');
+  assert.ok(
+    lines.some((l) => l.includes('feed_pay.router3_resign_held')),
+    JSON.stringify(lines),
+  );
+  // Past the earlier window (and the pay retry window): it ends unpaid, still never re-signed.
+  f.base.state.prepareErrors.length = 0;
+  f.advance(Number(legs[0]!.valid_before) * 1000 - f.clock() + 60_000);
+  await callAndWait(f, id, body);
+  const call = await statusOf(f, callId);
+  assert.equal(call.done, true, JSON.stringify(call));
+  assert.notEqual(call.moneyMoved, 'yes');
+  assert.equal(await authorizationCount(f), 2, 'never re-signed');
+  assert.equal(f.base.balanceOf(SELLER), seller0, 'nothing paid');
+});
+
+test('CCA-731: an earlier leg Base shows USED is only logged; no new pair is ever signed and nothing is paid again', async (t) => {
+  const f = await app(t);
+  const lines = engineLines(t);
+  const id = await listOffer(f, '1000000');
+  const { body, callId, legs } = await plannedAgain(f, id);
+  const [seller] = legs as [(typeof legs)[0]];
+  // Someone holding the seller leg submits it to USDC directly.
+  await f.base.useLater({
+    from: getAddress(seller.from_address),
+    to: getAddress(seller.to_address),
+    value: BigInt(seller.value),
+    validAfter: BigInt(seller.valid_after),
+    validBefore: BigInt(seller.valid_before),
+    nonce: seller.nonce as Hex,
+    signature: `0x${seller.signature}`,
+  });
+  const sellerAfterUse = f.base.balanceOf(SELLER);
+  await callAndWait(f, id, body);
+  assert.equal(await authorizationCount(f), 2, 'no new pair');
+  assert.equal(f.base.state.facilitator.broadcasts, 0, 'no settlement sent');
+  assert.ok(
+    lines.some(
+      (l) =>
+        l.includes('feed_pay.router3_earlier_leg_used') &&
+        l.includes(callId) &&
+        l.includes('"leg":"seller"'),
+    ),
+    JSON.stringify(lines),
+  );
+  f.advance(Number(seller.valid_before) * 1000 - f.clock() + 60_000);
+  await callAndWait(f, id, body);
+  assert.equal(await authorizationCount(f), 2, 'never re-signed');
+  assert.equal(f.base.balanceOf(SELLER), sellerAfterUse, 'paid once at most, by the used leg');
+});
+
 test('a reverted settlement with its legs unused: waits inside the window, then ends cancelled with nothing paid and the float released', async (t) => {
   const f = await app(t);
   const id = await listOffer(f, '1000000');
@@ -516,6 +699,103 @@ test('the FEE leg used outside the router after a revert: anomaly too, never re-
   assert.deepEqual(routerUserOps(f), [], 'never sent through router 1 or 2');
 });
 
+test('a correct router-3 settlement submitted by someone else after our revert: checked like our own receipt, paid and delivered, not an anomaly (CCA-738)', async (t) => {
+  const f = await app(t);
+  const id = await listOffer(f, '1000000');
+  f.base.state.facilitator.mode = 'revert';
+  const seller0 = f.base.balanceOf(SELLER);
+  const treasury0 = f.base.balanceOf(TREASURY);
+  const { call: first } = await buy(f, id);
+  const sent = f.base.state.facilitator.submits.at(-1)!;
+  // Another sender takes the broadcast pair and calls router 3 with it: FeeCharged plus both legs.
+  await f.base.router3SettledBy(f.db, sent.key, sent.settlement);
+  const call = await cronUntilDone(f, first.callId);
+  assert.equal(call.state, 'result_saved', JSON.stringify(call));
+  assert.equal(call.failure ?? null, null, JSON.stringify(call));
+  assert.equal(JSON.parse(call.result!.text!).hex, HELLO_HEX);
+  assert.equal(f.base.balanceOf(SELLER) - seller0, 900_000n);
+  assert.equal(f.base.balanceOf(TREASURY) - treasury0, 100_000n);
+  assert.ok(!f.alerts.some((a) => a.kind === 'payment_anomaly'), JSON.stringify(f.alerts));
+  const [row] = await f.sql<{ tx_hash: string; fee_state: string; pay_final_at: string | null }>(
+    'SELECT tx_hash, fee_state, pay_final_at::text FROM feed_pay_calls WHERE call_id = $1',
+    [first.callId],
+  );
+  assert.equal(row!.tx_hash, keccak256(stringToHex(`feed-pay-router3-${sent.key}`)).toLowerCase());
+  assert.equal(row!.fee_state, 'charged');
+  assert.notEqual(row!.pay_final_at, null, 'settled only once final');
+  assert.equal(await authorizationCount(f), 2, 'never re-signed');
+  assert.equal(await heldNow(f), 0n, 'nothing held once paid');
+});
+
+test('a router-3 leg used long after signing is still found: the search starts at the block stored at signing, not head minus 2,000 (CCA-739)', async (t) => {
+  const f = await app(t);
+  const id = await listOffer(f, '1000000');
+  f.base.state.facilitator.mode = 'revert';
+  const { call: first } = await buy(f, id);
+  const legs = await legsOf(f, first.callId);
+  const [seller] = legs as [(typeof legs)[0]];
+  await f.base.useLater({
+    from: getAddress(seller.from_address),
+    to: getAddress(seller.to_address),
+    value: BigInt(seller.value),
+    validAfter: BigInt(seller.valid_after),
+    validBefore: BigInt(seller.valid_before),
+    nonce: seller.nonce as Hex,
+    signature: `0x${seller.signature}`,
+  });
+  // Base moves on far past the use (a worker that was down), then the window ends.
+  f.base.state.head += 2_500n;
+  f.advance(Number(seller.valid_before) * 1000 - f.clock() + 30_000);
+  const call = await cronUntilDone(f, first.callId);
+  assert.equal(call.state, 'paid_no_result', JSON.stringify(call));
+  assert.equal(call.failure?.code, 'payment_unverified');
+  assert.ok(
+    f.alerts.some(
+      (a) =>
+        a.kind === 'payment_anomaly' &&
+        a.callId === first.callId &&
+        a.detail === 'fee_charged_mismatch',
+    ),
+    JSON.stringify(f.alerts),
+  );
+});
+
+test('a router-3 leg Base shows used with no event in the searched window: an anomaly with its own alert, never left pending (CCA-739)', async (t) => {
+  const f = await app(t);
+  const id = await listOffer(f, '1000000');
+  f.base.state.facilitator.mode = 'revert';
+  const { call: first } = await buy(f, id);
+  const legs = await legsOf(f, first.callId);
+  const [seller] = legs as [(typeof legs)[0]];
+  // The use lands beyond the 2,000 blocks searched from signing (as a log index with a gap would
+  // show it): only authorizationState knows.
+  f.base.state.head += 2_500n;
+  await f.base.useLater({
+    from: getAddress(seller.from_address),
+    to: getAddress(seller.to_address),
+    value: BigInt(seller.value),
+    validAfter: BigInt(seller.valid_after),
+    validBefore: BigInt(seller.valid_before),
+    nonce: seller.nonce as Hex,
+    signature: `0x${seller.signature}`,
+  });
+  f.base.state.head += 10n; // the use is below Base's safe block
+  f.advance(Number(seller.valid_before) * 1000 - f.clock() + 30_000);
+  const call = await cronUntilDone(f, first.callId);
+  assert.equal(call.state, 'paid_no_result', JSON.stringify(call));
+  assert.equal(call.failure?.code, 'payment_unverified');
+  assert.ok(
+    f.alerts.some(
+      (a) =>
+        a.kind === 'payment_anomaly' &&
+        a.callId === first.callId &&
+        a.detail === 'authorization_used_unseen',
+    ),
+    JSON.stringify(f.alerts),
+  );
+  assert.equal(await authorizationCount(f), 2, 'never re-signed');
+});
+
 for (const tamper of ['drop', 'wrongToken', 'wrongRecipient', 'wrongAmount'] as const)
   test(`a router-3 receipt with FeeCharged but a ${tamper} fee-leg USDC Transfer fails closed: an anomaly, never paid`, async (t) => {
     const f = await app(t);
@@ -582,6 +862,100 @@ test('a worker restart with the treasury binding unreadable: a landed router-3 p
   const call = await statusOf(f, first.callId);
   assert.equal(call.state, 'result_saved', JSON.stringify(call));
   assert.equal(f.base.state.facilitator.broadcasts, 1, 'the one settlement');
+});
+
+test('router3PreSign (the sponsored path): reserved payee, screening of payee and treasury, router 3 probe and treasury pin, fail closed', async (t) => {
+  const f = await app(t);
+  const SPONSOR = getAddress(`0x${'5a'.repeat(20)}`);
+  const asked: { intentId: string; parties: { role: string; address: string }[] }[] = [];
+  let blocked: string | null = null;
+  let down = false;
+  const screening = {
+    screen: async (req: { intentId: string; parties: { role: string; address: string }[] }) => {
+      asked.push({ intentId: req.intentId, parties: req.parties });
+      const hit = req.parties.some((p) => p.address.toLowerCase() === blocked);
+      return {
+        allowed: !down && !hit,
+        outcome: down ? 'unavailable' : hit ? 'blocked' : 'allowed',
+        decisionId: down ? null : 'd1',
+        reason: down ? 'provider_unavailable' : hit ? 'sanctioned' : 'clear',
+        expiresAt: f.clock() + 60_000,
+        reused: false,
+      };
+    },
+  } as unknown as NonNullable<Parameters<typeof createFeedPayEngine>[0]['screening']>;
+  const engine = createFeedPayEngine({
+    db: f.db,
+    env: { ...process.env, CITY_PROTOCOL_SCREENING: '1' },
+    now: f.clock,
+    chain: async () => f.base.chainFor(() => f.db),
+    alert: (alert) => void f.alerts.push(alert),
+    sleep: async () => {},
+    screening,
+  });
+  const input = {
+    intentId: 'sfp:sp_test',
+    payer: SPONSOR,
+    payee: SELLER,
+    grossRaw: 1_000_000n,
+    feeRaw: 100_000n,
+  };
+  // Clear: the seller leg (payer, payee) and the fee leg (payer, the router's treasury) screened.
+  assert.equal(await engine.router3PreSign(input), null);
+  assert.deepEqual(asked, [
+    {
+      intentId: 'sfp:sp_test',
+      parties: [
+        { role: 'payer', address: SPONSOR },
+        { role: 'payee', address: SELLER },
+      ],
+    },
+    {
+      intentId: 'sfp:sp_test:fee',
+      parties: [
+        { role: 'payer', address: SPONSOR },
+        { role: 'fee_recipient', address: TREASURY.toLowerCase() },
+      ],
+    },
+  ]);
+  // A reserved payee, before any screening.
+  asked.length = 0;
+  assert.equal(await engine.router3PreSign({ ...input, payee: ROUTER3 }), 'payee_reserved');
+  assert.equal(asked.length, 0);
+  // Screening blocks the payee, or the treasury; an unavailable answer fails closed.
+  blocked = SELLER.toLowerCase();
+  assert.equal(await engine.router3PreSign(input), 'screening_blocked');
+  blocked = TREASURY.toLowerCase();
+  assert.equal(await engine.router3PreSign(input), 'screening_blocked');
+  blocked = null;
+  down = true;
+  assert.equal(await engine.router3PreSign(input), 'screening_unavailable');
+  down = false;
+  // Router 3 pays another treasury than the one fixed in code: held, nothing signed.
+  const other = createFeedPayEngine({
+    db: f.db,
+    env: { ...process.env, CITY_PROTOCOL_SCREENING: '1' },
+    now: f.clock,
+    chain: async () => f.base.chainFor(() => f.db),
+    alert: (alert) => void f.alerts.push(alert),
+    sleep: async () => {},
+    screening,
+  });
+  f.base.state.feeRouter3 = { router: ROUTER3, treasury: getAddress(`0x${'7d'.repeat(20)}`) };
+  assert.equal(await other.router3PreSign(input), 'hold');
+  // Router 3 with no code, or Base unreadable: held.
+  f.base.state.feeRouter3 = { router: ROUTER3, treasury: TREASURY };
+  f.base.state.code.delete(ROUTER3.toLowerCase());
+  const third = createFeedPayEngine({
+    db: f.db,
+    env: { ...process.env, CITY_PROTOCOL_SCREENING: '1' },
+    now: f.clock,
+    chain: async () => f.base.chainFor(() => f.db),
+    alert: (alert) => void f.alerts.push(alert),
+    sleep: async () => {},
+    screening,
+  });
+  assert.equal(await third.router3PreSign(input), 'hold');
 });
 
 test('a settlement stored but never sent (queued, no tx) is submitted again under the same key and settles once (room x402 #208)', async (t) => {
@@ -750,9 +1124,20 @@ async function settledCalls(f: FeedPayApp, n: number): Promise<string[]> {
 async function finalOps(
   f: FeedPayApp,
   calls: string[],
-  shape: (callId: string) => { status?: string; error?: string | null; tx?: string; block?: string; chain?: number } = () => ({}),
+  shape: (callId: string) => {
+    status?: string;
+    error?: string | null;
+    tx?: string;
+    block?: string;
+    chain?: number;
+  } = () => ({}),
 ) {
-  const rows = await f.sql<{ call_id: string; tx_hash: string; settled_block: string; key: string }>(
+  const rows = await f.sql<{
+    call_id: string;
+    tx_hash: string;
+    settled_block: string;
+    key: string;
+  }>(
     `SELECT call_id, tx_hash, settled_block::text AS settled_block,
        COALESCE(fee_op_key, 'feed-pay:pay:' || call_id) AS key
      FROM feed_pay_calls WHERE call_id = ANY($1::text[])`,
@@ -794,7 +1179,12 @@ test('bulk finality: only a final op on this chain with the same tx AND block re
   const f = await app(t);
   const calls = await settledCalls(f, 6);
   const [match, wrongTx, wrongBlock, otherChain, reverted, already] = calls as [
-    string, string, string, string, string, string,
+    string,
+    string,
+    string,
+    string,
+    string,
+    string,
   ];
   await finalOps(f, calls, (id) =>
     id === wrongTx

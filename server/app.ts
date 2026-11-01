@@ -1,3 +1,6 @@
+import { registerHistoryRoute } from './base/explorer/history-route.js';
+import { createHistoryObserver } from './base/explorer/history-observer.js';
+import { registerExplorerHistoryMigration } from './base/explorer/history-schema.js';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import cookie from '@fastify/cookie';
 import type { PGlite } from '@electric-sql/pglite';
@@ -13,6 +16,7 @@ import {
   registerMigration,
   runMigrations,
   sessionsExpiryMigration,
+  sessionsHostCookieMigration,
 } from './migrations.js';
 import { loadLimits, type CityLimits } from './limits.js';
 import {
@@ -26,11 +30,13 @@ import {
   PrincipalCache,
   presentedPrincipal,
   FAIL_CLOSED_RETRY_MS,
+  hitAddressScopes,
   LOGIN_FAILURES,
   MemoryRateLimiter,
   PostgresRateLimiter,
   type RateLimiter,
 } from './rate-limit.js';
+import { admitNameCheck, createSignUpAdmission } from './signup-admission.js';
 import {
   acceptNonce,
   announcedOnline,
@@ -99,6 +105,8 @@ import {
   type GrantIdentity,
 } from './assistant-access.js';
 import { registerRemoteMcp, type RemoteMcpTestOptions } from './remote-mcp/index.js';
+import { errorGuidance } from './remote-mcp/error-guidance.js';
+import { guestToolsNow } from './links/invites.js';
 import { registerAutonomy } from './autonomy/index.js';
 import { createMessaging } from './messaging/service.js';
 import { registerMessagingRoutes } from './messaging/routes.js';
@@ -138,6 +146,18 @@ import { registerInvitationRoutes } from './rooms/invitations-routes.js';
 import { registerRoomInvitationsMigration } from './rooms/invitations-schema.js';
 import { createRoomPins, deliverBriefOnce, registerRoomPinsMigration } from './rooms/pins.js';
 import { registerPinRoutes } from './rooms/pins-routes.js';
+import { createRoomCards, registerRoomCardsMigration } from './rooms/cards.js';
+import { registerCardRoutes } from './rooms/cards-routes.js';
+import {
+  ROOM_FILE_UNAVAILABLE_CODES,
+  createRoomArtifacts,
+  registerRoomArtifactsMigration,
+} from './rooms/artifacts.js';
+import { registerFileRoutes } from './rooms/artifacts-routes.js';
+import { extractPdfText } from './rooms/pdf-text.js';
+import type { LinkFetchOptions } from './rooms/link-fetch.js';
+import { vercelArtifactStore, type ArtifactStore } from './rooms/artifact-store.js';
+import { createRoomDigest } from './rooms/digest.js';
 import { registerWakeMigration, registerWakeUnreadRecountMigration } from './wake/schema.js';
 import { createWake, type WakeOptions } from './wake/service.js';
 import { inboxWaiter, registerWakeRoutes } from './wake/routes.js';
@@ -145,8 +165,17 @@ import { wakeKeys } from './wake/webhooks.js';
 import type { RoomLimits } from './rooms/contract.js';
 import { registerResultsMigration } from './results/schema.js';
 import { registerResponderMigration } from './responder/schema.js';
+import { registerRoomPurgeIndexesMigration } from './rooms/purge-indexes-schema.js';
+import { registerRoomMessageExtrasMigration } from './rooms/message-extras-schema.js';
+import { registerRoomRelabelRoute, registerRoomRelabelRunsMigration } from './rooms/relabel-job.js';
+import { registerDashboardRollupsMigration } from './dashboard/schema.js';
+import { registerDashboardRoutes } from './dashboard/routes.js';
+import { registerReservationAuditIndexesMigration } from './base/lookup-indexes-schema.js';
+import { registerMessageSenderIndexMigration } from './messaging/sender-index-schema.js';
+import { registerAgentPayConsentSignatureMigration } from './base/wallet/agent-pay-consent-schema.js';
 import { registerResponderExecutionMigration } from './responder/execution-schema.js';
 import { responderKeys } from './responder/keys.js';
+import { defaultPiiKeyring } from './google/pii.js';
 import { createResponder, ResponderError } from './responder/service.js';
 import {
   AgentPayError,
@@ -173,10 +202,38 @@ import {
   type EmailOptions,
 } from './email/index.js';
 import { registerBaseMigration } from './base/schema.js';
-import { baseRegistrationStarted, registerShortLinks } from './base/identity/short-links.js';
+import {
+  baseRegistrationStarted,
+  registeredChainName,
+  registerShortLinks,
+  staysPublicMessage,
+} from './base/identity/short-links.js';
+import {
+  registerBaseDomainFilesMigration,
+  registerDomainFileCron,
+} from './base/identity/domain-file.js';
+import {
+  registerBaseIdentityMovesMigration,
+  watchConfirmedIdentities,
+} from './base/identity/moves.js';
 import { registerBaseRegistrationRoutes } from './base/identity/routes.js';
 import { chainRuntimes } from './base/chain/runtime.js';
 import { registerOnBaseRoutes } from './base/explorer/routes.js';
+import {
+  ARC_MAINNET,
+  arcNetwork,
+  chainNetwork,
+  usdcOf,
+  type ArcChainId,
+  type ChainId,
+} from '../shared/chains.js';
+import { parseAbi } from 'viem';
+import {
+  arcPaymasterSide,
+  bothUpkeeps,
+  paymasterSide,
+  paymasterSides,
+} from './base/chain/arc-env.js';
 import { registerServiceCallsRoutes } from './base/explorer/calls.js';
 import { registerDirectoryRoutes } from './directory/routes.js';
 import { registerDirectoryMigration } from './directory/schema.js';
@@ -184,14 +241,50 @@ import { registerFeedRequestsMigration } from './feed/schema.js';
 import { createFeedRequests, feedCaps } from './feed/requests.js';
 import { registerFeedRoutes } from './feed/routes.js';
 import { feedEventLog, registerFeedReviewRoutes } from './feed/review.js';
-import { registerFacilitatorKeyRoute } from './protocol/x402/facilitator-key-route.js';
+import { registerPublicOfferRoutes } from './feed/offers/public-route.js';
+import { registerArcChainIdsMigrations } from './base/arc-chain-ids-schema.js';
 import {
+  createPublicOfferPay,
+  PUBLIC_OFFER_FLAG,
+  publicOfferBudget,
+  publicOfferClientSimulations,
+  publicOfferSellerSimulations,
+  publicOfferCooldown,
+  publicOfferPaidBudget,
+  publicOfferSimulations,
+  type PublicOfferLane,
+} from './feed/offers/public-pay.js';
+import { registerFeedPayPublicMigrations } from './feed/pay/public-calls-schema.js';
+import { registerFacilitatorKeyRoute } from './protocol/x402/facilitator-key-route.js';
+import { registerPublicFacilitatorRoutes } from './protocol/x402/public-facilitator.js';
+import {
+  createPublicSettle,
+  publicSettlePaused,
+  publicSettleReservedPayees,
+  onceReady,
+  publicSettleScreening,
+  limiterBudget,
+  publicSettleCooldown,
+  limiterSimulations,
+  unavailablePublicFacilitator,
+} from './protocol/x402/public-settle.js';
+import {
+  bundlerChoice,
   registerOwnPaymasterKeysMigration,
   registerOwnPaymasterKeysRoute,
   registerPaymasterPublicRoute,
+  PAYMASTER_ARC_PUBLIC_PATH,
   provisionPaymasterKeysAtStart,
 } from './base/chain/own-paymaster-keys.js';
+import { checkKeyRolesAtStart } from './base/chain/key-roles.js';
 import { registerOwnPaymasterBudgetMigration } from './base/chain/own-paymaster-budget.js';
+import {
+  createSponsorOperators,
+  installSponsorOperators,
+  retiredSponsorOperatorAccountsLine,
+  sponsorOperatorAccounts,
+  sponsorOperatorOwners,
+} from './base/chain/sponsor-operators.js';
 import {
   registerDirectBundlerMigration,
   registerOwnBundlerMaintainRoute,
@@ -210,12 +303,21 @@ import { registerPaidCallCountDropMigration } from './feed/pay/count-drop-schema
 import { registerFeedPayTopUpRetryMigration } from './feed/pay/topup-retry-schema.js';
 import { registerFeedPayPayRetryMigration } from './feed/pay/pay-retry-schema.js';
 import { registerProtocolScreeningMigration } from './protocol/screening/schema.js';
-import { createScreeningGate, type ScreeningProvider } from './protocol/screening/gate.js';
-import { sanctionsOracleFor } from './protocol/screening/sanctions-oracle.js';
+import {
+  createScreeningGate,
+  screeningEnabled,
+  type ScreeningGateDeps,
+  type ScreeningProvider,
+} from './protocol/screening/gate.js';
+import { sanctionsOracleFor, type OracleReader } from './protocol/screening/sanctions-oracle.js';
+import type { ExactPayment } from './protocol/x402/public-facilitator.js';
 import { registerProtocolFeeRoutes } from './protocol/fees/routes.js';
 import {
+  protocolArcChainIdFromEnv,
   protocolFeeChainFromEnv,
   protocolFeeChainId,
+  protocolReservedPayees,
+  protocolTreasuryFor,
   registerProtocolFeeCron,
 } from './protocol/fees/cron.js';
 import type { FeedSyncDeps } from './feed/ingest.js';
@@ -229,13 +331,21 @@ import { registerX402FacilitatorMigration } from './protocol/x402/facilitator-sc
 import { registerFeedPayMovesCheckedMigration } from './feed/pay/moves-checked-schema.js';
 import { registerPaidCallValueMigration } from './feed/pay/value-schema.js';
 import { registerAgentNamesResetScopedMigration } from './rooms/agent-names-schema.js';
-import { registerWorkspaceAgentPathMigration } from './agent-rows/agent-lookup-schema.js';
+import { registerRoomOwnerKindMigration } from './rooms/owner-labels.js';
+import {
+  registerWorkspaceAgentExactMigration,
+  registerWorkspaceAgentPathMigration,
+} from './agent-rows/agent-lookup-schema.js';
+import { registerAgentPublicCardsMigration } from './agent-rows/public-cards-schema.js';
+import { registerPublicCardsCron } from './agent-rows/public-cards.js';
 import { registerAgentRowsMigration } from './agent-rows/schema.js';
 import { registerBaseWalletsAddressLowerMigration } from './base/pay/address-index-schema.js';
 import { registerBaseIdentitiesBaseIdMigration } from './base/explorer/base-id-index-schema.js';
 import { registerBaseWalletsSpenderMigration } from './base/wallet/spender-index-schema.js';
 import { registerFeedPaySponsorMigration } from './feed/pay/sponsor-schema.js';
 import { registerSponsorStatsRoute } from './feed/pay/sponsor-routes.js';
+import { errorFacts, errorLine, requestFacts, type LogLine } from './error-log.js';
+import { NO_NUL_MESSAGE, noNul } from './messaging/contract.js';
 import { createSponsorCredits } from './feed/pay/sponsor.js';
 import {
   createSponsoredCalls,
@@ -244,11 +354,20 @@ import {
 } from './feed/pay/sponsored.js';
 import { registerSponsoredRoutes } from './feed/pay/sponsored-routes.js';
 import { registerFeedPaySponsoredExplorerMigration } from './feed/pay/sponsored-explorer-schema.js';
+import {
+  registerFeedPaySponsorFleetCeilingMigration,
+  registerFeedPaySponsorFleetCeiling40Migration,
+} from './feed/pay/sponsor-ceiling-schema.js';
 import { registerPaidCallCountSponsoredMigration } from './feed/pay/sponsored-count-schema.js';
 import {
   registerFeedPaySponsorKeyMigration,
   registerSponsorKeyRoute,
 } from './feed/pay/sponsor-key.js';
+import {
+  createSponsorEthSweep,
+  registerOwnerSponsorEthMigration,
+  registerSponsorEthRoutes,
+} from './feed/pay/sponsor-eth-sweep.js';
 import { setOfferKindDeps } from './feed/offers/kinds.js';
 import { offerBaseReaderFromEnv } from './feed/offers/kinds-base.js';
 import {
@@ -261,9 +380,14 @@ import {
 import { refreshHostedUses } from './feed/offers/uses.js';
 import { registerFeedPayIncludedSettledMigration } from './feed/offers/uses-schema.js';
 import { registerFeedPayMigration } from './feed/pay/schema.js';
-import { createFeedPayEngine, type FeedPayEngineDeps } from './feed/pay/engine.js';
+import {
+  createFeedPayEngine,
+  FEED_PAY_AGENT_CHAIN_READS_PER_MINUTE,
+  type FeedPayEngineDeps,
+} from './feed/pay/engine.js';
 import { registerFeedPayRoutes } from './feed/pay/routes.js';
 import { createFeedPayAlerts } from './feed/pay/alerts.js';
+import type { WalletFunds } from './base/identity/chain-hold.js';
 import { FeedPayToolError, feedPayRefusalFields } from './feed/pay/tool.js';
 import { FeedToolError } from './feed/tools.js';
 import { FeedBusyError, isFeedPath, sendFeedBusy } from './feed/busy.js';
@@ -273,11 +397,18 @@ import { registerFeedRespondMigration } from './feed/respond-schema.js';
 import { createFeedRespond, type FeedRespondDependencies } from './feed/respond.js';
 import { registerFeedRespondRoutes } from './feed/respond-routes.js';
 import { feedEnabled } from './feed/flag.js';
-import { baseChainReader } from './base/explorer/head.js';
-import { registerBaseWalletRoutes, WALLET_CHAIN_ID, walletReaders } from './base/wallet/routes.js';
+import { baseChainReader, explorerReadUrls } from './base/explorer/head.js';
+import {
+  agentChainOf,
+  arcBalanceReader,
+  arcPayChainReader,
+  arcPermissionReader,
+  registerBaseWalletRoutes,
+  WALLET_CHAIN_ID,
+  walletReaders,
+} from './base/wallet/routes.js';
 import { ownerRevokePortFromEnv } from './base/chain/owner-revoke.js';
 import { BASE_MAINNET, BASE_NETWORKS } from '../shared/base/chains.js';
-import { PUBLIC_BASE_RPC } from '../shared/base/on-base.js';
 import { newsletterEmailSchema } from '../shared/newsletter-schema.js';
 import {
   OnboardingRequiredError,
@@ -312,10 +443,12 @@ import {
   registerPublicStatsRoutes,
   sqlPublicStatsStore,
 } from './stats/public-stats.js';
-import { createBaseAgentsReader } from './stats/base-agents.js';
+import { createArcAgentsReader, createBaseAgentsReader } from './stats/base-agents.js';
 import { registerFastCountCheckRoute } from './stats/fast-count-check.js';
+import { registerCodeCountRoutes } from './stats/code-count.js';
 import { createPaidCallsReader } from './stats/paid-calls.js';
-import { loadPlatformSigner } from './autonomy/signing.js';
+import { assertHostedSigningKey, loadPlatformSigner } from './autonomy/signing.js';
+import { RUNTIME_CREDENTIAL_PREFIX } from './credential-prefixes.js';
 import {
   createCountLog,
   registerCountLogMigration,
@@ -324,6 +457,8 @@ import {
 import type { SigningKey } from './manifest/keys.js';
 import { requestOrigin } from './oauth/server.js';
 import { describeValidation, validationErrorBody } from './validation-errors.js';
+import { cookieName, DEVICE_COOKIE, presentedCookie, SESSION_COOKIE } from './session-cookie.js';
+import { functionSecurityHeaders } from './security-headers.js';
 import { A2A_PIN, parseA2AIntent, projectNativeJob, createTaskResponse } from '../protocol/a2a.js';
 import {
   A2A_AUTH_EXTENSION,
@@ -353,6 +488,13 @@ export interface AppOptions {
    * When set, the cron seals without the noon cut.
    */
   countLogCronNow?: () => number;
+  /**
+   * Tests only: the room file store (artifact-store.ts memoryArtifactStore). Without it the store
+   * comes from BLOB_READ_WRITE_TOKEN, and without that the file tools answer 503.
+   */
+  artifactStore?: ArtifactStore;
+  /** Tests only: the saved-web-page fetch resolver and transport (link-fetch.ts). */
+  linkFetch?: LinkFetchOptions;
   startWorkers?: boolean;
   secureCookies?: boolean;
   hosted?: HostedConfig;
@@ -380,8 +522,9 @@ export interface AppOptions {
    */
   trustProxyHops?: number;
   /**
-   * Agent Card signing key. Defaults to CITY_SIGNING_KEY, else an ephemeral key locally and no
-   * key (cards served unsigned and flagged) in hosted mode. null forces unsigned cards.
+   * Agent Card signing key. Defaults to CITY_SIGNING_KEY, else an ephemeral key locally; a
+   * production deployment (signingKeyRequired) without it refuses to start, and a Vercel preview
+   * without it serves unsigned cards (flagged). null forces unsigned cards (flagged).
    */
   signingKey?: SigningKey | null;
   /** Structured operational log sink (e.g. capacity.pressure lines). Defaults to console.warn. */
@@ -470,6 +613,7 @@ export interface AppOptions {
     Pick<
       FeedPayEngineDeps,
       | 'chain'
+      | 'arc'
       | 'http'
       | 'alert'
       | 'sleep'
@@ -485,6 +629,10 @@ export interface AppOptions {
     screeningProvider?: () => ScreeningProvider | null;
     /** Tests: the sponsored first purchase's payer (server/feed/pay/sponsored.ts). */
     sponsorPay?: SponsoredDeps['pay'];
+    /** Tests: the offers' public address's lane (server/feed/offers/public-pay.ts). */
+    publicOfferLane?: () => Promise<PublicOfferLane | null>;
+    /** Tests: how long a public payment waits before it answers 202. */
+    publicOfferWaitMs?: number;
   };
 }
 export interface CityServices {
@@ -521,6 +669,8 @@ class ApiError extends Error {
     public statusCode: number,
     message: string,
     public retryAfterMs?: number,
+    /** For a 429: which limit was reached (a stable name, never a key or address). */
+    public limit?: string,
   ) {
     super(message);
   }
@@ -635,7 +785,7 @@ const workflowSchema = z
     requesterId: z.string().uuid(),
     researcherId: z.string().uuid(),
     reviewerId: z.string().uuid(),
-    source: z.string().trim().min(1).max(4000),
+    source: z.string().trim().min(1).max(4000).refine(noNul, NO_NUL_MESSAGE),
     idempotencyKey: z
       .string()
       .min(8)
@@ -644,6 +794,15 @@ const workflowSchema = z
   })
   .strict();
 
+/**
+ * Whether this process is a production deployment that must have CITY_SIGNING_KEY: Vercel
+ * production, or a self-hosted CITY_HOSTED=1 instance outside Vercel.
+ */
+export function signingKeyRequired(env: NodeJS.ProcessEnv): boolean {
+  if (env.VERCEL === '1') return env.VERCEL_ENV === 'production';
+  return env.CITY_HOSTED === '1';
+}
+
 /** Hosted mode refuses to start without a shared CITY_RATE_LIMIT_KEY of at least 32 characters. */
 export function assertHostedSecret(env: NodeJS.ProcessEnv): void {
   const key = env.CITY_RATE_LIMIT_KEY;
@@ -651,6 +810,43 @@ export function assertHostedSecret(env: NodeJS.ProcessEnv): void {
     throw new Error(
       'CITY_RATE_LIMIT_KEY must be set to a secret of at least 32 characters in hosted mode (CITY_HOSTED=1 or VERCEL=1); refusing to start.',
     );
+}
+
+/**
+ * The public x402 sender's screening as createApp wires it (CCA-755): payer and payee through the
+ * payment engine's screening gate on Base mainnet (8453), its sanctions oracle fixed in code and
+ * read through `readClient`, fail closed, and nothing settles while CITY_PROTOCOL_SCREENING=0.
+ * Exported so a test can drive the production composition (tests/x402-public-settle-app.test.ts).
+ */
+export function publicSettleScreenFor(deps: {
+  db: ScreeningGateDeps['db'];
+  env: Record<string, string | undefined>;
+  now: () => number;
+  /** Tests: the screening provider (options.feedPay.screeningProvider); else the oracle. */
+  provider?: () => ScreeningProvider | null;
+  /** Base mainnet's read client; null when it is not configured (screening then fails closed). */
+  readClient: () => Promise<OracleReader | null | undefined>;
+  log?: (line: string) => void;
+}): (payment: ExactPayment) => Promise<boolean> {
+  const gate = createScreeningGate({
+    db: deps.db,
+    env: deps.env,
+    now: deps.now,
+    provider:
+      deps.provider ??
+      (() =>
+        sanctionsOracleFor(deps.env, 8453, async () => {
+          const reader = await deps.readClient();
+          if (!reader) throw new Error('No read client.');
+          return reader;
+        })),
+  });
+  return publicSettleScreening({
+    enabled: () => screeningEnabled(deps.env),
+    screen: (request) => gate.screen(request),
+    // Sanitized codes only, on the console like the ALERT lines (the Fastify logger is off).
+    ...(deps.log ? { log: deps.log } : {}),
+  });
 }
 
 /** Idle timeout of a browser sign-in: each authenticated request slides it forward. */
@@ -670,12 +866,19 @@ export async function createApp(options: AppOptions = {}): Promise<FastifyInstan
     // Hosted instances derive rate-limit, known-device and unclaimed-partition identifiers from
     // this secret; a per-instance random fallback would split them across instances.
     assertHostedSecret(process.env);
+    // A production deployment never serves Agent Cards or seals count checkpoints unsigned
+    // because a setting is missing; only an injected key (tests) or an explicit null overrides
+    // this. Vercel previews and development deployments (VERCEL_ENV other than production) are
+    // not the public integrity record, so there a missing key keeps the flagged unsigned mode.
+    if (options.signingKey === undefined && signingKeyRequired(process.env))
+      assertHostedSigningKey(process.env);
     const db = options.database ?? (await openPostgres(options.hosted.databaseUrl));
     try {
       return await createDatabaseApp(options, clock, db, () => undefined);
-    } catch {
+    } catch (error) {
       await db.close();
-      throw new Error('Hosted database initialization failed.');
+      // The cause travels for the cold-start line (server/vercel-handler.ts: class and code only).
+      throw new Error('Hosted database initialization failed.', { cause: error });
     }
   }
   const requestedDataDir =
@@ -687,9 +890,11 @@ export async function createApp(options: AppOptions = {}): Promise<FastifyInstan
   try {
     if (dataDir !== 'memory://') await mkdir(dirname(dataDir), { recursive: true });
     const { PGlite } = await import('@electric-sql/pglite');
-    // btree_gin: the composite (room_id, search_tsv) index of room search (migration 55).
+    // btree_gin: the composite (room_id, search_tsv) index of room search (migration 55);
+    // pg_trgm: the trigram index of the public names (migration 280).
     const { btree_gin } = await import('@electric-sql/pglite/contrib/btree_gin');
-    const db = (openedDb = await PGlite.create(dataDir, { extensions: { btree_gin } }));
+    const { pg_trgm } = await import('@electric-sql/pglite/contrib/pg_trgm');
+    const db = (openedDb = await PGlite.create(dataDir, { extensions: { btree_gin, pg_trgm } }));
     return await createDatabaseApp(options, clock, db, () => dataLock?.release());
   } catch (error) {
     if (openedDb) await openedDb.close();
@@ -727,9 +932,23 @@ async function createDatabaseApp(
   registerRoomTasksMigration();
   // 68: room pins and the handoff brief ledger (docs/ROOMS.md "Pins and the handoff brief").
   registerRoomPinsMigration();
+  // 330: room decision and approval cards (docs/ROOMS.md "Decisions and approvals").
+  registerRoomCardsMigration();
+  // 331: room files, their versions, text pages and storage counters (docs/ROOMS.md "Room files").
+  registerRoomArtifactsMigration();
+  // 332-333: threads, edits, deletes and reactions of room messages; the thread index is built
+  // online on production (scripts/room-thread-index.ts). 334: the acting owner of a system line.
+  registerRoomMessageExtrasMigration();
+  // 335: the record of the one-time owner relabel (rooms/relabel-job.ts).
+  registerRoomRelabelRunsMigration();
+  // 336: the public Agent Dashboard's rollup tables (dashboard/schema.ts).
+  registerDashboardRollupsMigration();
+  // 337-348: the tables that name their chains also accept Arc (base/arc-chain-ids-schema.ts).
+  registerArcChainIdsMigrations();
   // 23: room repos, proposals, reviews and evidence; the tools are behind
   // CITY_ROOM_REPOS=1 (docs/ROOM_REPOS.md).
   registerRoomCodeMigration();
+  registerExplorerHistoryMigration();
   // 20: hosted responder settings and write-only provider keys. The schema always exists
   // (it also registers on import); the feature itself is behind CITY_RESPONDER=1.
   registerResponderMigration();
@@ -851,6 +1070,7 @@ async function createDatabaseApp(
   registerFeedPaySponsorMigration();
   // 249: the sponsor account's key record (server/feed/pay/sponsor-key.ts): one new one-row table.
   registerFeedPaySponsorKeyMigration();
+  registerOwnerSponsorEthMigration();
   // 250: the sponsored first purchase's calls (server/feed/pay/sponsored.ts): one new table.
   registerFeedPaySponsoredMigration();
   // 251: the indexes the Explorer's service calls read the paid sponsored calls through
@@ -873,6 +1093,44 @@ async function createDatabaseApp(
   // 257: Operation Paymaster's spending gate (server/base/chain/own-paymaster-budget.ts): two new tables.
   registerOwnPaymasterBudgetMigration();
   registerDirectBundlerMigration();
+  // 260: a sponsored first purchase may cost up to 20 USDC for the stress-test fleets
+  // (server/feed/pay/sponsor-ceiling-schema.ts): two CHECKs widened, no data change.
+  registerFeedPaySponsorFleetCeilingMigration();
+  // 273: the owner kind of room members and message senders (server/rooms/owner-labels.ts): two
+  // nullable columns, no data change.
+  registerRoomOwnerKindMigration();
+  // 274: sign-ins issued under the __Host- cookie name (server/session-cookie.ts): one defaulted
+  // column, no rows rewritten.
+  registerMigration(sessionsHostCookieMigration);
+  // 280: every agent's current public card as one row with a trigram-indexed name, kept by
+  // triggers (server/agent-rows/public-cards-schema.ts); existing agents are backfilled by a cron.
+  registerAgentPublicCardsMigration();
+  // 281: the stored domain file of each origin (server/base/identity/domain-file.ts): one new table.
+  registerBaseDomainFilesMigration();
+  // 282: the confirmed IDs moved away from Central City and the registry log cursor
+  // (server/base/identity/moves.ts): two new tables.
+  registerBaseIdentityMovesMigration();
+  // 290: workspace_agent() answers exactly as 245 again for ids a non-string JSON id can have
+  // (server/agent-rows/agent-lookup-schema.ts): one function replaced, no table touched.
+  registerWorkspaceAgentExactMigration();
+  // 300: an agent-pay consent is signed by the wallet's owner key (CCA-113).
+  registerAgentPayConsentSignatureMigration();
+  // 301: the room-purge indexes (CCA-517; built concurrently by the owner on a large database).
+  registerRoomPurgeIndexesMigration();
+  // 304: reservation and agent-pay audit look-up indexes (MPR1-01; built concurrently by the owner
+  // on a large database).
+  registerReservationAuditIndexesMigration();
+  // 305: messages (sender_owner_id, context_id, created_at) for the conversation list's sent side
+  // (R1-6; built concurrently by the owner on a large database).
+  registerMessageSenderIndexMigration();
+  // 307: the sponsored fleet ceiling rises to 40 USDC (server/feed/pay/sponsor-ceiling-schema.ts):
+  // two CHECKs replaced, no data change; a real user's stays at 2 USDC.
+  registerFeedPaySponsorFleetCeiling40Migration();
+  // 353-356: the offers' public address's paid calls (server/feed/pay/public-calls-schema.ts): one new
+  // table, its indexes, one more key purpose, the count trigger. Unused while the setting is off.
+  // 357: the revert cool-down of outside x402 payers (server/protocol/x402/payer-cooldown.ts), one
+  // new table.
+  registerFeedPayPublicMigrations();
   await runMigrations(db);
   // This build reads every workspace's agents from its document. A workspace whose agents were
   // moved to rows (by a later build) would look empty here, so it never serves such a database.
@@ -890,8 +1148,13 @@ async function createDatabaseApp(
   // Number of trusted proxy hops nearest the socket; 0 disables X-Forwarded-For entirely.
   const trustedHops = options.trustProxyHops ?? (options.hosted?.trustProxy ? 1 : 0);
   const trustProxy = trustedHops > 0 ? (_address: string, hop: number) => hop < trustedHops : false;
+  // Fastify's own logger stays off; failures are written as structured lines to errorLog (audit
+  // CCA-515, server/error-log.ts): route pattern, error class and code, never a message.
+  const errorLog: LogLine = options.logLine ?? ((text: string) => console.error(text));
   const app = Fastify({
     logger: false,
+    // A random id per request, so a failure line can be matched across instances.
+    genReqId: () => randomUUID(),
     bodyLimit: 65536,
     requestTimeout: 15000,
     connectionTimeout: 15000,
@@ -970,6 +1233,15 @@ async function createDatabaseApp(
     // Any other route under database load: busy (503, Retry-After), never the plain 500
     // (server/busy.ts). A2A keeps its JSON-RPC shape above.
     if (transientDatabaseError(error)) return sendDatabaseBusy(reply, error);
+    // Text the database refused to store, on a route whose schema let it through: the caller's
+    // input (a NUL, half an emoji), so a 400 and no failure line.
+    const pgCode = (error as { code?: string }).code ?? '';
+    if (['22021', '22P02', '22P05'].includes(pgCode)) {
+      // 22P02 is also any bad cast in a query, so keep one warn line to tell a server bug apart.
+      if (pgCode === '22P02')
+        _request.log.warn({ pgCode, route: _request.routeOptions?.url }, 'db_text_refused');
+      return reply.code(400).send({ error: NO_NUL_MESSAGE });
+    }
     // Field-level detail (paths and constraints only, never received values).
     if (error instanceof z.ZodError) return reply.code(400).send(validationErrorBody(error));
     const possible = error as { statusCode?: number; message?: string };
@@ -992,19 +1264,61 @@ async function createDatabaseApp(
               // city_service_call: the service or Base could not be reached (502, 503; nothing
               // was signed or sent, a retry may work), or busy.
               (error instanceof FeedPayToolError && error.statusCode >= 500) ||
+              // Room files are off, full or paused for the month (503, retryable states).
+              (error instanceof RoomError &&
+                error.statusCode === 503 &&
+                typeof errorCode === 'string' &&
+                ROOM_FILE_UNAVAILABLE_CODES.has(errorCode)) ||
+              // A saved web page could not be fetched (502) or timed out (504); a retry may work.
+              (error instanceof RoomError &&
+                (error.statusCode === 502 || error.statusCode === 504) &&
+                typeof errorCode === 'string' &&
+                errorCode.startsWith('link_')) ||
               // The responder provider could not be reached (502), or the feature has no root key (503).
               (error instanceof ResponderError &&
                 (error.statusCode === 502 || error.statusCode === 503)))
           ? possible.statusCode
           : 500;
-    if (code === 500) app.log.error('Request failed.');
+    if (code === 500)
+      errorLog(errorLine('request_failed', { ...requestFacts(_request), ...errorFacts(error) }));
     const issues = (error as { issues?: unknown }).issues;
+    const retryMs =
+      code === 429
+        ? typeof retryAfterMs === 'number' && Number.isFinite(retryAfterMs) && retryAfterMs > 0
+          ? Math.max(1, Math.ceil(retryAfterMs))
+          : 60_000
+        : undefined;
+    // REST clients also get the standard header (whole seconds).
+    if (retryMs !== undefined) reply.header('Retry-After', String(Math.ceil(retryMs / 1000)));
     return reply.code(code).send({
       error:
         code === 500
           ? 'The operation could not be completed.'
           : (possible.message ?? 'Request rejected.'),
       ...(code !== 500 && typeof errorCode === 'string' ? { code: errorCode } : {}),
+      // Every 429 says when to retry (the limiter's time, else its per-minute window) and,
+      // for the app's own limits, which limit it was.
+      ...(retryMs !== undefined
+        ? {
+            retry_after_ms: retryMs,
+            ...(error instanceof ApiError && error.limit ? { limit: error.limit } : {}),
+          }
+        : {}),
+      // Guests on the REST paths get the same next steps as over MCP (their own tools only).
+      ...(code !== 500 &&
+      error instanceof RoomError &&
+      typeof errorCode === 'string' &&
+      _request.url.startsWith('/api/public/invites/')
+        ? errorGuidance({
+            code: errorCode,
+            status: code,
+            args: _request.body,
+            surface: 'rest_guest',
+            has: (tool) => guestToolsNow().includes(tool),
+            details: error.details,
+            message: possible.message,
+          })
+        : {}),
       // Machine-actionable manifest issues (autonomy routes) accompany the message.
       ...(code !== 500 && Array.isArray(issues) ? { issues } : {}),
       // Room facts for the caller (removed_from_room: the host's reason, may_rejoin).
@@ -1027,24 +1341,39 @@ async function createDatabaseApp(
         ? new PostgresRateLimiter(db, clock)
         : new MemoryRateLimiter(clock);
   const principals = new PrincipalCache(clock);
-  async function limit(key: string, max: number, window: number, message?: string): Promise<void> {
-    const result = await limiter.hit(key, max, window);
+  // One sign-up admission for the password sign-up and Continue with Google.
+  const admitSignUp = createSignUpAdmission({ limiter, clock, caps });
+  async function limit(
+    key: string,
+    max: number,
+    window: number,
+    message?: string,
+    weight?: number,
+  ): Promise<void> {
+    const result = await limiter.hit(key, max, window, weight);
     if (!result.allowed)
       throw new ApiError(
         429,
         message ?? 'Too many requests. Try again later.',
-        result.retryAfterMs,
+        // The limiter's own time, else this limit's whole window (never a fixed guess).
+        result.retryAfterMs > 0 ? result.retryAfterMs : window,
+        // The key's first segment names the limit (ip, owner, ...); the rest is never shown.
+        `${key.split(':')[0]}_requests`,
       );
   }
-  /** A newsletter budget on sign-up/onboarding: false when spent (429), never a refusal there. */
-  async function newsletterBudget(take: () => Promise<void>): Promise<boolean> {
-    try {
-      await take();
-      return true;
-    } catch (error) {
-      if (error instanceof ApiError && error.statusCode === 429) return false;
-      throw error;
-    }
+  /**
+   * Sign-in attempts (this page and the OAuth consent form): 20 per 15 minutes per IPv4 address
+   * or IPv6 /64, and twice and four times that per IPv6 /56 and /48 (hitAddressScopes).
+   */
+  async function limitLogin(ip: string): Promise<void> {
+    const result = await hitAddressScopes(limiter, 'login', ip, 20, 15 * 60_000);
+    if (!result.allowed)
+      throw new ApiError(
+        429,
+        'Too many requests. Try again later.',
+        result.retryAfterMs > 0 ? result.retryAfterMs : 15 * 60_000,
+        'sign_in_attempts',
+      );
   }
   /**
    * The newsletter opt-in after a committed sign-up or onboarding: any error is logged and the
@@ -1054,7 +1383,9 @@ async function createDatabaseApp(
     try {
       await run();
     } catch (error) {
-      request.log.warn({ err: error }, 'newsletter opt-in skipped');
+      errorLog(
+        errorLine('newsletter_opt_in_skipped', { ...requestFacts(request), ...errorFacts(error) }),
+      );
     }
   }
   // Session renewal happens during the operator lookup, which only receives the request.
@@ -1062,11 +1393,20 @@ async function createDatabaseApp(
   const renewedSessions = new WeakMap<FastifyRequest, number>();
   app.addHook('onRequest', async (request, reply) => {
     replies.set(request, reply);
+    // The site's security header policy for a function answer (server/security-headers.ts), set
+    // before the route runs so a route's own value of a header (a stricter page CSP) wins, as it
+    // does at the edge. The same values vercel.json sends, except where security-headers.ts notes.
     reply
       .header('Cache-Control', 'no-store')
-      .header('X-Content-Type-Options', 'nosniff')
-      .header('Referrer-Policy', 'same-origin');
-    if (!request.url.startsWith('/api/')) return;
+      .headers(functionSecurityHeaders(Boolean(options.hosted), request.url.split('?')[0]!));
+    // CCA-508: decide on the routed path as well as the raw URL. The router decodes the path, so
+    // a percent-encoded prefix (/%61pi/...) reaches an /api route and must meet the same guard.
+    const routed = request.routeOptions?.url;
+    if (
+      !request.url.startsWith('/api/') &&
+      !(typeof routed === 'string' && routed.startsWith('/api/'))
+    )
+      return;
     const host = request.headers.host ?? '';
     const origin = request.headers.origin;
     if (options.hosted) {
@@ -1101,7 +1441,7 @@ async function createDatabaseApp(
       await limitRequestRate(
         limit,
         request.ip,
-        presentedPrincipal(request.headers.authorization, request.cookies.cc_session, {
+        presentedPrincipal(request.headers.authorization, sessionToken(request), {
           guest: (token) => links.invites.verify(token),
           workspaceKey: (token) => workspaces.verifyKey(token),
           accessToken: (token) => oauthServer.verifyAccessToken(token, originOf(request)),
@@ -1277,8 +1617,24 @@ async function createDatabaseApp(
     });
     for (const row of changed) notify(row.operator_id);
   }
+  const secureCookies = options.hosted ? true : (options.secureCookies ?? false);
+  const sessionCookieName = cookieName(SESSION_COOKIE, secureCookies);
+  function presentedSession(request: FastifyRequest) {
+    return presentedCookie(
+      request.headers.cookie,
+      request.cookies,
+      SESSION_COOKIE,
+      secureCookies,
+      clock(),
+    );
+  }
+  /** The session cookie's value, under the current name or the one used before it. */
+  function sessionToken(request: FastifyRequest): string | undefined {
+    return presentedSession(request)?.value;
+  }
   async function optionalOperator(request: FastifyRequest): Promise<Operator | null> {
-    const token = request.cookies.cc_session;
+    const presented = presentedSession(request);
+    const token = presented?.value;
     if (!token || token.length > 128) return null;
     const hash = sha(token),
       time = clock();
@@ -1289,9 +1645,10 @@ async function createDatabaseApp(
           created_at: string | number;
           salt: string;
           terms_version: string | null;
+          host_cookie: boolean;
         }
       >(
-        `SELECT o.id,o.name,o.salt,s.expires_at,s.created_at,a.version AS terms_version,
+        `SELECT o.id,o.name,o.salt,s.expires_at,s.created_at,s.host_cookie,a.version AS terms_version,
                 EXISTS (SELECT 1 FROM elric_verified_identities v WHERE v.operator_id=o.id)
                   AS google_linked
            FROM operators o JOIN sessions s ON s.operator_id=o.id
@@ -1300,7 +1657,9 @@ async function createDatabaseApp(
         [hash, time],
       )
     ).rows[0];
-    if (!row) return null;
+    // A sign-in issued under the __Host- name is never read from the plain name: only a sibling
+    // subdomain could have set that cookie (server/session-cookie.ts).
+    if (!row || (presented?.legacy && row.host_cookie)) return null;
     // Onboarding gate (docs/GOOGLE_SIGNIN.md "Onboarding"): an account created with Google can
     // only reach the onboarding routes until it has a name and has accepted the current Terms
     // and Privacy Policy. Enforced here, where every session-authenticated route resolves.
@@ -1331,14 +1690,20 @@ async function createDatabaseApp(
   function sessionCookieOptions(maxAge: number) {
     return {
       httpOnly: true,
-      secure: options.hosted ? true : (options.secureCookies ?? false),
+      secure: secureCookies,
       sameSite: 'strict' as const,
       path: '/',
       maxAge,
     };
   }
   function setSessionCookie(reply: FastifyReply, token: string, maxAge: number): void {
-    reply.setCookie('cc_session', token, sessionCookieOptions(maxAge));
+    reply.setCookie(sessionCookieName, token, sessionCookieOptions(maxAge));
+    clearLegacyCookie(reply, SESSION_COOKIE);
+  }
+  /** Drops a cookie the browser still sends under its name from before the __Host- prefix. */
+  function clearLegacyCookie(reply: FastifyReply, base: string): void {
+    if (secureCookies && reply.request.cookies[base] !== undefined)
+      reply.clearCookie(base, { path: '/', httpOnly: true, sameSite: 'strict', secure: true });
   }
   /** The signed-in person (session cookie), whatever workspace the request selects. */
   async function person(request: FastifyRequest): Promise<Operator> {
@@ -1379,8 +1744,8 @@ async function createDatabaseApp(
       [operatorId, SESSIONS_PER_ACCOUNT - 1],
     );
     await tx.query(
-      'INSERT INTO sessions (token_hash,operator_id,expires_at,created_at) VALUES ($1,$2,$3,$4)',
-      [sha(token), operatorId, time + SESSION_TTL_MS, time],
+      'INSERT INTO sessions (token_hash,operator_id,expires_at,created_at,host_cookie) VALUES ($1,$2,$3,$4,$5)',
+      [sha(token), operatorId, time + SESSION_TTL_MS, time, secureCookies],
     );
     setSessionCookie(reply, token, SESSION_TTL_MS / 1000);
   }
@@ -1453,6 +1818,11 @@ async function createDatabaseApp(
       !/^[a-f0-9]{64}$/i.test(signature)
     )
       fail(401, 'Invalid or expired runtime signature.');
+    // CCA-634: the signature covers the body bytes only as the JSON parser captured them. A body
+    // parsed under any other content type would be signed as empty, so refuse it before the
+    // signature or the nonce count.
+    if (request.body !== undefined && request.body !== null && request.rawBody === undefined)
+      fail(415, 'Use application/json.');
     // Routes that take query parameters sign the full request target (path and query).
     const pathname = options.query ? request.url : request.url.split('?')[0];
     if (!options.query && request.url.includes('?'))
@@ -1498,6 +1868,18 @@ async function createDatabaseApp(
         ),
         { errorCode: 'terms_version_outdated' },
       );
+    // A chosen name is checked against every account: each check spends the per-address
+    // name-check budget first (signup-admission.ts admitNameCheck), not only this account's.
+    if (input.name) {
+      const check = await admitNameCheck(limiter, request.ip);
+      if (!check.allowed)
+        throw new ApiError(
+          429,
+          'Too many requests. Try again later.',
+          check.retryAfterMs,
+          'name_checks',
+        );
+    }
     const name = await db.transaction(async (tx) => {
       const row = (
         await tx.query<{ name: string; salt: string }>(
@@ -1625,11 +2007,14 @@ async function createDatabaseApp(
     );
   }
   app.post('/api/auth/register', async (request, reply) => {
-    await limit(
-      `register:${clientAddressKey(request.ip)}`,
-      caps.registrationsPerWindow,
-      15 * 60_000,
-    );
+    const admitted = await admitSignUp(request.ip);
+    if (!admitted.allowed)
+      throw new ApiError(
+        429,
+        'Too many requests. Try again later.',
+        admitted.retryAfterMs,
+        'sign_ups',
+      );
     const { name, password, newsletter, email: address } = registerSchema.parse(request.body);
     const salt = randomBytes(16).toString('hex'),
       hash = await passwordHash(password, salt);
@@ -1648,14 +2033,17 @@ async function createDatabaseApp(
     if (newsletter && address) {
       // Best effort: the account is already committed, so an error here is logged and skipped.
       await bestEffortOptIn(request, async () => {
-        // The ticked box queues an email: the same per-address budget as settings.
-        const addressAllowed = await newsletterBudget(() =>
-          limit(
-            `newsletter:address:${clientAddressKey(request.ip)}`,
+        // The ticked box queues an email: the same per-address budget as settings, with the
+        // wider IPv6 scopes of the sign-up itself.
+        const addressAllowed = (
+          await hitAddressScopes(
+            limiter,
+            'newsletter:address',
+            request.ip,
             NEWSLETTER_RATE.perAddress,
             NEWSLETTER_RATE.windowMs,
-          ),
-        );
+          )
+        ).allowed;
         const admission = addressAllowed
           ? await email.admitOptIn(operator.id, 'signup', address)
           : null;
@@ -1676,13 +2064,14 @@ async function createDatabaseApp(
   const deviceToken = (operatorId: string) =>
     createHmac('sha256', deviceSecret).update(`known-device:${operatorId}`).digest('base64url');
   function rememberDevice(reply: FastifyReply, operatorId: string): void {
-    reply.setCookie('cc_device', deviceToken(operatorId), {
+    reply.setCookie(cookieName(DEVICE_COOKIE, secureCookies), deviceToken(operatorId), {
       httpOnly: true,
-      secure: options.hosted ? true : (options.secureCookies ?? false),
+      secure: secureCookies,
       sameSite: 'strict',
       path: '/',
       maxAge: 180 * 24 * 60 * 60,
     });
+    clearLegacyCookie(reply, DEVICE_COOKIE);
   }
   /** Password check shared by the owner login and the OAuth consent page; callers rate-limit. */
   async function authenticate(
@@ -1714,7 +2103,13 @@ async function createDatabaseApp(
         [nameKey],
       )
     ).rows[0];
-    const device = request.cookies.cc_device;
+    const device = presentedCookie(
+      request.headers.cookie,
+      request.cookies,
+      DEVICE_COOKIE,
+      secureCookies,
+      clock(),
+    )?.value;
     const knownDevice = Boolean(row && device && constantEqual(device, deviceToken(row.id)));
     const accountFailures = knownDevice
       ? 0
@@ -1736,26 +2131,27 @@ async function createDatabaseApp(
     return { id: row.id, name: row.name };
   }
   app.post('/api/auth/login', async (request, reply) => {
-    await limit(`login:${clientAddressKey(request.ip)}`, 20, 15 * 60_000);
+    await limitLogin(request.ip);
     const operator = await authenticate(request.body, clientAddressKey(request.ip), request);
     await db.transaction((tx) => session(tx, reply, operator.id));
     rememberDevice(reply, operator.id);
     return { operator };
   });
   app.post('/api/auth/logout', async (request, reply) => {
-    const token = request.cookies.cc_session;
+    const token = sessionToken(request);
     if (token) {
       const hash = sha(token);
       await db.query('DELETE FROM sessions WHERE token_hash=$1', [hash]);
       for (const [client, clientHash] of subscriptionSessions)
         if (clientHash === hash) client.raw.end();
     }
-    reply.clearCookie('cc_session', {
+    reply.clearCookie(sessionCookieName, {
       path: '/',
       httpOnly: true,
       sameSite: 'strict',
-      secure: options.hosted ? true : (options.secureCookies ?? false),
+      secure: secureCookies,
     });
+    clearLegacyCookie(reply, SESSION_COOKIE);
     return { ok: true };
   });
   registerShortLinks(app, {
@@ -1767,13 +2163,120 @@ async function createDatabaseApp(
       limit(`ip:${clientAddressKey(request.ip)}`, caps.apiRequestsPerMinute, 60_000),
   });
   // Keys, bundler and RPC from the environment; a missing setting answers 503 (fails closed).
-  const baseRuntimes = chainRuntimes(db, process.env, { hosted: Boolean(options.hosted) });
+  const baseRuntimes = chainRuntimes(db, process.env, {
+    hosted: Boolean(options.hosted),
+    // Chain-side ALERT lines (facilitator, own bundler) go to logLine or the console.
+    ...(options.logLine ? { log: options.logLine } : {}),
+  });
+  // The domain file's build (vercel.json crons, every minute): first the registry's logs for the
+  // confirmed IDs whose holder moved them away (server/base/identity/moves.ts), then one stored
+  // file per hosted origin, which the route above serves as stored.
+  registerDomainFileCron(app, {
+    db,
+    cronSecret: process.env.CRON_SECRET,
+    origins: () => options.hosted?.allowedOrigins ?? [],
+    now: clock,
+    before: () =>
+      watchConfirmedIdentities(db, baseRuntimes, {
+        now: clock,
+        arcChainId: protocolArcChainIdFromEnv(process.env),
+      }),
+    // Size-guard ALERT lines (CCA-118) on the console unless a sink is passed: the logger is off.
+    ...(options.logLine ? { logLine: options.logLine } : {}),
+  });
+  // The public x402 facilitator (server/protocol/x402/public-facilitator.ts): /supported, /verify
+  // (USDC's own simulation on Base mainnet, nothing sent) and /settle (off until reviewed).
+  /**
+   * The public x402 sender, built once (its per-settlement refresh pacing must outlive a request)
+   * as soon as its facilitator exists; until then a stand-in that never sends.
+   */
+  // Sanctions screening of payer and payee, the payment engine's gate (fail closed). With the
+  // engine's emergency switch off (CITY_PROTOCOL_SCREENING=0) nothing settles here (CCA-755).
+  const publicSettleScreen = publicSettleScreenFor({
+    db,
+    env: process.env,
+    now: clock,
+    ...(options.feedPay?.screeningProvider ? { provider: options.feedPay.screeningProvider } : {}),
+    readClient: async () => (await baseRuntimes(8453)).readClient,
+    ...(options.logLine ? { log: options.logLine } : {}),
+  });
+  // The payees the public facilitator never relays to (CCA-704): the protocol's reserved payees,
+  // our paymaster and the addresses of our configured server keys. Built once it could be read;
+  // until then every request reads it again, and a failed read refuses (fails closed).
+  const publicReserved = onceReady(async () => ({
+    value: publicSettleReservedPayees(
+      process.env,
+      (await (await baseRuntimes(8453)).protocolKeyAddresses?.()) ?? [],
+    ),
+    ready: true,
+  }));
+  // One sender per instance even when the first requests arrive together (onceReady).
+  const publicSender = onceReady(async () => {
+    const facilitator = (await baseRuntimes(8453)).publicSettleFacilitator?.() ?? null;
+    const sender = createPublicSettle({
+      facilitator: facilitator ?? unavailablePublicFacilitator,
+      enabled: () => facilitator !== null,
+      // The runtime switch (feed_flags 'x402-settle'), read per request, fails closed (CCA-704).
+      paused: publicSettlePaused(db),
+      advertised: process.env.CITY_X402_PUBLIC_SETTLE_ADDRESS as `0x${string}`,
+      reserved: publicReserved,
+      // Gas budget, sequential buckets: payer (20/h), client (100/day), payee (100/day), then the
+      // day (500), public-settle.ts; the day cap refusing logs one ALERT line an hour per instance.
+      budget: limiterBudget((key, max, windowMs) => limiter.hit(key, max, windowMs), {
+        ...(options.logLine ? { log: options.logLine } : {}),
+        now: clock,
+      }),
+      // A payer whose settlement reverted on Base gets no new one for an hour (CCA-704).
+      cooldown: publicSettleCooldown(db, clock, options.logLine),
+      // Bounded work: 120 chain simulations a minute in all, 4 new payments at once per instance.
+      simulations: limiterSimulations((key, max, windowMs) => limiter.hit(key, max, windowMs)),
+      // Payer and payee screened, fail closed (publicSettleScreenFor above, CCA-755).
+      screen: publicSettleScreen,
+      now: clock,
+    });
+    return { value: sender, ready: facilitator !== null };
+  });
+  registerPublicFacilitatorRoutes(app, {
+    reader: async () => (await baseRuntimes(8453)).readClient ?? null,
+    limit: (key, max, windowMs) => limit(key, max, windowMs),
+    now: clock,
+    reserved: publicReserved,
+    // The public sender (server/protocol/x402/public-settle.ts): only with
+    // CITY_X402_PUBLIC_SETTLE=1 and its own key (CITY_X402_PUBLIC_SETTLE_KEY_REF); else /settle
+    // answers 503 settlement_unavailable, and nothing is ever sent.
+    // Advertised in /supported only while on; the address of CITY_X402_PUBLIC_SETTLE_KEY_REF's key.
+    settle:
+      process.env.CITY_X402_PUBLIC_SETTLE === '1' &&
+      /^0x[0-9a-fA-F]{40}$/.test(process.env.CITY_X402_PUBLIC_SETTLE_ADDRESS ?? '')
+        ? {
+            address: process.env.CITY_X402_PUBLIC_SETTLE_ADDRESS as `0x${string}`,
+            settle: async (payment, verify, context) =>
+              (await publicSender()).settle(payment, verify, context),
+          }
+        : null,
+  });
   // Feed offers' built-in kinds (server/feed/offers/kind-core.ts): their one Base reader, set once
   // here. Without the Base mainnet gate and endpoint it is null and the Base kinds answer
   // 'unavailable' (503); the web kind's safe fetcher is the process default.
   setOfferKindDeps({
     readBase: offerBaseReaderFromEnv(process.env, { hosted: Boolean(options.hosted) }),
   });
+  // Its gas asset or USDC on that chain, at the latest block. An unread chain throws: see chainHolding.
+  const walletFunds: WalletFunds = async (chainId, address) => {
+    const reader = (await baseRuntimes(chainId as ChainId)).readClient;
+    const usdc = usdcOf(chainId);
+    if (!reader || !usdc) throw new Error('No read client.');
+    const [gas, held] = await Promise.all([
+      reader.getBalance({ address }),
+      reader.readContract({
+        address: usdc.address,
+        abi: parseAbi(['function balanceOf(address) view returns (uint256)']),
+        functionName: 'balanceOf',
+        args: [address],
+      }),
+    ]);
+    return gas > 0n || held > 0n;
+  };
   registerBaseRegistrationRoutes(app, {
     db,
     env: process.env,
@@ -1783,7 +2286,11 @@ async function createDatabaseApp(
     // With wallets on, a new registration's wallet is owned by this person's wallet key.
     currentPerson: optionalOperator,
     runtime: baseRuntimes,
+    walletFunds,
     cronSecret: process.env.CRON_SECRET,
+    limit,
+    // Central City's proven fleet accounts register at volume: not held to the per-account rate.
+    operatorAccounts: sponsorOperatorAccounts,
   });
   // Operation Base Wallet (behind CITY_BASE_WALLET=1): the person's owner vault and each agent's
   // wallet on the wallet network (shared/base/wallet-network.ts). Balances, spend permissions and
@@ -1791,19 +2298,46 @@ async function createDatabaseApp(
   // endpoint, on Base only with its gate open (walletReaders); without them a balance read answers
   // 503, a limit view is stale, a recipient is not verified, and nothing is invented.
   let limitOperations: ReturnType<typeof ownerRevokePortFromEnv> | null = null;
+  const arcLimitOperations = new Map<number, ReturnType<typeof ownerRevokePortFromEnv>>();
   registerBaseWalletRoutes(app, {
     db,
     env: process.env,
+    log: errorLog,
     currentPerson: optionalOperator,
     currentWorkspace: async (request) =>
       (await optionalOperator(request)) ? owner(request) : null,
     runtime: baseRuntimes,
+    walletFunds,
     ...walletReaders(process.env, { hosted: Boolean(options.hosted) }),
+    arcBalances: (chainId) =>
+      arcBalanceReader(chainId, process.env, { hosted: Boolean(options.hosted) }),
     // Built on first use; a missing setting answers 503 and is not cached.
     limitOperations: async () =>
       (limitOperations ??= ownerRevokePortFromEnv(db, process.env, WALLET_CHAIN_ID, {
         hosted: Boolean(options.hosted),
       })),
+    arcPermissions: (chainId) =>
+      arcPermissionReader(chainId, process.env, { hosted: Boolean(options.hosted) }),
+    arcPayChain: (chainId) =>
+      arcPayChainReader(chainId, process.env, { hosted: Boolean(options.hosted) }),
+    arcLimitOperations: async (chainId) => {
+      const known = arcLimitOperations.get(chainId);
+      if (known) return known;
+      const built = ownerRevokePortFromEnv(db, process.env, chainId, {
+        hosted: Boolean(options.hosted),
+        bundler: (await baseRuntimes(chainId)).arcOwnerBundler,
+      });
+      arcLimitOperations.set(chainId, built);
+      return built;
+    },
+    // Arc has no oracle: its withdrawals and payments are screened by Base's, read through Base's
+    // client and never Arc's. Without Base readable they are refused.
+    arcScreeningProvider: (chainId) =>
+      sanctionsOracleFor(process.env, chainId, async () => {
+        const reader = (await baseRuntimes(WALLET_CHAIN_ID)).readClient;
+        if (!reader) throw new Error('No read client.');
+        return reader;
+      }),
     limit,
     // The withdrawals sweep (vercel.json crons): expired and finished operations release the
     // sponsor's exposure even when nobody reads them.
@@ -1813,24 +2347,17 @@ async function createDatabaseApp(
   // The Agent Explorer's On Base view: public, read-only, cached. The server reads Base (the head
   // and ownerOf) through the configured Base endpoint, else (hosted only) the public one; locally
   // and in tests without either, owners and readAt come from the stored evidence instead.
-  const onBaseUrl =
-    process.env[BASE_NETWORKS[BASE_MAINNET].bundlerEnv]?.trim() ||
-    (options.hosted ? PUBLIC_BASE_RPC : undefined);
-  const onBaseRegistry = BASE_NETWORKS[BASE_MAINNET].contracts.identityRegistry;
   // The explorer's reads fall back to a second, keyless endpoint (Base's public RPC unless set):
   // the configured endpoint also carries the paymaster and every wallet read, and a busy moment
-  // there must not leave the public list showing an old block.
-  const onBaseFallback =
-    process.env.CITY_BASE_READ_FALLBACK_RPC_URL?.trim() ||
-    (options.hosted ? PUBLIC_BASE_RPC : undefined);
-  const onBaseUrls = onBaseUrl
-    ? [onBaseUrl, ...(onBaseFallback && onBaseFallback !== onBaseUrl ? [onBaseFallback] : [])]
-    : [];
+  // there must not leave the public list showing an old block. https only (explorerReadUrls).
+  const onBaseUrls = explorerReadUrls(process.env, Boolean(options.hosted));
+  const onBaseRegistry = BASE_NETWORKS[BASE_MAINNET].contracts.identityRegistry;
   registerOnBaseRoutes(app, {
     db,
     limit,
+    passportsAlsoOn: protocolArcChainIdFromEnv(process.env),
     chain:
-      onBaseUrl && onBaseRegistry
+      onBaseUrls.length > 0 && onBaseRegistry
         ? baseChainReader(
             onBaseUrls,
             BASE_MAINNET,
@@ -1840,10 +2367,34 @@ async function createDatabaseApp(
           )
         : undefined,
   });
+  // The explorer's On Arc view (/api/public/arc/...): only with CITY_ARC=1, on the Arc network
+  // CITY_ARC_CHAIN_ID names (mainnet unless set), read through CITY_ARC_RPC_URL or Arc's public
+  // endpoint. Off, nothing is mounted and Base is untouched.
+  const arc = arcNetwork(Number(process.env.CITY_ARC_CHAIN_ID ?? ARC_MAINNET), process.env);
+  if (arc)
+    registerOnBaseRoutes(app, {
+      db,
+      limit,
+      chainId: arc.chainId,
+      slug: 'arc',
+      chain: baseChainReader(
+        [process.env.CITY_ARC_RPC_URL?.trim() || arc.publicRpcUrl],
+        arc.chainId,
+        arc.contracts.identityRegistry,
+        undefined,
+        arc.contracts.reputationRegistry,
+      ),
+    });
   // The Agent Explorer's Service calls view: every paid service call on Base mainnet as its
   // transaction (server/base/explorer/calls.ts). Public, read-only, cached; it shares the paid
   // calls counter reader with the homepage stats, so both read that row at most once per 5 s.
-  const paidCallsReader = createPaidCallsReader({ db, clock });
+  registerHistoryRoute(app, { db, limit });
+  const observeHistory = createHistoryObserver(db, clock);
+  const paidCallsReader = createPaidCallsReader({
+    db,
+    clock,
+    observe: (value, at) => observeHistory('paid_calls_mainnet', value, at),
+  });
   registerServiceCallsRoutes(app, { db, limit, now: clock, counter: paidCallsReader });
   // Operation Directory D1: the public directory search and the owner's "Show in the directory"
   // settings per agent (server/directory/routes.ts), listing on the explorer's network.
@@ -1880,7 +2431,7 @@ async function createDatabaseApp(
     // The session counts only with the console's request header (a public POST skips that guard).
     // Only the workspace: the person's sign-in name is never published on the Feed.
     signedIn: async (request) => {
-      if (request.headers['x-city-request'] !== '1' || !request.cookies.cc_session) return null;
+      if (request.headers['x-city-request'] !== '1' || !sessionToken(request)) return null;
       if (!(await optionalOperator(request))) return null;
       return { ownerId: (await owner(request)).id };
     },
@@ -1910,29 +2461,117 @@ async function createDatabaseApp(
   registerSponsorStatsRoute(app, { db, env: process.env, now: clock });
   // Creates the sponsor account's key inside the app (CITY_OPS_SECRET; 409 once configured).
   registerSponsorKeyRoute(app, { db, env: process.env, now: clock });
+  // The owner's one click: the sponsor's surplus ETH to the facilitator (feed/pay/sponsor-eth-sweep.ts).
+  // Proven sponsor operators only (their own signed-in account), 404 for everyone else.
+  // Owner accounts allowed by name (account names are unique); the tool only ever moves sponsor ETH to the facilitator.
+  const SPONSOR_ETH_OWNER_ACCOUNT_NAME = 'now';
+  const sponsorEthOwnerIds = new Set<string>();
+  registerSponsorEthRoutes(app, {
+    sweep: createSponsorEthSweep({
+      db,
+      now: clock,
+      chain: async () => (await baseRuntimes(8453)).sponsorEth?.() ?? null,
+    }),
+    person: async (request) => {
+      if (!sessionToken(request)) return null;
+      const person = await optionalOperator(request);
+      if (!person) return null;
+      // Owner's own console account (the owner, 27 Oct): the account named "Now" may use this page too.
+      if (person.name.trim().toLowerCase() === SPONSOR_ETH_OWNER_ACCOUNT_NAME)
+        sponsorEthOwnerIds.add(person.id);
+      return { accountId: person.id };
+    },
+    operators: () => new Set([...sponsorOperatorAccounts(), ...sponsorEthOwnerIds]),
+    limit,
+  });
   registerOwnPaymasterKeysRoute(app, { db, env: process.env, now: clock });
   // Operation Paymaster prepare mode: the server provisions its own keys (no ops secret needed)
   // and publishes only their public addresses. Never blocks or fails the start.
+  const paymaster = paymasterSide(process.env);
   registerPaymasterPublicRoute(app, {
     db,
-    env: process.env,
-    chainId: BASE_MAINNET,
+    env: paymaster.env,
+    chainId: paymaster.chainId,
     entryPoint: BASE_NETWORKS[BASE_MAINNET].contracts.entryPointV06,
-    effective: async () => (await baseRuntimes(BASE_MAINNET)).ownBundlerEffective?.(),
+    effective: async () =>
+      (await baseRuntimes(paymaster.chainId as ChainId)).ownBundlerEffective?.(),
   });
+  // Arc's view of the same, its own keys, next to Base's: only while Arc is on.
+  const arcPaymaster = arcPaymasterSide(process.env);
+  if (arcPaymaster)
+    registerPaymasterPublicRoute(app, {
+      db,
+      env: arcPaymaster.env,
+      chainId: arcPaymaster.chainId,
+      entryPoint: BASE_NETWORKS[BASE_MAINNET].contracts.entryPointV06,
+      path: PAYMASTER_ARC_PUBLIC_PATH,
+      // With Arc still off there is no runtime to ask: only the keys' addresses are shown.
+      effective: async () =>
+        (
+          await baseRuntimes(arcPaymaster.chainId as ChainId).catch(() => null)
+        )?.ownBundlerEffective?.(),
+    });
   // Our own bundler's upkeep (direct-bundler.ts maintain), every minute; 'off' unless
   // CITY_BASE_BUNDLER=direct is in effect.
   registerOwnBundlerMaintainRoute(app, {
     cronSecret: process.env.CRON_SECRET,
-    upkeep: async () => (await baseRuntimes(BASE_MAINNET)).ownBundlerUpkeep,
+    upkeep: async () => {
+      const arc = protocolArcChainIdFromEnv(process.env);
+      if (arc === null) return (await baseRuntimes(BASE_MAINNET)).ownBundlerUpkeep;
+      // Arc on: neither chain's missing runtime stops the other's upkeep.
+      const upkeepOf = (chainId: ChainId) =>
+        baseRuntimes(chainId).then(
+          (runtime) => runtime.ownBundlerUpkeep,
+          () => undefined,
+        );
+      return bothUpkeeps(await upkeepOf(BASE_MAINNET), await upkeepOf(arc as ChainId));
+    },
   });
   // Awaited (a frozen serverless instance would drop a background promise), but never longer
   // than 3 s and never thrown: the site starts whatever happens here.
-  const paymasterKeys = await Promise.race([
-    provisionPaymasterKeysAtStart({ db, env: process.env, now: clock }),
+  // Base's keys, and Arc's when Arc is on (each chain's own mode decides), side by side.
+  await Promise.all(
+    paymasterSides(process.env).map(async (side) => {
+      const paymasterKeys = await Promise.race([
+        // 'settings_mismatch' (CCA-716): a key setting does not match the recorded keys; our own
+        // bundler then refuses to be built (fail closed) and CDP keeps serving. That one sanitized
+        // line (setting name only) goes to logLine or the console, never app.log (off in production).
+        provisionPaymasterKeysAtStart({
+          db,
+          env: side.env,
+          now: clock,
+          chainId: side.chainId,
+          ...(options.logLine ? { log: options.logLine } : {}),
+        }),
+        new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 3_000).unref()),
+      ]);
+      // 'ready' is the normal start: on this error sink it would bury real errors at every cold start.
+      if (
+        paymasterKeys !== 'off' &&
+        paymasterKeys !== 'settings_mismatch' &&
+        paymasterKeys !== 'ready'
+      )
+        errorLog(
+          errorLine('own_paymaster_keys', {
+            state: paymasterKeys,
+            ...(side.chainId === BASE_MAINNET ? {} : { chainId: side.chainId }),
+          }),
+        );
+    }),
+  );
+  // One key per role (audit CCA-714): ALERT for every two roles (app-held keys, the treasury, the
+  // funding wallet) that share an account. Role names, setting names and public addresses only;
+  // same 3 s bound, never thrown. To the effective sink (options.logLine, else the console):
+  // production runs Fastify with logger: false, so app.log would drop the ALERT.
+  await Promise.race([
+    checkKeyRolesAtStart({
+      db,
+      env: process.env,
+      chainId: BASE_MAINNET,
+      log: (line) => (options.logLine ?? ((text: string) => console.error(text)))(line),
+    }),
     new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 3_000).unref()),
   ]);
-  if (paymasterKeys !== 'off') app.log.info({ event: 'own_paymaster_keys', state: paymasterKeys });
   // Operation Central City Feed (live unless CITY_FEED=0, read per request): the services the Feed
   // lists as Offered, read from the x402 Bazaar (server/feed/services-routes.ts). Public and read-only. The status
   // route (FEED_PATHS.status) is the requests slice's; it takes feedServicesStatus (query.ts).
@@ -1949,7 +2588,7 @@ async function createDatabaseApp(
     hostedHost: options.hosted ? new URL(options.hosted.publicOrigin).hostname : null,
     // Each run first recomputes the use counts of the services sold by Central City agents from
     // their settled Feed pay calls (server/feed/offers/uses.ts).
-    hostedUses: (at) => refreshHostedUses(db, at),
+    hostedUses: (at) => refreshHostedUses(db, at, protocolArcChainIdFromEnv(process.env)),
     ...(options.feed?.fetch ? { fetch: options.feed.fetch } : {}),
     ...(options.logLine ? { log: options.logLine } : {}),
   });
@@ -1963,6 +2602,8 @@ async function createDatabaseApp(
     clock,
     limit,
     chainId: () => protocolFeeChainId(process.env),
+    // The treasury's own payments never count, also in rows stored before that rule (CCA-126).
+    treasury: (chainId) => protocolTreasuryFor(process.env, chainId),
   });
   registerProtocolFeeCron(app, {
     db,
@@ -1974,7 +2615,10 @@ async function createDatabaseApp(
   const email = registerEmail(app, {
     db,
     clock,
-    options: options.email,
+    options:
+      options.logLine && !options.email?.log
+        ? { ...options.email, log: options.logLine }
+        : options.email,
     originOf: (request) => requestOrigin(request, options.hosted),
     elricEnabled: () => options.elric?.enabled ?? elricEnabled(),
     owner: person,
@@ -1998,7 +2642,7 @@ async function createDatabaseApp(
     session,
     currentPerson: optionalOperator,
     signup: {
-      registrationsPerWindow: caps.registrationsPerWindow,
+      admit: admitSignUp,
       create: createOwner,
     },
     hosted: options.hosted,
@@ -2089,15 +2733,15 @@ async function createDatabaseApp(
         ? {}
         : {
             'Set-Cookie': app.serializeCookie(
-              'cc_session',
-              request.cookies.cc_session!,
+              sessionCookieName,
+              sessionToken(request)!,
               sessionCookieOptions(renewedMaxAge),
             ),
           }),
     });
     clients.add(reply);
     subscribers.set(operator.id, clients);
-    const sessionHash = sha(request.cookies.cc_session!);
+    const sessionHash = sha(sessionToken(request)!);
     subscriptionSessions.set(reply, sessionHash);
     reply.raw.write('retry: 3000\nevent: invalidate\ndata: {"connected":true}\n\n');
     const ping = setInterval(() => {
@@ -2214,7 +2858,7 @@ async function createDatabaseApp(
       );
       let token: string | undefined;
       if (agent.mode === 'external') {
-        token = randomBytes(32).toString('base64url');
+        token = `${RUNTIME_CREDENTIAL_PREFIX}${randomBytes(32).toString('base64url')}`;
         await tx.query(
           'INSERT INTO credentials(token_hash,operator_id,agent_id) VALUES($1,$2,$3)',
           [sha(token), operator.id, agent.id],
@@ -2356,7 +3000,7 @@ async function createDatabaseApp(
         manifest.spec.visibility !== 'private' &&
         (await baseRegistrationStarted(tx, agent.id))
       )
-        fail(409, "A Base agent's profile stays public.", 'base_stays_public');
+        fail(409, staysPublicMessage(await registeredChainName(tx, agent.id)), 'base_stays_public');
       const changed = await updateStoredAgent(
         workspace,
         tx,
@@ -2575,6 +3219,7 @@ async function createDatabaseApp(
     mutateMany,
     // Late-bound: the AI workspace module registers below.
     aiCapacity: () => workspaces.capacity(),
+    opsEnv: () => process.env,
   });
   // Mentions and wake-up (docs/WAKE.md): messaging and rooms write through wake.db so
   // their commits wake long-polls, streams and webhooks.
@@ -2616,7 +3261,10 @@ async function createDatabaseApp(
   const rooms = createRooms({
     db: wake.db,
     clock,
-    limit,
+    limit: (key, max, windowMs, limitOptions) =>
+      limit(key, max, windowMs, limitOptions?.message, limitOptions?.weight),
+    // Post attachments are room files, created below; resolved at post time.
+    attachments: () => files.attach,
     secret: roomsSecret,
     // Member caps from CITY_LIMIT_ROOM_MEMBERS_MAX / _DEFAULT (clamped to the protocol ceiling).
     limits: {
@@ -2645,6 +3293,7 @@ async function createDatabaseApp(
     clock,
     limit,
     rooms,
+    alsoOnArc: protocolArcChainIdFromEnv(process.env) as ArcChainId | null,
     ...options.roomInvitations,
   });
   // Feed Respond (server/feed/respond.ts, live unless CITY_FEED=0, read per request): a response
@@ -2666,6 +3315,32 @@ async function createDatabaseApp(
   // Context pins (docs/ROOMS.md "Pins and the handoff brief"): console REST and MCP tools.
   const pins = createRoomPins({ db: wake.db, clock, limit });
   registerPinRoutes(app, { pins, owner, originOf });
+  // Decisions, approvals and task results: console REST (the only place approvals are answered).
+  const cards = createRoomCards({ db: wake.db, clock, limit });
+  registerCardRoutes(app, {
+    cards,
+    digest: createRoomDigest({ db: wake.db, clock, limit }),
+    owner,
+    originOf,
+  });
+  // Room files (docs/ROOMS.md "Room files"): private object store; console REST and MCP tools.
+  const fileStore = options.artifactStore ?? vercelArtifactStore(process.env);
+  const files = createRoomArtifacts({
+    db: wake.db,
+    clock,
+    limit,
+    store: () => fileStore,
+    extractText: extractPdfText,
+    link: options.linkFetch,
+  });
+  registerFileRoutes(app, { files, owner, originOf, cronSecret: process.env.CRON_SECRET });
+  // The one-time owner relabel with the server's own label key (hourly cron; skipped once done).
+  registerRoomRelabelRoute(app, {
+    db,
+    secret: roomsSecret,
+    clock,
+    cronSecret: process.env.CRON_SECRET,
+  });
   // Room tasks (docs/ROOM_TASKS.md): limits are charged before its transactions.
   const tasks = createRoomTasks({ db, clock, limit, secret: roomsSecret });
   // Owner console REST mirror of the task tools, behind the same flag (no routes when off: 404).
@@ -2696,7 +3371,20 @@ async function createDatabaseApp(
     mutate,
   });
   registerResultRoutes(app, { results, owner, originOf });
-  const links = createJoinLinks({ db, clock, limit, rooms, caps, tasks, messaging });
+  const links = createJoinLinks({
+    db,
+    clock,
+    limit,
+    rooms,
+    caps,
+    tasks,
+    messaging,
+    pins,
+    mentions: wake,
+    repos,
+    cards,
+    files,
+  });
   registerJoinLinkRoutes(app, {
     links,
     owner,
@@ -2705,6 +3393,31 @@ async function createDatabaseApp(
   });
   stressTestMaxGuests(); // fails startup on an invalid CITY_STRESS_TEST_MAX_GUESTS
   stressTestMaxRooms(); // and on an invalid CITY_STRESS_TEST_MAX_ROOMS
+  // And on an invalid CITY_BASE_SPONSOR_OPERATOR_OWNERS (repeats are ignored). The fleets' owner
+  // addresses are mapped to account ids here, from server-verified proof of the owner key only
+  // (server/base/chain/sponsor-operators.ts), now and then hourly; each resolution logs its counts
+  // (never ids), as a warning when an owner is unproven or none are set while our paymaster
+  // sponsors. Awaited at most 3 s, like the keys above: until it lands nobody is exempt.
+  {
+    const operators = createSponsorOperators({
+      db,
+      owners: sponsorOperatorOwners(process.env),
+      sponsoring: bundlerChoice(process.env) === 'direct',
+      now: clock,
+      // Warnings and alerts only (the counts-only info line stays unlogged, as before).
+      log: (level, entry, message) => {
+        if (level === 'warn') errorLog(JSON.stringify({ ...entry, level, message }));
+      },
+    });
+    installSponsorOperators(operators);
+    const retired = retiredSponsorOperatorAccountsLine(process.env);
+    if (retired)
+      errorLog(JSON.stringify({ ...retired.entry, level: 'warn', message: retired.message }));
+    await Promise.race([
+      operators.refresh(),
+      new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 3_000).unref()),
+    ]);
+  }
   // "Verify here": the daily, hash-chained, signed checkpoints of the same count, public leaves,
   // owner-only inclusion proofs, and the Vercel Cron endpoint (CRON_SECRET).
   registerCountLogRoutes(app, {
@@ -2730,10 +3443,31 @@ async function createDatabaseApp(
     excludedOperators: parseExcludedOperators(process.env.CITY_STATS_EXCLUDED_OPERATORS),
     cronSecret: process.env.CRON_SECRET,
   });
+  // The public cards' backfill (migration 280): a few workspaces per minute until every agent
+  // that existed before the migration has its row; then one read per run.
+  registerPublicCardsCron(app, { db, cronSecret: process.env.CRON_SECRET, now: clock });
+  // Downtown's lines of code (migration 261): a 30-minute cron recounts the public repositories
+  // when a head commit changed; GET /api/public/code serves the latest count.
+  registerCodeCountRoutes(app, {
+    db,
+    limit,
+    cronSecret: process.env.CRON_SECRET,
+    token: process.env.CITY_CODE_COUNT_GITHUB_TOKEN || undefined,
+    clock,
+  });
+  // The public Agent Dashboard (/dashboard): snapshot reads and the rollup cron (dashboard/).
+  registerDashboardRoutes(app, {
+    db,
+    clock,
+    limit,
+    cronSecret: process.env.CRON_SECRET,
+    chainUrls: onBaseUrls,
+  });
   // Homepage ticker: AI agents that ever joined, cached per instance and at the edge; and the paid
   // service calls on Base mainnet (migration 125), left out while CITY_PAID_CALLS_TICKER is '0'.
   registerPublicStatsRoutes(app, {
     stats: createPublicStats({
+      store: sqlPublicStatsStore(db, observeHistory),
       db,
       clock,
       excludedOperators: parseExcludedOperators(process.env.CITY_STATS_EXCLUDED_OPERATORS),
@@ -2742,6 +3476,13 @@ async function createDatabaseApp(
     paidCalls: paidCallsReader,
     // The Agent Explorer's "On Base now" total, shared through its own public_stats row.
     baseAgents: createBaseAgentsReader({ db, store: sqlPublicStatsStore(db), clock }),
+    // The same count on Arc (its own row), only while Arc is on; undefined: no field, no query.
+    arcAgents: createArcAgentsReader({
+      db,
+      store: sqlPublicStatsStore(db),
+      clock,
+      env: process.env,
+    }),
     clock,
   });
   // Base Pay P2c: agents pay other Central City agents on their own (tools behind CITY_BASE_WALLET=1
@@ -2759,6 +3500,7 @@ async function createDatabaseApp(
     env: process.env,
     now: clock,
     chain: agentPayChain,
+    agentChain: (agentId) => agentChainOf(db, process.env, agentId),
     recipients: options.agentPay
       ? options.agentPay.recipients
       : walletReaders(process.env, { hosted: Boolean(options.hosted) }).payChain,
@@ -2790,6 +3532,9 @@ async function createDatabaseApp(
     db,
     env: process.env,
     now: clock,
+    // The agents list's Base reads, one budget for every account and instance (fails closed).
+    admitAgentReads: () =>
+      limit('feed-pay-agents-chain:base', FEED_PAY_AGENT_CHAIN_READS_PER_MINUTE, 60_000),
     revalidateGrant: (input) =>
       grantCheck ? grantCheck(input) : Promise.reject(new Error('Grant check not ready.')),
     chain:
@@ -2824,6 +3569,34 @@ async function createDatabaseApp(
         const runtime = await baseRuntimes(WALLET_CHAIN_ID);
         return runtime.router3Facilitator?.() ?? null;
       }),
+    // An Arc agent buys on Arc, through Arc's runtime only (asked only with CITY_ARC=1). Screening
+    // reads the sanctions oracle on Base, through Base's client, never Arc's.
+    arc: options.feedPay?.arc ?? {
+      chain: async (chainId) => {
+        const runtime = await baseRuntimes(chainId);
+        if (!runtime.feedPay) throw new Error('Feed pay is not configured.');
+        return runtime.feedPay();
+      },
+      facilitator: async (chainId) => (await baseRuntimes(chainId)).router3Facilitator?.() ?? null,
+      screening: createScreeningGate({
+        db,
+        env: process.env,
+        now: clock,
+        provider:
+          options.feedPay?.screeningProvider ??
+          (() =>
+            sanctionsOracleFor(
+              process.env,
+              protocolArcChainIdFromEnv(process.env) ?? WALLET_CHAIN_ID,
+              async () => {
+                const runtime = await baseRuntimes(WALLET_CHAIN_ID);
+                const reader = runtime.feedPayReadClient?.() ?? runtime.readClient;
+                if (!reader) throw new Error('No read client.');
+                return reader;
+              },
+            )),
+      }),
+    },
     // Payment screening (docs/protocol/SCREENING-GATE.md), live unless CITY_PROTOCOL_SCREENING is
     // '0'. On Base mainnet the sanctions oracle is the one fixed in code (shared/protocol.ts); on a
     // test network CITY_PROTOCOL_SCREENING_ORACLE names it. Without one, new payments are refused.
@@ -2845,7 +3618,7 @@ async function createDatabaseApp(
   });
   // The person's own account (whichever workspace is selected), with the console's header.
   const feedPayPerson = async (request: FastifyRequest) => {
-    if (request.headers['x-city-request'] !== '1' || !request.cookies.cc_session) return null;
+    if (request.headers['x-city-request'] !== '1' || !sessionToken(request)) return null;
     const person = await optionalOperator(request);
     if (!person) return null;
     const { rows } = await db.query<{ kind: string }>('SELECT kind FROM operators WHERE id = $1', [
@@ -2872,8 +3645,11 @@ async function createDatabaseApp(
       env: process.env,
       now: clock,
       chainId: WALLET_CHAIN_ID,
+      agentChain: (agentId) => agentChainOf(db, process.env, agentId),
       credits: createSponsorCredits({ db, env: process.env, now: clock }),
       hosted: { forSponsor: feedPay.hostedForSponsor, run: feedPay.runHostedOffer },
+      // The engine's own pre-send checks before the sponsor signs (screening, treasury, router 3).
+      preSign: feedPay.router3PreSign,
       pay:
         options.feedPay?.sponsorPay ??
         (async () => (await baseRuntimes(WALLET_CHAIN_ID)).sponsorPay?.() ?? null),
@@ -2886,6 +3662,48 @@ async function createDatabaseApp(
     limit,
     cronSecret: process.env.CRON_SECRET,
   });
+  // The offers' public address for outside buyers: off by default; stage 1 moves no money.
+  registerPublicOfferRoutes(app, {
+    env: process.env,
+    chainId: WALLET_CHAIN_ID,
+    origin: () =>
+      options.offers?.origin ?? options.hosted?.publicOrigin ?? 'https://centralcity.ai',
+    // Called per request, after `offers` below exists.
+    serviceIdOf: (offerId) => offers.serviceIdOf(offerId),
+    hosted: feedPay.hostedForSponsor,
+    limit,
+    cronSecret: process.env.CRON_SECRET,
+    pay: createPublicOfferPay({
+      db,
+      env: process.env,
+      now: clock,
+      chainId: WALLET_CHAIN_ID,
+      secret: () => process.env.CITY_RATE_LIMIT_KEY || feedLocalSecret,
+      lane:
+        options.feedPay?.publicOfferLane ??
+        (async () => (await baseRuntimes(WALLET_CHAIN_ID)).publicOfferLane?.() ?? null),
+      hosted: { forSponsor: feedPay.hostedForSponsor, run: feedPay.runHostedOffer },
+      // The engine's own pre-send checks: reserved payee, screening, router 3's probe and treasury.
+      preSign: feedPay.router3PreSign,
+      paused: publicSettlePaused(db, PUBLIC_OFFER_FLAG),
+      screeningOn: () => screeningEnabled(process.env),
+      cooldown: publicOfferCooldown(db, clock, options.logLine),
+      budget: publicOfferBudget(limiter),
+      paidBudget: publicOfferPaidBudget(limiter),
+      simulations: publicOfferSimulations((key, max, windowMs) => limiter.hit(key, max, windowMs)),
+      clientSimulations: publicOfferClientSimulations((key, max, windowMs) =>
+        limiter.hit(key, max, windowMs),
+      ),
+      sellerSimulations: publicOfferSellerSimulations((key, max, windowMs) =>
+        limiter.hit(key, max, windowMs),
+      ),
+      ...(options.logLine ? { log: options.logLine } : {}),
+      ...(options.feedPay?.sleep ? { sleep: options.feedPay.sleep } : {}),
+      ...(options.feedPay?.publicOfferWaitMs !== undefined
+        ? { waitMs: options.feedPay.publicOfferWaitMs }
+        : {}),
+    }),
+  });
   // Feed offers (server/feed/offers): the services:sell tools write through this store. Offers are
   // listed under the configured public origin, never a request's Host. A bad cap setting keeps the
   // defaults (logged) instead of stopping the app.
@@ -2893,10 +3711,8 @@ async function createDatabaseApp(
   try {
     offerCapsNow = options.offers?.caps ?? offerCaps(process.env);
   } catch (error) {
-    app.log.error(
-      { err: error },
-      'Offer caps: a CITY_LIMIT_OFFERS_ setting is invalid; using defaults.',
-    );
+    // The class only: the parse error's message would quote the setting's value.
+    errorLog(errorLine('offer_caps_invalid', { ...errorFacts(error), using: 'defaults' }));
     offerCapsNow = { ...OFFER_CAPS_DEFAULT };
   }
   const offers = createOfferStore(db, {
@@ -2905,6 +3721,10 @@ async function createDatabaseApp(
     now: clock,
     // Above 0.10 USDC only while fee router 2 is live (docs/protocol/FEE_ROUTER_2.md section 5).
     priceMaxRaw: () => offerPriceMaxRaw(process.env),
+    // Never paid to a fee router, the treasury, USDC, the facilitator or zero.
+    reservedPayees: () => protocolReservedPayees(process.env),
+    // An Arc agent's offer is paid to its wallet on Arc (only with CITY_ARC=1).
+    chainEnv: process.env,
   });
   const assistantAccess = await registerAssistantAccess(app, {
     db,
@@ -2924,6 +3744,8 @@ async function createDatabaseApp(
     rooms,
     tasks,
     pins,
+    cards,
+    files,
     repos,
     wake,
     results,
@@ -2961,6 +3783,7 @@ async function createDatabaseApp(
     });
   };
   const oauthServer = await registerRemoteMcp(app, {
+    errorLog,
     roomInvites: links.invites,
     db,
     access: assistantAccess,
@@ -2980,6 +3803,12 @@ async function createDatabaseApp(
     secureCookies: options.hosted ? true : (options.secureCookies ?? false),
     ...options.remoteMcp,
   });
+  // Hosted PII key ring (CCA-639): one status line when it cannot be used, so a deploy check can see
+  // it. The reason only (missing|invalid|not_distinct), never a value.
+  if (options.hosted) {
+    const pii = defaultPiiKeyring();
+    if (!pii.available) (options.logLine ?? console.warn)(`pii.unavailable reason=${pii.reason}`);
+  }
   // Hosted responder: owner settings and write-only provider keys (console session only).
   if (options.responder?.enabled ?? process.env.CITY_RESPONDER === '1') {
     const keys = responderKeys(options.responder?.env ?? process.env, {
@@ -3373,6 +4202,9 @@ async function createDatabaseApp(
       id = idFrom(request);
     return mutate(operator.id, (workspace, _tx, time) => {
       const job = ensureJob(workspace, id);
+      // A repeat cancel changes nothing; a job that finished another way can't be canceled.
+      if (job.status !== 'canceled' && !active(job))
+        fail(409, 'This work already finished, so it can no longer be canceled.');
       stopJob(workspace, job, time, 'Operator canceled the job.');
       return { job: publicJob(job) };
     });
@@ -3918,7 +4750,9 @@ async function createDatabaseApp(
     options.hosted || options.startWorkers === false
       ? undefined
       : setInterval(() => {
-          void tick().catch(() => app.log.error('Worker tick failed.'));
+          void tick().catch((error) =>
+            errorLog(errorLine('worker_tick_failed', errorFacts(error))),
+          );
         }, 1000);
   interval?.unref();
   app.addHook('preClose', async () => {

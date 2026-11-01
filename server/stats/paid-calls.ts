@@ -88,6 +88,7 @@ export function createPaidCallsReader(deps: {
   clock: () => number;
   ttlMs?: number;
   chainId?: number;
+  observe?: (value: number, at: number) => void;
 }): PaidCallsReader {
   const ttl = deps.ttlMs ?? PAID_CALLS_CACHE_MS;
   const chainId = deps.chainId ?? PAID_CALLS_CHAIN_ID;
@@ -121,6 +122,8 @@ export function createPaidCallsReader(deps: {
         throw new Error('paid_call_count: unreadable row');
       cached = { value, failed: false, until: started + ttl };
       good = value;
+      // Observation freshness uses this process's arrival clock, avoiding DB/app clock skew.
+      if (value && chainId === PAID_CALLS_CHAIN_ID) deps.observe?.(value.total, value.readAt);
       return value;
     } catch (error) {
       cached = { value: null, failed: true, until: started + ttl };
@@ -200,6 +203,31 @@ export const PAID_CALLS_CHECK_WITH_SPONSORED_SQL = `SELECT
          WHERE state IN ('paid','delivered','paid_no_result') AND tx_hash IS NOT NULL) p`;
 
 /**
+ * The same with the counted public calls too (migration 356, server/feed/pay/public-calls-schema.ts:
+ * the same states and rule, value gross_raw, fee included).
+ */
+const publicCallsScan = `(SELECT count(*) AS scan, COALESCE(sum(gross_raw), 0) AS scan_value
+          FROM feed_pay_public_calls
+         WHERE state IN ('paid','delivered','paid_no_result') AND tx_hash IS NOT NULL) x`;
+export const PAID_CALLS_CHECK_WITH_PUBLIC_SQL = `SELECT
+  (SELECT total FROM paid_call_count WHERE chain_id = $1) AS counter,
+  (SELECT value_raw::text FROM paid_call_count WHERE chain_id = $1) AS counter_value,
+  s.scan + x.scan AS scan, (s.scan_value + x.scan_value)::text AS scan_value
+  FROM (SELECT count(*) AS scan, COALESCE(sum(amount_raw + fee_raw), 0) AS scan_value
+          FROM feed_pay_calls WHERE chain_id = $1 AND payment_state = 'settled') s,
+       ${publicCallsScan}`;
+export const PAID_CALLS_CHECK_WITH_SPONSORED_AND_PUBLIC_SQL = `SELECT
+  (SELECT total FROM paid_call_count WHERE chain_id = $1) AS counter,
+  (SELECT value_raw::text FROM paid_call_count WHERE chain_id = $1) AS counter_value,
+  s.scan + p.scan + x.scan AS scan, (s.scan_value + p.scan_value + x.scan_value)::text AS scan_value
+  FROM (SELECT count(*) AS scan, COALESCE(sum(amount_raw + fee_raw), 0) AS scan_value
+          FROM feed_pay_calls WHERE chain_id = $1 AND payment_state = 'settled') s,
+       (SELECT count(*) AS scan, COALESCE(sum(gross_raw), 0) AS scan_value
+          FROM feed_pay_sponsored_calls
+         WHERE state IN ('paid','delivered','paid_no_result') AND tx_hash IS NOT NULL) p,
+       ${publicCallsScan}`;
+
+/**
  * Adds the difference found (scan minus the counter as read), so payments that settle meanwhile
  * (each already +1) stay counted exactly once. One short statement on one row, in the same
  * transaction as the read and under the check's own lock (PAID_CALLS_CHECK_LOCK_SQL), so two runs
@@ -275,18 +303,24 @@ export async function checkPaidCalls(
     const outcome = await db.transaction(async (tx) => {
       const bounded = boundedBy(deadline, now);
       const present = (
-        await bounded<{ ok: boolean; sponsored: boolean }>(
+        await bounded<{ ok: boolean; sponsored: boolean; public: boolean }>(
           tx,
           `SELECT to_regclass('paid_call_count') IS NOT NULL AND to_regclass('feed_pay_calls') IS NOT NULL AS ok,
-                  to_regclass('feed_pay_sponsored_calls') IS NOT NULL AS sponsored`,
+                  to_regclass('feed_pay_sponsored_calls') IS NOT NULL AS sponsored,
+                  to_regclass('feed_pay_public_calls') IS NOT NULL AS public`,
         )
       ).rows[0];
       if (!present?.ok) return null;
-      // Sponsored first purchases count in their chain's row (migration 252).
+      // Sponsored first purchases and public calls count in their chain's row (252, 356).
+      const here = chainId === PAID_CALLS_SPONSORED_CHAIN_ID;
       const checkSql =
-        present.sponsored && chainId === PAID_CALLS_SPONSORED_CHAIN_ID
-          ? PAID_CALLS_CHECK_WITH_SPONSORED_SQL
-          : PAID_CALLS_CHECK_SQL;
+        present.sponsored && present.public && here
+          ? PAID_CALLS_CHECK_WITH_SPONSORED_AND_PUBLIC_SQL
+          : present.public && here
+            ? PAID_CALLS_CHECK_WITH_PUBLIC_SQL
+            : present.sponsored && here
+              ? PAID_CALLS_CHECK_WITH_SPONSORED_SQL
+              : PAID_CALLS_CHECK_SQL;
       const locked = (await bounded<{ ok: boolean }>(tx, PAID_CALLS_CHECK_LOCK_SQL, [chainId]))
         .rows[0]?.ok;
       if (!locked) return 'busy' as const;

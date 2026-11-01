@@ -56,7 +56,13 @@ import {
   validateCitations,
   visibleChars,
 } from './reply.js';
-import { deleteDraft, draftWriter, sweepStaleDrafts, writeDraft } from './draft.js';
+import {
+  deleteDraft,
+  deleteElricDrafts,
+  draftWriter,
+  sweepStaleDrafts,
+  writeDraft,
+} from './draft.js';
 import { route, type ElricRoute } from './router.js';
 import { titleConversation } from './titles.js';
 import type { ElricOutcome } from './schema.js';
@@ -69,6 +75,7 @@ import {
   type TurnInput,
 } from './turns.js';
 import { forgetCardIndex } from '../manifest/card-agent.js';
+import { revokeResponderCredentials } from '../responder/revoke.js';
 
 /**
  * Elric, Central City's first-party agent: the server core of the Phase 2 slice
@@ -228,12 +235,14 @@ const KIND_LABEL: Record<ElricKind, string> = {
 };
 /** The owner-visible limit notice for one kind (or the global ceiling). */
 export function elricLimitNotice(
-  reason: 'owner_allowance' | 'global_ceiling',
+  reason: 'owner_allowance' | 'owner_units' | 'global_ceiling',
   kind: ElricKind,
 ): string {
-  return reason === 'global_ceiling'
-    ? "Elric has reached today's limit for everyone. It resets at 00:00 UTC."
-    : `${KIND_LABEL[kind]} used up for today. Resets at 00:00 UTC.`;
+  if (reason === 'global_ceiling')
+    return "Elric has reached today's limit for everyone. It resets at 00:00 UTC.";
+  if (reason === 'owner_units')
+    return "You have used today's Elric budget. It resets at 00:00 UTC.";
+  return `${KIND_LABEL[kind]} used up for today. Resets at 00:00 UTC.`;
 }
 
 type InvocationRow = {
@@ -398,8 +407,8 @@ export function createElric(d: ElricDependencies) {
       )
     ).rows;
     for (const row of rows) {
-      // A deferred invocation holds a reservation: release it, count what it spent, refund the
-      // allowance.
+      // A deferred invocation holds a reservation: release it, count what it spent, and refund
+      // the allowance when it spent nothing.
       if (Number(row.reserved_units) > 0 && row.usage_day && row.kind) {
         await settle(tx, {
           ownerId: row.owner_id,
@@ -407,7 +416,7 @@ export function createElric(d: ElricDependencies) {
           day: row.usage_day,
           reserved: Number(row.reserved_units),
           spent: Number(row.spent_units),
-          refund: true,
+          refund: Number(row.spent_units) === 0 && Number(row.inflight_units) === 0,
         });
         await tx.query(
           `UPDATE elric_invocations SET reserved_units=0 WHERE agent_id=$1 AND room_id=$2
@@ -446,14 +455,27 @@ export function createElric(d: ElricDependencies) {
         const agent = workspace.agents.find((item) => item.id === own.agent_id);
         if (agent && !agent.revokedAt) agent.revokedAt = iso(time);
         forgetCardIndex(ownerId);
+        // An Auto-reply key stored for it is deleted and auto-reply turned off, as for any revoked
+        // agent (agent-lifecycle.ts): the owner can no longer reach a revoked agent's settings.
+        await revokeResponderCredentials(
+          tx,
+          { ownerId, agentIds: [own.agent_id] },
+          time,
+          'elric revoked',
+        );
         await cancelQueued(tx, own.agent_id, 'revoked', time);
+        await deleteElricDrafts(tx, own.agent_id);
         event(workspace, time, 'elric.revoked', 'Elric revoked by the owner.', own.agent_id);
       } else {
         await tx.query(
           `UPDATE elric_agents SET status=$2, updated_at=$3, updated_by='the owner' WHERE agent_id=$1`,
           [own.agent_id, status, time],
         );
-        if (status === 'paused') await cancelQueued(tx, own.agent_id, 'paused', time);
+        if (status === 'paused') {
+          await cancelQueued(tx, own.agent_id, 'paused', time);
+          // A run already answering keeps its lease until its next recheck: its draft goes now.
+          await deleteElricDrafts(tx, own.agent_id);
+        }
         event(
           workspace,
           time,
@@ -891,10 +913,15 @@ export function createElric(d: ElricDependencies) {
       }
     };
 
+    /**
+     * A recheck refused the run (paused, revoked, removed, no longer allowed to write). Each
+     * recheck runs between model calls, so nothing is in flight: the allowance count comes back
+     * only when no model step was paid for, as for any other run that ends after spending.
+     */
     const refused = (code: string): InvocationResult | Promise<InvocationResult> =>
       INACTIVE.has(code as ElricAccessCode)
-        ? finish('refused_inactive', code, { refund: true })
-        : finish('cancelled', code, { refund: true });
+        ? finish('refused_inactive', code, { refund: usage.units === 0 })
+        : finish('cancelled', code, { refund: usage.units === 0 });
     /** One audited tool call: only allowlisted names are stored, never a model-chosen string. */
     const audit = (name: string, args: unknown, status: ToolCallRecord['status']) =>
       toolCalls.push({
@@ -932,8 +959,12 @@ export function createElric(d: ElricDependencies) {
       if (!text) return { ok: false, reason: 'empty_reply' };
       return { ok: true, text, stripped: cited.stripped.length };
     }
-    /** Posts a reply under the run's label: the model's ("Elric · AI") or the automated one. */
-    const postModelReply = (text: string) => {
+    /**
+     * Posts a reply under the run's label: the model's ("Elric · AI") or the automated one.
+     * `fromContext`: the model wrote it from the room context, so it is posted only while the
+     * audience start is still the one that context was built from.
+     */
+    const postModelReply = (text: string, fromContext: boolean) => {
       // One source for the public label (shared/elric-copy.ts): "Elric · AI", or
       // "Elric · automated" for a Tier 0 reply that no model wrote.
       const shown = model ?? ELRIC_DETERMINISTIC_MODEL;
@@ -952,12 +983,30 @@ export function createElric(d: ElricDependencies) {
         },
         precondition: async (tx) => {
           const again = await recheck(tx, inv, leaseId, reservation !== null);
-          return again.ok ? null : again.code;
+          if (!again.ok) return again.code;
+          return fromContext && audienceMoved(again.access) ? 'audience_changed' : null;
         },
       });
     };
-    /** Elric sees messages after this seq (set once room access is checked; none before). */
+    /**
+     * Elric sees messages after this seq (set once room access is checked; none before): the
+     * reply's audience start, the latest history start among the room's active members, so a
+     * member who joined later never learns from the reply what was said before they joined.
+     * Nothing is kept from before it, not even the trigger: when a member cannot see the trigger
+     * the run does not answer it (audience_changed).
+     */
     let visibleFrom = Number.MAX_SAFE_INTEGER;
+    const audienceFrom = (seen: Extract<ElricAccess, { ok: true }>) =>
+      Math.max(seen.visibleFromSeq, seen.audienceFromSeq);
+    /**
+     * The start the model's context was loaded from (none for Tier 0). The conversation keeps
+     * that context for the whole run, so a member who joins after it was loaded would read a
+     * reply written from messages before their join: that reply is not posted. The check reads
+     * the members' actual history starts each time, so any join after the context start counts.
+     */
+    let contextStart: number | null = null;
+    const audienceMoved = (seen: Extract<ElricAccess, { ok: true }>) =>
+      contextStart !== null && audienceFrom(seen) > contextStart;
 
     const started = d.clock();
     if (Number(inv.reserved_units) > 0 && inv.usage_day && inv.kind) {
@@ -986,7 +1035,7 @@ export function createElric(d: ElricDependencies) {
     const access = await elricRoomAccess(d.db, inv.agent_id, inv.room_id, { mode: 'write' });
     if (!access.ok)
       return finish(INACTIVE.has(access.code) ? 'refused_inactive' : 'refused_access', access.code);
-    visibleFrom = access.visibleFromSeq;
+    visibleFrom = audienceFrom(access);
     const trigger = (
       await d.db.query<{ parts: unknown[]; sender_name: string; sender_agent_id: string }>(
         'SELECT parts,sender_name,sender_agent_id FROM room_messages WHERE room_id=$1 AND seq=$2',
@@ -995,6 +1044,9 @@ export function createElric(d: ElricDependencies) {
     ).rows[0];
     if (!trigger || Number(inv.source_seq) <= access.visibleFromSeq)
       return finish('refused_access', 'not_visible');
+    // A member joined after the trigger (history 'from_join'): they could not see the question,
+    // so no reply may carry it. The run stops without posting.
+    if (Number(inv.source_seq) <= visibleFrom) return refused('audience_changed');
     // The invoker must still be the owner's (or host's) person member when the run starts.
     const invoker = (
       await d.db.query(
@@ -1015,7 +1067,7 @@ export function createElric(d: ElricDependencies) {
     if (!invoker) return finish('refused_access', 'invoker_left');
     // The owner may have withdrawn the host's consent after this was queued.
     if (inv.invoker_kind === 'host' && !access.elric.host_may_invoke)
-      return finish('refused_access', 'host_not_allowed', { refund: true });
+      return finish('refused_access', 'host_not_allowed', { refund: usage.units === 0 });
     const requestText = (Array.isArray(trigger.parts) ? trigger.parts : [])
       .map((part) =>
         part && typeof part === 'object' && (part as { type?: string }).type === 'text'
@@ -1052,6 +1104,8 @@ export function createElric(d: ElricDependencies) {
     let text: string;
     let outcome: ElricOutcome = 'ok';
     let reason: string | null = null;
+    /** The reply is the model's own answer (not Tier 0 or a fixed line). */
+    let modelText = false;
     /** Pending actions this run created (consequential tools waiting for the owner). */
     const pendingIds: string[] = [];
     if (chosen.tier === 0) {
@@ -1108,10 +1162,11 @@ export function createElric(d: ElricDependencies) {
       const messages = await loadRoomMessages(
         d.db,
         inv.room_id,
-        access.visibleFromSeq,
+        visibleFrom,
         Number(inv.source_seq),
         config.contextMessages,
       );
+      contextStart = visibleFrom;
       range = contextRange(messages);
       const system = elricSystemPrompt({
         agentName: access.agent.name,
@@ -1127,6 +1182,7 @@ export function createElric(d: ElricDependencies) {
             lines: transcript(messages, Number(inv.source_seq), config.transcriptChars),
             triggerSeq: Number(inv.source_seq),
             triggerSender: trigger.sender_name,
+            historyLimited: visibleFrom > access.visibleFromSeq,
           }),
         },
       ];
@@ -1154,6 +1210,8 @@ export function createElric(d: ElricDependencies) {
         }
         const before = await d.db.transaction((tx) => recheck(tx, inv, leaseId, true));
         if (!before.ok) return refused(before.code);
+        // A member joined since the context was loaded: no further step, its answer could not go.
+        if (audienceMoved(before.access)) return refused('audience_changed');
         // Only the text of the call that fails can become a cut-short answer.
         streamed = '';
         let response: ModelResponse;
@@ -1216,7 +1274,7 @@ export function createElric(d: ElricDependencies) {
           if (cut !== null) {
             const checked = await checkReply(cut, config.replyChars - marker.length);
             if (checked.ok && visibleChars(checked.text) >= ELRIC_PARTIAL_MIN_CHARS) {
-              const posted = await postModelReply(`${checked.text}${marker}`);
+              const posted = await postModelReply(`${checked.text}${marker}`, true);
               if (posted.ok) {
                 log(
                   JSON.stringify({
@@ -1321,7 +1379,9 @@ export function createElric(d: ElricDependencies) {
               async (tx): Promise<{ refused: string } | { lines: string[] }> => {
                 const again = await recheck(tx, inv, leaseId, true);
                 if (!again.ok) return { refused: again.code };
-                const since = Math.max(again.access.visibleFromSeq, checked.args.since ?? 0);
+                // A member joined since the context was loaded: the answer could not be posted.
+                if (audienceMoved(again.access)) return { refused: 'audience_changed' };
+                const since = Math.max(visibleFrom, checked.args.since ?? 0);
                 const rows = await loadRoomMessages(
                   tx,
                   inv.room_id,
@@ -1365,6 +1425,7 @@ export function createElric(d: ElricDependencies) {
             async (tx): Promise<{ refused: string } | { id: string }> => {
               const again = await recheck(tx, inv, leaseId, true);
               if (!again.ok) return { refused: again.code };
+              if (audienceMoved(again.access)) return { refused: 'audience_changed' };
               const action = await createPendingAction(
                 tx,
                 {
@@ -1393,6 +1454,7 @@ export function createElric(d: ElricDependencies) {
           });
         }
       }
+      modelText = final !== null && !pendingIds.length;
       if (final !== null) text = final;
       else {
         if (outcome === 'ok') {
@@ -1419,10 +1481,13 @@ export function createElric(d: ElricDependencies) {
     if (checked.stripped) reason = reason ?? `citations_stripped:${checked.stripped}`;
 
     await d.probe?.('before_post');
-    const posted = await postModelReply(text);
+    // Tier 0 and the fixed step-limit and pending lines carry nothing from the room's history.
+    const posted = await postModelReply(text, modelText);
     if (!posted.ok) return refused(posted.code);
     const done = await finish(outcome, reason, { postedSeq: posted.seq });
-    nameConversation(text);
+    // A Tier 0 reply cost nothing and took no allowance: it never starts a paid title call (the
+    // fallback title stays).
+    if (chosen.tier !== 0) nameConversation(text);
     return done;
   }
 

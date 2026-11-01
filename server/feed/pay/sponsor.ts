@@ -41,14 +41,25 @@ export const SFP_FLEET_OFFERS_SETTING = 'CITY_SFP_FLEET_OFFERS';
  * service and buy the other's). Offer ids; empty: no sponsored purchase for real users.
  */
 export const SFP_OFFERS_SETTING = 'CITY_SFP_OFFERS';
+/**
+ * The price limit of a FLEET agent's credit, fee included (raw USDC). Lets the stress-test
+ * fleets buy dearer services (value volume) while real users stay at the normal limit. Unset:
+ * the normal limit (CITY_SFP_CREDIT_MAX_RAW), so nothing changes until it is set.
+ */
+export const SFP_FLEET_CREDIT_MAX_SETTING = 'CITY_SFP_FLEET_CREDIT_MAX_RAW';
 
 /**
  * Defaults: a credit covers a first service up to 2 USDC, fee included; 1,000,000
  * USDC a day in all (the stress test runs through it too); one credit per owner a day.
  */
 export const SFP_CREDIT_MAX_DEFAULT_RAW = 2_000_000n;
-/** The hard ceiling of a credit (also the table's CHECK): 2 USDC, fee included. */
+/** The hard ceiling of a real user's credit: 2 USDC, fee included. */
 export const SFP_CREDIT_CEILING_RAW = 2_000_000n;
+/**
+ * The hard ceiling of a fleet agent's credit, and of every sponsored purchase (the signer's own
+ * limit and the tables' CHECKs, migrations 260 and 307): 40 USDC, fee included.
+ */
+export const SFP_FLEET_CREDIT_CEILING_RAW = 40_000_000n;
 export const SFP_DAILY_BUDGET_DEFAULT_RAW = 1_000_000_000_000n;
 export const SFP_OWNER_DAILY_DEFAULT = 1;
 const DAY_MS = 86_400_000;
@@ -57,6 +68,8 @@ const LOCK = "SELECT pg_advisory_xact_lock(hashtext('feed_pay_sponsor'))";
 export interface SponsorConfig {
   startMs: number;
   creditMaxRaw: bigint;
+  /** A fleet agent's limit (CITY_SFP_FLEET_CREDIT_MAX_RAW, at most 40 USDC). */
+  fleetCreditMaxRaw: bigint;
   dailyBudgetRaw: bigint;
   ownerDailyMax: number;
   fleetWorkspaces: Set<string>;
@@ -84,12 +97,18 @@ export function sponsorConfig(env: Env): SponsorConfig | null {
   const start = env[SFP_START_SETTING]?.trim();
   if (!start || !/^[1-9]\d{9,15}$/.test(start)) return null;
   const owner = env[SFP_OWNER_DAILY_SETTING]?.trim();
+  const creditMaxRaw = rawSetting(
+    env[SFP_CREDIT_MAX_SETTING],
+    SFP_CREDIT_MAX_DEFAULT_RAW,
+    SFP_CREDIT_CEILING_RAW,
+  );
   return {
     startMs: Number(start),
-    creditMaxRaw: rawSetting(
-      env[SFP_CREDIT_MAX_SETTING],
-      SFP_CREDIT_MAX_DEFAULT_RAW,
-      SFP_CREDIT_CEILING_RAW,
+    creditMaxRaw,
+    fleetCreditMaxRaw: rawSetting(
+      env[SFP_FLEET_CREDIT_MAX_SETTING],
+      creditMaxRaw,
+      SFP_FLEET_CREDIT_CEILING_RAW,
     ),
     dailyBudgetRaw: rawSetting(env[SFP_DAILY_BUDGET_SETTING], SFP_DAILY_BUDGET_DEFAULT_RAW),
     ownerDailyMax: owner && /^[1-9]\d{0,5}$/.test(owner) ? Number(owner) : SFP_OWNER_DAILY_DEFAULT,
@@ -152,6 +171,107 @@ export function createSponsorCredits(deps: { db: Database; env: Env; now: () => 
   };
 
   /**
+   * reserve()'s checks that read nothing (setting, price, service list, self-dealing): the
+   * configuration and the credit's kind, or why not.
+   */
+  function fixedChecks(
+    request: SponsorRequest,
+  ): { config: SponsorConfig; fleet: boolean } | { refusal: SponsorRefusal } {
+    const config = sponsorConfig(deps.env);
+    if (!config) return { refusal: 'disabled' };
+    const fleet = config.fleetWorkspaces.has(request.operatorId);
+    const maxRaw = fleet ? config.fleetCreditMaxRaw : config.creditMaxRaw;
+    if (request.priceRaw <= 0n || request.priceRaw > maxRaw) return { refusal: 'over_price' };
+    const sellerFleet = config.fleetWorkspaces.has(request.seller.operatorId);
+    // Fleet agents buy only the services Central City chose for them.
+    if (fleet && !config.fleetOffers.has(request.offerId))
+      return { refusal: 'service_not_allowed' };
+    // Real users: only Central City's own services (no farming between colluding accounts).
+    if (!fleet && !config.offers.has(request.offerId)) return { refusal: 'service_not_allowed' };
+    if (
+      request.seller.agentId === request.agentId ||
+      (!(fleet && sellerFleet) &&
+        (request.seller.operatorId === request.operatorId ||
+          request.seller.ownerAccountId === null ||
+          request.seller.ownerAccountId === request.ownerAccountId))
+    )
+      return { refusal: 'self_dealing' };
+    return { config, fleet };
+  }
+
+  /**
+   * Sybil guard: credits go only to agents of verified, onboarded humans, so many fresh owner
+   * accounts do not mean many credits.
+   */
+  async function ownerChecks(
+    q: Transaction,
+    request: SponsorRequest,
+    fleet: boolean,
+  ): Promise<SponsorRefusal | null> {
+    if (fleet) return null;
+    const verified = await q.query(
+      'SELECT 1 FROM elric_verified_identities WHERE operator_id = $1',
+      [request.ownerAccountId],
+    );
+    if (verified.rows.length === 0) return 'unverified_owner';
+    try {
+      await assertOnboarded(q, request.ownerAccountId);
+    } catch {
+      return 'unverified_owner';
+    }
+    return null;
+  }
+
+  /** The agent is eligible, its credit unused, and (real users) the owner's day not full. */
+  async function creditChecks(
+    q: Transaction,
+    request: SponsorRequest,
+    config: SponsorConfig,
+    fleet: boolean,
+    today: number,
+  ): Promise<SponsorRefusal | null> {
+    const eligible = await q.query(
+      `SELECT 1 FROM base_identities
+       WHERE agent_id = $1 AND chain_id = $2 AND state = 'confirmed'
+         AND erc8004_agent_id IS NOT NULL AND started_at >= $3`,
+      [request.agentId, request.chainId, config.startMs],
+    );
+    if (eligible.rows.length === 0) return 'not_eligible';
+    const held = await q.query<{ state: string }>(
+      'SELECT state FROM feed_pay_sponsor_credits WHERE agent_id = $1',
+      [request.agentId],
+    );
+    if (held.rows[0] && held.rows[0].state !== 'released') return 'used';
+    // Per owner (real users only): their own few credits today, through the owner index.
+    if (!fleet) {
+      const { rows: owned } = await q.query<{ n: string }>(
+        `SELECT COUNT(*)::text AS n FROM feed_pay_sponsor_credits
+         WHERE owner_account_id = $1 AND created_at >= $2 AND state <> 'released'`,
+        [request.ownerAccountId, today],
+      );
+      if (Number(owned[0]!.n) >= config.ownerDailyMax) return 'owner_daily';
+    }
+    return null;
+  }
+
+  /**
+   * reserve()'s checks that only read the database (review MPR-4), without the lock and writing
+   * nothing but the refusal count: run before anything is read from Base, so a request that can
+   * never hold a credit costs no Base read. A hint only: reserve() runs every check again under
+   * its lock and decides.
+   */
+  async function precheck(
+    request: SponsorRequest,
+  ): Promise<{ ok: true } | { ok: false; reason: SponsorRefusal }> {
+    const fixed = fixedChecks(request);
+    if ('refusal' in fixed) return refused(fixed.refusal);
+    const why =
+      (await ownerChecks(deps.db, request, fixed.fleet)) ??
+      (await creditChecks(deps.db, request, fixed.config, fixed.fleet, dayStart(deps.now())));
+    return why ? refused(why) : { ok: true };
+  }
+
+  /**
    * Holds the agent's credit for this call, or says why not. Every check runs under one advisory
    * lock in one transaction, so two calls can never both take the credit or the last budget.
    */
@@ -161,69 +281,26 @@ export function createSponsorCredits(deps: { db: Database; env: Env; now: () => 
      * Runs inside the same transaction and lock once every credit check passed, before anything
      * is written: the caller's own checks and writes (the sponsored call row, room SFP #11 C2), so
      * the credit and its call commit together or not at all. A refusal it answers writes nothing.
+     * `kind.fleet` is this credit's kind (the buyer's workspace is on CITY_SFP_FLEET_WORKSPACES),
+     * for the call row's own `fleet` column (migration 260).
      */
-    within?: (tx: Transaction) => Promise<SponsorRefusal | void>,
+    within?: (tx: Transaction, kind: { fleet: boolean }) => Promise<SponsorRefusal | void>,
   ): Promise<{ ok: true } | { ok: false; reason: SponsorRefusal }> {
-    const config = sponsorConfig(deps.env);
-    if (!config) return refused('disabled');
-    if (request.priceRaw <= 0n || request.priceRaw > config.creditMaxRaw)
-      return refused('over_price');
-    const fleet = config.fleetWorkspaces.has(request.operatorId);
-    const sellerFleet = config.fleetWorkspaces.has(request.seller.operatorId);
-    // Fleet agents buy only the services Central City chose for them.
-    if (fleet && !config.fleetOffers.has(request.offerId)) return refused('service_not_allowed');
-    // Real users: only Central City's own services (no farming between colluding accounts).
-    if (!fleet && !config.offers.has(request.offerId)) return refused('service_not_allowed');
-    if (
-      request.seller.agentId === request.agentId ||
-      (!(fleet && sellerFleet) &&
-        (request.seller.operatorId === request.operatorId ||
-          request.seller.ownerAccountId === null ||
-          request.seller.ownerAccountId === request.ownerAccountId))
-    )
-      return refused('self_dealing');
+    const fixed = fixedChecks(request);
+    if ('refusal' in fixed) return refused(fixed.refusal);
+    const { config, fleet } = fixed;
     const at = deps.now();
     const outcome = await deps.db.transaction(async (tx) => {
-      // Sybil guard: credits go only to agents of verified, onboarded humans, so many
-      // fresh owner accounts do not mean many credits. Read before the lock, to keep it short.
-      if (!fleet) {
-        const verified = await tx.query(
-          'SELECT 1 FROM elric_verified_identities WHERE operator_id = $1',
-          [request.ownerAccountId],
-        );
-        if (verified.rows.length === 0) return 'unverified_owner' as const;
-        try {
-          await assertOnboarded(tx, request.ownerAccountId);
-        } catch {
-          return 'unverified_owner' as const;
-        }
-      }
+      // Read before the lock, to keep it short.
+      const owner = await ownerChecks(tx, request, fleet);
+      if (owner) return owner;
       // One more global lock (like feed_pay_unfinal): its wait is bounded here, whatever the
       // pooler does with the session's own lock_timeout (#551), and the transaction stays tiny.
       await tx.query("SET LOCAL lock_timeout = '5s'");
       await tx.query(LOCK);
-      const eligible = await tx.query(
-        `SELECT 1 FROM base_identities
-         WHERE agent_id = $1 AND chain_id = $2 AND state = 'confirmed'
-           AND erc8004_agent_id IS NOT NULL AND started_at >= $3`,
-        [request.agentId, request.chainId, config.startMs],
-      );
-      if (eligible.rows.length === 0) return 'not_eligible' as const;
-      const held = await tx.query<{ state: string }>(
-        'SELECT state FROM feed_pay_sponsor_credits WHERE agent_id = $1',
-        [request.agentId],
-      );
-      if (held.rows[0] && held.rows[0].state !== 'released') return 'used' as const;
       const today = dayStart(at);
-      // Per owner (real users only): their own few credits today, through the owner index.
-      if (!fleet) {
-        const { rows: owned } = await tx.query<{ n: string }>(
-          `SELECT COUNT(*)::text AS n FROM feed_pay_sponsor_credits
-           WHERE owner_account_id = $1 AND created_at >= $2 AND state <> 'released'`,
-          [request.ownerAccountId, today],
-        );
-        if (Number(owned[0]!.n) >= config.ownerDailyMax) return 'owner_daily' as const;
-      }
+      const credit = await creditChecks(tx, request, config, fleet, today);
+      if (credit) return credit;
       // The day's budget: one row, never a sum over the day's credits.
       const { rows: day } = await tx.query<{ spent: string }>(
         'SELECT spent_raw::text AS spent FROM feed_pay_sponsor_days WHERE day = $1',
@@ -231,7 +308,7 @@ export function createSponsorCredits(deps: { db: Database; env: Env; now: () => 
       );
       if (BigInt(day[0]?.spent ?? '0') + request.priceRaw > config.dailyBudgetRaw)
         return 'budget' as const;
-      const theirs = within ? await within(tx) : undefined;
+      const theirs = within ? await within(tx, { fleet }) : undefined;
       if (theirs) return theirs;
       await tx.query(
         `INSERT INTO feed_pay_sponsor_days (day, spent_raw, credits) VALUES ($1, $2, 1)
@@ -239,12 +316,15 @@ export function createSponsorCredits(deps: { db: Database; env: Env; now: () => 
            credits = feed_pay_sponsor_days.credits + 1`,
         [today, request.priceRaw.toString()],
       );
+      // `fleet` is the kind the table's CHECK holds the amount to (migration 260): a real user's
+      // credit can never be stored above 2 USDC, whatever was asked.
       await tx.query(
         `INSERT INTO feed_pay_sponsor_credits
-           (agent_id, chain_id, owner_account_id, call_id, amount_raw, state, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, 'reserved', $6, $6)
+           (agent_id, chain_id, owner_account_id, call_id, amount_raw, state, created_at, updated_at,
+            fleet)
+         VALUES ($1, $2, $3, $4, $5, 'reserved', $6, $6, $7)
          ON CONFLICT (agent_id) DO UPDATE SET chain_id = $2, owner_account_id = $3, call_id = $4,
-           amount_raw = $5, state = 'reserved', created_at = $6, updated_at = $6
+           amount_raw = $5, state = 'reserved', created_at = $6, updated_at = $6, fleet = $7
          WHERE feed_pay_sponsor_credits.state = 'released'`,
         [
           request.agentId,
@@ -253,6 +333,7 @@ export function createSponsorCredits(deps: { db: Database; env: Env; now: () => 
           request.callId,
           request.priceRaw.toString(),
           at,
+          fleet,
         ],
       );
       return 'ok' as const;
@@ -328,6 +409,7 @@ export function createSponsorCredits(deps: { db: Database; env: Env; now: () => 
     return {
       enabled: config !== null,
       credit_max_raw: config?.creditMaxRaw.toString() ?? null,
+      fleet_credit_max_raw: config?.fleetCreditMaxRaw.toString() ?? null,
       budget_raw: config?.dailyBudgetRaw.toString() ?? null,
       budget_left_raw: config
         ? (config.dailyBudgetRaw > BigInt(spent)
@@ -410,7 +492,7 @@ export function createSponsorCredits(deps: { db: Database; env: Env; now: () => 
     return out;
   }
 
-  return { reserve, use, release, stats, status };
+  return { precheck, reserve, use, release, stats, status };
 }
 
 export type SponsorCredits = ReturnType<typeof createSponsorCredits>;

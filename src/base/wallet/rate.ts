@@ -25,6 +25,9 @@
  *   - the server's summary says exactly that.
  *
  * The owner key is only ever a local inside signAndSend: unlocked, used once, dropped.
+ *
+ * For a rater on Arc the same read is on Arc (the chain from its wallet view): its endpoint and
+ * identity registry from the build's list (shared/base/wallet-chains.ts), and Arc's words.
  */
 import {
   decodeFunctionResult,
@@ -40,10 +43,18 @@ import { BASE_MAINNET, BASE_NETWORKS } from '../../../shared/base/chains';
 import { PAY_PASSPORT_HOST } from '../../../shared/base/pay';
 import { sponsoredWithoutCharge, type SponsorAllowlist } from '../../../shared/base/paymasters';
 import {
+  arcReadChain,
+  chainWords,
+  isChainIdOf,
+  NOT_ON_ARC_YET,
+  operationChain,
+  WALLET_SPONSORS,
+} from '../../../shared/base/wallet-chains';
+import {
   decodeRateCall,
   isStars,
   RATE_PATHS,
-  RATE_REGISTRY,
+  rateRegistryOf,
   RATE_TAG,
   starsValue,
   type RateLookup,
@@ -58,7 +69,6 @@ import {
   ownerOperationHash,
   userOperationFromRpc,
   WITHDRAWAL_CHAIN_ID,
-  WITHDRAWAL_ENTRY_POINT,
 } from '../../../shared/base/withdraw';
 import { isOwnWallet } from './derive';
 import { PAY_BASE_RPC } from './pay';
@@ -168,11 +178,15 @@ const isTypedBaseId = (value: string) => BASE_ID.test(value) && BigInt(value) <=
  * The two values the owner typed, trimmed and checked, ready for the lookup; or a RateTargetError
  * saying which one is wrong. Nothing is read another way: no links, no "CC-" form, no free text.
  */
-export function rateLookup(typed: { baseId: string; passport: string }): RateLookup {
+export function rateLookup(
+  typed: { baseId: string; passport: string },
+  chainId?: number,
+): RateLookup {
+  const words = chainWords(chainId);
   const baseId = typeof typed?.baseId === 'string' ? typed.baseId.trim() : '';
   const passport = typeof typed?.passport === 'string' ? typed.passport.trim() : '';
-  if (!baseId || !passport) throw new RateTargetError(TYPE_BOTH);
-  if (!isTypedBaseId(baseId)) throw new RateTargetError(NOT_A_BASE_ID);
+  if (!baseId || !passport) throw new RateTargetError(words.say(TYPE_BOTH));
+  if (!isTypedBaseId(baseId)) throw new RateTargetError(words.say(NOT_A_BASE_ID));
   if (!SHORT.test(passport)) throw new RateTargetError(NOT_A_PASSPORT);
   return { baseId, passport };
 }
@@ -239,6 +253,8 @@ const READ_TIMEOUT_MS = 8_000;
 export interface BaseReadOptions {
   fetch?: typeof fetch;
   timeoutMs?: number;
+  /** The rater's chain, from its wallet view (the wallet network when not given). */
+  chainId?: number;
 }
 
 /**
@@ -246,25 +262,33 @@ export interface BaseReadOptions {
  * one block: plain JSON-RPC to Base's public endpoint (pay.ts PAY_BASE_RPC), no keys. null when the
  * call reverts (no such Base ID). Base mainnet only; on any other network, or when Base doesn't
  * answer, it throws and nothing is signed. As Pay's ownerOnBase.
+ *
+ * For a rater on Arc: the same read at Arc's own endpoint and identity registry, both from the
+ * build's list, and only after that node says it is that chain. Arc mainnet reads nothing until it
+ * is recorded (arcReadChain).
  */
 export async function tokenUriOnBase(
   baseId: string,
   options: BaseReadOptions = {},
 ): Promise<{ uri: string | null; block: number }> {
-  if (WITHDRAWAL_CHAIN_ID !== BASE_MAINNET || !IDENTITY_REGISTRY)
+  const arc = arcReadChain(options.chainId, (message) => new RateTargetError(message));
+  const words = chainWords(options.chainId);
+  if (!arc && (WITHDRAWAL_CHAIN_ID !== BASE_MAINNET || !IDENTITY_REGISTRY))
     throw new RateTargetError(
       'This browser can only check agents on Base itself, so nothing is signed on this network.',
     );
   if (typeof baseId !== 'string' || !BASE_ID.test(baseId))
-    throw new RateTargetError('The agent to rate has no Base ID.');
+    throw new RateTargetError(`The agent to rate has no ${words.id}.`);
   const send = options.fetch ?? globalThis.fetch.bind(globalThis);
   const unreachable = () =>
-    new RateTargetError('Couldn’t check on Base. Nothing was signed. Try again in a moment.');
+    new RateTargetError(
+      `Couldn’t check on ${words.on}. Nothing was signed. Try again in a moment.`,
+    );
   async function rpc(method: string, params: unknown[]): Promise<unknown> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? READ_TIMEOUT_MS);
     try {
-      const response = await send(PAY_BASE_RPC, {
+      const response = await send(arc ? arc.publicRpc : PAY_BASE_RPC, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
@@ -285,6 +309,8 @@ export async function tokenUriOnBase(
       clearTimeout(timer);
     }
   }
+  if (arc && !isChainIdOf(await rpc('eth_chainId', []), arc.chainId))
+    throw new RateTargetError(`That node isn’t ${arc.name}. Nothing was signed.`);
   const head = await rpc('eth_blockNumber', []);
   if (typeof head !== 'string' || !/^0x[0-9a-f]+$/i.test(head)) throw unreachable();
   const block = Number(BigInt(head));
@@ -293,7 +319,8 @@ export async function tokenUriOnBase(
     functionName: 'tokenURI',
     args: [BigInt(baseId)],
   });
-  const result = await rpc('eth_call', [{ to: IDENTITY_REGISTRY, data }, head]);
+  const to = arc ? arc.identityRegistry : IDENTITY_REGISTRY;
+  const result = await rpc('eth_call', [{ to, data }, head]);
   if (result === null) return { uri: null, block };
   if (typeof result !== 'string' || !/^0x([0-9a-f]{64})+$/i.test(result)) throw unreachable();
   try {
@@ -324,7 +351,8 @@ export async function confirmRateTargetOnBase(
   if (typeof short !== 'string' || !SHORT.test(short))
     throw new RateTargetError('The agent couldn’t be read. Try again.');
   const read = await tokenUriOnBase(target.agent.baseId, options);
-  if (read.uri !== passportUri(short)) throw new RateTargetError(NOT_ON_BASE);
+  if (read.uri !== passportUri(short))
+    throw new RateTargetError(chainWords(options?.chainId).say(NOT_ON_BASE));
   return read.block;
 }
 
@@ -345,7 +373,9 @@ export async function lookupRateTarget(
   typed: { baseId: string; passport: string },
   options?: BaseReadOptions,
 ): Promise<RateTarget> {
-  const lookup = rateLookup(typed);
+  // Arc mainnet refuses here, before the server is asked.
+  arcReadChain(options?.chainId, (message) => new RateTargetError(message));
+  const lookup = rateLookup(typed, options?.chainId);
   let answer: RateTarget;
   try {
     answer = await api<RateTarget>(rateLookupPath(agentId), {
@@ -456,6 +486,11 @@ const sameInteger = (value: unknown, decoded: bigint) =>
  */
 export function checkRateOperation(input: {
   request: RateSigningRequest;
+  /**
+   * The chain the rater agent is on, from its wallet view (the wallet network when not given): the
+   * rating must be for this one, and this build must list it (shared/base/wallet-chains.ts).
+   */
+  agentChainId?: number;
   wallet: string;
   /**
    * The wallet's owner key and the rater agent: `wallet` must be exactly the wallet that key makes
@@ -476,17 +511,20 @@ export function checkRateOperation(input: {
   lane?: LaneExpectation;
 }): Hex {
   const { request, expected } = input;
+  const words = chainWords(input.agentChainId);
   if (!isStars(expected?.stars)) throw new RatingCheckError('A rating is 1 to 5 whole stars.');
   if (typeof expected.baseId !== 'string' || !BASE_ID.test(expected.baseId))
-    throw new RatingCheckError('The agent to rate has no Base ID.');
+    throw new RatingCheckError(`The agent to rate has no ${words.id}.`);
   if (!request || typeof request !== 'object')
     throw new RatingCheckError('The operation from the server isn’t well formed.');
-  if (request.chainId !== WITHDRAWAL_CHAIN_ID)
-    throw new RatingCheckError('This operation is for another network.');
+  const chain = operationChain(request.chainId, input.agentChainId);
+  const registry = chain && rateRegistryOf(chain.chainId);
+  if (!chain || !registry) throw new RatingCheckError('This operation is for another network.');
+  if (!chain.manager) throw new RatingCheckError(NOT_ON_ARC_YET);
   if (
     typeof request.entryPoint !== 'string' ||
     !isAddress(request.entryPoint, { strict: false }) ||
-    getAddress(request.entryPoint) !== getAddress(WITHDRAWAL_ENTRY_POINT)
+    getAddress(request.entryPoint) !== getAddress(chain.owner.entryPoint)
   )
     throw new RatingCheckError('This operation names another EntryPoint.');
   let op;
@@ -502,15 +540,17 @@ export function checkRateOperation(input: {
   if (!wallet || getAddress(op.sender) !== wallet)
     throw new RatingCheckError('The operation isn’t from this agent’s wallet.');
   // The wallet itself: derived here from the owner key and the agent, never taken on trust.
-  if (!isOwnWallet(wallet, input.owner, input.agentId))
+  if (!isOwnWallet(wallet, input.owner, input.agentId, chain.chainId))
     throw new RatingCheckError('This isn’t the wallet your wallet key makes for this agent.');
   // Fees are covered: an allowed sponsor pays, never the wallet (shared/base/paymasters.ts),
   // whatever the summary says. Anything else fails closed.
-  if (!sponsoredWithoutCharge(request.chainId, op.paymasterAndData, input.sponsors))
+  if (
+    !sponsoredWithoutCharge(chain.chainId, op.paymasterAndData, input.sponsors ?? WALLET_SPONSORS)
+  )
     throw new RatingCheckError(
       'The network fee isn’t covered by the approved sponsor; the wallet could be charged.',
     );
-  const hash = ownerOperationHash(op);
+  const hash = ownerOperationHash(op, chain.owner);
   if (
     typeof request.userOpHash !== 'string' ||
     hash.toLowerCase() !== request.userOpHash.toLowerCase()
@@ -520,7 +560,7 @@ export function checkRateOperation(input: {
   // index, as for withdrawals (withdraw.ts deploysOwnWallet).
   if (
     (op.initCode ?? '0x') !== '0x' &&
-    !deploysOwnWallet(op.initCode as Hex, input.owner, input.agentId)
+    !deploysOwnWallet(op.initCode as Hex, input.owner, input.agentId, chain.chainId)
   )
     throw new RatingCheckError('The operation would set up the wallet with other owners.');
   // Never the replayable key; with lanes on, exactly the start of the rating's own lane, derived
@@ -534,7 +574,7 @@ export function checkRateOperation(input: {
   );
   // Exactly one rating and nothing else (shared/base/rate.ts): a transfer, a batch or any other
   // call is refused here, as a rating is refused by every withdrawal check.
-  const call = decodeRateCall(op.callData, wallet);
+  const call = decodeRateCall(op.callData, wallet, registry);
   if (!call) throw new RatingCheckError('The operation does something other than this rating.');
   if (call.agentId !== BigInt(expected.baseId))
     throw new RatingCheckError('The operation rates a different agent.');
@@ -542,24 +582,23 @@ export function checkRateOperation(input: {
     throw new RatingCheckError('The operation gives a different number of stars.');
   if (input.raterBaseId !== undefined) {
     if (typeof input.raterBaseId !== 'string' || !DECIMAL.test(input.raterBaseId))
-      throw new RatingCheckError('The rating agent’s own Base ID isn’t readable.');
+      throw new RatingCheckError(`The rating agent’s own ${words.id} isn’t readable.`);
     if (call.agentId === BigInt(input.raterBaseId)) throw new RatingCheckError(NOT_ITSELF);
   }
   // What the screen shows comes from the server's summary: it must say exactly what is signed.
   const summary = request.summary;
-  const mainnet = request.chainId === BASE_MAINNET;
   if (
     !summary ||
     typeof summary !== 'object' ||
     summary.kind !== 'rate' ||
-    !sameAddress(summary.registry, RATE_REGISTRY) ||
+    !sameAddress(summary.registry, registry) ||
     !sameInteger(summary.agentId, call.agentId) ||
     !sameInteger(summary.value, starsValue(call.stars)) ||
     summary.tag1 !== RATE_TAG ||
     (summary.stars !== undefined && summary.stars !== call.stars) ||
     !sameAddress(summary.from, op.sender) ||
-    summary.network !== (mainnet ? 'Base' : 'Base Sepolia') ||
-    summary.testnet !== !mainnet ||
+    summary.network !== chain.name ||
+    summary.testnet !== chain.testnet ||
     summary.sponsored !== true ||
     summary.fee?.paidBy !== 'sponsor' ||
     summary.deploysWallet !== ((op.initCode ?? '0x') !== '0x')

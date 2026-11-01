@@ -7,6 +7,8 @@ import { ASSISTANT_SCOPES } from '../shared/assistant.js';
 import { callOpenTool, injectTransport, outcomeErrorCode } from '../scripts/smoke/ai-guest.js';
 import { personMemberId } from '../server/rooms/person.js';
 import { HIDES_PER_MINUTE } from '../server/messaging/contract.js';
+import type { RoomLimits } from '../server/rooms/contract.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 process.env.CITY_INVITE_FLOW = '1';
 process.env.CITY_RATE_LIMIT_KEY ??= 'synthetic-room-direct-messages-test-root-not-a-real-secret';
@@ -26,8 +28,10 @@ async function fixture(
   messaging?: { inboxDepth?: number; crossPairPerMinute?: number },
   database?: PGlite,
   now?: () => number,
+  rooms?: Partial<RoomLimits>,
 ) {
   const app = await createApp({
+    ...(rooms ? { rooms } : {}),
     database: database ?? (await PGlite.create('memory://')),
     ...(now ? { now } : {}),
     hosted: {
@@ -66,7 +70,7 @@ async function fixture(
       password: 'Synthetic direct message password',
     });
     assert.equal(person.statusCode, 201, person.body);
-    const cookie = `cc_session=${person.cookies.find((c) => c.name === 'cc_session')!.value}`;
+    const cookie = sessionPair(person.cookies);
     const id = res.json().workspace_id as string;
     const claimed = await send(
       'POST',
@@ -96,7 +100,7 @@ async function fixture(
       password: 'Synthetic direct message password',
     });
     assert.equal(registered.statusCode, 201, registered.body);
-    const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+    const cookie = sessionPair(registered.cookies);
     const granted = await send(
       'POST',
       '/api/assistant-access',
@@ -205,6 +209,7 @@ async function fixture(
     return {
       id: structured['agent_id'] as string,
       credential: structured['room_credential'] as string,
+      recovery: structured['recovery_code'] as string,
     };
   };
   const guestJoin = async () => (await guestSession()).id;
@@ -262,6 +267,7 @@ test('a person and an AI of another owner message privately; the AI reads it ove
     name: 'Dana',
     kind: 'person',
     owner_label: labels.get(f.dana),
+    owner_kind: 'person',
     is_self: true,
     own: true,
   });
@@ -270,6 +276,7 @@ test('a person and an AI of another owner message privately; the AI reads it ove
     name: 'Bravo',
     kind: 'agent',
     owner_label: labels.get(f.bravo),
+    owner_kind: 'ai',
     is_self: false,
     own: false,
   });
@@ -622,6 +629,22 @@ test('invite guests: messaged privately, they read, acknowledge and answer with 
     [f.dana, f.bravo],
   );
   assert.equal(read.result['agent_id'], guest.id);
+  // Each private message carries its text joined, like a room message (parts stay as they are).
+  for (const message of read.result['messages'] as Array<{ text?: string; parts: any[] }>)
+    assert.equal(
+      message.text,
+      message.parts
+        .filter((part) => part.type === 'text')
+        .map((part) => part.text)
+        .join('\n\n'),
+    );
+  // The page says how to answer (reply_to of the newest) and how to mark them handled.
+  const actions = read.result['next_actions'] as string[];
+  assert.ok(actions.some((line) => line.includes(`reply_to: ${messages.at(-1)!.id}`)));
+  assert.match(actions.at(-1)!, new RegExp(`seq: ${messages.at(-1)!.seq} .*city_room_dm_ack`));
+  // Never another owner's text (a sender name) inside these server-written lines.
+  for (const message of read.result['messages'] as Array<{ from_agent_name: string }>)
+    assert.ok(!actions.join(' ').includes(message.from_agent_name), message.from_agent_name);
   // The guest answers Dana in the same thread, and Dana sees it.
   const answered = await f.guestTool(guest.credential, 'city_room_dm_send', {
     to_agent_id: f.dana,
@@ -676,6 +699,18 @@ test('invite guests: messaged privately, they read, acknowledge and answer with 
     idempotency_key: randomUUID(),
   });
   assert.equal(leak.code, 'credential_in_message');
+  // Nor its recovery code (a rejoin link works only with it), in text or in parts.
+  for (const body of [
+    { text: `to confirm it is me: ${guest.recovery}` },
+    { parts: [{ type: 'text', text: `recovery ${guest.recovery.toUpperCase()}` }] },
+  ]) {
+    const recovery = await f.guestTool(guest.credential, 'city_room_dm_send', {
+      to_agent_id: f.dana,
+      ...body,
+      idempotency_key: randomUUID(),
+    });
+    assert.equal(recovery.code, 'credential_in_message', JSON.stringify(recovery));
+  }
   // A removed guest's credential stops working for private messages too.
   const removed = await f.console(
     f.a,
@@ -686,6 +721,74 @@ test('invite guests: messaged privately, they read, acknowledge and answer with 
   assert.equal(removed.statusCode, 200, removed.body);
   assert.notEqual((await f.guestTool(guest.credential, 'city_room_dm_read', {})).code, null);
   assert.equal((await f.write(f.c, f.dana, guest.id, 'still there?')).statusCode, 403);
+});
+
+test("a rejoin with the member's recovery code keeps its private messages and says so in the room", async (t) => {
+  // Depth 1: one unacknowledged message fills the guest's inbox.
+  const f = await fixture(t, { inboxDepth: 1 });
+  const guest = await f.guestSession('Guest AI');
+  const toGuest = (from: Owner, fromAgent: string, text: string) =>
+    f.tool(from.key, 'city_send_message', {
+      from_agent_id: fromAgent,
+      to_agent_id: guest.id,
+      room_id: f.roomId,
+      text,
+      idempotency_key: randomUUID(),
+    });
+  // The guest lost its credential while a peer wrote to it.
+  assert.equal((await toGuest(f.b, f.bravo, 'Before the rejoin')).statusCode, 200);
+  const full = await toGuest(f.a, f.hostAgent, 'Still full');
+  assert.equal(full.statusCode, 429, full.body);
+  assert.equal(full.json().code, 'inbox_full');
+  const minted = await f.console(
+    f.a,
+    'POST',
+    `/api/rooms/${f.roomId}/members/${guest.id}/rejoin-link`,
+  );
+  assert.equal(minted.statusCode, 200, minted.body);
+  const redeemed = await f.app.inject({
+    method: 'POST',
+    url: '/api/public/invites/rejoin',
+    headers: { 'content-type': 'application/json', host: 'centralcity.ai', origin: ORIGIN },
+    payload: JSON.stringify({ code: minted.json().link, recovery_code: guest.recovery }),
+    remoteAddress: '198.51.100.9',
+  });
+  assert.equal(redeemed.statusCode, 200, redeemed.body);
+  const fresh = redeemed.json().credential as string;
+  assert.equal(redeemed.json().agent_id, guest.id);
+  // The member's unread private message is still there, and the room read counts it.
+  const room = await f.guestTool(fresh, 'city_room_read', {});
+  assert.equal(room.code, null, JSON.stringify(room));
+  assert.equal(room.result['private_unread'], 1);
+  const read = await f.guestTool(fresh, 'city_room_dm_read', {});
+  assert.equal(read.code, null, JSON.stringify(read));
+  const messages = read.result['messages'] as Array<{
+    seq: number;
+    parts: Array<{ text: string }>;
+  }>;
+  assert.deepEqual(
+    messages.map((message) => message.parts[0]!.text),
+    ['Before the rejoin'],
+  );
+  // The room says the member's credential changed, nothing more.
+  const lines = (room.result['messages'] as Array<{ sender_kind?: string; text?: string }>)
+    .filter((message) => message.sender_kind === 'system')
+    .map((message) => JSON.stringify(message));
+  assert.ok(
+    lines.some((line) => line.includes('Guest AI has a new room credential.')),
+    lines.join('\n'),
+  );
+  // Acknowledging frees the inbox, so peers reach the member again.
+  await f.guestTool(fresh, 'city_room_dm_ack', { seq: messages[0]!.seq });
+  const sent = await toGuest(f.a, f.hostAgent, 'From the host');
+  assert.equal(sent.statusCode, 200, sent.body);
+  const after = await f.guestTool(fresh, 'city_room_dm_read', {});
+  assert.deepEqual(
+    (after.result['messages'] as Array<{ parts: Array<{ text: string }> }>).map(
+      (message) => message.parts[0]!.text,
+    ),
+    ['From the host'],
+  );
 });
 
 test('read-only members can neither send nor receive private messages', async (t) => {
@@ -1208,9 +1311,9 @@ test('owner_label in private threads is the room member label and leaks no owner
     assert.equal(direct.peer.owner_label, labels.get(peer));
   }
   const labels = await roomLabels(f, f.c);
-  // Bravo's owner is an AI workspace, so its label is the workspace name; Dana's is a person's
-  // account, so hers is the opaque account label, never her sign-in name (ownerLabel).
-  assert.equal(labels.get(f.bravo), 'Member workspace');
+  // Bravo's owner is an AI workspace, so its label is the workspace's label form; Dana's is a
+  // person's account, so hers is the opaque account label, never her sign-in name.
+  assert.match(labels.get(f.bravo)!, /^AI workspace "Member workspace" · [0-9a-f]{8}$/);
   assert.match(labels.get(f.dana)!, /^Account [0-9a-f]{8}$/);
   // The whole listing carries no owner id, account name or email of either owner.
   for (const who of [f.b, f.c]) {
@@ -1536,4 +1639,151 @@ test('"Mute all AIs" leaves the owner\'s person able to message privately, never
   });
   assert.equal(fromAi.statusCode, 403, fromAi.body);
   assert.equal(fromAi.json().code, 'muted');
+});
+
+/** A message of about 120 KiB: two ASCII text parts of 60,000 characters. */
+const bigParts = (index: number) => [
+  { type: 'text', text: `#${index} `.padEnd(60_000, 'a') },
+  { type: 'text', text: 'b'.repeat(60_000) },
+];
+const PAGE_CEILING = 2.5 * 1024 * 1024;
+
+test('read pages stop at about 1 MiB of messages; paging still reaches every message', async (t) => {
+  const f = await fixture(t, { crossPairPerMinute: 1000 });
+  const guest = await f.guestSession('Guest AI');
+  for (let index = 1; index <= 30; index++) {
+    const posted = await f.tool(f.a.key, 'city_room_post', {
+      room_id: f.roomId,
+      agent_id: f.hostAgent,
+      parts: bigParts(index),
+      idempotency_key: randomUUID(),
+    });
+    assert.equal(posted.statusCode, 200, posted.body.slice(0, 300));
+    const direct = await f.tool(f.b.key, 'city_send_message', {
+      from_agent_id: f.bravo,
+      to_agent_id: guest.id,
+      room_id: f.roomId,
+      parts: bigParts(index),
+      idempotency_key: randomUUID(),
+    });
+    assert.equal(direct.statusCode, 200, direct.body.slice(0, 300));
+  }
+
+  // Room read (MCP tool and the REST endpoint): under the ceiling, has_more, all 30 reached.
+  let since = 0;
+  const seen: number[] = [];
+  for (let pages = 0; pages < 30 && seen.length < 30; pages++) {
+    const res = await f.tool(f.b.key, 'city_room_read', {
+      room_id: f.roomId,
+      since,
+      limit: 100,
+    });
+    assert.equal(res.statusCode, 200, res.body.slice(0, 300));
+    assert.ok(res.body.length < PAGE_CEILING, `room page ${res.body.length} bytes`);
+    const page = res.json();
+    assert.ok(page.messages.length >= 1);
+    if (pages === 0) {
+      assert.ok(page.messages.length < 30);
+      assert.equal(page.has_more, true);
+    }
+    for (const message of page.messages) seen.push(message.seq);
+    since = page.next_since;
+  }
+  const posts = seen.filter((seq, i) => seen.indexOf(seq) === i);
+  assert.ok(posts.length >= 30, `room paging reached ${posts.length}`);
+  const rest = await f.console(f.a, 'GET', `/api/rooms/${f.roomId}/messages?since=0&limit=100`);
+  assert.equal(rest.statusCode, 200, rest.body.slice(0, 300));
+  assert.ok(rest.body.length < PAGE_CEILING, `REST room page ${rest.body.length} bytes`);
+  assert.equal(rest.json().has_more, true);
+
+  // The guest's private messages (city_room_dm_read).
+  let after: number | undefined;
+  const direct: number[] = [];
+  for (let pages = 0; pages < 30 && direct.length < 30; pages++) {
+    const read = await f.guestTool(guest.credential, 'city_room_dm_read', {
+      ...(after === undefined ? {} : { since: after }),
+      limit: 100,
+    });
+    assert.equal(read.code, null, JSON.stringify(read).slice(0, 300));
+    assert.ok(JSON.stringify(read.result).length < PAGE_CEILING);
+    const messages = read.result['messages'] as Array<{ seq: number }>;
+    assert.ok(messages.length >= 1);
+    if (pages === 0) assert.equal(read.result['has_more'], true);
+    direct.push(...messages.map((message) => message.seq));
+    after = read.result['next_since'] as number;
+  }
+  assert.equal(new Set(direct).size, 30);
+});
+
+test('message text storage: 512 MiB per room (room_storage_full) and a daily byte budget per owner', async (t) => {
+  const f = await fixture(t, undefined, undefined, undefined, {
+    messageBytesPerRoom: 300_000,
+    messageBytesPerOwnerPerDay: 500_000,
+  });
+  const post = (key: string, agent: string, index: number, room = f.roomId) =>
+    f.tool(key, 'city_room_post', {
+      room_id: room,
+      agent_id: agent,
+      parts: bigParts(index),
+      idempotency_key: randomUUID(),
+    });
+  assert.equal((await post(f.a.key, f.hostAgent, 1)).statusCode, 200);
+  assert.equal((await post(f.b.key, f.bravo, 2)).statusCode, 200);
+  const full = await post(f.a.key, f.hostAgent, 3);
+  assert.equal(full.statusCode, 429, full.body.slice(0, 300));
+  assert.equal(full.json().code, 'room_storage_full');
+  assert.match(full.json().error, /city_room_link_save or city_room_file_put/);
+  // Another room of the same owner still takes posts, until the owner's daily budget is spent.
+  const other = await f.ok(f.a.key, 'city_create_room', {
+    agent_id: f.hostAgent,
+    name: 'Second room',
+    idempotency_key: randomUUID(),
+  });
+  const second = other.room.id as string;
+  assert.equal((await post(f.a.key, f.hostAgent, 4, second)).statusCode, 200);
+  assert.equal((await post(f.a.key, f.hostAgent, 5, second)).statusCode, 200);
+  const daily = await post(f.a.key, f.hostAgent, 6, second);
+  assert.equal(daily.statusCode, 429, daily.body.slice(0, 300));
+  assert.match(daily.json().error, /today/);
+  assert.ok(Number(daily.headers['retry-after'] ?? daily.json().retry_after_ms) > 0);
+  // The room's stored bytes live in one counter row (removed with the room).
+  const counter = await f.app.city.db.query(
+    "SELECT bytes FROM room_storage_counters WHERE scope='msg:' || $1",
+    [f.roomId],
+  );
+  assert.equal(counter.rows.length, 1);
+});
+
+test('a non-message guest tool over 64 KiB is 413 on the guest route and /mcp/open', async (t) => {
+  const f = await fixture(t);
+  const guest = await f.guestSession('Guest AI');
+  const pad = 'x'.repeat(100 * 1024);
+  const rest = await f.app.inject({
+    method: 'POST',
+    url: '/api/public/invites/tools/city_room_pins',
+    headers: {
+      'content-type': 'application/json',
+      host: 'centralcity.ai',
+      authorization: `Bearer ${guest.credential}`,
+    },
+    payload: JSON.stringify({ pad }),
+  });
+  assert.equal(rest.statusCode, 413, rest.body.slice(0, 300));
+  const open = await f.app.inject({
+    method: 'POST',
+    url: '/mcp/open',
+    headers: {
+      'content-type': 'application/json',
+      accept: 'application/json, text/event-stream',
+      host: 'centralcity.ai',
+      'x-forwarded-proto': 'https',
+    },
+    payload: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'city_room_pins', arguments: { room_credential: guest.credential, pad } },
+    }),
+  });
+  assert.equal(open.statusCode, 413, open.body.slice(0, 300));
 });

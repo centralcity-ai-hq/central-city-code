@@ -49,10 +49,15 @@ import { getAddress } from 'viem';
 import type { Database, Transaction } from '../../database.js';
 import type { Workspace } from '../../model.js';
 import { walletReady } from '../../base/pay/store.js';
-import { PUBLIC_NAME } from '../../base/explorer/store.js';
+import { agentChainsOf } from '../../base/wallet/routes.js';
+import { protocolArcChainIdFromEnv } from '../../protocol/fees/cron.js';
+import { chainWords } from '../../../shared/base/wallet-chains.js';
+import { chainNetwork } from '../../../shared/chains.js';
+import { publicManifestsOf } from '../../base/explorer/store.js';
 import { elricAgentIds } from '../../elric/access.js';
 import { WALLET_CHAIN_ID, WALLET_NETWORK } from '../../../shared/base/wallet-network.js';
 import { FEED_LIMITS } from '../../../shared/feed.js';
+import { isReservedPayee, reservedPayees } from '../../../shared/protocol.js';
 import {
   FEE_ROUTER_MAX_TOTAL,
   FEE_ROUTER_MIN_INCLUDED,
@@ -215,6 +220,8 @@ const REFUSAL_TEXT: Record<OfferRefusalReason, string> = {
   agent_paused: 'The agent is paused: resume it first, or publish the offer paused.',
   workspace_paused: 'The workspace is paused: resume it first, or publish the offer paused.',
   wallet_not_ready: "The agent's wallet on Base is not ready to be paid.",
+  payee_reserved:
+    "The agent's wallet address can't receive payments (a protocol contract, the treasury or the token).",
   agent_changed: 'An offer keeps its agent: use a new key for another agent.',
   kind_changed: 'An offer keeps its kind: use a new key for another kind.',
   price_change_too_soon: 'The price of this offer was changed recently: try again later.',
@@ -346,7 +353,8 @@ function readBatch(
     if (
       priceText === null ||
       Number(priceText) < FEE_ROUTER_MIN_INCLUDED ||
-      Number(priceText) > priceMaxRaw
+      // The cap binds what's on sale: an offer above a lowered cap can still be taken off the Feed.
+      (Number(priceText) > priceMaxRaw && (record.state ?? 'active') === 'active')
     )
       return refuse('invalid_price');
     if (record.discoverable !== undefined && typeof record.discoverable !== 'boolean')
@@ -565,6 +573,8 @@ interface WalletRow {
   derivation: unknown;
   vault_owner: string | null;
   backup_confirmed_at: string | number | null;
+  /** Read only with Arc on. */
+  chain_id?: number;
 }
 
 /** One planned offer with what publishing it needs beyond the public plan item. */
@@ -616,6 +626,16 @@ export interface OfferStoreOptions {
    * while it is live, docs/protocol/FEE_ROUTER_2.md section 5).
    */
   priceMaxRaw?: () => number;
+  /**
+   * The payees no offer may be paid to, read per batch (protocolReservedPayees; Base mainnet's
+   * reservedPayees by default).
+   */
+  reservedPayees?: () => ReadonlySet<string>;
+  /**
+   * The settings that say whether Arc is on (CITY_ARC=1, read per batch): an agent's offer is then
+   * paid to its wallet on its own chain (agentChainsOf). Absent or Arc off: the wallet network alone.
+   */
+  chainEnv?: Record<string, string | undefined>;
 }
 
 export function createOfferStore(db: Database, options: OfferStoreOptions) {
@@ -637,6 +657,7 @@ export function createOfferStore(db: Database, options: OfferStoreOptions) {
       registry,
       options.priceMaxRaw ? options.priceMaxRaw() : FEE_ROUTER_MAX_TOTAL,
     );
+    const reserved = options.reservedPayees ? options.reservedPayees() : reservedPayees();
     const { rows: workspaces } = await q.query<{ paused: boolean | null }>(
       `SELECT (data->>'paused')::boolean AS paused FROM workspaces WHERE operator_id = $1${
         lock ? ' FOR UPDATE' : ''
@@ -662,18 +683,31 @@ export function createOfferStore(db: Database, options: OfferStoreOptions) {
     );
     const agentOf = new Map(agents.map((agent) => [agent.id, agent]));
     const managed = await elricAgentIds(q, agentIds);
+    const chainEnv = options.chainEnv ?? {};
+    const arcChain = protocolArcChainIdFromEnv(chainEnv);
     const { rows: wallets } = await q.query<WalletRow>(
       `SELECT w.wallet_id, w.agent_id, w.address, w.state, w.owner_account_id, w.owner_address,
-         w.derivation, v.owner_address AS vault_owner, v.backup_confirmed_at
+         w.derivation, v.owner_address AS vault_owner, v.backup_confirmed_at${
+           arcChain === null ? '' : ', w.chain_id'
+         }
        FROM base_wallets w LEFT JOIN base_owner_vaults v ON v.operator_id = w.owner_account_id
-       WHERE w.operator_id = $1 AND w.chain_id = $2 AND w.agent_id = ANY($3::text[])`,
-      [operatorId, WALLET_CHAIN_ID, agentIds],
+       WHERE w.operator_id = $1 AND ${
+         arcChain === null ? 'w.chain_id = $2' : 'w.chain_id = ANY($2::int[])'
+       } AND w.agent_id = ANY($3::text[])`,
+      [operatorId, arcChain === null ? WALLET_CHAIN_ID : [WALLET_CHAIN_ID, arcChain], agentIds],
     );
+    const chainOf = await agentChainsOf(q, chainEnv, agentIds);
     const walletOf = new Map<string, { walletId: string; address: string } | null>();
     for (const row of wallets) {
+      // Arc on: only the row of the chain the agent lives on, and that chain's network.
+      const chainId = row.chain_id === undefined ? WALLET_CHAIN_ID : Number(row.chain_id);
+      if (arcChain !== null && (chainOf.get(row.agent_id) ?? WALLET_CHAIN_ID) !== chainId) continue;
+      const network =
+        chainId === WALLET_CHAIN_ID ? WALLET_NETWORK : chainNetwork(chainId, chainEnv);
       const ready =
         (row.state === 'derived' || row.state === 'deployed') &&
-        walletReady(WALLET_NETWORK, {
+        network !== null &&
+        walletReady(network, {
           agentId: row.agent_id,
           address: row.address,
           ownerAccountId: row.owner_account_id,
@@ -688,7 +722,9 @@ export function createOfferStore(db: Database, options: OfferStoreOptions) {
       );
     }
     const { rows: names } = await q.query<{ agent_id: string; name: string | null }>(
-      `SELECT l.agent_id, p.name FROM (SELECT unnest($1::text[]) AS agent_id) l ${PUBLIC_NAME}`,
+      `WITH l AS (SELECT DISTINCT unnest($1::text[]) AS agent_id),
+       p AS (${publicManifestsOf('SELECT agent_id FROM l')})
+       SELECT l.agent_id, p.name FROM l LEFT JOIN p ON p.agent_id = l.agent_id`,
       [agentIds],
     );
     const nameOf = new Map(names.map((row) => [row.agent_id, row.name]));
@@ -720,8 +756,8 @@ export function createOfferStore(db: Database, options: OfferStoreOptions) {
 
     const listingUrl = new URL(OFFER_PUBLIC_PATH, origin);
     const planned: Planned[] = [];
-    const refuse = (offer: ReadOffer, reason: OfferRefusalReason) =>
-      void refusals.push(refusal(offer.index, offer.key, reason));
+    const refuse = (offer: ReadOffer, reason: OfferRefusalReason, message?: string) =>
+      void refusals.push(refusal(offer.index, offer.key, reason, message));
 
     for (const offer of offers) {
       const existing = existingOf.get(offer.key) ?? null;
@@ -764,7 +800,23 @@ export function createOfferStore(db: Database, options: OfferStoreOptions) {
         (!existing || offer.state === 'active') &&
         (!wallet || (existing !== null && wallet.address !== getAddress(existing.pay_to)))
       ) {
-        refuse(offer, 'wallet_not_ready');
+        // The chain the agent lives on, when it has one; with Arc on, none yet may become either.
+        const on = chainOf.get(offer.agentId);
+        refuse(
+          offer,
+          'wallet_not_ready',
+          arcChain === null
+            ? undefined
+            : on === undefined
+              ? "The agent's wallet is not ready to be paid. It gets one when its owner registers it in My agents, on Base or Arc."
+              : chainWords(on).say(REFUSAL_TEXT.wallet_not_ready),
+        );
+        continue;
+      }
+      // A pay-to no payment may name (a fee router, the treasury, USDC, the facilitator, zero).
+      const payTo = existing ? existing.pay_to : wallet!.address;
+      if ((!existing || offer.state === 'active') && isReservedPayee(payTo, reserved)) {
+        refuse(offer, 'payee_reserved');
         continue;
       }
       const priceChanged = existing !== null && existing.price_raw !== offer.priceRaw;

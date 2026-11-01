@@ -17,7 +17,12 @@ import { getAddress } from 'viem';
 import { z } from 'zod';
 import { transientDatabaseError, type Database } from '../../database.js';
 import { transientChainError } from '../chain/transient.js';
-import { BASE_MAINNET, type BaseChainId } from '../../../shared/base/chains.js';
+import { BASE_MAINNET } from '../../../shared/base/chains.js';
+import { chainHolding, type WalletFunds } from './chain-hold.js';
+import { ARC_MAINNET, ARC_TESTNET, chainView, type ChainId } from '../../../shared/chains.js';
+import { BundlerError, sponsorBudgetRefused } from '../chain/rpc-bundler.js';
+import { SubmitError } from '../chain/submit.js';
+import { protocolArcChainIdFromEnv } from '../../protocol/fees/cron.js';
 import type { Address } from '../../../shared/base/chains.js';
 import { cronAuthorized } from '../../wake/cron.js';
 import {
@@ -60,6 +65,17 @@ export interface ChainRuntime {
   /** Fee router 3's facilitator (server/protocol/x402/facilitator.ts); null when not configured. */
   router3Facilitator?: () => import('../../feed/pay/router3.js').Router3FacilitatorPort | null;
   /**
+   * The public x402 facilitator's sender (server/protocol/x402/public-settle.ts): its OWN EOA
+   * (CITY_X402_PUBLIC_SETTLE_KEY_REF) sends USDC transferWithAuthorization; null without its key.
+   */
+  publicSettleFacilitator?: () =>
+    import('../../protocol/x402/public-settle.js').PublicFacilitator | null;
+  /**
+   * The offers' public address's lane (server/feed/offers/public-pay.ts): its OWN EOA
+   * (CITY_X402_PUBLIC_OFFER_KEY_REF) sends router 3 settle; null without its key (closed).
+   */
+  publicOfferLane?: () => import('../../feed/offers/public-pay.js').PublicOfferLane | null;
+  /**
    * The sponsored first purchase's payer (server/feed/pay/sponsored.ts): the sponsor's signer and
    * its own facilitator over its own key; null unless CITY_SFP_SPONSOR_KEY_REF and router 3 are set.
    */
@@ -71,6 +87,14 @@ export interface ChainRuntime {
   ownBundlerUpkeep?: import('../chain/direct-bundler.js').OwnBundlerUpkeep;
   /** Whether our bundler is in effect or the CDP fallback is (public route). */
   ownBundlerEffective?: () => 'direct' | 'cdp_fallback' | 'unknown';
+  /**
+   * The addresses (lowercase) of Central City's configured server keys, from their stored rows
+   * (chain/runtime.ts): no payment the public x402 facilitator relays may pay one of them. Rejects
+   * while a configured key cannot be read.
+   */
+  protocolKeyAddresses?: () => Promise<string[]>;
+  /** The sponsor's surplus-ETH move to the facilitator (feed/pay/sponsor-eth-sweep.ts); null unless both keys are set. */
+  sponsorEth?: () => Promise<import('../../feed/pay/sponsor-eth-sweep.js').SponsorEthChain | null>;
   /** The network's public read client, for read-only contract calls (payment screening). */
   readClient?: import('viem').PublicClient;
   /**
@@ -79,6 +103,17 @@ export interface ChainRuntime {
    * name only) when that setting is not an https URL.
    */
   feedPayReadClient?: () => import('viem').PublicClient;
+  /**
+   * Arc only: the bundler its owner operations go through (our own, as Arc's RPC has none). A limit's
+   * revoke is built on it (owner-revoke.ts).
+   */
+  arcOwnerBundler?: import('../chain/submit.js').Bundler;
+  /**
+   * Arc only: its owner operations (withdrawals and payments), built on first use. Throws without
+   * Arc's wallet fee cap (ChainRuntimeError, the setting name only). Sponsored by Arc's configured
+   * paymaster until one is pinned, under the same no-charge rule.
+   */
+  arcOwnerOperations?: () => import('../chain/owner-ops.js').OwnerOperationsPort;
 }
 
 export interface RegisterRouteDeps {
@@ -87,7 +122,9 @@ export interface RegisterRouteDeps {
   /** The signed-in owner, or null. */
   currentOperator(request: FastifyRequest): Promise<{ id: string } | null>;
   /** Builds the chain runtime for a network; throws when it is not configured. */
-  runtime(chainId: BaseChainId): Promise<ChainRuntime>;
+  runtime(chainId: ChainId): Promise<ChainRuntime>;
+  /** Whether a wallet holds anything on its chain. Absent: any wallet holds its agent there. */
+  walletFunds?: WalletFunds;
   /** Enables the finalize cron (Vercel Cron's bearer secret); without it the route is absent. */
   cronSecret?: string;
   /**
@@ -104,7 +141,18 @@ export interface RegisterRouteDeps {
    * Off only for tests that drive every advance through the route themselves.
    */
   throttleChainChecks?: boolean;
+  /** The shared rate limiter (server/app.ts); absent in unit tests. */
+  limit?: (key: string, max: number, windowMs: number) => Promise<void>;
+  /** Proven sponsor operator accounts (chain/sponsor-operators.ts): not held to REGISTER_RATE. */
+  operatorAccounts?: () => ReadonlySet<string>;
 }
+
+/**
+ * Per account (the agent's workspace), like a payment: each call that takes a registration a step
+ * further on Base (and may be sponsored). Polls answered from the stored state are not counted,
+ * and a call over the rate is answered from the stored state when there is one.
+ */
+export const REGISTER_RATE = { prefix: 'base-register', max: 20, windowMs: 60_000 } as const;
 
 export const IDENTITY_FINALIZE_PATH = '/api/cron/base-identity-finalize';
 /** Rows already registered or in flight claimed per cron run, advanced at most this many at a time, within this deadline. */
@@ -131,11 +179,17 @@ export const FINALIZE_FRESH_MS = 30_000;
 
 /** Seconds a register call that met a transient database failure asks the caller to wait. */
 export const TRANSIENT_RETRY_AFTER_S = 5;
+/** Seconds a register call refused by the sponsorship budget asks the caller to wait. */
+export const BUDGET_RETRY_AFTER_S = 300;
 
 const params = z.object({ agentId: z.string().uuid() });
+/** Listed here; whether Arc is on is registrationChainOn's answer. */
+const chainIdField = z
+  .union([z.literal(BASE_MAINNET), z.literal(ARC_MAINNET), z.literal(ARC_TESTNET)])
+  .default(BASE_MAINNET);
 const body = z.object({
   ownerAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
-  chainId: z.literal(BASE_MAINNET).default(BASE_MAINNET),
+  chainId: chainIdField,
   /** The owner's explicit "Try again" after a failed step. */
   retry: z.boolean().optional(),
 });
@@ -143,11 +197,53 @@ const body = z.object({
 const keyBody = z.strictObject({
   /** The wallet this browser derived from the wallet key it held (src/base/wallet/derive.ts). */
   expectedWallet: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
-  chainId: z.literal(BASE_MAINNET).default(BASE_MAINNET),
+  chainId: chainIdField,
   retry: z.boolean().optional(),
 });
 
+/** The chains an agent can register on now: Base, and the one Arc network while Arc is on. */
+export function registrationChainOn(
+  chainId: number,
+  env: Record<string, string | undefined>,
+): boolean {
+  return chainId === BASE_MAINNET || chainId === protocolArcChainIdFromEnv(env);
+}
+
+/** The chain a register call asked for, when it is one that's on; else Base. Read for its answer only. */
+function chainOfBody(raw: unknown, env: Record<string, string | undefined>): number {
+  const chainId = raw && typeof raw === 'object' ? (raw as Record<string, unknown>).chainId : null;
+  return typeof chainId === 'number' && registrationChainOn(chainId, env) ? chainId : BASE_MAINNET;
+}
+
+/** What these answers call the chain: every Base network stays "Base", as it always read. */
+function registrationPlace(chainId: number): string {
+  const view = chainView(chainId);
+  return view?.slug === 'arc' ? view.name : 'Base';
+}
+const registrationBusy = (chainId: number) =>
+  `${registrationPlace(chainId)} registration is busy. Try again in a moment.`;
+const registrationUnavailable = (chainId: number) =>
+  `${registrationPlace(chainId)} registration is not available yet.`;
+
 export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: RegisterRouteDeps) {
+  /** The chain the agent is already on, when it isn't this one. One chain per agent for now. */
+  async function otherChainOf(agentId: string, chainId: number): Promise<number | null> {
+    // Arc off: an agent with an Arc row or wallet keeps its one chain, and nothing new is made on
+    // Base for it. One round trip on the two keys' agent_id prefix (base_identities' primary key,
+    // base_wallets' UNIQUE (agent_id, chain_id)); only Arc's ids count, so Base's own are untouched.
+    if (protocolArcChainIdFromEnv(deps.env) === null) {
+      const { rows } = await deps.db.query<{ chain_id: number }>(
+        `SELECT chain_id FROM base_identities
+         WHERE agent_id = $1 AND chain_id = ANY($2::int[]) AND state <> 'failed'
+         UNION ALL
+         SELECT chain_id FROM base_wallets WHERE agent_id = $1 AND chain_id = ANY($2::int[])
+         LIMIT 1`,
+        [agentId, [ARC_MAINNET, ARC_TESTNET]],
+      );
+      return rows[0]?.chain_id ?? null;
+    }
+    return chainHolding(deps.db, deps.walletFunds, agentId, chainId);
+  }
   async function ownedAgent(request: FastifyRequest) {
     const operator = await deps.currentOperator(request);
     if (!operator) return { ok: false as const, code: 401 };
@@ -248,7 +344,12 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
    * included), the current manifest's visibility is checked and the short id assigned: once it
    * exists, Make private is refused, so the two cannot interleave.
    */
-  async function claimPublicProfile(workspaceId: string, agentId: string): Promise<boolean> {
+  async function claimPublicProfile(
+    workspaceId: string,
+    agentId: string,
+    /** false: only whether the profile is public now; no short id is assigned (CCA-116). */
+    assign = true,
+  ): Promise<boolean> {
     const visibility = async (tx: Pick<Database, 'query'>) => {
       const { rows } = await tx.query<{ visibility: string | null }>(
         `SELECT m.manifest->'spec'->>'visibility' AS visibility
@@ -269,7 +370,7 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
       'SELECT 1 FROM base_short_ids WHERE agent_id = $1',
       [agentId],
     );
-    if (claimed[0]) return (await visibility(deps.db)) === 'public';
+    if (claimed[0] || !assign) return (await visibility(deps.db)) === 'public';
     return deps.db.transaction(async (tx) => {
       await tx.query('SELECT 1 FROM workspaces WHERE operator_id = $1 FOR UPDATE', [workspaceId]);
       if ((await visibility(tx)) !== 'public') return false;
@@ -322,7 +423,7 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
       reply
         .code(503)
         .header('Retry-After', String(TRANSIENT_RETRY_AFTER_S))
-        .send({ error: 'Base registration is busy. Try again in a moment.', code: 'busy' });
+        .send({ error: registrationBusy(chainId), code: 'busy' });
     let row: Awaited<ReturnType<typeof storedRegistrations>>[number] | undefined;
     try {
       row = (await storedRegistrations(agentId, chainId))[0];
@@ -380,7 +481,7 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
       return reply
         .code(503)
         .header('Retry-After', String(TRANSIENT_RETRY_AFTER_S))
-        .send({ error: 'Base registration is busy. Try again in a moment.', code: 'busy' });
+        .send({ error: registrationBusy(chainOfBody(request.body, deps.env)), code: 'busy' });
     }
     if (!owned.ok) return reply.code(owned.code).send({ error: 'Not found.' });
     try {
@@ -390,8 +491,34 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
       // call and the finalize cron advance the same registration), or Base's endpoint saying
       // "not now" (a 429 rate limit, a timeout, a 5xx), is never a 500: the answer is where the
       // registration stands. Anything else is a real error and still throws.
+      // The fee could exceed the reserved budget: nothing was signed, and the same call can pass
+      // once fees fall. A 503 like Pay's fee_cap_exceeded, with the wait and its own code.
+      if (
+        (error instanceof SubmitError && error.code === 'COST_CAP_EXCEEDED') ||
+        (error instanceof BundlerError && error.code === 'FEE_CAP_EXCEEDED')
+      )
+        return reply.code(503).header('Retry-After', String(TRANSIENT_RETRY_AFTER_S)).send({
+          error: 'The network fee could exceed its budget, so nothing was signed or sent.',
+          code: 'fee_cap_exceeded',
+        });
+      // Our own paymaster's budget said "not now" before it signed (on Arc: a deposit under its
+      // protected reserve): nothing was signed or charged, and the owner is told so, not left on a
+      // pending line with no reason. The attempt stays open, as for any "not now" (registerRefusedNow).
+      if (sponsorBudgetRefused(error)) {
+        logEvent({
+          event: 'identity.register_budget_refused',
+          agentId: owned.agentId,
+          chainId: chainOfBody(request.body, deps.env),
+          code: errorCode(error),
+        });
+        return reply.code(503).header('Retry-After', String(BUDGET_RETRY_AFTER_S)).send({
+          error:
+            'Registration is paused by the sponsorship budget for now. Nothing was signed or charged. Try again later.',
+          code: 'sponsorship_budget',
+        });
+      }
       if (!transientDatabaseError(error) && !transientChainError(error)) throw error;
-      return answerStored(reply, owned.agentId, BASE_MAINNET, error, {
+      return answerStored(reply, owned.agentId, chainOfBody(request.body, deps.env), error, {
         wallet: named(request.body, 'expectedWallet'),
         owner: named(request.body, 'ownerAddress'),
       });
@@ -403,7 +530,7 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
     reply: FastifyReply,
     owned: { agentId: string; workspaceId: string },
   ) {
-    let input: { chainId: typeof BASE_MAINNET; retry?: boolean };
+    let input: { chainId: ChainId; retry?: boolean };
     let owner: { address: Address; accountId?: string; expectedWallet?: Address };
     if (walletsOn()) {
       const parsed = keyBody.safeParse(request.body ?? {});
@@ -435,16 +562,29 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
       input = parsed.data;
       owner = { address: parsed.data.ownerAddress as Address };
     }
+    if (!registrationChainOn(input.chainId, deps.env))
+      return reply.code(400).send({ error: 'This chain is not available.', code: 'invalid_body' });
+    const otherChain = await otherChainOf(owned.agentId, input.chainId);
+    if (otherChain !== null)
+      return reply.code(409).send({
+        error: 'This agent is already on another chain. An agent has one chain for now.',
+        code: 'other_chain',
+        details: { chainId: otherChain, name: chainView(otherChain)?.name ?? null },
+      });
     let runtime: ChainRuntime;
     try {
       runtime = await deps.runtime(input.chainId);
     } catch {
-      return reply.code(503).send({ error: 'Base registration is not available yet.' });
+      return reply.code(503).send({ error: registrationUnavailable(input.chainId) });
     }
-    if (!(await claimPublicProfile(owned.workspaceId, owned.agentId)))
-      return reply
+    const profilePrivate = () =>
+      reply
         .code(409)
         .send({ error: "Make the agent's profile public first.", code: 'profile_private' });
+    // Checked first; the short id is assigned only once the wallet checks below passed, so a
+    // refused registration ("Nothing was registered") never keeps the agent public (CCA-116).
+    if (!(await claimPublicProfile(owned.workspaceId, owned.agentId, false)))
+      return profilePrivate();
     const wallets = createWalletService({ db: deps.db, chain: runtime.walletPort, env: deps.env });
     const identities = createIdentityService({
       db: deps.db,
@@ -480,6 +620,8 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
       // when the throttle answers the stored state instead.
       if (wallet.state === 'frozen' || wallet.state === 'closed')
         throw new IdentityServiceError('wallet_frozen', 'The wallet is frozen or closed.');
+      // Before the first chain step: the short id, under the workspace lock (Make private waits).
+      if (!(await claimPublicProfile(owned.workspaceId, owned.agentId))) return profilePrivate();
       // "Try again" counts only while the stored registration offers it (canRetry); any other
       // retry is a normal poll, so the throttle, the backoffs and the settling gate still apply.
       if (input.retry === true) {
@@ -506,6 +648,31 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
             identity: identityViewOf(stored, (deps.now ?? Date.now)()),
           };
       }
+      if (deps.limit && !deps.operatorAccounts?.().has(owned.workspaceId)) {
+        try {
+          await deps.limit(
+            `${REGISTER_RATE.prefix}:${owned.workspaceId}`,
+            REGISTER_RATE.max,
+            REGISTER_RATE.windowMs,
+          );
+        } catch (error) {
+          if ((error as { statusCode?: unknown } | null)?.statusCode !== 429) throw error;
+          const stored = (await storedRegistrations(owned.agentId, input.chainId))[0];
+          if (!stored)
+            return reply
+              .code(429)
+              .header('Retry-After', String(Math.ceil(REGISTER_RATE.windowMs / 1000)))
+              .send({ error: 'Too many registrations at once. Try again in a minute.' });
+          return {
+            wallet: {
+              address: wallet.address,
+              ownerAddress: wallet.ownerAddress,
+              state: wallet.state,
+            },
+            identity: identityViewOf(stored, (deps.now ?? Date.now)()),
+          };
+        }
+      }
       const identity = await identities.advance(owned.agentId, input.chainId, {
         retry: input.retry === true,
       });
@@ -514,6 +681,12 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
         identity,
       };
     } catch (error) {
+      if (error instanceof IdentityServiceError && error.code === 'other_chain')
+        return reply.code(409).send({
+          error: 'This agent is already on another chain. An agent has one chain for now.',
+          code: 'other_chain',
+          details: { chainId: error.chainId, name: chainView(error.chainId ?? 0)?.name ?? null },
+        });
       if (error instanceof IdentityServiceError)
         return reply.code(409).send({ error: error.message, code: error.code });
       if (error instanceof WalletServiceError && error.code === 'wallet_conflict') {
@@ -529,7 +702,7 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
         });
       }
       if (error instanceof WalletServiceError && error.code === 'network_unavailable')
-        return reply.code(503).send({ error: 'Base registration is not available yet.' });
+        return reply.code(503).send({ error: registrationUnavailable(input.chainId) });
       throw error;
     }
   }
@@ -608,7 +781,7 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
       const serviceFor = (chainId: number) => {
         let service = services.get(chainId);
         if (!service) {
-          service = deps.runtime(chainId as BaseChainId).then((runtime) =>
+          service = deps.runtime(chainId as ChainId).then((runtime) =>
             createIdentityService({
               db: deps.db,
               chain: runtime.identityPort,
@@ -629,7 +802,7 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
           const row = rows[next++];
           try {
             const service = await serviceFor(row.chain_id);
-            const view = await service.advance(row.agent_id, row.chain_id as BaseChainId);
+            const view = await service.advance(row.agent_id, row.chain_id as ChainId);
             advanced++;
             if (view.state === 'confirmed') confirmed++;
           } catch (error) {

@@ -22,6 +22,28 @@ import {
 
 const BASE = '/api/v2/connections';
 
+/** At most this many pages of one direction (100 requests each). */
+const MAX_REQUEST_PAGES = 10;
+
+/**
+ * Every request of one direction, newest first. The server pages only when asked for a direction:
+ * without one it answers the first 100 of each and no cursor, so older connections would vanish.
+ */
+export async function requestsOf(direction: 'incoming' | 'outgoing') {
+  const rows: ConnectionRequest[] = [];
+  let before: string | null = null;
+  for (let page = 0; page < MAX_REQUEST_PAGES; page++) {
+    const query = new URLSearchParams({ direction, ...(before ? { before } : {}) });
+    const lists: CrossLists & { next_before?: string | null } = await api(
+      `${BASE}/requests?${query}`,
+    );
+    rows.push(...lists[direction]);
+    before = lists.next_before ?? null;
+    if (!before) break;
+  }
+  return rows;
+}
+
 const inviteStatus: Record<string, string> = {
   active: 'Not used yet',
   used: 'Used',
@@ -72,12 +94,13 @@ export function useCrossConnections(agents: Agent[], onChanged: () => void) {
     setLoading(true);
     setLoadError('');
     try {
-      const [requests, owned] = await Promise.all([
-        api<CrossLists>(`${BASE}/requests`),
+      const [incoming, outgoing, owned] = await Promise.all([
+        requestsOf('incoming'),
+        requestsOf('outgoing'),
         api<{ invites: ConnectionInvite[] }>(`${BASE}/invites`),
       ]);
       if (alive.current && version === loadVersion.current) {
-        setLists(requests);
+        setLists({ incoming, outgoing });
         setInvites(owned.invites);
       }
     } catch (err) {
@@ -123,6 +146,8 @@ export function useCrossConnections(agents: Agent[], onChanged: () => void) {
             area,
             text: err instanceof Error ? err.message : "That didn't work. Try again.",
           });
+        // The row may be out of date (expired, withdrawn): its buttons shouldn't stay.
+        if (alive.current) await load();
         return false;
       }
       if (!alive.current) return true;

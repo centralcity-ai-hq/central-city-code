@@ -19,7 +19,8 @@ export interface RateLimitResult {
   retryAfterMs: number;
 }
 export interface RateLimiter {
-  hit(key: string, limit: number, windowMs: number): Promise<RateLimitResult>;
+  /** Counts one hit, or `weight` units (e.g. bytes) when given. */
+  hit(key: string, limit: number, windowMs: number, weight?: number): Promise<RateLimitResult>;
   /** Hits already counted in the key's current window, without counting a new one. */
   count(key: string, windowMs: number): Promise<number>;
 }
@@ -30,6 +31,11 @@ export interface RateLimiter {
  * under active attack keeps being touched, so eviction reaches idle keys first. There is no
  * global fail-closed denial (the shared limiter's outage policy is in outageMode).
  */
+/** A hit's units: a positive integer weight (bytes, for byte budgets), at most the int column. */
+function unitsOf(weight: number): number {
+  return Number.isFinite(weight) && weight >= 1 ? Math.min(Math.floor(weight), 2_147_483_647) : 1;
+}
+
 export class MemoryRateLimiter implements RateLimiter {
   private readonly entries = new Map<string, { count: number; until: number }>();
   constructor(
@@ -42,15 +48,15 @@ export class MemoryRateLimiter implements RateLimiter {
   get size(): number {
     return this.entries.size;
   }
-  async hit(key: string, limit: number, windowMs: number): Promise<RateLimitResult> {
-    return this.hitSync(key, limit, windowMs);
+  async hit(key: string, limit: number, windowMs: number, weight = 1): Promise<RateLimitResult> {
+    return this.hitSync(key, limit, windowMs, weight);
   }
   async count(key: string, _windowMs: number): Promise<number> {
     if (this.strict) assertClassified(key);
     const current = this.entries.get(key);
     return current && current.until > this.now() ? current.count : 0;
   }
-  hitSync(key: string, limit: number, windowMs: number): RateLimitResult {
+  hitSync(key: string, limit: number, windowMs: number, weight = 1): RateLimitResult {
     if (this.strict) assertClassified(key);
     const time = this.now();
     let current = this.entries.get(key);
@@ -62,7 +68,7 @@ export class MemoryRateLimiter implements RateLimiter {
     }
     // Re-insert to mark as most recently used.
     this.entries.set(key, current);
-    current.count++;
+    current.count += unitsOf(weight);
     return current.count > limit
       ? { allowed: false, retryAfterMs: Math.max(1, current.until - time) }
       : { allowed: true, retryAfterMs: 0 };
@@ -109,9 +115,24 @@ export function storedKeyHash(windowMs: number, key: string): string {
  * under server/ is classified explicitly.
  */
 export const FAIL_CLOSED_PREFIXES: readonly string[] = [
+  // The offers' public address (server/feed/offers/public-route.ts): anonymous, per address.
+  'x402-offer',
+  // Its gas budget and simulations (server/feed/offers/public-pay.ts): an outage refuses new payments.
+  'x402-offer-pay',
   // The Agent Explorer's Service calls searches, one bucket for every client together
   // (server/base/explorer/calls.ts): searches scan the payment table, so they share one budget.
   'explorer-calls-search',
+  // The public x402 facilitator's gas budget (server/protocol/x402/public-settle.ts): during a
+  // limiter outage it must refuse new settlements, never multiply the cap per instance.
+  'x402-settle',
+  // The public x402 /verify simulations, one budget for every client together
+  // (server/protocol/x402/public-facilitator.ts): an outage must not multiply it per instance.
+  'x402-verify',
+  // Deployment-wide budgets of Base reads (the explorer's passports, server/base/explorer/
+  // routes.ts; the Feed pay agents list, server/feed/pay/engine.ts): a refusal only serves the last
+  // read or "not known now", so an outage must not multiply them per instance.
+  'onbase-chain',
+  'feed-pay-agents-chain',
   // Newsletter subscribe attempts and the signed link POSTs (server/email/index.ts).
   'newsletter',
   'newsletter-link',
@@ -127,14 +148,33 @@ export const FAIL_CLOSED_PREFIXES: readonly string[] = [
   'ai-ws-create-site',
   'ai-ws-create-network',
   'ai-ws-create-region',
-  // Sign-in, registration and the OAuth authorization server.
+  // Sign-in, registration and the OAuth authorization server (the -site and -network buckets are
+  // the wider IPv6 scopes of hitAddressScopes, -region the /32 for sign-up only; register-global
+  // counts every sign-up).
   'register',
+  'register-site',
+  'register-network',
+  'register-region',
+  // Account-name checks of Google-created accounts (signup-admission.ts admitNameCheck).
+  'name-check',
+  'name-check-site',
+  'name-check-network',
+  'name-check-region',
+  'register-global',
   'login',
+  'login-site',
+  'login-network',
   'login-attempt',
   'login-fail',
   'oauth-register',
+  'oauth-register-site',
+  'oauth-register-network',
   'oauth-register-day',
+  'oauth-register-day-site',
+  'oauth-register-day-network',
   'oauth-authorize',
+  'oauth-authorize-site',
+  'oauth-authorize-network',
   'oauth-token',
   // Sign in with Google (docs/GOOGLE_SIGNIN.md): starting, the callback and unlinking.
   'google-start',
@@ -226,6 +266,8 @@ export const FAIL_CLOSED_PREFIXES: readonly string[] = [
   'feed-pay-call',
   // The sponsored first purchase's calls (server/feed/pay/sponsored-routes.ts).
   'sfp-call',
+  // The owner's one-click sponsor ETH move (server/feed/pay/sponsor-eth-sweep.ts): 1/min per account.
+  'owner-sponsor-eth',
   'sfp-credit',
   'feed-pay-agents',
   'feed-pay-mcp',
@@ -256,13 +298,35 @@ export const DEGRADED_PREFIXES: readonly string[] = [
   'room-post-owner',
   'room-post-agent',
   'room-post-all',
+  // Bytes of room message text per owner per day (weighted hits).
+  'room-post-bytes',
   // AI self-reported status changes per member agent (ride on posts; member-says.ts).
   'room-status',
   // Searches inside a room (read-only, members only).
   'room-search',
+  // Reactions on room messages, per owner (members and invite-link guests).
+  'room-react',
+  // city_room_session catch-up calls, per member agent and per owner (members and guests).
+  'room-session',
+  'room-session-owner',
+  // city_room_manifest reads, per member agent and per owner (members and guests).
+  'room-manifest',
+  'room-manifest-owner',
   // Room pins (pin and unpin writes) and on-demand handoff briefs, per owner (members only).
   'room-pin',
   'room-brief',
+  // Room decision and approval card writes, and card reads, per owner (members only).
+  'room-card',
+  'room-card-read',
+  // The owner's daily rooms digest, per owner (console only).
+  'room-digest',
+  // Room file uploads, reads and download links, per owner (members only).
+  'room-file-upload',
+  'room-file-read',
+  'room-file-download',
+  // Saved web pages, per owner and per room (members and invite-link guests).
+  'room-link-save',
+  'room-link-save-room',
   // A person's own Needs-you dismissals and console read marks, per owner (members only).
   'room-needs-you',
   'room-read',
@@ -299,8 +363,20 @@ export const DEGRADED_PREFIXES: readonly string[] = [
   // and the spending limits (read from Base each time).
   'wallet-read',
   'wallet-limits-read',
+  // Base Wallet writes per signed-in person, each its own bucket (each may prepare a sponsored
+  // operation or send one): withdrawal creates and the spending-limit writes.
+  'wallet-withdraw-create',
+  'wallet-limits-prepare',
+  'wallet-limits-store',
+  'wallet-limits-revoke',
+  'wallet-limits-revoke-signature',
+  // A Base registration step per workspace (may be sponsored; over it the stored state answers).
+  'base-register',
   // city_request_search reads of the public request list, per workspace (read-only).
   'feed-read-owner',
+  // Public count-log leaf pages that reach the app (an edge miss), per address and per /56.
+  'count-log-leaves',
+  'count-log-leaves-site',
 ];
 /** Degraded buckets allow limit / this per instance while the shared limiter is unavailable. */
 export const DEGRADED_LIMIT_DIVISOR = 4;
@@ -538,9 +614,11 @@ export class PostgresRateLimiter implements RateLimiter {
     this.report(mode, cause);
     return mode;
   }
-  async hit(key: string, limit: number, windowMs: number): Promise<RateLimitResult> {
+  async hit(key: string, limit: number, windowMs: number, weight = 1): Promise<RateLimitResult> {
     if (this.strict) assertClassified(key);
+    const units = unitsOf(weight);
     const time = this.now();
+    // The local pre-check counts hits, not units: it undercounts a weighted key, which is safe.
     const shedRetryAfterMs = this.shed?.refuse(key, limit, windowMs, time) ?? null;
     if (shedRetryAfterMs !== null) {
       this.shedHits++;
@@ -552,14 +630,14 @@ export class PostgresRateLimiter implements RateLimiter {
     try {
       row = (
         await this.db.query<{ count: number | string; expires_at: number | string }>(
-          `INSERT INTO rate_limits(key_hash,window_start,count,expires_at) VALUES($1,$2,1,$3)
+          `INSERT INTO rate_limits(key_hash,window_start,count,expires_at) VALUES($1,$2,$4,$3)
            ON CONFLICT (key_hash) DO UPDATE SET
              count = CASE WHEN rate_limits.window_start >= EXCLUDED.window_start
-               THEN LEAST(rate_limits.count + 1, 2147483647) ELSE 1 END,
+               THEN LEAST(rate_limits.count::bigint + $4, 2147483647) ELSE $4 END,
              window_start = GREATEST(rate_limits.window_start, EXCLUDED.window_start),
              expires_at = GREATEST(rate_limits.expires_at, EXCLUDED.expires_at)
            RETURNING count,expires_at`,
-          [keyHash, windowStart, windowStart + windowMs],
+          [keyHash, windowStart, windowStart + windowMs, units],
         )
       ).rows[0];
     } catch (error) {
@@ -569,6 +647,7 @@ export class PostgresRateLimiter implements RateLimiter {
         key,
         Math.max(1, Math.floor(limit / DEGRADED_LIMIT_DIVISOR)),
         windowMs,
+        units,
       );
     }
     if (row) this.shed?.counted(key, limit, windowMs, windowStart, Number(row.expires_at), time);
@@ -678,6 +757,49 @@ export function clientAddressPrefixes(ip: string): {
     network: `${head}::/48`,
     region: `${groups.slice(0, 2).join(':')}::/32`,
   };
+}
+
+/**
+ * How many times the per-source budget each wider IPv6 scope allows, for budgets anyone can spend
+ * without an account (sign-up, the OAuth authorization server, newsletter sign-ups). A multiple
+ * of the source budget, so one source alone always reaches its own full budget, and raising the
+ * source budget raises the wider ones with it.
+ */
+export const WIDER_SCOPE_FACTORS = { site: 2, network: 4, region: 16 } as const;
+
+/**
+ * Charges one budget per address scope, narrowest first, and answers with the first refusal: the
+ * source (`${head}:<IPv4 address or IPv6 /64>`, the key such budgets always used), then for IPv6
+ * the /56 (`${head}-site:`) and the /48 (`${head}-network:`) at WIDER_SCOPE_FACTORS times
+ * `limit`, so rotating /64s inside one allocation does not multiply the budget. IPv4 keeps the
+ * single address: a /24 is often shared by unrelated people behind one provider. A source refused
+ * at its own budget spends nothing of its neighbours' wider budgets. With `region`, the IPv6 /32
+ * (`${head}-region:`) is counted too at WIDER_SCOPE_FACTORS.region times `limit`: only for
+ * budgets whose spending multiplies others (sign-up), as one /32 can hold a whole provider.
+ */
+export async function hitAddressScopes(
+  limiter: Pick<RateLimiter, 'hit'>,
+  head: string,
+  ip: string,
+  limit: number,
+  windowMs: number,
+  options: { region?: boolean } = {},
+): Promise<RateLimitResult> {
+  const prefixes = clientAddressPrefixes(ip);
+  const scopes: Array<[string, number]> = [[`${head}:${prefixes.source}`, limit]];
+  if (prefixes.source.endsWith('::/64')) {
+    scopes.push(
+      [`${head}-site:${prefixes.site}`, limit * WIDER_SCOPE_FACTORS.site],
+      [`${head}-network:${prefixes.network}`, limit * WIDER_SCOPE_FACTORS.network],
+    );
+    if (options.region)
+      scopes.push([`${head}-region:${prefixes.region}`, limit * WIDER_SCOPE_FACTORS.region]);
+  }
+  for (const [key, max] of scopes) {
+    const result = await limiter.hit(key, max, windowMs);
+    if (!result.allowed) return result;
+  }
+  return { allowed: true, retryAfterMs: 0 };
 }
 
 /** A bearer credential that names a principal: guest room credential, workspace key, OAuth access. */

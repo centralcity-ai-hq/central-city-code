@@ -131,7 +131,7 @@ account-specific authenticated data as implemented.
 | Revocation race / crash                            | The owner signs the revocation; it shows pending until a read of Base at a settled block shows it revoked; transactions already ordered before it count. The signed revoke is stored before it is sent, so a stop in between resumes the same operation. An API toggle is not an on-chain revocation.                                                                                                                                | Pending spend versus revoke, retries, a stop before and after the chain store, and stale grant replay; an honest remaining and used display.                                                           |
 | Cancel race                                        | A cancel is a sponsored no-op at the withdrawal's nonce; either may win. A signed operation stays live until its nonce is used; only unsigned requests expire. A read never decides from an older row than the one it writes.                                                                                                                                                                                                        | A read held across a concurrent cancel signature and landing never reports a failure the chain did not produce; holds are released once.                                                               |
 | Forged or duplicated deposits                      | Canonical token Transfer logs scoped to chain and address; dedupe by chain, transaction hash and log index; keep block hashes, roll back on reorgs, resume a cursor safely; balances read at a named block independently of event sums.                                                                                                                                                                                              | A fake token, a duplicate or removed log, a reorg, a restart and an RPC outage never create a balance.                                                                                                 |
-| Privacy / authorization                            | Vault blobs are read and written by their own account only; authorization follows the wallet's owner account, also after an agent is removed or transferred; an AI workspace is not a human owner; CSRF guard and rate limits. Agent grants cannot read owner blobs or ask for arbitrary sponsored calls.                                                                                                                            | Cross-tenant and AI-principal tests fail; concurrent setup cannot replace an existing wallet or key binding.                                                                                           |
+| Privacy / authorization                            | Vault blobs are read and written by their own account only; authorization follows the wallet's owner account, also after an agent is removed or transferred; an AI workspace is not a human owner; CSRF guard and rate limits. Agent grants cannot read owner blobs or ask for arbitrary sponsored calls. Not a privacy control on Base: one owner's agent wallets share the owner key, so deployed ones are linkable (see Honest product states). | Cross-tenant and AI-principal tests fail; concurrent setup cannot replace an existing wallet or key binding.                                                                                           |
 | Payments to the wrong agent (Base Pay)             | A recipient is parsed from text only (canonical Base ID, exact passport link, passport number, address), never fetched from a user URL; verified on Base at one block (ownerOf at that block hash), behind a short-lived server-stored lookup; checked again right before the operation is prepared, and again in the browser on Base itself before review and before signing. Both wallets must be vault-linked, backed-up wallets. | Look-alike hosts, user-info, homographs, ambiguous numbers and bad checksums are refused; a recipient that changes between lookup and payment is refused; nothing is fetched from a user-supplied URL. |
 
 ## Honest product states
@@ -147,9 +147,50 @@ account-specific authenticated data as implemented.
   The owner is never charged silently when sponsorship is unavailable.
 - A stolen backup grants owner power. Changing the password only re-encrypts the local key; it
   does not invalidate a stolen backup. A key-compromise response needs an on-chain ownership
-  rotation, designed and approved separately.
+  rotation; until it ships, follow [Owner-key compromise](#owner-key-compromise).
 - A payment reads as paid only when final; while on its way it says so, and a failed one says it
   did not go through.
+- An owner's agent wallets are linkable on Base. Every agent wallet of one person has that
+  person's one owner key as an owner, so once the wallets are deployed, anyone can see on Base
+  that they share an owner. Central City does not publish the owner key, but it cannot hide it on
+  Base; one owner key per agent would be a separate wallet design decision.
+
+## Owner-key compromise
+
+**Blast radius.** Each person has one owner key (the vault key). It is the owner of every agent
+smart account of that person and of the Base IDs those accounts hold. Whoever holds the key can
+sign directly against Base, outside this application: the browser's call decoder and the
+paymaster policy only limit what Central City prepares and sponsors, not what a key holder can
+send with their own gas. A leaked key therefore exposes every agent wallet of that person at
+once: all USDC and ETH, each spend permission, each Base ID, and the owner set of each account.
+Spend permissions bound the agents, never the owner.
+
+**Today there is no rotation path.** No code adds or removes an owner of a deployed account
+(`addOwnerAddress` / `removeOwnerAtIndex` are refused by the decoder). The response is a race to
+move value away first.
+
+**Incident runbook (person and operator).**
+
+1. Treat every agent wallet of the account as compromised, not only the one that showed activity.
+2. From a clean device, recover the vault from the backup and withdraw USDC and ETH from each agent
+   wallet to an address whose key was never on the compromised device. Start with the largest
+   balance; each withdrawal is one owner-signed operation.
+3. Revoke each spend permission (the owner signs `revoke`), so a spender cannot keep drawing
+   inside its allowance once the funds are back.
+4. Transfer each Base ID to an account the person controls with a new key, where the identity
+   should survive.
+5. The operator pauses the account's agents and records the incident. No new agent wallet is
+   created for that account while it still has the compromised owner key: every new wallet would
+   be owned by it.
+6. Any replacement wallet needs a new owner key. Its address differs, because the owner is part of
+   each account's counterfactual address.
+
+**Planned rotation (needs its own design approval).** For each account, one owner-signed operation
+that calls `addOwnerAddress(newOwner)` and then `removeOwnerAtIndex(index, oldOwner)`, where the
+browser derives the new owner, the account and the index itself and shows them before signing; the
+decoder accepts exactly that pair and nothing else. The vault records a key version so recovery
+metadata (owner order and derivation) stays correct after a rotation, and the paymaster exit policy
+names the two calls explicitly. Per-agent owner keys for high-value agents are an option on top.
 
 ## Backup format
 

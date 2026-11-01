@@ -25,6 +25,7 @@ import {
 import { readdir, readFile } from 'node:fs/promises';
 import { windowClock } from './window-clock.js';
 import { join } from 'node:path';
+import { sessionPair } from './session-cookie-pair.js';
 
 // Hosted apps refuse to start without a shared secret; this one is synthetic and test-only.
 process.env.CITY_RATE_LIMIT_KEY ??= 'synthetic-test-only-rate-limit-secret-0000';
@@ -518,6 +519,10 @@ test('every rate-limit key prefix used under server/ has an explicit outage poli
     'result-report-network',
     'result-flag-principal',
     'result-reuse-principal',
+    // Deployment-wide Base read budgets: an outage must not multiply them per instance.
+    'onbase-chain',
+    'feed-pay-agents-chain',
+    'x402-verify',
   ])
     assert.equal(outageMode(`${prefix}:x`), 'fail-closed', prefix);
 });
@@ -591,6 +596,9 @@ test('capacity limits default to the reviewed bounds and accept validated overri
   assert.deepEqual(DEFAULT_LIMITS, {
     operators: 0,
     registrationsPerWindow: 10,
+    // No deployment-wide sign-up ceiling by default; the volume is logged from 1,000 an hour.
+    registrationsPerHourGlobal: 0,
+    registrationsAlertPerHour: 1000,
     apiRequestsPerMinute: 600,
     assistantToolCallsPerMinute: 120,
     agentsPerWorkspace: 100,
@@ -672,6 +680,10 @@ test('capacity limits default to the reviewed bounds and accept validated overri
   assert.equal(loadLimits({ CITY_LIMIT_OPERATORS: '0' }).operators, 0);
   assert.equal(loadLimits({}, { operators: 0 }).operators, 0);
   assert.throws(() => loadLimits({ CITY_LIMIT_OPERATORS: '-1' }), /positive integer/);
+  assert.equal(
+    loadLimits({ CITY_LIMIT_REGISTRATIONS_PER_HOUR_GLOBAL: '0' }).registrationsPerHourGlobal,
+    0,
+  );
   assert.equal(raised.apiRequestsPerMinute, 100000);
   for (const bad of ['0', '-1', '1.5', 'many', '99999999999'])
     assert.throws(() => loadLimits({ CITY_LIMIT_JOBS_PER_WORKSPACE: bad }), /positive integer/);
@@ -757,7 +769,7 @@ test('a configured agent limit applies to registration', async (t) => {
     headers: local,
     payload: JSON.stringify({ name: 'Limit owner', password: 'Synthetic limit password' }),
   });
-  const cookie = `cc_session=${registered.cookies.find((entry) => entry.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(registered.cookies);
   const agent = () =>
     app.inject({
       method: 'POST',

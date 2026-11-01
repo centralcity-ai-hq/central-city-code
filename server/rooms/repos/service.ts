@@ -95,6 +95,7 @@ export function createRoomRepos(d: RoomReposDependencies): RoomRepos {
   async function repo(p: RoomPrincipal, body: unknown) {
     const input = repoGetInput.parse(body);
     const { room, binding } = await d.db.transaction(async (tx) => {
+      if (p.guard) await p.guard(tx, d.clock());
       const { room } = await membership(tx, input.room_id, p.operatorId);
       return { room, binding: await activeBinding(tx, room.id) };
     });
@@ -121,6 +122,7 @@ export function createRoomRepos(d: RoomReposDependencies): RoomRepos {
   async function read(p: RoomPrincipal, body: unknown) {
     const input = repoReadInput.parse(body);
     const { room, binding } = await d.db.transaction(async (tx) => {
+      if (p.guard) await p.guard(tx, d.clock());
       const { room } = await membership(tx, input.room_id, p.operatorId);
       const binding = await activeBinding(tx, room.id);
       if (!binding) refuse(404, 'repo_not_bound', 'This room has no connected repository.');
@@ -224,6 +226,7 @@ export function createRoomRepos(d: RoomReposDependencies): RoomRepos {
     }
     // Recheck after the GitHub calls: an unbind or removal during the read wins.
     await d.db.transaction(async (tx) => {
+      if (p.guard) await p.guard(tx, d.clock());
       await membership(tx, room.id, p.operatorId);
       const still = await activeBinding(tx, room.id);
       if (!still || String(still.repo_id) !== String(binding.repo_id))
@@ -255,6 +258,7 @@ export function createRoomRepos(d: RoomReposDependencies): RoomRepos {
     consoleOnly(p);
     const app = github();
     const pre = await d.db.transaction(async (tx) => {
+      if (p.guard) await p.guard(tx, d.clock());
       const { room, members } = await membership(tx, roomRef, p.operatorId);
       actingAgent(members, agentId);
       hostOnly(room, p);
@@ -314,6 +318,7 @@ export function createRoomRepos(d: RoomReposDependencies): RoomRepos {
     const { pre, installation, info } = await lookup(p, input.room_id, input.agent_id, input.repo);
     const time = d.clock();
     return d.db.transaction(async (tx) => {
+      if (p.guard) await p.guard(tx, d.clock());
       const { room, members } = await membership(tx, pre.id, p.operatorId);
       const member = actingAgent(members, input.agent_id);
       hostOnly(room, p);
@@ -369,6 +374,7 @@ export function createRoomRepos(d: RoomReposDependencies): RoomRepos {
     consoleOnly(p);
     const time = d.clock();
     return d.db.transaction(async (tx) => {
+      if (p.guard) await p.guard(tx, d.clock());
       const { room, members } = await membership(tx, input.room_id, p.operatorId);
       const member = actingAgent(members, input.agent_id);
       hostOnly(room, p);

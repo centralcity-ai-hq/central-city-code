@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from '../server/app.js';
+import { NEWSLETTER_RATE, newsletterRecipientKey } from '../server/email/index.js';
+import type { CityLimits } from '../server/limits.js';
+import { WIDER_SCOPE_FACTORS } from '../server/rate-limit.js';
+// Ticked sign-ups per IPv6 /56 per hour (hitAddressScopes: the /64 budget times the site factor).
+const PER_SITE = NEWSLETTER_RATE.perAddress * WIDER_SCOPE_FACTORS.site;
 import { RESEND_URL } from '../server/email/provider.js';
 import { COMPANY_LINE, newsletterFooter } from '../server/email/templates.js';
 import { NEWSLETTER_TEXT_VERSION } from '../shared/newsletter.js';
@@ -36,7 +41,12 @@ interface Sent {
 
 async function fixture(
   t: { after: (fn: () => Promise<unknown>) => void },
-  options: { env?: Record<string, string>; status?: () => number } = {},
+  options: {
+    env?: Record<string, string>;
+    status?: () => number;
+    log?: (line: string) => void;
+    limits?: Partial<CityLimits>;
+  } = {},
 ) {
   process.env.CRON_SECRET = CRON;
   const google = fakeGoogle();
@@ -46,6 +56,7 @@ async function fixture(
     dataDir: ':memory:',
     startWorkers: false,
     now: () => clock.now,
+    ...(options.limits ? { limits: options.limits } : {}),
     google: {
       env: {
         CITY_GOOGLE_SIGNIN: '1',
@@ -57,6 +68,7 @@ async function fixture(
     email: {
       env: options.env ?? EMAIL_ENV,
       autoDrain: false,
+      ...(options.log ? { log: options.log } : {}),
       transport: async (request) => {
         sent.push({ url: request.url, headers: request.headers, body: JSON.parse(request.body) });
         const status = options.status?.() ?? 200;
@@ -685,5 +697,173 @@ test('a newsletter opt-in error after the commit is skipped: sign-up and onboard
     (await f.app.city.db.query("SELECT 1 FROM email_outbox WHERE kind='newsletter_confirm'")).rows
       .length,
     0,
+  );
+});
+
+test('R2-8: sub-addressed and Gmail dot variants of one inbox share one recipient budget', async (t) => {
+  const same = ['victim@example.com', 'victim+1@example.com', 'Victim+news@Example.com'].map(
+    newsletterRecipientKey,
+  );
+  assert.equal(new Set(same).size, 1);
+  const gmail = ['j.doe@gmail.com', 'jdoe+x@gmail.com', 'J.D.O.E@googlemail.com'].map(
+    newsletterRecipientKey,
+  );
+  assert.equal(new Set(gmail).size, 1);
+  // Different inboxes stay apart; dots matter outside Gmail.
+  assert.notEqual(
+    newsletterRecipientKey('j.doe@example.com'),
+    newsletterRecipientKey('jdoe@example.com'),
+  );
+  assert.notEqual(
+    newsletterRecipientKey('victim@example.com'),
+    newsletterRecipientKey('victim@example.org'),
+  );
+
+  const f = await fixture(t);
+  let ip = 60;
+  const signUpFor = (name: string, email: string) =>
+    f.app.inject({
+      method: 'POST',
+      url: '/api/auth/register',
+      headers: jsonHeaders,
+      remoteAddress: `198.51.100.${ip++}`,
+      payload: JSON.stringify({
+        password: 'synthetic-password-0001',
+        name,
+        newsletter: true,
+        email,
+      }),
+    });
+  for (const [i, email] of [
+    'victim+1@example.com',
+    'victim+2@example.com',
+    'victim+3@example.com',
+  ].entries())
+    assert.equal((await signUpFor(`Variant ${i}`, email)).statusCode, 201);
+  const fourth = await signUpFor('Variant 4', 'victim+4@example.com');
+  assert.equal(fourth.statusCode, 201, fourth.body);
+  assert.equal(
+    (
+      await f.app.city.db.query('SELECT 1 FROM email_outbox WHERE operator_id=$1', [
+        fourth.json().operator.id,
+      ])
+    ).rows.length,
+    0,
+    'the fourth variant of one inbox gets no confirmation email',
+  );
+});
+
+test('CCA-532: every operator subscriber export writes one audit line without emails or addresses', async (t) => {
+  const lines: string[] = [];
+  const f = await fixture(t, { log: (line) => lines.push(line) });
+  const exported = await f.app.inject({
+    method: 'GET',
+    url: '/api/ops/newsletter/subscribers',
+    headers: { authorization: `Bearer ${OPS}` },
+    remoteAddress: '2001:db8:5:6:7::9',
+  });
+  assert.equal(exported.statusCode, 200, exported.body);
+  const audit = lines
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+    .filter((line) => line.event === 'newsletter.subscribers_exported');
+  assert.equal(audit.length, 1);
+  assert.equal(audit[0]!.rows, 0);
+  assert.equal(audit[0]!.caller_prefix, '2001:db8:5:0::/56');
+  assert.equal(typeof audit[0]!.at, 'string');
+  // A refused export (no secret) is not an export.
+  await f.app.inject({ method: 'GET', url: '/api/ops/newsletter/subscribers' });
+  assert.equal(lines.filter((line) => line.includes('subscribers_exported')).length, 1);
+});
+
+test('CCA-527: a deployment-wide hourly ceiling on confirmation emails, with one alert', async (t) => {
+  const lines: string[] = [];
+  const f = await fixture(t, {
+    env: { ...EMAIL_ENV, CITY_LIMIT_NEWSLETTER_CONFIRMATIONS_PER_HOUR: '2' },
+    log: (line) => lines.push(line),
+  });
+  let ip = 120;
+  const signUpFor = (name: string, email: string) =>
+    f.app.inject({
+      method: 'POST',
+      url: '/api/auth/register',
+      headers: jsonHeaders,
+      remoteAddress: `198.51.100.${ip++}`,
+      payload: JSON.stringify({
+        password: 'synthetic-password-0001',
+        name,
+        newsletter: true,
+        email,
+      }),
+    });
+  const queued = async (response: { json(): any }) =>
+    (
+      await f.app.city.db.query(
+        "SELECT 1 FROM email_outbox WHERE operator_id=$1 AND kind='newsletter_confirm'",
+        [response.json().operator.id],
+      )
+    ).rows.length;
+  // Different recipients, accounts and addresses: only the deployment-wide ceiling applies.
+  const results = [];
+  for (let i = 0; i < 4; i++) {
+    const res = await signUpFor(`Global ${i}`, `global${i}@example.com`);
+    assert.equal(res.statusCode, 201, res.body);
+    results.push(await queued(res));
+  }
+  assert.deepEqual(results, [1, 1, 0, 0]);
+  const alerts = lines.filter((line) => line.includes('newsletter.global_limited'));
+  assert.equal(alerts.length, 1, 'one alert per window');
+  assert.deepEqual(JSON.parse(alerts[0]!), {
+    event: 'newsletter.global_limited',
+    window: 'hour',
+    max: 2,
+  });
+});
+
+test('ticked sign-ups are also charged to the IPv6 /56 around the /64', async (t) => {
+  // Sign-ups have their own /56 budget (twice registrationsPerWindow), below this one by
+  // default; raised here so the newsletter budget is the one that answers.
+  const f = await fixture(t, { limits: { registrationsPerWindow: 100 } });
+  // Every sign-up from its own /64 inside one /56: each /64 budget is untouched.
+  const signUpFrom = (i: number) =>
+    f.app.inject({
+      method: 'POST',
+      url: '/api/auth/register',
+      headers: jsonHeaders,
+      remoteAddress: `2001:db8:7:${i.toString(16)}::1`,
+      payload: JSON.stringify({
+        password: 'synthetic-password-0001',
+        name: `Prefix ${i}`,
+        newsletter: true,
+        email: `prefix${i}@example.com`,
+      }),
+    });
+  for (let i = 0; i < PER_SITE; i++) assert.equal((await signUpFrom(i)).statusCode, 201);
+  const over = await signUpFrom(PER_SITE);
+  assert.equal(over.statusCode, 201, over.body);
+  const consents = await f.app.city.db.query(
+    'SELECT 1 FROM newsletter_consents WHERE operator_id=$1',
+    [over.json().operator.id],
+  );
+  assert.equal(consents.rows.length, 0, 'the account is created; the opt-in is skipped');
+  // The next /56 of the same /48 still has its own budget.
+  const next = await f.app.inject({
+    method: 'POST',
+    url: '/api/auth/register',
+    headers: jsonHeaders,
+    remoteAddress: '2001:db8:7:100::1',
+    payload: JSON.stringify({
+      password: 'synthetic-password-0001',
+      name: 'Prefix next',
+      newsletter: true,
+      email: 'prefix-next@example.com',
+    }),
+  });
+  assert.equal(
+    (
+      await f.app.city.db.query('SELECT 1 FROM newsletter_consents WHERE operator_id=$1', [
+        next.json().operator.id,
+      ])
+    ).rows.length,
+    1,
   );
 });

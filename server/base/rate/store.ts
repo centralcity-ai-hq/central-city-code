@@ -19,7 +19,7 @@ import { getAddress } from 'viem';
 import type { Transaction } from '../../database.js';
 import { calendarPeriod } from '../../../shared/base/spend-limits.js';
 import type { WithdrawalState } from '../../../shared/base/withdraw.js';
-import { PUBLIC_NAME } from '../explorer/store.js';
+import { publicManifestsOf } from '../explorer/store.js';
 import type { RecipientRecord } from '../pay/store.js';
 
 type Queryable = Pick<Transaction, 'query'>;
@@ -192,8 +192,9 @@ export function createRateStore(options: { chainId: number; registry: string }) 
     input: { accountId: string; walletId: string; now: number; limit: number },
   ): Promise<GivenRow[]> {
     const { rows } = await db.query<GivenRow>(
-      // The public-name join (explorer/store.ts PUBLIC_NAME) reads l.agent_id: the rated agent.
-      `SELECT l.*, p.name FROM (
+      // The rated agents' public names (explorer/store.ts publicManifestsOf), one pass per
+      // workspace for the whole page.
+      `WITH l AS (
          SELECT x.withdrawal_id, x.rated_agent_id AS agent_id,
            x.rated_base_id::text AS base_id, s.short_id, x.rating_value, x.state, x.tx_hash,
            x.block_number::text AS block_number, x.created_at::text AS created_at,
@@ -205,8 +206,9 @@ export function createRateStore(options: { chainId: number; registry: string }) 
            AND (x.signed_at IS NOT NULL
              OR (x.state = 'awaiting_signature' AND x.expires_at > $4))
          ORDER BY x.created_at DESC, x.withdrawal_id DESC
-         LIMIT $5) l
-       ${PUBLIC_NAME}
+         LIMIT $5),
+       p AS (${publicManifestsOf('SELECT agent_id FROM l')})
+       SELECT l.*, p.name FROM l LEFT JOIN p ON p.agent_id = l.agent_id
        ORDER BY l.created_at::bigint DESC, l.withdrawal_id DESC`,
       [input.accountId, input.walletId, options.chainId, input.now, input.limit],
     );

@@ -110,7 +110,10 @@ function NewPasswordFields({
           value={password}
           onChange={(event) => onPassword(event.target.value)}
         />
-        <small>At least {MIN_PASSWORD_LENGTH} characters. Central City never sees it.</small>
+        <small>
+          At least {MIN_PASSWORD_LENGTH} characters, not a common password or your account name.
+          Central City never sees it.
+        </small>
       </label>
       <label className="w4-field">
         <span>Repeat the new password</span>

@@ -31,11 +31,23 @@ export function registerProtocolFeeRoutes(
     chainId: () => number | null;
     clock: () => number;
     limit: (key: string, max: number, windowMs: number) => Promise<void>;
+    /**
+     * The fee chain's treasury (lowercase): its own payments never count (CCA-126). Default: the
+     * one fixed in code for the chain (dailyFees); a test network passes CITY_PROTOCOL_TREASURY.
+     */
+    treasury?: (chainId: number) => string | null;
   },
 ): void {
   app.get('/api/public/protocol/fees', async (request, reply) => {
     const chainId = deps.chainId();
     if (chainId === null) return reply.code(404).send({ error: 'not_found' });
+    // The raw query, as the edge cache keys it (CCA-135): none, or exactly `days=<n>`. A stray
+    // '&', an empty key or a percent-encoded spelling would be a new cache entry for the same
+    // answer, so it is refused before the limiter and the database.
+    const at = request.url.indexOf('?');
+    const search = at < 0 ? '' : request.url.slice(at + 1);
+    if (search !== '' && !/^days=[^&=]*$/.test(search))
+      return reply.code(400).send({ error: 'invalid_query' });
     await deps.limit(
       `ip:protocolfees:${clientAddressKey(request.ip)}`,
       PROTOCOL_FEES_RATE.max,
@@ -46,7 +58,7 @@ export function registerProtocolFeeRoutes(
     const query = (request.query ?? {}) as Record<string, unknown>;
     if (Object.keys(query).some((key) => key !== 'days'))
       return reply.code(400).send({ error: 'invalid_query' });
-    const raw = query.days ?? '30';
+    const raw = search === '' ? '30' : search.slice('days='.length);
     if (
       typeof raw !== 'string' ||
       !/^[1-9]\d{0,2}$/.test(raw) ||
@@ -63,7 +75,10 @@ export function registerProtocolFeeRoutes(
     const { rows, progress, complete } = await deps.db.transaction(async (tx) => {
       await tx.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY');
       return {
-        rows: await dailyFees(tx, chainId, end - days * DAY, end, { finalizedOnly: true }),
+        rows: await dailyFees(tx, chainId, end - days * DAY, end, {
+          finalizedOnly: true,
+          ...(deps.treasury ? { treasury: deps.treasury(chainId) } : {}),
+        }),
         progress: await scanProgress(tx, chainId),
         complete: await historyComplete(tx, chainId),
       };

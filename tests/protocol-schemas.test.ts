@@ -9,7 +9,11 @@ import { fileURLToPath } from 'node:url';
 import type { z } from 'zod';
 import type { AgentMessage, InboxPage } from '../server/messaging/contract.js';
 import { parseA2AIntent, type A2ATask } from '../protocol/a2a.js';
-import type { RoomLinkView, RoomMember, RoomMessage, RoomView } from '../server/rooms/contract.js';
+import type { RoomLinkView, RoomMember } from '../server/rooms/contract.js';
+import type {
+  CompactRoomMessage as RoomMessage,
+  CompactRoomView as RoomView,
+} from '../server/remote-mcp/compact-room.js';
 import { createApp } from '../server/app.js';
 import { highEntropyKey } from '../server/autonomy/index.js';
 import {

@@ -108,11 +108,31 @@ test('remote tools mirror the bridge with schemas, annotations and structured re
       'city_room_leave',
       'city_room_search',
       'city_room_update',
+      'city_room_message_edit',
+      'city_room_message_delete',
+      'city_room_react',
+      'city_room_handoff',
       'city_room_pin',
       'city_room_unpin',
       'city_room_pins',
       'city_room_brief',
+      'city_room_cards',
+      'city_room_card',
+      'city_room_decision_record',
+      'city_room_approval_request',
+      'city_room_approval_withdraw',
+      'city_room_files',
+      'city_room_file_versions',
+      'city_room_file_upload',
+      'city_room_file_finalize',
+      'city_room_file_put',
+      'city_room_file_download',
+      'city_room_file_read',
+      'city_room_link_save',
+      'city_room_file_share',
       'city_room_overview',
+      'city_room_session',
+      'city_room_manifest',
       'city_room_invite',
       'city_room_invitations',
       'city_room_invitation_decide',
@@ -142,9 +162,21 @@ test('remote tools mirror the bridge with schemas, annotations and structured re
     'city_ask',
     'city_set_wake_webhook',
     'city_create_invite',
+    // The server fetches a page from the open web for every member of the room.
+    'city_room_link_save',
     // Pins are seen by every member of the room (other owners).
     'city_room_pin',
     'city_room_unpin',
+    // Decision and approval cards are seen by every member of the room (other owners).
+    'city_room_decision_record',
+    'city_room_approval_request',
+    'city_room_approval_withdraw',
+    // Files are shared with every member of the room (other owners).
+    'city_room_file_upload',
+    'city_room_file_finalize',
+    'city_room_file_put',
+    // Copies a file into a room other owners share.
+    'city_room_file_share',
     // Returns messages written by other owners' agents and people.
     'city_room_read',
     // Create or change a space other owners' members share.
@@ -157,6 +189,11 @@ test('remote tools mirror the bridge with schemas, annotations and structured re
     'city_room_invite',
     'city_room_invitations',
     'city_room_invitation_decide',
+    // Change or react to a message every member (other owners) sees.
+    'city_room_message_edit',
+    'city_room_message_delete',
+    'city_room_react',
+    'city_room_handoff',
   ]);
   const DESTRUCTIVE = new Set([
     'city_cancel_job',
@@ -177,6 +214,8 @@ test('remote tools mirror the bridge with schemas, annotations and structured re
     'city_set_wake_webhook',
     // A decline cannot be taken back.
     'city_room_invitation_decide',
+    // Replaces a message's text for every member (the host keeps the history).
+    'city_room_message_delete',
     // city_room_update stays false: reversible history change, nobody loses access.
   ]);
   for (const tool of tools) {

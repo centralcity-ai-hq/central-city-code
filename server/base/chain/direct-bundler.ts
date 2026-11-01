@@ -67,31 +67,40 @@ import { cronAuthorized } from '../../wake/cron.js';
 import { getUserOperationHash, type UserOperation } from 'viem/account-abstraction';
 import type { Database, Transaction } from '../../database.js';
 import { registerMigration, type Migration } from '../../migrations.js';
-import type { Address } from '../../../shared/base/chains.js';
+import { BASE_MAINNET, type Address } from '../../../shared/base/chains.js';
 import { SPONSOR_PAYMASTERS } from '../../../shared/base/paymasters.js';
+import { assertFeeFloor, chainParams } from './chain-params.js';
 import { protocolDeployment } from '../../../shared/protocol.js';
 import { protocolRouter2FromEnv } from '../../protocol/fees/cron.js';
 import {
   BudgetError,
+  budgetAlert,
   budgetTransient,
+  type ExposureFlow,
   ownPaymasterBudget,
   ReservationGone,
+  SELF_PAID,
   worstCaseWei,
 } from './own-paymaster-budget.js';
+import { sponsorOperatorAccounts } from './sponsor-operators.js';
 import {
   ownPaymasterMode,
   PAYMASTER_ADDRESS_SETTING,
+  paymasterKeyPurposes,
+  paymasterKeySettingName,
+  paymasterKeySettingsMismatch,
   provisionedPaymasterKeys,
 } from './own-paymaster-keys.js';
 import { paymasterHash, signPaymasterData, type PaymasterFields } from './own-paymaster.js';
 import {
   checkSponsorship,
-  GAS_CEILINGS,
+  OWNER_SIGNED_FLOWS,
   PolicyRefusal,
   type GasCeilings,
   type PolicyAddresses,
   type SponsorFlow,
 } from './own-paymaster-policy.js';
+import type { HotWalletWatch } from './hot-wallets.js';
 import { liveReads } from './rpc-budget.js';
 import { BundlerError, SponsorError } from './rpc-bundler.js';
 import {
@@ -206,11 +215,29 @@ const paymasterAbi = parseAbi([
 /** How long a sponsorship stays valid at most (seconds); within the owner's 10-minute deadline. */
 export const SPONSOR_VALIDITY_S = 9 * 60;
 /**
+ * How long one handed to an owner to sign in the browser (OWNER_SIGNED_FLOWS) stays valid: 3
+ * minutes to sign and send (VALIDITY_MARGIN_S before its end it is no longer sent), so one left
+ * unsigned holds its share of the budget for about 7 minutes, not 11. The server-signed flows send
+ * theirs at once and keep SPONSOR_VALIDITY_S.
+ */
+export const OWNER_SPONSOR_VALIDITY_S = 5 * 60;
+/** The validity of a sponsorship for `flow` (seconds). */
+export const sponsorValidityS = (flow: SponsorFlow) =>
+  OWNER_SIGNED_FLOWS.has(flow) ? OWNER_SPONSOR_VALIDITY_S : SPONSOR_VALIDITY_S;
+/**
  * A sponsored operation this close to its validUntil is no longer sent, and one still pending is
  * cancelled: it could otherwise be mined just past validUntil and revert (AA32) at
  * our cost.
  */
 export const VALIDITY_MARGIN_S = 120;
+/**
+ * Bundler.sendMarginS for sponsorships of `paymaster` (ours): VALIDITY_MARGIN_S for data signed by
+ * it, 0 for anything else (another sponsor's, or none).
+ */
+export const ownSendMarginS = (paymaster: Address | null, paymasterAndData: Hex) =>
+  paymaster !== null && (paymasterAndData ?? '0x').toLowerCase().startsWith(paymaster.toLowerCase())
+    ? VALIDITY_MARGIN_S
+    : 0;
 /** Gas limits of our own (EntryPoint v0.6 charges what is used, not the limit). */
 export const DIRECT_GAS = {
   /** Without initCode: the inner call is estimated, then given this margin and floor. */
@@ -228,13 +255,22 @@ export const DIRECT_GAS = {
 /** An unmined transaction older than this is replaced (same nonce and calldata, +30% fees). */
 export const STUCK_MS = 3 * 60_000;
 export const MAX_REPLACEMENTS = 3;
-/** The submitter keeps at least this much ETH beyond one transaction's worst case. */
-export const SUBMITTER_RESERVE_WEI = 100_000_000_000_000n; // 0.0001 ETH
+/**
+ * The submitter keeps at least this much beyond one transaction's worst case: 0.0001 ETH on Base
+ * (each chain's in its own gas asset, chain-params.ts).
+ */
+export const SUBMITTER_RESERVE_WEI = chainParams(BASE_MAINNET).submitterReserveWei;
 /** How often (per instance) open sends are looked after without being asked (maintain). */
 export const MAINTAIN_EVERY_MS = 15_000;
 /** Final receipts settled per run: 4 x the lane limit (200 per cron minute), 8 at a time. */
 export const SETTLE_FACTOR = 4;
 export const SETTLE_PARALLEL = 8;
+/** A small-pool lane's drain in one cron run: passes while it moves, within this time. */
+export const DRAIN_PASSES = 40;
+export const DRAIN_BUDGET_MS = 25_000;
+export const DRAIN_WAIT_MS = 500;
+/** Only a run this large drains (the cron's 50); a send's background look stays one pass. */
+export const DRAIN_MIN_LIMIT = 50;
 /** The most a draining CDP path waits for the provenance lookup before it keeps CDP (M2). */
 export const PROVENANCE_TIMEOUT_MS = 500;
 
@@ -285,13 +321,27 @@ export interface DirectBundlerDeps {
   submitter: { keyRef: string; address: Address };
   budget: Pick<
     ReturnType<typeof ownPaymasterBudget>,
-    'reserve' | 'rekey' | 'markSentIn' | 'settleIn' | 'settleWorstIn' | 'exposeIn' | 'lapsedState'
+    | 'reserve'
+    | 'rekey'
+    | 'markSentIn'
+    | 'settleIn'
+    | 'settleWorstIn'
+    | 'exposeIn'
+    | 'lapsedState'
+    | 'release'
   >;
   policy: { addresses: PolicyAddresses; ceilings?: GasCeilings; paused?: ReadonlySet<SponsorFlow> };
   /** Receipts of operations this module never sent (the CDP bundler's, before the switch). */
   fallback?: Pick<Bundler, 'receipt'>;
   now?: () => number;
   log?: (line: string) => void;
+  /** Sees every submitter balance read: ALERT above its ceiling or on outflow (CCA-706). */
+  hotWallets?: HotWalletWatch;
+  /**
+   * The L1 data fee (wei) reserved for one transaction, given it serialized unsigned (default: twice
+   * the OP-stack oracle's getL1Fee over it; 0 on a chain with no such fee, chain-params.ts).
+   */
+  l1FeeWei?: (unsignedTx: Hex) => Promise<bigint>;
   /**
    * Whether send()/receipt() also look after open sends in the background (default true; the
    * cron does it regardless). Tests turn it off and call maintain() themselves.
@@ -463,6 +513,29 @@ const LOGGED_ERROR_NAMES = new Set([
   'Error',
 ]);
 
+/** The node's refusal of a send as a fixed label: its message may carry an endpoint URL. */
+const REFUSALS: readonly [RegExp, string][] = [
+  [/underpriced/i, 'underpriced'],
+  [/nonce too high|nonce gap|future nonce/i, 'nonce_too_high'],
+  [/pool.{0,12}full|queue.{0,12}full|exceeds.{0,24}(pool|queue|limit)|too many/i, 'pool_full'],
+  [/insufficient funds/i, 'insufficient_funds'],
+  [/rate limit|limit exceeded|too many requests/i, 'rate_limited'],
+  [/intrinsic gas|gas limit|exceeds block gas/i, 'gas'],
+  [/fee cap|max fee|base fee/i, 'fee_cap'],
+  [/timeout|timed out|fetch failed|network/i, 'unreachable'],
+];
+function refusalOf(error: unknown): string {
+  let current: unknown = error;
+  for (let depth = 0; current && depth < 6; depth++) {
+    const e = current as { message?: unknown; details?: unknown; cause?: unknown };
+    for (const text of [e.details, e.message])
+      if (typeof text === 'string')
+        for (const [wording, label] of REFUSALS) if (wording.test(text)) return label;
+    current = e.cause;
+  }
+  return 'other';
+}
+
 /**
  * Why an upkeep step failed, safe to log: an allowlisted error name, a code-shaped code, a numeric
  * RPC or HTTP code, and a database SQLSTATE. Never the message (an endpoint URL in it may carry a key).
@@ -482,6 +555,9 @@ const KNOWN_MESSAGES = new Set([
   'A reservation costs more than 0.',
   'Reservation keys are 32 bytes.',
   'Spender key not found.',
+  // Fixed texts of errors whose name is plain 'Error' (own-paymaster-budget.ts): "Error code=-".
+  'This operation was reserved with another flow or cost.',
+  'The reservation is no longer open; do not send this operation.',
 ]);
 
 export function failureOf(error: unknown): string {
@@ -513,8 +589,15 @@ export function failureOf(error: unknown): string {
 
 export function directBundler(deps: DirectBundlerDeps): DirectBundler {
   const now = deps.now ?? Date.now;
-  const log = deps.log ?? (() => {});
-  const ceilings = deps.policy.ceilings ?? GAS_CEILINGS;
+  // The effective sink: the caller's, else the console (the Fastify logger is off in production).
+  const log = deps.log ?? ((line: string) => console.error(line));
+  const params = chainParams(deps.chainId);
+  const ceilings = deps.policy.ceilings ?? params.gasCeilings;
+  const submitterReserve = params.submitterReserveWei;
+  const pool = params.lanePool;
+  // A ceiling under the chain's fee floor could only clamp a fee into being dropped: refused at
+  // once, so no fee below can be clamped under the floor. Base's floor is 0.
+  assertFeeFloor(params, ceilings.maxFeePerGas, 'The bundler fee ceiling');
   const submitter = getAddress(deps.submitter.address);
   const submitterKey = submitter.toLowerCase();
   // Nonces, balances, fees and finality need the node's current head, never a shared cached one.
@@ -527,8 +610,21 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
       userOperation: op,
     }).toLowerCase() as Hex;
 
+  // A chain with no L1 data fee never asks the OP-stack oracle (there is none at that address).
+  const l1Oracle =
+    deps.l1FeeWei ??
+    (params.l1FeeOracle
+      ? async (unsignedTx: Hex) =>
+          2n *
+          (await deps.client.readContract({
+            address: GAS_PRICE_ORACLE,
+            abi: oracleAbi,
+            functionName: 'getL1Fee',
+            args: [unsignedTx],
+          }))
+      : async () => 0n);
   /** Twice the oracle's L1 data fee for exactly this unsigned transaction (as the facilitator). */
-  const l1FeeFor = async (input: {
+  const l1FeeFor = (input: {
     nonce: number;
     to: Address;
     data: Hex;
@@ -536,20 +632,14 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
     maxFeePerGas: bigint;
     maxPriorityFeePerGas: bigint;
   }) =>
-    2n *
-    (await deps.client.readContract({
-      address: GAS_PRICE_ORACLE,
-      abi: oracleAbi,
-      functionName: 'getL1Fee',
-      args: [
-        serializeTransaction({
-          type: 'eip1559',
-          chainId: deps.chainId,
-          value: 0n,
-          ...input,
-        }),
-      ],
-    }));
+    l1Oracle(
+      serializeTransaction({
+        type: 'eip1559',
+        chainId: deps.chainId,
+        value: 0n,
+        ...input,
+      }),
+    );
 
   // ---------------------------------------------------------------- fail-closed readiness
   let readyUntil = 0;
@@ -624,12 +714,15 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
     // A node's priority suggestion above our ceiling is only a suggestion: it is capped (Base
     // includes at ~0.001 gwei). Twice the base fee plus the tip, as CDP's bundlerFees. Fee fields on
     // the incoming operation are minimums (a replacement must outbid); only those, or a base fee
-    // past the cap, refuse.
+    // past the cap, refuse. A low quote is raised to the chain's fee floor (Base's is 0).
     const maxPriorityFeePerGas = maxOf(
       op.maxPriorityFeePerGas,
-      minOf(suggested, ceilings.maxPriorityFeePerGas),
+      minOf(minOf(suggested, params.firstSendTipWei ?? suggested), ceilings.maxPriorityFeePerGas),
     );
-    const maxFeePerGas = maxOf(op.maxFeePerGas, 2n * baseFee + maxPriorityFeePerGas);
+    const maxFeePerGas = maxOf(
+      maxOf(op.maxFeePerGas, 2n * baseFee + maxPriorityFeePerGas),
+      params.minMaxFeePerGasWei,
+    );
     if (
       maxFeePerGas > ceilings.maxFeePerGas ||
       maxPriorityFeePerGas > ceilings.maxPriorityFeePerGas
@@ -739,7 +832,7 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
     // deterministic, so it fixes the userOpHash the reservation is re-keyed to below).
     const at = Math.floor(now() / 1000);
     const fields: PaymasterFields = {
-      validUntil: at + SPONSOR_VALIDITY_S,
+      validUntil: at + sponsorValidityS(intent.flow),
       validAfter: 0,
       // Our own accounting id: the operation's sender and nonce (UserOperationSponsored's index).
       sponsorUUID:
@@ -756,12 +849,21 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
         flow: intent.flow,
         maxCostWei: worst,
         validUntil: fields.validUntil,
+        sender: getAddress(intent.sender),
+        accountId: intent.accountId,
       });
     } catch (error) {
       if (error instanceof BudgetError) {
-        log(`own paymaster: budget refused ${intent.flow} (${error.reason})`);
-        // Transient limits (hour, ceiling, protected reserve) say "not now", like a rate limit.
-        throw refuse(`budget (${error.reason}).`, budgetTransient(error.reason) ? 'busy' : 'other');
+        log(
+          `own paymaster: ${budgetAlert(error.reason) ? 'ALERT ' : ''}budget refused ${intent.flow} (${error.reason})`,
+        );
+        // Transient limits (hours, per-account caps, ceiling, protected reserve) say "not now",
+        // like a rate limit.
+        throw Object.assign(
+          refuse(`budget (${error.reason}).`, budgetTransient(error.reason) ? 'busy' : 'other'),
+          // Before the signature: sponsorBudgetRefused lets a caller say so plainly.
+          budgetTransient(error.reason) ? { sponsorBudgetNotNow: true } : {},
+        );
       }
       throw error;
     }
@@ -803,35 +905,82 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
     ).rows[0]!;
   };
 
-  const signTx = (input: {
-    nonce: bigint;
-    to: Address;
-    data: Hex;
-    gas: bigint;
-    maxFeePerGas: bigint;
-    maxPriorityFeePerGas: bigint;
-  }) =>
-    deps.keystore.withSigner(deps.submitter.keyRef, async (account) => {
-      if (!same(account.address, submitter)) throw new Error('Submitter key does not match.');
-      return account.signTransaction({
-        type: 'eip1559',
-        chainId: deps.chainId,
-        nonce: Number(input.nonce),
-        to: input.to,
-        value: 0n,
-        data: input.data,
-        gas: input.gas,
-        maxFeePerGas: input.maxFeePerGas,
-        maxPriorityFeePerGas: input.maxPriorityFeePerGas,
-      });
+  /**
+   * The submitter's key, opened BEFORE the transaction that signs with it: the key store reads on a
+   * connection of its own, which is never asked for while the lane lock is held (under load that
+   * lock would wait on the pool; on one connection, PGlite, it would wait forever). The signature
+   * itself stays inside the transaction, under the lane lock. The account never leaves `use`.
+   */
+  const withSubmitter = <T>(use: (account: PrivateKeyAccount) => Promise<T>) =>
+    deps.keystore.withSigner(deps.submitter.keyRef, use);
+
+  const signTx = async (
+    account: PrivateKeyAccount,
+    input: {
+      nonce: bigint;
+      to: Address;
+      data: Hex;
+      gas: bigint;
+      maxFeePerGas: bigint;
+      maxPriorityFeePerGas: bigint;
+    },
+  ) => {
+    // The last gate: every signature of the submitter passes here.
+    assertFeeFloor(params, input.maxFeePerGas, 'A bundle fee');
+    if (!same(account.address, submitter)) throw new Error('Submitter key does not match.');
+    return account.signTransaction({
+      type: 'eip1559',
+      chainId: deps.chainId,
+      nonce: Number(input.nonce),
+      to: input.to,
+      value: 0n,
+      data: input.data,
+      gas: input.gas,
+      maxFeePerGas: input.maxFeePerGas,
+      maxPriorityFeePerGas: input.maxPriorityFeePerGas,
     });
+  };
 
   const broadcast = async (raw: Hex): Promise<boolean> => {
     try {
       await deps.client.sendRawTransaction({ serializedTransaction: raw });
       return true;
     } catch (error) {
-      return alreadyKnown(error);
+      if (alreadyKnown(error)) return true;
+      log(`own bundler: broadcast refused (${refusalOf(error)}; ${failureOf(error)})`);
+      return false;
+    }
+  };
+
+  /** The node said "not now" (rate limit) during this pass: no more offers until the next. */
+  let rateLimited = false;
+  /**
+   * A rebroadcast on a small-pool node. 'busy' (its pool or rate limit, -32003 and -32005 on Arc's
+   * public RPC) is not a failure: the stored transaction waits for the next pass.
+   */
+  const offer = async (raw: Hex): Promise<'taken' | 'underpriced' | 'busy' | 'refused'> => {
+    if (rateLimited) return 'busy';
+    try {
+      await deps.client.sendRawTransaction({ serializedTransaction: raw });
+      return 'taken';
+    } catch (error) {
+      if (alreadyKnown(error)) return 'taken';
+      const label = refusalOf(error);
+      if (label === 'underpriced') return 'underpriced';
+      const codes: unknown[] = [];
+      let current: unknown = error;
+      for (let depth = 0; current && depth < 6; depth++) {
+        const e = current as { code?: unknown; cause?: unknown };
+        codes.push(e.code);
+        current = e.cause;
+      }
+      if (label === 'rate_limited' || codes.includes(-32005)) {
+        rateLimited = true;
+        return 'busy';
+      }
+      if (label === 'pool_full' || codes.includes(-32003)) return 'busy';
+      log(`own bundler: broadcast refused (${label}; ${failureOf(error)})`);
+      return 'refused';
     }
   };
 
@@ -849,20 +998,27 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
    * own recorded flow, or null when no such record exists. Never a default: a missing record must
    * not grant the protected exit class; the caller refuses instead.
    */
-  const flowOf = async (tx: Transaction, hash: string): Promise<SponsorFlow | null> =>
-    (
-      await tx.query<{ flow: SponsorFlow }>(
-        'SELECT flow FROM own_paymaster_reservations WHERE user_op_hash = ANY($1::text[]) LIMIT 1',
+  const flowOf = async (
+    tx: Transaction,
+    hash: string,
+  ): Promise<{ flow: ExposureFlow; sender: string | null; accountId: string | null } | null> => {
+    const row = (
+      await tx.query<{ flow: ExposureFlow; sender: string | null; account_id: string | null }>(
+        `SELECT flow, sender, account_id FROM own_paymaster_reservations
+         WHERE user_op_hash = ANY($1::text[]) LIMIT 1`,
         [[hash.toLowerCase(), exposureKey(hash)]],
       )
-    ).rows[0]?.flow ?? null;
+    ).rows[0];
+    return row ? { flow: row.flow, sender: row.sender, accountId: row.account_id } : null;
+  };
 
   /**
-   * A self-paid operation (owner ops when not sponsored) brings no trusted purpose to this module:
-   * its submitter exposure is ORDINARY work, within the hourly cap and the 0.15
-   * ceiling, never the protected exit reserve.
+   * A self-paid operation (owner ops when not sponsored) brings no trusted purpose to this module
+   * and no sponsorship: its submitter exposure is its own class (SELF_PAID), checked only against
+   * the submitter's float, never a sponsored cap and never the protected exit reserve.
    */
-  const SELF_PAID_FLOW: SponsorFlow = 'ownerPay';
+  const selfPaidFloat = (balance: bigint) =>
+    balance > submitterReserve ? balance - submitterReserve : 0n;
 
   /**
    * This call did not send it, but that alone does not prove the OPERATION was never sent: another
@@ -982,6 +1138,13 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
     const fees = { maxFeePerGas: op.maxFeePerGas, maxPriorityFeePerGas: op.maxPriorityFeePerGas };
     if (fees.maxFeePerGas > ceilings.maxFeePerGas)
       throw new BundlerError('FEE_CAP_EXCEEDED', 'Network fees are above the configured cap.');
+    // Refused before anything moves: on such a chain this bundle would be dropped without an error.
+    if (fees.maxFeePerGas < params.minMaxFeePerGasWei)
+      throw new BundlerError(
+        'RPC_ERROR',
+        "eth_sendUserOperation: the fee is under this chain's floor; prepare it again.",
+        'other',
+      );
 
     let pending: number;
     let balance: bigint;
@@ -991,6 +1154,7 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
         live.getTransactionCount({ address: submitter, blockTag: 'pending' }),
         live.getBalance({ address: submitter }),
       ]);
+      deps.hotWallets?.observe('paymaster_submitter', 'eth', balance);
       l1Fee = await l1FeeFor({
         nonce: pending,
         to: deps.entryPoint,
@@ -1004,7 +1168,7 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
         'eth_sendUserOperation: Base could not answer now.',
       );
     }
-    if (balance < gasLimit * fees.maxFeePerGas + l1Fee + SUBMITTER_RESERVE_WEI) {
+    if (balance < gasLimit * fees.maxFeePerGas + l1Fee + submitterReserve) {
       log('own bundler: ALERT submitter low on gas funds, not sent');
       throw new BundlerError(
         'RPC_UNAVAILABLE',
@@ -1018,62 +1182,70 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
     let refused: BudgetError | null = null;
     let row: SendRow | null = null;
     try {
-      row = await deps.db.transaction(async (tx) => {
-        const at = now();
-        // Budget lock first (markSentIn, exposeIn), lane lock second: the one lock order here.
-        if (sponsored) await deps.budget.markSentIn(tx, hash);
-        await deps.budget.exposeIn(tx, {
-          key: exposureKey(hash),
-          flow: sponsored
+      row = await withSubmitter((account) =>
+        deps.db.transaction(async (tx) => {
+          const at = now();
+          // Budget lock first (markSentIn, exposeIn), lane lock second: the one lock order here.
+          if (sponsored) await deps.budget.markSentIn(tx, hash);
+          // Counted for whom the sponsorship is (its own record), a self-paid one for its sender.
+          const owner = sponsored
             ? ((await flowOf(tx, hash)) ??
               (() => {
                 // markSentIn just moved this very reservation: its record cannot be missing.
                 throw new ReservationGone();
               })())
-            : SELF_PAID_FLOW,
-          maxCostWei: exposure,
-        });
-        const lane = await lockLane(tx, at);
-        if (await get(hash, tx)) return null; // another instance stored it meanwhile
-        const nonce = maxOf(BigInt(lane.next_nonce), BigInt(pending));
-        const raw = await signTx({
-          nonce,
-          to: deps.entryPoint,
-          data: calldata,
-          gas: gasLimit,
-          ...fees,
-        });
-        await tx.query(
-          'UPDATE own_paymaster_lanes SET next_nonce = $3, updated_at = $4 WHERE chain_id = $1 AND submitter = $2',
-          [deps.chainId, submitterKey, (nonce + 1n).toString(10), at],
-        );
-        return (
-          await tx.query<SendRow>(
-            `INSERT INTO own_paymaster_sends (user_op_hash, chain_id, submitter, sponsored, calldata,
+            : { flow: SELF_PAID, sender: op.sender, accountId: null };
+          await deps.budget.exposeIn(tx, {
+            key: exposureKey(hash),
+            flow: owner.flow,
+            maxCostWei: exposure,
+            sender: owner.sender,
+            accountId: owner.accountId,
+            sponsored,
+            floatWei: selfPaidFloat(balance),
+          });
+          const lane = await lockLane(tx, at);
+          if (await get(hash, tx)) return null; // another instance stored it meanwhile
+          const nonce = maxOf(BigInt(lane.next_nonce), BigInt(pending));
+          const raw = await signTx(account, {
+            nonce,
+            to: deps.entryPoint,
+            data: calldata,
+            gas: gasLimit,
+            ...fees,
+          });
+          await tx.query(
+            'UPDATE own_paymaster_lanes SET next_nonce = $3, updated_at = $4 WHERE chain_id = $1 AND submitter = $2',
+            [deps.chainId, submitterKey, (nonce + 1n).toString(10), at],
+          );
+          return (
+            await tx.query<SendRow>(
+              `INSERT INTO own_paymaster_sends (user_op_hash, chain_id, submitter, sponsored, calldata,
                valid_until, nonce, gas_limit, max_fee_per_gas, max_priority_fee_per_gas, raw_tx,
                l1_fee_wei, tx_hash, tx_hashes, sent_at, status, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, ARRAY[$13]::text[], $14,
                'submitted', $14, $14)
              RETURNING ${COLUMNS}`,
-            [
-              hash,
-              deps.chainId,
-              submitterKey,
-              sponsored,
-              calldata,
-              validUntilOf(op),
-              nonce.toString(10),
-              gasLimit.toString(10),
-              fees.maxFeePerGas.toString(10),
-              fees.maxPriorityFeePerGas.toString(10),
-              raw,
-              l1Fee.toString(10),
-              keccak256(raw),
-              at,
-            ],
-          )
-        ).rows[0]!;
-      });
+              [
+                hash,
+                deps.chainId,
+                submitterKey,
+                sponsored,
+                calldata,
+                validUntilOf(op),
+                nonce.toString(10),
+                gasLimit.toString(10),
+                fees.maxFeePerGas.toString(10),
+                fees.maxPriorityFeePerGas.toString(10),
+                raw,
+                l1Fee.toString(10),
+                keccak256(raw),
+                at,
+              ],
+            )
+          ).rows[0]!;
+        }),
+      );
     } catch (error) {
       if (error instanceof ReservationGone) gone = true;
       else if (error instanceof BudgetError) refused = error;
@@ -1085,7 +1257,9 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
     }
     if (refused) {
       const reason = (refused as BudgetError).reason;
-      log(`own bundler: ${hash} submitter exposure refused (${reason}), not signed`);
+      log(
+        `own bundler: ${budgetAlert(reason) ? 'ALERT ' : ''}${hash} submitter exposure refused (${reason}), not signed`,
+      );
       throw new BundlerError(
         'RPC_ERROR',
         `eth_sendUserOperation: budget (${reason}).`,
@@ -1165,11 +1339,14 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
    */
   async function finalize(row: SendRow, receipt: TransactionReceipt): Promise<SendRow> {
     const event = receipt.status === 'success' ? eventOf(receipt, row.user_op_hash) : null;
-    return deps.db.transaction(async (tx) => {
+    /** A sponsored operation that reverted inside, settled here once (CCA-752). */
+    let revertedSponsored = false as boolean;
+    const done = await deps.db.transaction(async (tx) => {
       const current = await get(row.user_op_hash, tx, true);
       if (!current || current.final) return current ?? row;
       if (current.block_hash !== receipt.blockHash.toLowerCase()) return current;
       if (!current.settled) {
+        revertedSponsored = current.sponsored && !!event && !event.args.success;
         if (current.sponsored)
           await deps.budget.settleIn(
             tx,
@@ -1194,14 +1371,24 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
         )
       ).rows[0]!;
     });
+    // The deposit paid for an operation whose own execution reverted (its worst case was reserved
+    // before it was signed): an ALERT per operation, for monitoring to count (CCA-752).
+    if (revertedSponsored && event)
+      log(
+        `own paymaster: ALERT sponsored operation ${row.user_op_hash} reverted, deposit paid ${event.args.actualGasCost} wei`,
+      );
+    return done;
   }
 
-  /** The next fees at this nonce: +30% on both, within the ceilings; null at the ceiling. */
+  /**
+   * The next fees at this nonce: +30% on both, the tip by at least minBumpWei (so a tip of 0 can be
+   * raised), within the ceilings; null at the ceiling.
+   */
   const bumped = (row: SendRow) => {
     const oldMax = BigInt(row.max_fee_per_gas);
     const oldPriority = BigInt(row.max_priority_fee_per_gas);
     const maxPriorityFeePerGas = minOf(
-      ceilMul(oldPriority, 13n, 10n),
+      maxOf(ceilMul(oldPriority, 13n, 10n), oldPriority + params.minBumpWei),
       ceilings.maxPriorityFeePerGas,
     );
     const maxFeePerGas = minOf(
@@ -1220,6 +1407,15 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
    * signature; refused, nothing is signed and the row stays as it is.
    */
   async function resend(row: SendRow, cancel: boolean): Promise<SendRow> {
+    // A cancel is decided on reads that may be old: a send mined since then also fails its
+    // simulation. Asked again right before signing, outside any lock; a failed read cancels nothing.
+    if (cancel) {
+      const mined = await live.getTransactionCount({ address: submitter, blockTag: 'latest' });
+      if (BigInt(mined) > BigInt(row.nonce) || (await anyReceipt(row))) {
+        log(`own bundler: ${row.user_op_hash} mined meanwhile, not cancelled`);
+        return row;
+      }
+    }
     const fees = bumped(row);
     if (!fees) {
       log(`own bundler: ALERT ${row.user_op_hash} fee ceiling reached, stays pending`);
@@ -1237,57 +1433,64 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
     } catch {
       return row;
     }
-    if (balance < exposure + SUBMITTER_RESERVE_WEI) {
+    deps.hotWallets?.observe('paymaster_submitter', 'eth', balance);
+    if (balance < exposure + submitterReserve) {
       log(`own bundler: ALERT ${row.user_op_hash} submitter low on gas funds, not re-signed`);
       return row;
     }
     let raw: Hex | null = null;
     let refused: BudgetError | null = null;
     let unaccounted = false;
-    const rows = await deps.db.transaction(async (tx) => {
-      const at = now();
-      const flow = await flowOf(tx, row.user_op_hash);
-      if (!flow) {
-        // No accounting record to classify it by: nothing is signed.
-        unaccounted = true;
-        return [] as SendRow[];
-      }
-      try {
-        await deps.budget.exposeIn(tx, {
-          key: exposureKey(row.user_op_hash),
-          flow,
-          maxCostWei: exposure,
-        });
-      } catch (error) {
-        if (!(error instanceof BudgetError)) throw error;
-        refused = error;
-        return [] as SendRow[];
-      }
-      await lockLane(tx, at);
-      const current = await get(row.user_op_hash, tx, true);
-      if (!current || current.sent_at !== row.sent_at || current.status !== 'submitted')
-        return [] as SendRow[];
-      raw = await signTx({ nonce: BigInt(row.nonce), to, data, gas, ...fees });
-      const hash = keccak256(raw);
-      return (
-        await tx.query<SendRow>(
-          `UPDATE own_paymaster_sends SET raw_tx = $3, tx_hash = $4, tx_hashes = array_append(tx_hashes, $4),
+    const rows = await withSubmitter((account) =>
+      deps.db.transaction(async (tx) => {
+        const at = now();
+        const flow = await flowOf(tx, row.user_op_hash);
+        if (!flow) {
+          // No accounting record to classify it by: nothing is signed.
+          unaccounted = true;
+          return [] as SendRow[];
+        }
+        try {
+          await deps.budget.exposeIn(tx, {
+            key: exposureKey(row.user_op_hash),
+            flow: flow.flow,
+            maxCostWei: exposure,
+            sender: flow.sender,
+            accountId: flow.accountId,
+            sponsored: row.sponsored,
+            floatWei: selfPaidFloat(balance),
+          });
+        } catch (error) {
+          if (!(error instanceof BudgetError)) throw error;
+          refused = error;
+          return [] as SendRow[];
+        }
+        await lockLane(tx, at);
+        const current = await get(row.user_op_hash, tx, true);
+        if (!current || current.sent_at !== row.sent_at || current.status !== 'submitted')
+          return [] as SendRow[];
+        raw = await signTx(account, { nonce: BigInt(row.nonce), to, data, gas, ...fees });
+        const hash = keccak256(raw);
+        return (
+          await tx.query<SendRow>(
+            `UPDATE own_paymaster_sends SET raw_tx = $3, tx_hash = $4, tx_hashes = array_append(tx_hashes, $4),
              max_fee_per_gas = $5, max_priority_fee_per_gas = $6, sent_at = $7, updated_at = $7,
              cancelled = cancelled OR $8
            WHERE user_op_hash = $1 AND sent_at = $2 RETURNING ${COLUMNS}`,
-          [
-            row.user_op_hash,
-            row.sent_at,
-            raw,
-            hash,
-            fees.maxFeePerGas.toString(10),
-            fees.maxPriorityFeePerGas.toString(10),
-            at,
-            cancel,
-          ],
-        )
-      ).rows;
-    });
+            [
+              row.user_op_hash,
+              row.sent_at,
+              raw,
+              hash,
+              fees.maxFeePerGas.toString(10),
+              fees.maxPriorityFeePerGas.toString(10),
+              at,
+              cancel,
+            ],
+          )
+        ).rows;
+      }),
+    );
     if (unaccounted) {
       log(`own bundler: ALERT ${row.user_op_hash} has no accounting record, nothing signed`);
       return row;
@@ -1401,15 +1604,36 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
     // no longer succeed must not land right behind the head and revert at our cost. Past
     // MAX_REPLACEMENTS bumps the head is cancelled too (a self-paid one has no validUntil to end
     // it), and a cancel is itself bumped at most twice; past that it is rebroadcast as stored.
+    // A node with a small pool: nothing past its window can be held yet, and nothing there can land
+    // before it enters the window, where it is cancelled if it can no longer succeed.
+    if (pool && BigInt(row.nonce) >= BigInt(mined) + BigInt(pool.windowNonces)) return row;
     const head = BigInt(mined) === BigInt(row.nonce);
-    const stuck = now() - Number(row.sent_at) >= STUCK_MS;
+    const stuck = now() - Number(row.sent_at) >= (pool?.stuckMs ?? STUCK_MS);
     const bumps = row.tx_hashes.length - 1;
+    let valid: boolean | null | undefined;
     if (!row.cancelled && (stuck || row.valid_until !== '0')) {
-      const valid = await stillValid(row);
+      valid = await stillValid(row);
       if (valid === false) return resend(row, true);
       if (valid && stuck && head) return resend(row, bumps >= MAX_REPLACEMENTS);
     } else if (row.cancelled && stuck && head && bumps < MAX_REPLACEMENTS + 3) {
       return resend(row, true);
+    }
+    // A small pool: offered as stored every time, since "known" from one node says nothing about
+    // the one that builds blocks. A node holding a same-nonce transaction our stored one does not
+    // outbid would refuse it forever, so the head is raised at once, within the same bounds.
+    if (pool) {
+      const answer = await offer(row.raw_tx as Hex);
+      if (answer === 'underpriced' && head) {
+        if (row.cancelled) {
+          if (bumps < MAX_REPLACEMENTS + 3) return resend(row, true);
+        } else {
+          valid ??= await stillValid(row);
+          if (valid === false) return resend(row, true);
+          if (valid) return resend(row, bumps >= MAX_REPLACEMENTS);
+        }
+      }
+      if (answer === 'refused') log(`own bundler: ${row.user_op_hash} rebroadcast failed`);
+      return row;
     }
     // Otherwise (or past every bound): the lane head stays alive, rebroadcast
     // exactly as stored whenever the node does not know it.
@@ -1475,19 +1699,54 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
       };
       await Promise.all(Array.from({ length: Math.min(parallel, rows.length) }, worker));
     };
-    const pending = await deps.db.query<SendRow>(
-      `SELECT ${COLUMNS} FROM own_paymaster_sends
+    const pending = pool
+      ? null
+      : await deps.db.query<SendRow>(
+          `SELECT ${COLUMNS} FROM own_paymaster_sends
        WHERE chain_id = $1 AND submitter = $2 AND status = 'submitted' AND NOT final
        ORDER BY nonce LIMIT $3`,
-      [deps.chainId, submitterKey, limit],
-    );
+          [deps.chainId, submitterKey, limit],
+        );
     let finalizedNow: bigint | null = null;
     try {
       finalizedNow = await finalizedHeight();
     } catch {
       finalizedNow = null;
     }
-    await run(pending.rows, finalizedNow);
+    if (pool) {
+      // Far end first: a held neighbour that can no longer succeed is cancelled before the head
+      // releases it. The cron's run (a full limit) goes on while the lane moves, so a backlog
+      // drains at the chain's pace instead of one nonce per run; a send's short look stays one pass.
+      // A failed read ends the drain, never the run: settlement below still happens.
+      const minedNow = () =>
+        live.getTransactionCount({ address: submitter, blockTag: 'latest' }).catch(() => null);
+      const open = (where: string, from: number | null, most: number) =>
+        deps.db.query<SendRow>(
+          // The column: `nonce` alone is COLUMNS' text, which sorts 10 before 9.
+          `SELECT ${COLUMNS} FROM own_paymaster_sends
+           WHERE chain_id = $1 AND submitter = $2 AND status = 'submitted' AND NOT final
+             AND own_paymaster_sends.nonce ${where} $3
+           ORDER BY own_paymaster_sends.nonce LIMIT $4`,
+          [deps.chainId, submitterKey, from ?? 0, most],
+        );
+      const started = now();
+      let mined = await minedNow();
+      // Mined, still without their receipt: looked at once, and never in the window's way.
+      if (mined !== null) await run((await open('<', mined, limit)).rows, finalizedNow);
+      for (let pass = 0; pass < DRAIN_PASSES; pass++) {
+        const rows = (await open('>=', mined, Math.min(limit, pool.windowNonces))).rows;
+        if (rows.length === 0) break;
+        const limited = rateLimited;
+        rateLimited = false;
+        // After a rate limit the head goes first, so it is never the offer that is left out.
+        await run(limited ? rows : [...rows].reverse(), finalizedNow);
+        if (limit < DRAIN_MIN_LIMIT || now() - started >= DRAIN_BUDGET_MS) break;
+        await new Promise((resolve) => setTimeout(resolve, DRAIN_WAIT_MS));
+        const after = await minedNow();
+        if (mined === null || after === null || (after <= mined && !rateLimited)) break;
+        mined = after;
+      }
+    } else await run(pending!.rows, finalizedNow);
     if (finalizedNow === null) return done;
     const settleable = await deps.db.query<SendRow>(
       `SELECT ${COLUMNS} FROM own_paymaster_sends
@@ -1530,7 +1789,19 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
     }
   }
 
-  return { prepare, send, receipt, maintain, unsent, readiness };
+  /** Bundler.release: the budget gives back a never-sent sponsorship (own-paymaster-budget.ts). */
+  const release = (userOpHash: Hex) => deps.budget.release(userOpHash);
+
+  return {
+    prepare,
+    send,
+    receipt,
+    release,
+    sendMarginS: (data) => ownSendMarginS(deps.paymaster, data),
+    maintain,
+    unsent,
+    readiness,
+  };
 }
 
 /** The upkeep cron (CRON_SECRET; vercel.json, every minute). */
@@ -1592,7 +1863,9 @@ const depositAbi = parseAbi(['function balanceOf(address account) view returns (
  *   - any other operation (prepared by the CDP bundler, before the switch or during a fallback)
  *     goes to the CDP bundler, never silently to ours;
  *   - a NEW preparation uses ours, or the CDP bundler while ours cannot be built (never an
- *     outage), logged as cdp_fallback and tried again after 60 s.
+ *     outage), logged as cdp_fallback and tried again after 60 s. That fallback never sponsors: a
+ *     sponsored preparation is refused as "busy" (our budget's caps do not exist on it), a
+ *     self-paid one goes through.
  */
 export function lazyBundler(input: {
   make: () => Promise<DirectBundler>;
@@ -1676,16 +1949,17 @@ export function lazyBundler(input: {
     route.paymaster !== null &&
     (op.paymasterAndData ?? '0x').toLowerCase().startsWith(route.paymaster.toLowerCase());
   const other = () => fallback ?? null;
+  const [, submitter1, submitter2] = paymasterKeyPurposes(route.chainId);
   const open = async () =>
     Number(
       (
         await route.db.query<{ n: string }>(
-          // This chain's sends from our provisioned submitters only: a
+          // This chain's sends from its own provisioned submitters only: a
           // stray row of any other address can never hold the cron in 'drain'.
           `SELECT count(*)::text AS n FROM own_paymaster_sends
            WHERE chain_id = $1 AND NOT final
              AND submitter IN (SELECT lower(address) FROM own_paymaster_keys
-                               WHERE purpose IN ('paymaster_submitter_1', 'paymaster_submitter_2'))`,
+                               WHERE purpose IN ('${submitter1}', '${submitter2}'))`,
           [route.chainId],
         )
       ).rows[0]?.n ?? '0',
@@ -1735,6 +2009,11 @@ export function lazyBundler(input: {
         hash.toLowerCase(),
       ])
     ).rows.length > 0;
+  /** Only ours holds sponsorships to give back; one that cannot be built leaves them to lapse. */
+  const release = async (hash: Hex) => {
+    const built = await get().catch(() => null);
+    await built?.release?.(hash);
+  };
   /** send/receipt by provenance: ours to ours only, everything else to `cdp`. */
   const routed = (cdp: Bundler | null): Pick<Bundler, 'send' | 'receipt'> => ({
     send: async (op) => {
@@ -1760,11 +2039,27 @@ export function lazyBundler(input: {
   return {
     effective: () => (newWork === 'cdp' ? 'unknown' : state),
     open,
-    routes: (cdp) => ({ prepare: (op, options) => cdp.prepare(op, options), ...routed(cdp) }),
-    prepare: async (op, options) =>
-      newWork === 'cdp'
-        ? fallback!.prepare(op, options)
-        : ((await get()) ?? fallback!).prepare(op, options),
+    routes: (cdp) => ({
+      prepare: (op, options) => cdp.prepare(op, options),
+      ...routed(cdp),
+      release: (hash) => release(hash),
+      sendMarginS: (data) => ownSendMarginS(route.paymaster, data),
+    }),
+    release: (hash) => release(hash),
+    sendMarginS: (data) => ownSendMarginS(route.paymaster, data),
+    prepare: async (op, options) => {
+      if (newWork === 'cdp') return fallback!.prepare(op, options);
+      const built = await get();
+      if (built) return built.prepare(op, options);
+      // The automatic fallback carries new work, never a sponsorship: none of our budget's caps
+      // (per account, per sender, hourly, daily) exist on that path, so a sponsored operation waits
+      // for ours instead ("busy", like a full hour). A self-paid one still goes through CDP.
+      if (options?.sponsor !== false) {
+        log('own bundler: ALERT sponsorship refused while CDP is the fallback (cdp_fallback)');
+        throw refuse('not sponsoring while CDP is the fallback (cdp_fallback).', 'busy');
+      }
+      return fallback!.prepare(op, options);
+    },
     ...routed(other()),
     // A drain builds ours only while there is something to finish.
     maintain: async (limit) => {
@@ -1808,18 +2103,38 @@ export async function createDirectBundler(deps: {
   keystore: Keystore;
   fallback?: Pick<Bundler, 'receipt'>;
   log?: (line: string) => void;
+  hotWallets?: HotWalletWatch;
 }): Promise<DirectBundler> {
-  const keys = await provisionedPaymasterKeys(deps.db);
+  const keys = await provisionedPaymasterKeys(deps.db, deps.chainId);
   const signer = keys.get('paymaster_signer');
   const submitter = keys.get('paymaster_submitter_1');
   if (!signer || !submitter)
     throw new BundlerError('RPC_UNAVAILABLE', 'own bundler: keys are not provisioned.');
+  // Fail closed (CCA-716): a key setting that does not match the recorded keys stops ours from
+  // being built (CDP keeps serving); the message names the setting, never a value.
+  const mismatch = paymasterKeySettingsMismatch(deps.env, keys);
+  if (mismatch)
+    throw new BundlerError(
+      'RPC_UNAVAILABLE',
+      `own bundler: ${paymasterKeySettingName(mismatch, deps.chainId)} does not match the recorded keys.`,
+    );
   const configured = deps.env[PAYMASTER_ADDRESS_SETTING]?.trim() ?? '';
   const paymaster = /^0x[0-9a-fA-F]{40}$/.test(configured) ? getAddress(configured) : null;
   const entryPoint = deps.network.contracts.entryPointV06;
   const live = liveReads(deps.client);
   const budget = ownPaymasterBudget({
     db: deps.db,
+    chainId: deps.chainId,
+    // In this chain's gas asset (Base's are the budget's own defaults).
+    limits: chainParams(deps.chainId).budget,
+    // The proven fleet accounts (sponsor-operators.ts), read at every admission.
+    operatorAccounts: sponsorOperatorAccounts,
+    // Every sponsorship this bundler signs carries allowAnyBundler = false (own-paymaster.ts), it
+    // sponsors only while its submitter is the paymaster's allowlisted bundler (readiness), and it
+    // broadcasts only after markSentIn: a never-sent reservation released or lapsed cannot execute.
+    submitterBound: true,
+    // An exit admitted past the deployment's exit day is reported here as ALERT (once a day).
+    ...(deps.log ? { log: deps.log } : {}),
     deposit: async () => {
       if (!paymaster) return { wei: 0n, block: 0n };
       const block = await live.getBlockNumber();
@@ -1864,5 +2179,6 @@ export async function createDirectBundler(deps: {
     },
     ...(deps.fallback ? { fallback: deps.fallback } : {}),
     ...(deps.log ? { log: deps.log } : {}),
+    ...(deps.hotWallets ? { hotWallets: deps.hotWallets } : {}),
   });
 }

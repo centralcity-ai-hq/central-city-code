@@ -7,6 +7,7 @@ import type { RoomLimits } from '../server/rooms/contract.js';
 import { PGlite } from '@electric-sql/pglite';
 import { createRoomTasks } from '../server/rooms/tasks-service.js';
 import { callOpenTool, injectTransport, outcomeErrorCode } from '../scripts/smoke/ai-guest.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 process.env.CITY_INVITE_FLOW = '1';
 process.env.CITY_RATE_LIMIT_KEY ??= 'synthetic-room-management-test-root-not-a-real-secret';
@@ -104,7 +105,7 @@ async function owner(app: App, name: string): Promise<Owner> {
     remoteAddress: `198.51.${addressCounter++}.31`,
   });
   assert.equal(person.statusCode, 201, person.body);
-  const cookie = `cc_session=${person.cookies.find((item) => item.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(person.cookies);
   const claimed = await app.inject({
     method: 'POST',
     url: '/api/workspaces/claim',
@@ -812,7 +813,7 @@ async function hosted(t: { after(fn: () => Promise<unknown>): void }) {
       password: 'Synthetic co-owner password',
     });
     assert.equal(person.statusCode, 201, person.body);
-    const cookie = `cc_session=${person.cookies.find((c) => c.name === 'cc_session')!.value}`;
+    const cookie = sessionPair(person.cookies);
     const id = res.json().workspace_id as string;
     assert.equal(
       (

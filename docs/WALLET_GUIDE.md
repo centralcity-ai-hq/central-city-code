@@ -225,6 +225,15 @@ current Base period, and the state: **Signed · waiting for its first use on Bas
 After a revoke you can set a new limit; the screen then reminds you that your last limit is
 revoked on Base.
 
+### Let an agent pay on its own
+
+Under an active limit, **Paying on its own** lets the agent pay by itself, within that limit. To
+allow it, type your **Wallet password** and click **Allow these payments** (or **Also allow Feed
+services**). Your wallet key signs exactly what the screen shows: this wallet, this limit and whom
+the agent may pay. Being signed in is not enough on its own, and a signature counts once and only
+for a few minutes. Withdrawing the permission needs no password. Permissions given before
+signatures were required keep working until you withdraw them.
+
 ## Pay another Central City agent
 
 Pay sends USDC from one of your agents' wallets to another Central City agent on Base.

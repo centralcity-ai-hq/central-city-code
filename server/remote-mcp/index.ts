@@ -1,4 +1,5 @@
 import type { createRoomInvites } from '../links/invites.js';
+import { errorFacts, errorLine, errorWhere, requestFacts, type LogLine } from '../error-log.js';
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -24,10 +25,13 @@ import {
   invokeOpenInvite,
   openInviteInputSchemas,
   openInviteTaskInputSchemas,
+  openInviteMemberInputSchemas,
+  openInviteRepoInputSchemas,
 } from './open-invite.js';
 import { describeValidation } from '../validation-errors.js';
 import { feedEnabled } from '../feed/flag.js';
 import { sendGuide, wantsGuide } from './guide.js';
+import { openUnavailableError } from './open-unavailable.js';
 import {
   clientAddressKey,
   limitRequestRate,
@@ -36,6 +40,12 @@ import {
 } from '../rate-limit.js';
 import { extendForWait } from '../wake/routes.js';
 import { OFFER_BATCH_TOOLS, OFFER_LIMITS, TOOL_BODY_MAX_BYTES } from '../../shared/feed-offers.js';
+// A leaf module: read per request (no import cycle in the bundle).
+import {
+  MESSAGE_BODY_MAX_BYTES,
+  MESSAGE_SEND_TOOLS,
+  requestBodyBytes,
+} from '../messaging/body-limits.js';
 
 /**
  * Scopes a client is told to request on its first 401 (RFC 6750 §3 `scope`), so a client that
@@ -57,6 +67,8 @@ export const DEFAULT_CHALLENGE_SCOPES = [
 export interface RemoteMcpDependencies extends OAuthDependencies {
   /** The general per-principal request limit, shared with the REST API (limitRequestRate). */
   apiRequestsPerMinute: number;
+  /** Where a 500 on these routes is written: this scope's handler replaces the root one. */
+  errorLog: LogLine;
   roomInvites: ReturnType<typeof createRoomInvites>;
   fail(code: number, message: string): never;
   /** Unauthenticated (unclaimed-mode) tool execution for the anonymous tool subset. */
@@ -119,12 +131,17 @@ export async function registerRemoteMcp(
       throw error;
     }));
   async function createMcp(): Promise<McpHandler> {
-    const [{ createMcpHandler }, { createRemoteServer }, { withUniformValidation }] =
-      await Promise.all([
-        import('@modelcontextprotocol/server'),
-        import('./tools.js'),
-        import('./validation.js'),
-      ]);
+    const [
+      { createMcpHandler },
+      { createRemoteServer },
+      { withUniformValidation },
+      { withToolsVersion },
+    ] = await Promise.all([
+      import('@modelcontextprotocol/server'),
+      import('./tools.js'),
+      import('./validation.js'),
+      import('./tools-version.js'),
+    ]);
     return createMcpHandler(
       ({ authInfo, requestInfo }) => {
         const identity = authInfo?.extra as Identity | undefined;
@@ -134,13 +151,20 @@ export async function registerRemoteMcp(
           (tool: string, args: unknown) => {
             if (!identity) return d.fail(401, 'Authentication is required.');
             if (identity.anonymous && isOpenInviteTool(tool))
-              return invokeOpenInvite(d.roomInvites, tool, args, identity.address, identity.origin);
+              return invokeOpenInvite(
+                d.roomInvites,
+                tool,
+                args,
+                identity.address,
+                identity.origin,
+                signal,
+              );
             if (identity.anonymous)
               return tool === 'city_create_workspace'
                 ? d.createWorkspace(identity.address, args, identity.origin)
                 : d.anonymousTool(identity.address, tool, args, identity.origin);
             if ('roomOnly' in identity)
-              return d.roomInvites.invoke(identity.token, tool, args, identity.origin);
+              return d.roomInvites.invoke(identity.token, tool, args, identity.origin, signal);
             if ('workspaceKey' in identity)
               return d.access.executeTool(
                 {
@@ -169,6 +193,8 @@ export async function registerRemoteMcp(
             // Same field-level format as REST 400s: paths and constraints, never received values.
             if (error instanceof z.ZodError) return { status: 400, ...describeValidation(error) };
             const status = statusOf(error);
+            // The client only sees "could not be completed": this line is the one trace of it.
+            if (status === 500) d.errorLog(errorLine('mcp_tool_failed', errorFacts(error)));
             const issues = (error as { issues?: unknown }).issues;
             return {
               status,
@@ -190,8 +216,14 @@ export async function registerRemoteMcp(
                 : undefined,
           },
         );
-        // Every schema failure answers with our invalid_arguments body (see validation.ts).
-        return withUniformValidation(server);
+        // Every schema failure answers with our invalid_arguments body (see validation.ts). The
+        // anonymous /mcp/open list (invite guests) advertises compact input schemas.
+        // A stale client (tool list from before a deploy) is told to reconnect: tools-version.ts.
+        return withToolsVersion(
+          withUniformValidation(server, {
+            compact: identity?.anonymous === true && d.roomInvites.enabled(),
+          }),
+        );
       },
       {
         legacy: 'stateless',
@@ -247,7 +279,20 @@ export async function registerRemoteMcp(
       );
     });
     scope.setErrorHandler((error, request, reply) => {
+      // A broken body on the MCP endpoints is JSON-RPC's parse error, the shape their clients read.
+      if (/^\/mcp(\/|\?|$)/.test(request.url) && (error as Error).message === 'Invalid JSON')
+        return reply
+          .code(400)
+          .send({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
       const status = statusOf(error);
+      if (status === 500)
+        d.errorLog(
+          errorLine('request_failed', {
+            ...requestFacts(request),
+            ...errorFacts(error),
+            where: errorWhere(error),
+          }),
+        );
       // Per-credential and per-address 429s carry their window, as the root handler sends it.
       const retryAfterMs = (error as { retryAfterMs?: unknown }).retryAfterMs;
       if (status === 429 && typeof retryAfterMs === 'number' && Number.isFinite(retryAfterMs))
@@ -346,7 +391,28 @@ export async function registerRemoteMcp(
       else if (verified) await d.limit(`assistant:${verified.grantId}`, 120, 60_000);
       else if (guest) await d.limit(`guest-mcp:${guest.agent_id}`, 120, 60_000);
       else await d.limit(`anon-mcp:${clientAddressKey(request.ip)}`, 120, 60_000);
-      if (key || verified) extendForWait(request); // authenticated wait= tool calls (docs/WAKE.md)
+      // Authenticated wait= tool calls (docs/WAKE.md), invite-link guests included: a bearer
+      // credential, or on /mcp/open a room_credential argument verified first (only for a real
+      // wait, so other calls cost no extra lookup and unauthenticated sockets keep 15 s).
+      const call = request.body as
+        | {
+            method?: unknown;
+            params?: { arguments?: { wait?: unknown; room_credential?: unknown } };
+          }
+        | undefined;
+      const argCredential = call?.params?.arguments?.room_credential;
+      const argWait = call?.params?.arguments?.wait;
+      const argGuest =
+        !guest &&
+        open &&
+        call?.method === 'tools/call' &&
+        typeof argWait === 'number' &&
+        argWait > 0 &&
+        typeof argCredential === 'string' &&
+        argCredential.startsWith('crc_')
+          ? await d.roomInvites.verify(argCredential)
+          : null;
+      if (key || verified || guest || argGuest) extendForWait(request);
       if (
         request.method === 'POST' &&
         !request.headers['content-type']?.startsWith('application/json')
@@ -360,6 +426,29 @@ export async function registerRemoteMcp(
           id: null,
           error: { code: -32600, message: 'JSON-RPC batch requests are not supported.' },
         });
+      // A known tool /mcp/open does not offer (host-only, or account-only): an ordinary tool
+      // error with what to do instead, not a bare "Tool not found" protocol error.
+      if (open && request.method === 'POST' && call?.method === 'tools/call') {
+        const unavailable = openUnavailableError(
+          (call.params as { name?: unknown } | undefined)?.name,
+        );
+        if (unavailable)
+          return reply.code(200).send({
+            jsonrpc: '2.0',
+            id: (request.body as { id?: unknown }).id ?? null,
+            result: {
+              isError: true,
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    error: { ...unavailable, kind: 'forbidden', retryable: false },
+                  }),
+                },
+              ],
+            },
+          });
+      }
       if (open && presented?.startsWith('crc_') && request.method === 'POST')
         bearerRoomCredential(request.body, presented);
       const authInfo: AuthInfo = invited
@@ -441,7 +530,8 @@ export async function registerRemoteMcp(
       return reply.send(Readable.fromWeb(response.body as unknown as NodeReadableStream));
     }
     // /mcp takes up to 1 MiB, but only for one tools/call of an offer batch tool
-    // (OFFER_BATCH_TOOLS); any other body over 64 KiB is refused with 413 once parsed.
+    // (OFFER_BATCH_TOOLS), or up to MESSAGE_BODY_MAX_BYTES for one message tool call
+    // (MESSAGE_SEND_TOOLS); any other body over 64 KiB is refused with 413 once parsed.
     scope.route({
       method: ['GET', 'POST', 'DELETE'],
       url: MCP_PATH,
@@ -457,6 +547,12 @@ export async function registerRemoteMcp(
     scope.route({
       method: ['GET', 'POST', 'DELETE'],
       url: MCP_OPEN_PATH,
+      // A message tool call may carry a whole message (MESSAGE_BODY_MAX_BYTES); any other body
+      // keeps 64 KiB.
+      bodyLimit: MESSAGE_BODY_MAX_BYTES,
+      preHandler: async (request) => {
+        if (!withinToolBodyLimit(request)) throw bodyTooLarge();
+      },
       handler: (request, reply) => serveMcp(request, reply, true),
     });
   });
@@ -469,16 +565,15 @@ export async function registerRemoteMcp(
  * JSON-RPC tools/call of an offer batch tool (the route's own limit bounds that one).
  */
 function withinToolBodyLimit(request: FastifyRequest): boolean {
-  const raw = request.rawBody;
-  if (typeof raw !== 'string' || Buffer.byteLength(raw, 'utf8') <= TOOL_BODY_MAX_BYTES) return true;
+  // Measured even without a raw body (Content-Length or the parsed body), so no route skips it.
+  const bytes = requestBodyBytes(request);
+  if (bytes <= TOOL_BODY_MAX_BYTES) return true;
   const body = request.body as { method?: unknown; params?: { name?: unknown } } | null;
-  return (
-    !!body &&
-    !Array.isArray(body) &&
-    body.method === 'tools/call' &&
-    typeof body.params?.name === 'string' &&
-    OFFER_BATCH_TOOLS.includes(body.params.name)
-  );
+  if (!body || Array.isArray(body) || body.method !== 'tools/call') return false;
+  const name = body.params?.name;
+  if (typeof name !== 'string') return false;
+  if (OFFER_BATCH_TOOLS.includes(name)) return true;
+  return MESSAGE_SEND_TOOLS.includes(name) && bytes <= MESSAGE_BODY_MAX_BYTES;
 }
 
 /** The same 413 Fastify answers for a body over a route's limit. */
@@ -491,7 +586,12 @@ function bodyTooLarge(): Error {
 
 /** Open room tools that take a room_credential argument (city_join_invite does not). */
 const CREDENTIAL_TOOLS = new Set(
-  Object.entries({ ...openInviteInputSchemas, ...openInviteTaskInputSchemas })
+  Object.entries({
+    ...openInviteInputSchemas,
+    ...openInviteTaskInputSchemas,
+    ...openInviteMemberInputSchemas,
+    ...openInviteRepoInputSchemas,
+  })
     .filter(([, schema]) => 'room_credential' in (schema as z.ZodObject<z.ZodRawShape>).shape)
     .map(([name]) => name),
 );

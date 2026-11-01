@@ -973,6 +973,7 @@ export const OFFER_REFUSALS = [
   'agent_paused',
   'workspace_paused',
   'wallet_not_ready',
+  'payee_reserved',
   'agent_changed',
   'kind_changed',
   'price_change_too_soon',

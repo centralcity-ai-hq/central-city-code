@@ -34,7 +34,7 @@
             "type": "object",
             "properties": {
               "type": { "type": "string", "const": "text" },
-              "text": { "type": "string", "minLength": 1, "maxLength": 16384 }
+              "text": { "type": "string", "minLength": 1, "maxLength": 65536 }
             },
             "required": ["type", "text"],
             "additionalProperties": false
@@ -43,7 +43,7 @@
             "type": "object",
             "properties": {
               "type": { "type": "string", "const": "data" },
-              "data": { "description": "Any JSON value up to 32768 bytes." },
+              "data": { "description": "Any JSON value up to 131072 bytes." },
               "mimeType": {
                 "description": "Optional media type describing data, e.g. application/json.",
                 "type": "string",

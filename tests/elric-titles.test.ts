@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { MockAdapter } from '../server/elric/adapter.js';
+import { AdapterError, MockAdapter, type ModelAdapter } from '../server/elric/adapter.js';
+import { reserve, settle } from '../server/elric/budget.js';
+import { dayOf, ELRIC_CONFIG } from '../server/elric/config.js';
 import { buildCostReport } from '../server/elric/cost-report.js';
 import {
   cleanTitle,
@@ -280,6 +282,238 @@ test('no title call when killed, paused, ineligible, over budget or not the firs
   assert.equal(adapter.calls, 1);
 });
 
+test("CCA-627: a title call is charged to and bounded by the owner's daily cost cap", async (t) => {
+  const f = await elricFixture(t);
+  const a = await owner(f, 'Capped title owner');
+  f.small.push({ text: 'An answer.' }, { error: 'server_error' });
+  await post(f, a, QUESTION);
+  await f.elric.drain();
+  const agentId = (
+    await f.db.query<{ agent_id: string }>('SELECT agent_id FROM elric_agents WHERE owner_id=$1', [
+      a.operatorId,
+    ])
+  ).rows[0]!.agent_id;
+  const adapter = new MockAdapter('mock-title', 'Compare phones');
+  const spent = async () =>
+    Number(
+      (
+        await f.db.query<{ s: string }>(
+          'SELECT COALESCE(sum(spent_units),0)::text AS s FROM elric_usage WHERE owner_id=$1',
+          [a.operatorId],
+        )
+      ).rows[0]!.s,
+    );
+  const run = (ownerDailyUnits: number) =>
+    titleConversation({
+      db: f.db,
+      adapter,
+      config: { globalDailyUnits: 1_000_000_000, ownerDailyUnits },
+      clock: f.now,
+      env: {},
+      gpuUnits: () => 1,
+      ownerId: a.operatorId,
+      agentId,
+      roomId: a.roomId,
+      userText: QUESTION,
+      replyText: 'An answer.',
+    });
+  const before = await spent();
+  // An owner already at the cap gets no title call.
+  assert.deepEqual(await run(before), { ok: false, reason: 'owner_units' });
+  assert.equal(adapter.calls, 0);
+  // Under the cap the call runs, and its cost lands on the owner's day row.
+  assert.equal((await run(before + 1_000_000)).ok, true);
+  assert.equal(adapter.calls, 1);
+  assert.equal(await spent(), before + 1);
+});
+
+/**
+ * CCA-627 atomic reservation: an owner with two private conversations, each after its first reply
+ * with the fallback title still in place (the answer's own title call failed before it left).
+ */
+async function twoConversations(f: F, name: string) {
+  const a = await owner(f, name);
+  f.small.push({ text: 'An answer.' }, { error: 'server_error' });
+  await post(f, a, QUESTION);
+  await f.elric.drain();
+  const conv = (await f.call(a.cookie, 'POST', '/api/elric/conversations', {})).json();
+  f.small.push({ text: 'Another answer.' }, { error: 'server_error' });
+  await post(f, a, 'plan a trip to Lisbon in spring', conv.id, conv.person_member_id);
+  await f.elric.drain();
+  assert.equal(await source(f, a.roomId), 'fallback');
+  assert.equal(await source(f, conv.id), 'fallback');
+  const agentId = (
+    await f.db.query<{ agent_id: string }>('SELECT agent_id FROM elric_agents WHERE owner_id=$1', [
+      a.operatorId,
+    ])
+  ).rows[0]!.agent_id;
+  const units = async () => {
+    const row = (await f.usage(a.operatorId))!;
+    return {
+      reserved: Number(row.reserved_units),
+      spent: Number(row.spent_units),
+      short: Number(row.short),
+    };
+  };
+  const run = (adapter: ModelAdapter, roomId: string, ownerDailyUnits: number) =>
+    titleConversation({
+      db: f.db,
+      adapter,
+      config: { globalDailyUnits: 1_000_000_000, ownerDailyUnits },
+      clock: f.now,
+      env: {},
+      // The worst case and the true cost are both 1 unit.
+      gpuUnits: () => 1,
+      ownerId: a.operatorId,
+      agentId,
+      roomId,
+      userText: QUESTION,
+      replyText: 'An answer.',
+    });
+  return { a, conv: conv.id as string, agentId, units, run };
+}
+
+/** A title adapter whose call waits in flight until released. */
+function heldAdapter() {
+  const adapter = new MockAdapter('mock-title', 'Compare phones');
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  adapter.beforeReply = async () => held;
+  const inFlight = async (calls: number) => {
+    while (adapter.calls < calls) await new Promise((resolve) => setTimeout(resolve, 5));
+  };
+  return { adapter, release, inFlight };
+}
+
+test('CCA-627: two titles in two rooms of one owner with one unit left: exactly one runs', async (t) => {
+  const f = await elricFixture(t);
+  const s = await twoConversations(f, 'Two-room title owner');
+  const before = await s.units();
+  assert.equal(before.reserved, 0);
+  const cap = before.spent + 1;
+  const { adapter, release, inFlight } = heldAdapter();
+  // Both start at once; the admitted one waits in its model call.
+  const both = [s.run(adapter, s.a.roomId, cap), s.run(adapter, s.conv, cap)];
+  // Bounded: if both were admitted (the pre-fix race) neither returns while held, so fail, not hang.
+  let timer!: ReturnType<typeof setTimeout>;
+  const first = await Promise.race([
+    ...both.map((p) => p.then((result) => ({ result }))),
+    new Promise<{ result: string }>(
+      (resolve) => (timer = setTimeout(() => resolve({ result: 'both admitted' }), 5_000)),
+    ),
+  ]);
+  clearTimeout(timer);
+  if (first.result === 'both admitted') release();
+  assert.deepEqual(first.result, { ok: false, reason: 'owner_units' });
+  await inFlight(1);
+  assert.equal(adapter.calls, 1, 'the refused title never reached the model');
+  // While the admitted call is in flight its worst case is held on the owner's row.
+  assert.deepEqual(await s.units(), { ...before, reserved: 1 });
+  release();
+  const results = await Promise.all(both);
+  assert.equal(results.filter((r) => r.ok).length, 1);
+  const after = await s.units();
+  assert.deepEqual(after, { reserved: 0, spent: before.spent + 1, short: before.short });
+  assert.ok(after.spent <= cap, 'never above the cap');
+  assert.equal(Number((await f.globalUsage())!.reserved_units), 0);
+  assert.equal((await titleCosts(f)).calls, 1);
+});
+
+test('CCA-627: a title and an answer racing for the last unit never overspend', async (t) => {
+  const f = await elricFixture(t);
+  const s = await twoConversations(f, 'Title and answer owner');
+  const day = dayOf(f.now());
+  const before = await s.units();
+  const cap = before.spent + 1;
+  const config = { ...ELRIC_CONFIG, ownerDailyUnits: cap, globalDailyUnits: 1_000_000_000 };
+
+  // The title holds the last unit while its call is in flight: the answer is refused.
+  const { adapter, release, inFlight } = heldAdapter();
+  const titling = s.run(adapter, s.a.roomId, cap);
+  await inFlight(1);
+  const answer = await reserve(f.db, config, {
+    ownerId: s.a.operatorId,
+    kind: 'short',
+    units: 1,
+    day,
+  });
+  assert.deepEqual(answer, { ok: false, reason: 'owner_units' });
+  release();
+  assert.equal((await titling).ok, true);
+  let now = await s.units();
+  assert.deepEqual(now, { reserved: 0, spent: before.spent + 1, short: before.short });
+
+  // The other order: an answer holds the last unit, the title is refused before any model call.
+  const cap2 = now.spent + 1;
+  const config2 = { ...config, ownerDailyUnits: cap2 };
+  const held = await reserve(f.db, config2, {
+    ownerId: s.a.operatorId,
+    kind: 'short',
+    units: 1,
+    day,
+  });
+  assert.equal(held.ok, true);
+  const other = new MockAdapter('mock-title', 'Lisbon trip');
+  assert.deepEqual(await s.run(other, s.conv, cap2), { ok: false, reason: 'owner_units' });
+  assert.equal(other.calls, 0);
+  await f.db.transaction((tx) =>
+    settle(tx, {
+      ownerId: s.a.operatorId,
+      kind: 'short',
+      day,
+      reserved: 1,
+      spent: 1,
+      refund: false,
+    }),
+  );
+  now = await s.units();
+  assert.deepEqual(now, { reserved: 0, spent: cap2, short: before.short + 1 });
+  assert.ok(now.spent <= cap2);
+});
+
+test('CCA-627: a failed title call releases or settles its reservation, never an answer count', async (t) => {
+  const f = await elricFixture(t);
+  const s = await twoConversations(f, 'Refund title owner');
+  const before = await s.units();
+  const costsBefore = (await titleCosts(f)).calls;
+  const big = before.spent + 1_000;
+  const failing = (error: Error): ModelAdapter => ({
+    model: 'mock-title',
+    complete: async () => {
+      throw error;
+    },
+  });
+  // Never left: the reservation is released in full, nothing spent, no cost row.
+  assert.deepEqual(await s.run(failing(new AdapterError('unreachable')), s.a.roomId, big), {
+    ok: false,
+    reason: 'model_unreachable',
+  });
+  assert.deepEqual(await s.run(failing(new Error('boom')), s.a.roomId, big), {
+    ok: false,
+    reason: 'model_error',
+  });
+  assert.deepEqual(await s.units(), before);
+  assert.equal((await titleCosts(f)).calls, costsBefore);
+  // Sent, then timed out: settled at the worst case (1 unit), the hold released.
+  assert.deepEqual(await s.run(failing(new AdapterError('timeout', true)), s.a.roomId, big), {
+    ok: false,
+    reason: 'model_timeout',
+    units: 1,
+  });
+  assert.deepEqual(await s.units(), { ...before, spent: before.spent + 1 });
+  assert.equal((await titleCosts(f)).calls, costsBefore + 1);
+  assert.equal(Number((await f.globalUsage())!.reserved_units), 0);
+  // A refused (unusable) title is still costed and settled.
+  const empty = new MockAdapter('mock-title', '""');
+  assert.deepEqual(await s.run(empty, s.a.roomId, big), {
+    ok: false,
+    reason: 'unusable_title',
+    units: 1,
+  });
+  assert.deepEqual(await s.units(), { ...before, spent: before.spent + 2 });
+  assert.equal(await source(f, s.a.roomId), 'fallback');
+});
+
 test('the cost report shows title calls in the total, not as turns', () => {
   const now = Date.UTC(2026, 9, 2, 12);
   const day = Math.floor(now / 86_400_000);
@@ -354,4 +588,20 @@ test('no title call without enough time left in the run', async (t) => {
   assert.deepEqual(result, { ok: false, reason: 'time_budget' });
   assert.equal(adapter.calls, 0);
   assert.equal(await titleOf(f, a), QUESTION);
+});
+
+test('a Tier 0 first reply never starts a title call: the fallback stays', async (t) => {
+  const f = await elricFixture(t);
+  const a = await owner(f, 'Tier zero owner');
+  await post(f, a, 'who is here');
+  await f.elric.drain();
+  const turns = await f.turns(a.operatorId);
+  assert.deepEqual(
+    turns.map((turn) => [turn.outcome, turn.tier]),
+    [['ok', 0]],
+  );
+  assert.equal(f.adapterCalls(), 0, 'no answer call and no title call');
+  assert.equal((await titleCosts(f)).calls, 0);
+  assert.equal(await source(f, a.roomId), 'fallback');
+  assert.equal(await titleOf(f, a), 'who is here');
 });

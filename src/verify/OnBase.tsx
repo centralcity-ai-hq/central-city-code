@@ -3,8 +3,9 @@ import { Check, Copy, LoaderCircle, Search } from 'lucide-react';
 import { scoreLine } from '../../shared/base/rating-score';
 import { ON_BASE_QUERY_MAX } from '../../shared/base/on-base';
 import { PublicHeader } from '../shell/PublicHeader';
-import { json, number } from './countLogClient';
-import { ExplorerSwitch } from './ExplorerSwitch';
+import { number } from './countLogClient';
+import { ExplorerSwitch, useOnBaseCount, useStatsCounts } from './ExplorerSwitch';
+import { BASE_EXPLORER_CHAIN, type ExplorerChain } from '../explorer/chain';
 import { OnBaseVerifyPanel, type VerifyState } from './OnBaseVerifyPanel';
 import {
   basescanRegistry,
@@ -13,6 +14,8 @@ import {
   loadOnBase,
   initial,
   ON_BASE_LIST_TIMEOUT_MS,
+  refusedSearchNote,
+  searchNotes,
   shortWallet,
   shownName,
   verifyKey,
@@ -119,55 +122,67 @@ function Status({ row, now }: { row: OnBaseRow; now: number }) {
   );
 }
 
-export function OnBase() {
+/**
+ * The view for one chain: Base by default (/explorer/base); /explorer/arc renders the same view
+ * with the Arc chain, read from Arc's routes. Only Base has the in-browser Verify and keeps its
+ * last known numbers in this browser; on another chain a row's button opens the agent's page.
+ */
+export function OnBase({ chain = BASE_EXPLORER_CHAIN }: { chain?: ExplorerChain } = {}) {
+  const isBase = chain.slug === 'base';
+  const listPath = isBase ? undefined : chain.paths.list;
+  // The On Base count for the switch on another chain's view (Base's own view uses its totals).
+  const baseCount = useOnBaseCount(!isBase);
   const [load, setLoad] = useState<Load>({ phase: 'loading' });
   const [query, setQuery] = useState('');
+  // Why the last submitted text was not searched (refusedSearchNote), '' when it was.
+  const [refused, setRefused] = useState('');
   const [open, setOpen] = useState<string | null>(null);
   const [checks, setChecks] = useState<Record<string, VerifyState>>({});
   const [more, setMore] = useState(false);
-  const [all, setAll] = useState<number | null>(null);
-  const [calls, setCalls] = useState<number | null>(null);
+  // The switch's other counts, kept current by the shared stats poller (ExplorerSwitch).
+  const { all, calls } = useStatsCounts();
   const [now, setNow] = useState(() => Date.now());
   const generation = useRef(0);
   // Background refreshes that failed in a row: after REFRESH_FAILURES_STALE the numbers are no
   // longer shown as live (the rows and numbers stay).
   const [refreshFailures, setRefreshFailures] = useState(0);
   // The numbers as last known (this browser's last visit, then every answer on this page).
-  const [known, setKnown] = useState<KnownTotals | null>(() => readStoredOnBaseTotals());
+  const [known, setKnown] = useState<KnownTotals | null>(() =>
+    isBase ? readStoredOnBaseTotals() : null,
+  );
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
     return () => window.clearInterval(timer);
   }, []);
-  useEffect(() => {
-    json<{ ai_agents_total: number; paid_calls?: { total?: number } }>('/api/public/stats')
-      .then((stats) => {
-        setAll(stats.ai_agents_total);
-        // The paid service calls on Base mainnet, for the switch (absent while switched off).
-        if (typeof stats.paid_calls?.total === 'number') setCalls(stats.paid_calls.total);
-      })
-      .catch(() => undefined);
-  }, []);
 
   // `retry`: the failed reads in a row before this one; a retry keeps the failure on screen (and
   // the last known numbers) until it succeeds, instead of blinking back to loading.
-  const read = useCallback(async (q: string, retry?: number) => {
-    const mine = ++generation.current;
-    if (retry === undefined) {
-      setLoad({ phase: 'loading' });
-      setOpen(null);
-    }
-    try {
-      const data = await loadOnBase({ q, timeoutMs: ON_BASE_LIST_TIMEOUT_MS });
-      if (mine === generation.current) {
-        setRefreshFailures(0);
-        setLoad({ phase: 'ready', data, query: q, fetchedAt: Date.now() });
+  const read = useCallback(
+    async (q: string, retry?: number) => {
+      // A text the list refuses (a 1-2 character name) is not searched: the page stays as it is and
+      // says why, never "no match" for a search that was not made.
+      const refused = refusedSearchNote(q);
+      setRefused(refused);
+      if (refused) return;
+      const mine = ++generation.current;
+      if (retry === undefined) {
+        setLoad({ phase: 'loading' });
+        setOpen(null);
       }
-    } catch {
-      if (mine === generation.current)
-        setLoad({ phase: 'error', query: q, attempt: retry === undefined ? 0 : retry + 1 });
-    }
-  }, []);
+      try {
+        const data = await loadOnBase({ q, timeoutMs: ON_BASE_LIST_TIMEOUT_MS, listPath });
+        if (mine === generation.current) {
+          setRefreshFailures(0);
+          setLoad({ phase: 'ready', data, query: q, fetchedAt: Date.now() });
+        }
+      } catch {
+        if (mine === generation.current)
+          setLoad({ phase: 'error', query: q, attempt: retry === undefined ? 0 : retry + 1 });
+      }
+    },
+    [listPath],
+  );
   useEffect(() => {
     void read('');
   }, [read]);
@@ -190,8 +205,8 @@ export function OnBase() {
     setKnown((previous) => mergeTotals(previous, data.totals, fetchedAt, load.query !== ''));
   }, [load]);
   useEffect(() => {
-    if (known) storeOnBaseTotals(known);
-  }, [known]);
+    if (known && isBase) storeOnBaseTotals(known);
+  }, [known, isBase]);
 
   // Read again while the tab is visible: the block and the finalizing rows stay live. A newer
   // search wins (generation), and the open Verify and loaded older rows stay as they are.
@@ -202,7 +217,7 @@ export function OnBase() {
       const shown = shownRef.current;
       if (document.visibilityState !== 'visible' || shown.phase !== 'ready') return;
       const mine = generation.current;
-      loadOnBase({ q: shown.query, timeoutMs: ON_BASE_LIST_TIMEOUT_MS })
+      loadOnBase({ q: shown.query, timeoutMs: ON_BASE_LIST_TIMEOUT_MS, listPath })
         .then((fresh) => {
           const current = shownRef.current;
           if (mine !== generation.current || current.phase !== 'ready') return;
@@ -219,7 +234,7 @@ export function OnBase() {
         });
     }, REFRESH_MS);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [listPath]);
 
   async function older() {
     if (load.phase !== 'ready' || !load.data.nextBefore || more) return;
@@ -230,6 +245,7 @@ export function OnBase() {
         q: load.query,
         before: load.data.nextBefore,
         timeoutMs: ON_BASE_LIST_TIMEOUT_MS,
+        listPath,
       });
       if (mine !== generation.current) return;
       setLoad({
@@ -286,27 +302,40 @@ export function OnBase() {
   return (
     <div className="public-shell">
       <PublicHeader current="downtown" />
-      <main id="main-content" tabIndex={-1} className="public-main vf-main ll-main ob-main">
+      <main
+        id="main-content"
+        tabIndex={-1}
+        className="public-main vf-main ll-main ob-main"
+        data-chain={chain.slug}
+      >
         <header className="vf-head">
           <p className="vf-eyebrow">
             Downtown · Transparency · <a href="/downtown/verify">Verify the count</a>
           </p>
           <h1>Agent Explorer</h1>
-          <ExplorerSwitch current="base" all={all} onBase={totals?.onBase ?? null} calls={calls} />
+          <ExplorerSwitch
+            current={chain.slug}
+            all={all}
+            onBase={isBase ? (totals?.onBase ?? null) : baseCount}
+            calls={calls}
+          />
           <p className="vf-lede">
-            Every Central City agent with a Base ID. Owners are read from Base, and Verify checks
-            any agent again in your own browser, directly on Base.
+            {isBase
+              ? 'Every Central City agent with a Base ID. Owners are read from Base, and Verify checks any agent again in your own browser, directly on Base.'
+              : `Every Central City agent with an ${chain.name} ID. Owners are read from ${chain.name}'s identity registry, and each agent's page shows what ${chain.name} holds for it.`}
           </p>
         </header>
 
         {stale && data ? (
           <div className="ob-banner" data-tone="warn" role="status">
             <div>
-              <b>Base isn't answering right now</b>
+              <b>{chain.name} isn't answering right now</b>
               <p>
                 The list shows the last block we read, {number.format(totals?.read?.block ?? 0)},{' '}
-                {ago(lag + Math.max(0, now - fetchedAt))}. Verify needs Base itself, so try it again
-                in a moment.
+                {ago(lag + Math.max(0, now - fetchedAt))}.{' '}
+                {isBase
+                  ? 'Verify needs Base itself, so try it again in a moment.'
+                  : 'Try again in a moment.'}
               </p>
             </div>
             <button
@@ -327,17 +356,17 @@ export function OnBase() {
             void read(query);
           }}
         >
-          <label htmlFor="ob-query" className="visually-hidden">
-            Search agents on Base
+          <label htmlFor={`ob-query-${chain.slug}`} className="visually-hidden">
+            Search agents on {chain.name}
           </label>
           <Search size={16} aria-hidden="true" />
           <input
-            id="ob-query"
+            id={`ob-query-${chain.slug}`}
             className="vf-input"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             maxLength={ON_BASE_QUERY_MAX}
-            placeholder="Base ID, wallet or agent name"
+            placeholder={`${chain.name} ID, wallet or agent name`}
             autoComplete="off"
             spellCheck={false}
           />
@@ -345,13 +374,18 @@ export function OnBase() {
             Find
           </button>
         </form>
+        {refused ? (
+          <p className="ob-under" role="status" data-search-note="refused">
+            {refused}
+          </p>
+        ) : null}
 
         {load.phase === 'error' ? (
           <div className="ob-banner" data-tone="bad" role="alert">
             <div>
               <b>The list couldn't be loaded</b>
               <p>
-                Nothing on this page changed on Base.{' '}
+                Nothing on this page changed on {chain.name}.{' '}
                 {known
                   ? 'The numbers are the last ones this browser saw. Trying again…'
                   : 'Trying again…'}
@@ -369,7 +403,9 @@ export function OnBase() {
             data-fresh={live ? 'live' : 'saved'}
           >
             <div>
-              <dt>{live ? <span className="ll-live" aria-hidden="true" /> : null} On Base now</dt>
+              <dt>
+                {live ? <span className="ll-live" aria-hidden="true" /> : null} On {chain.name} now
+              </dt>
               <dd>{totals ? number.format(totals.onBase) : sk}</dd>
               <dd className="ob-stat-sub">registered agents</dd>
             </div>
@@ -381,15 +417,15 @@ export function OnBase() {
             <div>
               <dt>Finalizing now</dt>
               <dd>{totals ? number.format(totals.finalizingNow) : sk}</dd>
-              <dd className="ob-stat-sub">final in 15–30 min</dd>
+              <dd className="ob-stat-sub">{chain.slug === 'base' ? 'final in 15–30 min' : 'final in seconds'}</dd>
             </div>
             <div>
               <dt>Rated agents</dt>
               <dd>{totals?.ratedAgents != null ? number.format(totals.ratedAgents) : sk}</dd>
-              <dd className="ob-stat-sub">final on Base</dd>
+              <dd className="ob-stat-sub">final on {chain.name}</dd>
             </div>
             <div>
-              <dt>Read from Base block</dt>
+              <dt>Read from {chain.name} block</dt>
               <dd>{totals?.read ? number.format(totals.read.block) : sk}</dd>
               <dd className="ob-stat-sub">
                 {totals?.read
@@ -402,22 +438,31 @@ export function OnBase() {
           </dl>
           <p className="ob-under">
             <span>
-              Final means Base can no longer change it. Finalizing rows turn final by themselves.
-              Central City registers each agent on Base from that agent's own account.
+              Final means {chain.name} can no longer change it. Finalizing rows turn final by
+              themselves. Central City registers each agent on {chain.name} from that agent's own
+              account.
             </span>
             {data ? (
-              <a href={basescanRegistry(data.registry)} target="_blank" rel="noreferrer">
-                See the registry on Basescan
+              <a
+                href={
+                  isBase
+                    ? basescanRegistry(data.registry)
+                    : chain.addressUrl(data.registry || chain.registry)
+                }
+                target="_blank"
+                rel="noreferrer"
+              >
+                See the registry on {chain.explorerName}
               </a>
             ) : null}
           </p>
 
           <div className="ob-head">
-            <h2>Registered on Base</h2>
+            <h2>Registered on {chain.name}</h2>
             <span>
               {data
                 ? load.phase === 'ready' && load.query
-                  ? `${number.format(data.rows.length)} found`
+                  ? `${number.format(data.rows.length)} found${searchNotes(data) ? ` · ${searchNotes(data)}` : ''}`
                   : `${number.format(data.totals.onBase)} registered agents, newest first`
                 : load.phase === 'error'
                   ? 'Trying again…'
@@ -428,15 +473,15 @@ export function OnBase() {
           <div
             className="ob-table"
             role="table"
-            aria-label="Agents registered on Base"
+            aria-label={`Agents registered on ${chain.name}`}
             aria-busy={data ? undefined : true}
             data-rows={data ? 'ready' : 'loading'}
           >
             <div className="ob-thead" role="row">
               <span role="columnheader">
-                <span className="visually-hidden">Verify</span>
+                <span className="visually-hidden">{isBase ? 'Verify' : 'Open'}</span>
               </span>
-              <span role="columnheader">Base ID</span>
+              <span role="columnheader">{chain.name} ID</span>
               <span role="columnheader">Agent</span>
               <span role="columnheader">Owner wallet</span>
               <span role="columnheader">Status</span>
@@ -457,10 +502,14 @@ export function OnBase() {
               <div className="ob-empty">
                 {load.phase === 'ready' && load.query ? (
                   <>
-                    <b>No registered agent matches “{load.query}”</b>
+                    <b>
+                      {data.incomplete
+                        ? `No matches for “${load.query}” in the results available so far`
+                        : `No registered agent matches “${load.query}”`}
+                    </b>
                     <span>
-                      Search by Base ID, owner wallet or agent name. Agents without a Base ID are
-                      under All agents.
+                      {data.notice ? `${searchNotes(data)}. ` : ''}Search by {chain.name} ID, owner
+                      wallet or agent name. Agents without a {chain.name} ID are under All agents.
                     </span>
                     <button
                       type="button"
@@ -475,10 +524,10 @@ export function OnBase() {
                   </>
                 ) : (
                   <>
-                    <b>No agents on Base yet</b>
+                    <b>No agents on {chain.name} yet</b>
                     <span>
-                      When an owner makes an agent a Base agent, it shows here as soon as Base
-                      includes it.
+                      When an owner makes an agent {isBase ? 'a Base' : `an ${chain.name}`} agent,
+                      it shows here as soon as {chain.name} includes it.
                     </span>
                   </>
                 )}
@@ -490,15 +539,25 @@ export function OnBase() {
                   <div className="ob-item" key={row.baseId} data-open={isOpen} role="rowgroup">
                     <div className="ob-row" role="row">
                       <span className="ob-c-verify" role="cell">
-                        <button
-                          type="button"
-                          className="ob-pill"
-                          aria-expanded={isOpen}
-                          aria-label={`${isOpen ? 'Hide' : 'Verify'} Base ID ${row.baseId}`}
-                          onClick={() => toggle(row)}
-                        >
-                          {isOpen ? 'Hide' : 'Verify'}
-                        </button>
+                        {isBase ? (
+                          <button
+                            type="button"
+                            className="ob-pill"
+                            aria-expanded={isOpen}
+                            aria-label={`${isOpen ? 'Hide' : 'Verify'} Base ID ${row.baseId}`}
+                            onClick={() => toggle(row)}
+                          >
+                            {isOpen ? 'Hide' : 'Verify'}
+                          </button>
+                        ) : (
+                          <a
+                            className="ob-pill"
+                            href={chain.agentPath(row.baseId)}
+                            aria-label={`Open ${chain.name} ID ${row.baseId}`}
+                          >
+                            Open
+                          </a>
+                        )}
                       </span>
                       <span className="ob-c-id ob-id" role="cell">
                         {row.baseId}
@@ -533,7 +592,7 @@ export function OnBase() {
                         <Status row={row} now={now} />
                       </span>
                     </div>
-                    {isOpen ? (
+                    {isOpen && isBase ? (
                       <OnBaseVerifyPanel
                         row={row}
                         state={checks[verifyKey(row)] ?? { phase: 'checking' }}

@@ -1,4 +1,5 @@
 import { createHash, hkdfSync, randomBytes } from 'node:crypto';
+import { decode32, otherSecretForms } from '../secret-env.js';
 
 /**
  * The responder root key (KEK) that wraps every stored provider key's data key (docs/RESPONDER.md).
@@ -28,31 +29,8 @@ export function responderKeyId(key: Buffer): string {
   return `k_${createHash('sha256').update('central-city/responder-kid:').update(key).digest('hex').slice(0, 12)}`;
 }
 
-const OTHER_SECRETS = [
-  'CITY_RATE_LIMIT_KEY',
-  'CITY_WAKE_SECRET',
-  'CITY_WAKE_SECRET_PREVIOUS',
-  'CITY_SIGNING_KEY',
-  'CITY_SIGNING_KEY_PREVIOUS',
-  'DATABASE_URL',
-] as const;
-
-/** 32 bytes from standard or URL-safe base64, else null. */
-function decode32(value: string): Buffer | null {
-  const text = value.trim();
-  if (!/^[A-Za-z0-9+/_-]{43}=?$/.test(text)) return null;
-  const bytes = Buffer.from(text.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
-  return bytes.length === 32 ? bytes : null;
-}
-
-/** Every byte form another secret could take, to compare the KEK against. */
-function forms(value: string): Buffer[] {
-  const out: Buffer[] = [Buffer.from(value, 'utf8'), Buffer.from(value.trim(), 'utf8')];
-  const b64 = decode32(value);
-  if (b64) out.push(b64);
-  if (/^[0-9a-f]{64}$/i.test(value.trim())) out.push(Buffer.from(value.trim(), 'hex'));
-  return out;
-}
+/** This keyring's own variables; every other deployment secret must differ (server/secret-env.ts). */
+const OWN_SECRETS = ['CITY_RESPONDER_KEK', 'CITY_RESPONDER_KEK_PREVIOUS'] as const;
 
 /** The key-encryption key: HKDF-SHA256 of the configured root, bound to this one purpose. */
 export function deriveKek(root: Buffer): Buffer {
@@ -78,17 +56,13 @@ export function responderKeys(
     : null;
   if (!current || (env.CITY_RESPONDER_KEK_PREVIOUS && !previous))
     return { available: false, reason: 'invalid' };
-  for (const name of OTHER_SECRETS) {
-    const other = env[name];
-    if (!other) continue;
-    for (const form of forms(other))
-      if (
-        form.equals(current) ||
-        (previous && form.equals(previous)) ||
-        form.equals(Buffer.from(raw))
-      )
-        return { available: false, reason: 'not_distinct' };
-  }
+  for (const form of otherSecretForms(env, OWN_SECRETS))
+    if (
+      form.equals(current) ||
+      (previous && form.equals(previous)) ||
+      form.equals(Buffer.from(raw))
+    )
+      return { available: false, reason: 'not_distinct' };
   const keys = [current, ...(previous && !previous.equals(current) ? [previous] : [])].map(
     (root) => {
       const key = deriveKek(root);

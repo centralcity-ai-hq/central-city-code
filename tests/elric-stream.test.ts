@@ -349,3 +349,75 @@ test('erasing an owner removes the drafts of their Elric', async (t) => {
     0,
   );
 });
+
+test('the draft disappears the moment Elric may no longer write: pause, responders off, removal', async (t) => {
+  const f = await elricFixture(t);
+  const url = (roomId: string) => `/api/rooms/${roomId}/elric-drafts`;
+  const wait = () => new Promise((resolve) => setTimeout(resolve, DRAFT_LIMITS.intervalMs + 50));
+  const count = async () =>
+    Number((await f.db.query('SELECT count(*)::int AS n FROM elric_drafts')).rows[0].n);
+  const cases: Array<[string, (s: Awaited<ReturnType<typeof f.scene>>) => Promise<void>]> = [
+    [
+      'paused',
+      async (s) => {
+        const res = await f.call(s.owner.cookie, 'POST', '/api/elric/pause', {});
+        assert.equal(res.statusCode, 200, res.body);
+      },
+    ],
+    [
+      'responders off',
+      async (s) => {
+        const res = await f.call(s.host.cookie, 'POST', `/api/rooms/${s.room.id}/settings`, {
+          responders_allowed: false,
+        });
+        assert.equal(res.statusCode, 200, res.body);
+      },
+    ],
+    [
+      'removed',
+      async (s) => {
+        const res = await f.call(
+          s.host.cookie,
+          'POST',
+          `/api/rooms/${s.room.id}/members/${s.elricId}/remove`,
+          {},
+        );
+        assert.equal(res.statusCode, 200, res.body);
+      },
+    ],
+  ];
+  for (const [label, stop] of cases) {
+    const s = await f.scene(`Draft stop ${label}`);
+    const trigger = await f.say(s.owner, s.room, '@Elric tell me something', s.person);
+    const seen: unknown[] = [];
+    f.small.push(async (req) => {
+      req.onText!('Once upon');
+      await wait();
+      seen.push((await f.call(s.host.cookie, 'GET', url(s.room.id))).json().drafts.length);
+      await stop(s);
+      seen.push((await f.call(s.host.cookie, 'GET', url(s.room.id))).json().drafts.length);
+      // The call is still streaming: nothing more is written or shown.
+      req.onText!('Once upon a time there was a room that should stay hidden.');
+      await wait();
+      seen.push((await f.call(s.host.cookie, 'GET', url(s.room.id))).json().drafts.length);
+      seen.push(
+        (
+          await f.db.query<{ text: string }>('SELECT text FROM elric_drafts WHERE agent_id=$1', [
+            s.elricId,
+          ])
+        ).rows.map((row) => row.text),
+      );
+      return { text: 'never posted' };
+    });
+    await f.elric.run({ agentId: s.elricId, roomId: s.room.id, sourceSeq: trigger.message.seq });
+    assert.deepEqual(seen.slice(0, 3), [1, 0, 0], label);
+    // The new text is never written, and (CCA-609) the stop deletes the stored draft at once in
+    // every case: pause, the host's responders off switch and removal alike.
+    assert.ok(
+      !(seen[3] as string[]).some((text) => text.includes('stay hidden')),
+      `${label}: ${JSON.stringify(seen[3])}`,
+    );
+    assert.deepEqual(seen[3], [], label);
+    assert.equal(await count(), 0, `${label}: no draft after the run`);
+  }
+});

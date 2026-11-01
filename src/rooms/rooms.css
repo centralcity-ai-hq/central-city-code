@@ -1015,6 +1015,14 @@
 .rm-task-cancel {
   justify-self: start;
 }
+/* The host's optional send-back reason: fills the actions row; the counter shows near the limit. */
+.rm-task-reason {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+.rm-task-actions .rm-meta:empty {
+  display: none;
+}
 /* Task comments (TaskComments.tsx): a thread inside the task card, design tokens only. */
 .rm-task-comments-toggle {
   justify-self: start;

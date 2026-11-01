@@ -18,6 +18,9 @@ import { ELRIC_TABLES } from './elric/schema.js';
 import { GOOGLE_TABLES } from './google/schema.js';
 import { EMAIL_TABLES } from './email/schema.js';
 import { BASE_TABLES } from './base/schema.js';
+import { PUBLIC_CARDS_TABLES } from './agent-rows/public-cards-schema.js';
+import { DOMAIN_FILE_TABLES } from './base/identity/domain-file.js';
+import { IDENTITY_MOVE_TABLES } from './base/identity/moves.js';
 import { DIRECTORY_TABLES } from './directory/schema.js';
 import { FEED_REQUEST_TABLES } from './feed/schema.js';
 import { FEED_SERVICE_TABLES } from './feed/services-schema.js';
@@ -25,11 +28,14 @@ import { FEED_OFFER_TABLES } from './feed/offers/schema.js';
 import { FEED_RESPOND_TABLES } from './feed/respond-schema.js';
 import { FEED_PAY_TABLES } from './feed/pay/schema.js';
 import { FEED_PAY_SPONSOR_TABLES } from './feed/pay/sponsor-schema.js';
+import { FEED_PAY_PUBLIC_TABLES } from './feed/pay/public-calls-schema.js';
 import { PAID_CALL_COUNT_TABLE } from './feed/pay/count-schema.js';
+import { DASHBOARD_TABLES } from './dashboard/schema.js';
 import { PROTOCOL_FEE_TABLES } from './protocol/fees/ledger.js';
 import { PROTOCOL_SCREENING_TABLES } from './protocol/screening/schema.js';
 import { X402_FACILITATOR_TABLES } from './protocol/x402/facilitator-schema.js';
 import { OWN_PAYMASTER_TABLES } from './base/chain/own-paymaster-budget.js';
+import { OWNER_SPONSOR_ETH_TABLES } from './feed/pay/sponsor-eth-sweep.js';
 import { DIRECT_BUNDLER_TABLES } from './base/chain/direct-bundler.js';
 import { ROOM_INVITATION_TABLES } from './rooms/invitations-schema.js';
 import { ELRIC_ERASE_TABLES } from './elric/erase.js';
@@ -455,13 +461,27 @@ export async function backupDatabase(dataPath: string, backupPath: string) {
         // migration 125 paid_call_count are derived (recomputed from workspaces, room members,
         // tasks and Feed pay calls): recognized on top of any schema and never exported, so they
         // never decide whether a schema is supported. After a restore the paid calls count is
-        // hidden or low until its daily check, never too high.
+        // hidden or low until its daily check, never too high. Migration 261 code_counts is
+        // derived the same way (recounted from the public repositories on GitHub): after a
+        // restore the line count is missing until the next count, never wrong. Migration 280
+        // agent_public_cards (and its backfill state) is derived from workspaces and manifests
+        // the same way: rebuilt by its triggers and its backfill after a restore. Migration 281
+        // base_domain_files is built again by the next run of its cron, and migration 282's
+        // moved IDs and log cursor are read again from Base.
         .filter(
           (name) =>
+            !(PUBLIC_CARDS_TABLES as readonly string[]).includes(name) &&
+            !(DOMAIN_FILE_TABLES as readonly string[]).includes(name) &&
+            !(IDENTITY_MOVE_TABLES as readonly string[]).includes(name) &&
             name !== 'public_stats' &&
+            name !== 'explorer_history' &&
+            name !== 'explorer_history_start' &&
+            name !== 'code_counts' &&
             name !== 'counted_agent_ids' &&
             name !== 'room_counts' &&
-            name !== PAID_CALL_COUNT_TABLE,
+            name !== PAID_CALL_COUNT_TABLE &&
+            // Migration 336 (the Agent Dashboard rollups): derived, rebuilt by its backfill.
+            !(DASHBOARD_TABLES as readonly string[]).includes(name),
         );
       const legacyTables = ['credentials', 'operators', 'replay_nonces', 'sessions', 'workspaces'];
       // Assistant grants and mutation receipts are authority, not recovery data.
@@ -601,12 +621,38 @@ export async function backupDatabase(dataPath: string, backupPath: string) {
         (roomPins.length !== roomPinTables.length || !tables.includes('room_members'))
       )
         throw new Error('Unsupported database schema; no backup was written.');
+      // Migration 330 (room decision and approval cards, docs/ROOMS.md) likewise sits on top of
+      // rooms: recognized and never exported, like the tasks and messages the cards refer to.
+      const roomCardTables = [
+        'room_cards',
+        // Migration 331 (room files): metadata, text pages and counters, never exported (the
+        // bytes live in the object store; a restore starts without files).
+        'room_artifacts',
+        'room_artifact_versions',
+        'room_artifact_text',
+        'room_storage_counters',
+        // Migration 332 (edit history and reactions of room messages): never exported, like the
+        // messages they belong to.
+        'room_message_edits',
+        'room_message_reactions',
+        // Migration 335 (one-time owner relabel): the run log, recognized and never exported; it
+        // only records that the relabel already ran, never room data.
+        'room_relabel_runs',
+      ];
+      if (roomCardTables.some((name) => tables.includes(name)) && !tables.includes('room_members'))
+        throw new Error('Unsupported database schema; no backup was written.');
       // Migration 70 (conversation_hidden, docs/MESSAGING.md) comes only on top of messaging:
       // per-person "hidden from my list" marks, recognized and never exported like the messages.
       if (tables.includes('conversation_hidden') && !tables.includes('messages'))
         throw new Error('Unsupported database schema; no backup was written.');
       // Migration 73 (conversation_reads) likewise: per-owner read marks, never exported.
       if (tables.includes('conversation_reads') && !tables.includes('messages'))
+        throw new Error('Unsupported database schema; no backup was written.');
+      // Migration 302 (conversation_summaries and its meta row, R8-2) likewise: derived from the
+      // messages (recounted by scripts/backfill-conversation-summaries.ts), never exported.
+      const summaryTables = ['conversation_summaries', 'conversation_summaries_meta'];
+      const summaryCount = summaryTables.filter((name) => tables.includes(name)).length;
+      if (summaryCount && (summaryCount !== summaryTables.length || !tables.includes('messages')))
         throw new Error('Unsupported database schema; no backup was written.');
       // Migration 39 (Elric, docs/ELRIC.md) may sit on top of any schema that has rooms: all of its
       // tables or none, recognized and never exported (no allowance, turn or pending action comes
@@ -693,6 +739,8 @@ export async function backupDatabase(dataPath: string, backupPath: string) {
         // like Feed pay: Base is the record of every sponsored payment, and the key record points
         // into base_spender_keys, which is not exported either.
         ...FEED_PAY_SPONSOR_TABLES,
+        // Migration 337 (the offers' public address): recognized and never exported, the same way.
+        ...FEED_PAY_PUBLIC_TABLES,
         ...ROOM_INVITATION_TABLES,
         // Migration 103 (Feed requests): public and short-lived, keyed by hashed client addresses,
         // so never exported; a restore starts the Feed's requests empty.
@@ -720,13 +768,18 @@ export async function backupDatabase(dataPath: string, backupPath: string) {
         // records point into base_spender_keys.
         ...OWN_PAYMASTER_TABLES,
         ...DIRECT_BUNDLER_TABLES,
+        // Migration 306 (owner one-click sponsor ETH move): the send log, recognized and never
+        // exported, like the paymaster's stored sends: Base is the record of every transfer.
+        ...OWNER_SPONSOR_ETH_TABLES,
         // Migration 115 (payment screening): short-lived decisions (minutes), recognized and never
         // exported; after a restore every new payment is screened again.
         ...PROTOCOL_SCREENING_TABLES,
         'conversation_hidden',
         'conversation_reads',
+        ...summaryTables,
         ...messageCountTables,
         ...roomPinTables,
+        ...roomCardTables,
         ...ELRIC_TABLES,
         ...GOOGLE_TABLES,
         // Migration 76 (email outbox, newsletter consent): recognized, never exported.

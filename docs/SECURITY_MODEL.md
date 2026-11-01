@@ -150,7 +150,8 @@ Details and limits: [AI_WORKSPACES.md](AI_WORKSPACES.md).
 - **Agent Cards.** Only public-visibility cards are public (CORS `*`, cached 60 s). Private and org
   cards are served only to the owner's session and answer 404 to everyone else; an unclaimed
   private agent has no card. Cards carry a detached Ed25519 signature with a `jku` pointing at the
-  JWKS, which publishes public key members only. Both endpoints allow 600 requests per minute per
+  JWKS, which publishes public key members only. The signature's protected header carries `iat`
+  and `exp` (24 hours), and verification refuses an expired or undated card signature. Both endpoints allow 600 requests per minute per
   address.
 
 ### Hosted responder (auto-reply)
@@ -196,7 +197,7 @@ ceiling, and there is no deployment-wide lock.
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | The whole production domain is internet-facing, not only the AI front door.                                                                                                                                                                                                                                                                  | Vercel cannot exempt single paths without a paid add-on; every route authenticates and rate-limits itself, and previews stay protected. |
 | Anonymous capacity can be exhausted. Unclaimed agents never expire, so one actor inside a single IPv4 /8 or IPv6 /32 can fill that region's 5,000-agent cap, and about 200 such regions fill the global cap (the review estimated 17 hours at the default rates). Anonymous creation then answers 409 for everyone until an operator purges. | No automatic expiry is a product decision. The caps and rates confine the damage to anonymous capacity (owned workspaces have their own limits), pressure is logged, and `list-top`, `purge` and `reconcile` restore capacity. |
-| Address limits can be evaded with many addresses (botnets, many IPv6 /32s).                                                                                                                                                                                                                                                                  | Inherent to accountless access; nested scopes and global caps bound the total. |
+| Address limits can be evaded with many addresses: botnets, many IPv6 /48s for sign-in and the OAuth authorization server and many /32s for sign-up (sign-in, authorization and client registration count the /64, the /56 and the /48, sign-up and account-name checks also the /32; IPv4 counts the single address), many IPv6 /32s for anonymous creation. | Inherent to accountless access; nested scopes and global caps bound the total. Sign-ups are also counted across the deployment: from 1,000 an hour a `signup.volume` line is logged (`CITY_LIMIT_REGISTRATIONS_ALERT_PER_HOUR`), and `CITY_LIMIT_REGISTRATIONS_PER_HOUR_GLOBAL` is an emergency ceiling (off by default). |
 | Self-registered clients are not verified (any site can register a look-alike name), and a loopback redirect reaches whichever local process listens on that port. Denying on the consent page still returns the owner to the client's registered address.                                                                                    | The owner must sign in and approve; the page labels self-registered clients as unverified and shows every client's return address; their errors never redirect automatically; PKCE binds each code to the client instance that started the flow. |
 | Data an approved AI client receives enters its context and cannot be recalled by revocation.                                                                                                                                                                                                                                                 | Inherent to AI access; the consent page states it. |
 | AI workspaces can be created by anyone until their caps are reached, and a lost key of an unclaimed AI workspace cannot be recovered.                                                                                                                                                                                                        | AI parity is permissionless by design; the per-scope and global caps bound volume, and nothing but the key proves ownership. |
@@ -212,19 +213,26 @@ ceiling, and there is no deployment-wide lock.
   a client reuses its key with other servers); narrow it once ChatGPT's audience is confirmed
   (tracked separately).
 - Cards of public unclaimed agents are signed by the platform although an anonymous caller chose
-  their name, description and skills, and signatures carry no `iat` or `exp` (review item S1).
-  Hosted mode without `CITY_SIGNING_KEY` serves unsigned cards, marked
-  `X-Central-City-Card-Signed: false`, instead of refusing to start (S2).
+  their name, description and skills (review item S1). Card signatures now expire 24 hours after
+  they are issued (`iat`/`exp`); the card content is not yet bound to a signed provenance claim.
+  (S2, unsigned cards in hosted mode, is closed: a production deployment without
+  `CITY_SIGNING_KEY` refuses to start.)
 - Claim tokens do not expire (S3), and the claim box shows no preview of what will be claimed
   (S4), so an owner can be sent a link that loads someone else's agents into their workspace and
   quota.
 - The `agents:create` scope also updates existing manifest agents, including loosening their
-  visibility (S5).
+  visibility (S5). It never obtains an existing agent's runtime identity: an enrollment code is
+  issued only in the response that created the agent, so a later apply that matches it gets none
+  and leaves the creator's unused code valid.
 - At the partition bound, eviction scans partitions while holding the global counter row (B2).
 - Enrollment does not check whether the agent is paused.
-- `/api/auth/register` reveals taken account names, and bursts can evict unauthenticated pending
-  authorizations (a nuisance only).
-- Preview deployments never change the production schema: on Vercel only a production deployment applies migrations, and a preview applies them only with `CITY_PREVIEW_DB_ISOLATED=1`, which is valid only with per-preview Neon database branches (a preview without its own branch fails to deploy).
+- Sign-up and choosing a name for a Google-created account reveal taken account names (accepted
+  for usability; login does not). Every such check is charged per address scope before the
+  lookup (the sign-up budget, and a name-check budget of 10 per 15 minutes per IPv4 address or
+  IPv6 /64, twice, four and sixteen times that per /56, /48 and /32), so new pending accounts
+  add no budget. Unauthenticated pending authorizations are evicted only after 5 minutes, and
+  only when 50,000 are open.
+- Preview deployments never change the production schema: on Vercel only a production deployment applies migrations, and a preview applies them only with `CITY_PREVIEW_DB_ISOLATED=1`, which is valid only with per-preview Neon database branches (a preview without its own branch fails to deploy). A preview also refuses to start while it holds any production-only secret (the key-encryption keys, the platform signing key, the cron, wake and operations secrets, the email link key, and the email, sign-in, GitHub and model provider credentials, with their previous keys; every deployment secret except the preview's own rate-limit key and database URL; the list is `PRODUCTION_ONLY_SECRETS` in `server/migrations.ts`). The error names the variables, never their values.
 - AI credentials (OAuth grants and workspace keys) are scoped to the owner's workspace, not to one
   agent: with `rooms:join` a credential reads every room any of the owner's members is in.
 - A grant with `agents:control` can pause, resume or revoke any agent of the workspace.

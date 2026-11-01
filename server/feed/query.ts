@@ -25,6 +25,7 @@
  * one stays null and never passes max_price.
  */
 import type { Address } from '../../shared/base/chains.js';
+import { ARC_USDC, chainFamily } from '../../shared/chains.js';
 import type { Database } from '../database.js';
 import {
   FEED_HTTP_METHODS,
@@ -140,6 +141,9 @@ interface ServiceRow {
   host_listed: number;
 }
 
+/** Central City's listing times are published to this step (a UTC day). */
+export const HOSTED_TIME_STEP_MS = 86_400_000;
+
 /** bigint columns arrive as numbers (PGlite) or strings (node-postgres). */
 const time = (value: number | string | null): number | null =>
   value === null ? null : Number(value);
@@ -165,6 +169,11 @@ export function feedServiceOf(
   moreFromHost: number,
 ): FeedService {
   const source = feedSourceOf(row.source);
+  // Central City writes one time for every listing of a publish, pause or resume, and one publish
+  // can cover several agents of one workspace: its listings show the UTC day only, so listings
+  // written together do not read as one owner's.
+  const hosted = source.name === HOSTED_SOURCE;
+  const shown = (value: number) => (hosted ? value - (value % HOSTED_TIME_STEP_MS) : value);
   return {
     id: row.id,
     kind: 'external_service',
@@ -196,8 +205,8 @@ export function feedServiceOf(
       credit: source.credit,
       url: source.url,
       recordId: row.record_id,
-      fetchedAt: Number(row.fetched_at),
-      updatedAt: time(row.source_updated_at),
+      fetchedAt: shown(Number(row.fetched_at)),
+      updatedAt: row.source_updated_at === null ? null : shown(Number(row.source_updated_at)),
     },
     usage: {
       paidCalls30d: row.paid_calls_30d,
@@ -205,7 +214,7 @@ export function feedServiceOf(
       lastCalledAt: time(row.last_called_at),
       reportedBy: source.name,
     },
-    lastSeenAt: Number(row.last_seen_at),
+    lastSeenAt: shown(Number(row.last_seen_at)),
     status: status === 'stale' && source.name === HOSTED_SOURCE ? 'active' : status,
     moreFromHost: Math.max(0, moreFromHost),
   };
@@ -399,11 +408,57 @@ const rankColumns = (a: string) =>
     .join(', ');
 
 /**
+ * A Central City listing is paid on its seller's chain: the chain of the wallet its offer pays
+ * (as the pay engine reads it). One read, only for a page that has such a listing; every other row
+ * stays as it is, and so does a listing on Base.
+ */
+export async function withSellerChains(
+  db: Queryable,
+  services: FeedService[],
+): Promise<FeedService[]> {
+  const hosted = services.filter((service) => service.source.name === HOSTED_SOURCE);
+  if (!hosted.length) return services;
+  const { rows } = await db.query<{ id: string; chain_id: number }>(
+    `SELECT s.id, w.chain_id FROM feed_services s
+     JOIN city_offers o ON s.record_id = 'cc:' || o.offer_id
+     JOIN base_wallets w ON w.wallet_id = o.wallet_id
+     WHERE s.id = ANY($1::text[])`,
+    [hosted.map((service) => service.id)],
+  );
+  const onArc = new Map(
+    rows
+      .filter((row) => chainFamily(Number(row.chain_id)) === 'arc')
+      .map((row) => [row.id, Number(row.chain_id)]),
+  );
+  if (!onArc.size) return services;
+  return services.map((service) => {
+    const chainId = onArc.get(service.id);
+    return chainId === undefined
+      ? service
+      : {
+          ...service,
+          network: `eip155:${chainId}` as const,
+          asset: { address: ARC_USDC, symbol: 'USDC', decimals: 6 },
+        };
+  });
+}
+
+/** One page of listed services (readFeedServices), each on the chain it is paid on. */
+export async function searchFeedServices(
+  db: Queryable,
+  query: FeedServiceQuery,
+  options: { limit: number; now: number },
+): Promise<FeedServicePage> {
+  const page = await readFeedServices(db, query, options);
+  return { ...page, services: await withSellerChains(db, page.services) };
+}
+
+/**
  * One page of listed services. Throws FeedQueryError 'source_unavailable' before the first
  * complete sweep and 'cursor_stale' for a cursor of another snapshot or data version (or one this
  * server did not write).
  */
-export async function searchFeedServices(
+async function readFeedServices(
   db: Queryable,
   query: FeedServiceQuery,
   options: { limit: number; now: number },
@@ -575,11 +630,15 @@ export async function feedServiceDetail(
   return {
     ...freshness,
     // The others of its host: all listed ones but itself (a withdrawn one is not among them).
-    service: feedServiceOf(
-      row,
-      withdrawn ? 'withdrawn' : listedStatus(freshness, now),
-      row.host_listed - (withdrawn ? 0 : 1),
-    ),
+    service: (
+      await withSellerChains(db, [
+        feedServiceOf(
+          row,
+          withdrawn ? 'withdrawn' : listedStatus(freshness, now),
+          row.host_listed - (withdrawn ? 0 : 1),
+        ),
+      ])
+    )[0]!,
   };
 }
 

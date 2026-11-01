@@ -10,16 +10,25 @@ import {
   standardDescription,
 } from '../shared/base/registration.js';
 import {
+  DOMAIN_PAGES_PATH,
+  DOMAIN_PAGE_SIZE,
   REGISTRATION_LIVE,
   ensureShortId,
   registerShortLinks,
 } from '../server/base/identity/short-links.js';
+import { BASE_DOMAIN_FILES_SQL, buildDomainFile } from '../server/base/identity/domain-file.js';
+import { AGENT_ROWS_SQL } from '../server/agent-rows/schema.js';
+import { WORKSPACE_AGENT_PATH_SQL } from '../server/agent-rows/agent-lookup-schema.js';
+import { AGENT_PUBLIC_CARDS_SQL } from '../server/agent-rows/public-cards-schema.js';
+import { backfillPublicCards } from '../server/agent-rows/public-cards.js';
 import {
   MAX_AGENT_URI_BYTES,
   isShortId,
   newShortId,
   shortAgentUri,
 } from '../shared/base/short-id.js';
+import { BASE_IDENTITY_MOVES_SQL } from '../server/base/identity/moves.js';
+import { BASE_IDENTITIES_BASE_ID_SQL } from '../server/base/explorer/base-id-index-schema.js';
 
 test('the on-chain agent URI is exactly one storage slot (≤ 31 bytes)', () => {
   for (let i = 0; i < 1000; i++) {
@@ -41,6 +50,13 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }) {
     "CREATE TABLE operators (id text PRIMARY KEY); INSERT INTO operators VALUES ('ws');",
   );
   await pg.exec(BASE_MIGRATION_SQL);
+  // Migration 85's provisional id column (its checks need operations these rows do not have) and
+  // the Base ID index (255) the domain file's scoped read and its pages go through.
+  await pg.exec(
+    'ALTER TABLE base_identities ADD COLUMN IF NOT EXISTS provisional_agent_id numeric(78,0)',
+  );
+  await pg.exec(BASE_IDENTITIES_BASE_ID_SQL);
+  await pg.exec(BASE_IDENTITY_MOVES_SQL);
   const db: Database = {
     query: (sql, params) => pg.query(sql, params) as never,
     exec: (sql) => pg.exec(sql),
@@ -163,25 +179,155 @@ test('the domain file lists exactly the confirmed agents with a public card at t
       ],
     );
   }
+  // The public cards (280) arrive after these agents, as on a database that had them: the file is
+  // built by the workspace documents' rule first, then from the backfilled cards, the same.
+  for (const sql of [
+    AGENT_ROWS_SQL,
+    WORKSPACE_AGENT_PATH_SQL,
+    AGENT_PUBLIC_CARDS_SQL,
+    BASE_DOMAIN_FILES_SQL,
+  ])
+    await db.exec(sql);
+  for (const ready of [false, true]) {
+    if (ready) assert.equal((await backfillPublicCards(db)).ready, true);
+    await buildDomainFile(db, 'https://centralcity.ai', { logLine: () => {} });
+    await buildDomainFile(db, 'https://preview.example', { logLine: () => {} });
+    const app = Fastify();
+    t.after(() => app.close());
+    registerShortLinks(app, { db, originOf: () => 'https://centralcity.ai' });
+    const res = await app.inject({ url: '/.well-known/agent-registration.json' });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.headers['access-control-allow-origin'], '*');
+    assert.equal(res.headers['cache-control'], REGISTRATION_LIVE);
+    assert.match(String(res.headers['content-type']), /^application\/json/);
+    assert.deepEqual(res.json(), {
+      registrations: [{ agentId: 101, agentRegistry: `eip155:8453:${registry}` }],
+    });
+
+    // Another origin (a preview) lists none of centralcity.ai's agents.
+    const other = Fastify();
+    t.after(() => other.close());
+    registerShortLinks(other, { db, originOf: () => 'https://preview.example' });
+    assert.deepEqual((await other.inject({ url: '/.well-known/agent-registration.json' })).json(), {
+      registrations: [],
+    });
+  }
+});
+
+test('the domain file is scoped to the newest; the paginated companion lists every one (CCA-118)', async (t) => {
+  const db = await setup(t);
+  await db.exec(`
+    CREATE TABLE workspaces (operator_id text PRIMARY KEY, data jsonb NOT NULL);
+    CREATE TABLE agent_manifests (agent_id text, operator_id text, revision int, manifest jsonb);
+  `);
+  for (const sql of [
+    AGENT_ROWS_SQL,
+    WORKSPACE_AGENT_PATH_SQL,
+    AGENT_PUBLIC_CARDS_SQL,
+    BASE_DOMAIN_FILES_SQL,
+  ])
+    await db.exec(sql);
+  const registry = '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432';
+  const other = '0x8004A818BFB912233c491871b3d84c89A494BD9e';
+  // Mainnet ids 1..2345 on one registry, plus id 1346 on a second one (two entries with one id,
+  // exactly at the first page's end), Sepolia ids 1..3; one agent without a public card and one
+  // whose holder moved it away are never listed.
+  await db.exec(`
+    INSERT INTO base_short_ids (short_id, agent_id, created_at)
+      SELECT 'm' || lpad(n::text, 5, '0'), 'm' || n, 1 FROM generate_series(1, 2349) n;
+    INSERT INTO base_identities (agent_id, chain_id, operator_id, registry_address,
+        erc8004_agent_id, agent_card_uri, owner_of_identity, state, updated_at)
+      SELECT 'm' || n, CASE WHEN n <= 2346 THEN 8453 ELSE 84532 END, 'ws',
+        CASE WHEN n = 2346 THEN '${other}' ELSE '${registry}' END,
+        CASE WHEN n <= 2345 THEN n WHEN n = 2346 THEN 1346 ELSE n - 2346 END,
+        'https://centralcity.ai/a/m' || lpad(n::text, 5, '0'), '0x1', 'confirmed', 1
+      FROM generate_series(1, 2349) n;
+    INSERT INTO agent_public_cards (agent_id, operator_id, revision, name)
+      SELECT 'm' || n, 'ws', 1, 'Agent' FROM generate_series(1, 2349) n;
+    INSERT INTO base_short_ids VALUES ('hidden', 'hidden', 1), ('movedA', 'moved', 1);
+    INSERT INTO base_identities (agent_id, chain_id, operator_id, registry_address,
+        erc8004_agent_id, agent_card_uri, owner_of_identity, state, updated_at)
+      VALUES ('hidden', 8453, 'ws', '${registry}', 9001, 'https://centralcity.ai/a/hidden', '0x1',
+          'confirmed', 1),
+        ('moved', 8453, 'ws', '${registry}', 9002, 'https://centralcity.ai/a/movedA', '0x1',
+          'confirmed', 1);
+    INSERT INTO agent_public_cards VALUES ('moved', 'ws', 1, 'Moved');
+    INSERT INTO base_identity_moves (agent_id, chain_id, reason, moved_at)
+      VALUES ('moved', 8453, 'uri', 1);
+  `);
   const app = Fastify();
   t.after(() => app.close());
   registerShortLinks(app, { db, originOf: () => 'https://centralcity.ai' });
-  const res = await app.inject({ url: '/.well-known/agent-registration.json' });
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.headers['access-control-allow-origin'], '*');
-  assert.equal(res.headers['cache-control'], REGISTRATION_LIVE);
-  assert.match(String(res.headers['content-type']), /^application\/json/);
-  assert.deepEqual(res.json(), {
-    registrations: [{ agentId: 101, agentRegistry: `eip155:8453:${registry}` }],
+  const get = (query: string) => app.inject({ url: `${DOMAIN_PAGES_PATH}${query}` });
+
+  // Before the public cards are backfilled a page would need every row: busy, never a partial list.
+  await db.query('UPDATE agent_public_cards_backfill SET ready = false WHERE id = 1');
+  const busy = await get('');
+  assert.equal(busy.statusCode, 503);
+  assert.equal(busy.headers['cache-control'], 'no-store');
+  await db.query('UPDATE agent_public_cards_backfill SET ready = true WHERE id = 1');
+
+  // The standard file, scoped: the newest of each chain (the cards' indexed read), id order.
+  await buildDomainFile(db, 'https://centralcity.ai', { logLine: () => {}, scope: 3 });
+  const file = await app.inject({ url: '/.well-known/agent-registration.json' });
+  assert.deepEqual(file.json(), {
+    registrations: [
+      { agentId: 1, agentRegistry: `eip155:84532:${registry}` },
+      { agentId: 2, agentRegistry: `eip155:84532:${registry}` },
+      { agentId: 3, agentRegistry: `eip155:84532:${registry}` },
+      { agentId: 2343, agentRegistry: `eip155:8453:${registry}` },
+      { agentId: 2344, agentRegistry: `eip155:8453:${registry}` },
+      { agentId: 2345, agentRegistry: `eip155:8453:${registry}` },
+    ],
   });
 
-  // Another origin (a preview) lists none of centralcity.ai's agents.
-  const other = Fastify();
-  t.after(() => other.close());
-  registerShortLinks(other, { db, originOf: () => 'https://preview.example' });
-  assert.deepEqual((await other.inject({ url: '/.well-known/agent-registration.json' })).json(), {
-    registrations: [],
-  });
+  // The companion: newest first, DOMAIN_PAGE_SIZE at most, pages end between two ids.
+  const seen: string[] = [];
+  let next: string | null = null;
+  const sizes: number[] = [];
+  do {
+    const res = await get(next === null ? '' : `?before=${next}`);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.headers['cache-control'], REGISTRATION_LIVE);
+    assert.equal(res.headers['access-control-allow-origin'], '*');
+    const page = res.json() as {
+      registrations: Array<{ agentId: number; agentRegistry: string }>;
+      chainId: number;
+      nextBefore: string | null;
+    };
+    assert.equal(page.chainId, 8453);
+    assert.ok(page.registrations.length <= DOMAIN_PAGE_SIZE);
+    sizes.push(page.registrations.length);
+    seen.push(...page.registrations.map((r) => `${r.agentId}@${r.agentRegistry.slice(-4)}`));
+    next = page.nextBefore;
+  } while (next !== null);
+  assert.deepEqual(sizes, [999, 1000, 347]);
+  assert.equal(new Set(seen).size, seen.length);
+  assert.equal(seen.length, 2346);
+  assert.deepEqual(seen.slice(998, 1001), ['1347@a432', '1346@BD9e', '1346@a432']);
+  assert.equal(seen.at(-1), '1@a432');
+  const sepolia = (await get('?chain=84532')).json() as { registrations: unknown[] };
+  assert.equal(sepolia.registrations.length, 3);
+
+  // Only the documented keys, each in its canonical form: never a separate edge-cache entry.
+  for (const query of ['?x=1', '?chain=1', '?chain=08453', '?before=abc', '?before=01']) {
+    const res = await get(query);
+    assert.equal(res.statusCode, 400, query);
+    assert.equal(res.headers['cache-control'], 'no-store', query);
+  }
+});
+
+test('an Arc agent is registered on Arc in the standard line, a Base agent still on Base', () => {
+  const standard = { name: 'Winry', passport: 'centralcity.ai/a/fjPsW7' };
+  assert.match(
+    standardDescription({ ...standard, chainName: 'Arc' }),
+    /Registered on Arc through Central City\./,
+  );
+  assert.equal(
+    standardDescription({ ...standard, chainName: 'Base' }),
+    standardDescription(standard),
+  );
+  assert.match(standardDescription(standard), /Registered on Base through Central City\./);
 });
 
 test("every registration file says its own agent's name and passport in the standard line", () => {

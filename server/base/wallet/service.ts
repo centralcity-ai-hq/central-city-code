@@ -7,7 +7,8 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import type { Database, Transaction } from '../../database.js';
-import { baseNetwork, type Address, type BaseChainId } from '../../../shared/base/chains.js';
+import type { Address } from '../../../shared/base/chains.js';
+import { chainNetwork, type ChainId } from '../../../shared/chains.js';
 import type {
   EnsureWalletInput,
   WalletDerivation,
@@ -19,13 +20,9 @@ import type {
 /** What the wallet service needs from the chain module (implemented in server/base/chain). */
 export interface WalletChainPort {
   /** Counterfactual smart-account address for the ordered owners and index; no RPC write. */
-  deriveSmartAccount(
-    chainId: BaseChainId,
-    owners: Address[],
-    accountIndex: bigint,
-  ): Promise<Address>;
+  deriveSmartAccount(chainId: ChainId, owners: Address[], accountIndex: bigint): Promise<Address>;
   /** A new spender smart account; its key stays inside the chain module. */
-  createSpender(chainId: BaseChainId): Promise<{ spender: Address; keyRef: string }>;
+  createSpender(chainId: ChainId): Promise<{ spender: Address; keyRef: string }>;
   /** Marks the spender key as referenced, inside the wallet insert transaction. */
   commitSpender(tx: Transaction, keyRef: string, at?: number): Promise<void>;
   /** The Coinbase Smart Wallet implementation version the factory deploys today. */
@@ -61,7 +58,7 @@ const view = (row: WalletRow): WalletView => ({
   walletId: row.wallet_id,
   agentId: row.agent_id,
   workspaceId: row.operator_id,
-  chainId: row.chain_id as BaseChainId,
+  chainId: row.chain_id as ChainId,
   address: row.address as Address,
   ownerAddress: row.owner_address as Address,
   ownerAccountId: row.owner_account_id ?? null,
@@ -136,7 +133,7 @@ export function createWalletService(deps: WalletServiceDeps): WalletService {
 
   return {
     async ensureWallet(input: EnsureWalletInput): Promise<WalletView> {
-      const network = baseNetwork(input.chainId, deps.env);
+      const network = chainNetwork(input.chainId, deps.env);
       if (!network) throw new WalletServiceError('network_unavailable', 'Network not available.');
       if (!ADDRESS.test(input.ownerAddress))
         throw new WalletServiceError('invalid_owner', 'Owner address is invalid.');
@@ -200,12 +197,12 @@ export function createWalletService(deps: WalletServiceDeps): WalletService {
       });
     },
 
-    async getWallet(agentId: string, chainId: BaseChainId) {
+    async getWallet(agentId: string, chainId: ChainId) {
       const row = await load(deps.db, agentId, chainId);
       return row ? view(row) : null;
     },
 
-    async freeze(agentId: string, chainId: BaseChainId, actorId: string) {
+    async freeze(agentId: string, chainId: ChainId, actorId: string) {
       return deps.db.transaction(async (tx) => {
         const { rows } = await tx.query<WalletRow>(
           `UPDATE base_wallets SET state = 'frozen', updated_at = $3

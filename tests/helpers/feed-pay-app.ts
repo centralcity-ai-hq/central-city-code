@@ -20,8 +20,9 @@ import { BAZAAR_SOURCE } from '../../server/feed/types.js';
 import { WALLET_NET } from '../wallet-network-fixture.js';
 import { fakeX402Service, type FakeServiceConfig } from './fake-x402-service.js';
 import { feedPayFakeBase } from './feed-pay-fake-base.js';
+import { signedConsent } from './agent-pay-sign.js';
 import { OWNER, PASSWORD } from '../oauth-helpers.js';
-import type { ScreeningProvider } from '../../server/protocol/screening/gate.js';
+import type { ScreeningGate, ScreeningProvider } from '../../server/protocol/screening/gate.js';
 import type { FeedPayEngineDeps } from '../../server/feed/pay/engine.js';
 
 /*
@@ -102,6 +103,8 @@ export async function setup(
     now?: number;
     /** Payment screening's provider (a fake; never the network). */
     screeningProvider?: () => ScreeningProvider | null;
+    /** Arc's screening gate (a fake): absent, one that clears; null, none wired. */
+    arcScreening?: ScreeningGate | null;
     /** The kinds a service sold by a Central City agent runs (the built-in registry by default). */
     offerKinds?: FeedPayEngineDeps['offerKinds'];
     /**
@@ -113,12 +116,24 @@ export async function setup(
     finalityPerRun?: number;
     /** The sponsored first purchase's payer (server/feed/pay/sponsored.ts); unset: none. */
     sponsorPay?: import('../../server/feed/pay/sponsored.js').SponsoredDeps['pay'];
+    /** The offers' public address's lane (server/feed/offers/public-pay.ts); unset: closed. */
+    publicOfferLane?: () => Promise<
+      import('../../server/feed/offers/public-pay.js').PublicOfferLane | null
+    >;
+    publicOfferWaitMs?: number;
+    /** The app's rate limiter (its in-memory one by default). */
+    rateLimiter?: import('../../server/rate-limit.js').RateLimiter;
+    /** The app's log lines. */
+    logLine?: (line: string) => void;
+    /** A second fake chain on this network, wired in as the engine's Arc side (`arcBase`). */
+    arcNetwork?: import('../../shared/base/chains.js').BaseNetwork;
   } = {},
 ) {
   withEnv(t, { ...FLAGS, ...options.env });
   let clockMs = options.now ?? Date.now();
   const clock = () => clockMs;
   const base = feedPayFakeBase(clock);
+  const arcBase = options.arcNetwork ? feedPayFakeBase(clock, options.arcNetwork) : null;
   const service = fakeX402Service({ settle: base.settle });
   const alerts: FeedPayAlert[] = [];
   let database: Database | undefined;
@@ -126,8 +141,35 @@ export async function setup(
     dataDir: ':memory:',
     startWorkers: false,
     now: clock,
+    ...(options.rateLimiter ? { rateLimiter: options.rateLimiter } : {}),
+    ...(options.logLine ? { logLine: options.logLine } : {}),
     feedPay: {
       chain: async () => base.chainFor(() => database!),
+      ...(arcBase
+        ? {
+            arc: {
+              chain: async () => arcBase.chainFor(() => database!),
+              facilitator: async () => arcBase.facilitatorFor(() => database!),
+              // Arc always screens: clear by default, a test about screening brings its own gate.
+              ...(options.arcScreening !== null
+                ? {
+                    screening:
+                      options.arcScreening ??
+                      ({
+                        screen: async () => ({
+                          allowed: true,
+                          outcome: 'allowed',
+                          decisionId: 'synthetic',
+                          reason: 'clear',
+                          expiresAt: clockMs + 60_000,
+                          reused: false,
+                        }),
+                      } as unknown as ScreeningGate),
+                  }
+                : {}),
+            },
+          }
+        : {}),
       http: service.http,
       alert: (alert) => void alerts.push(alert),
       ...(options.screeningProvider ? { screeningProvider: options.screeningProvider } : {}),
@@ -137,6 +179,10 @@ export async function setup(
         : { facilitator: async () => null }),
       ...(options.finalityPerRun !== undefined ? { finalityPerRun: options.finalityPerRun } : {}),
       sponsorPay: options.sponsorPay ?? (async () => null),
+      publicOfferLane: options.publicOfferLane ?? (async () => null),
+      ...(options.publicOfferWaitMs !== undefined
+        ? { publicOfferWaitMs: options.publicOfferWaitMs }
+        : {}),
       sleep: async (ms) => {
         clockMs += ms;
         await new Promise((resolve) => setImmediate(resolve));
@@ -295,7 +341,15 @@ export async function setup(
         method: 'PUT',
         url: `/api/base/agents/${agentId}/wallet/agent-pay`,
         headers: { ...json, cookie: owner.cookie },
-        payload: JSON.stringify({ permissionHash, ...(shown ? { recipients: shown } : {}) }),
+        // Signed by the wallet's owner key, as the owner's screen does (CCA-113).
+        payload: await signedConsent(
+          app,
+          owner.cookie,
+          agentId,
+          ownerKey,
+          { permissionHash, ...(shown ? { recipients: shown } : {}) },
+          { issuedAt: clock() },
+        ),
       });
     };
     return { owner, grant, main, agentId, ownerKey, wallet, walletId, limit, consentView, consent };
@@ -404,6 +458,7 @@ export async function setup(
     db,
     sql,
     base,
+    arcBase,
     service,
     alerts,
     owner,

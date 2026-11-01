@@ -144,6 +144,7 @@ test(
       treasury: { wallet: treasury, spender, spenderKeyRef: keyRef },
       permission,
       permissionSignature,
+      permissionPolicy: { plannedPerPeriod: parseEther('0.05') },
       token: NATIVE_ETH,
       transfers: agents.map((to) => ({ to, amount: parseEther('0.01') })),
       beforeBroadcast: async () => {},

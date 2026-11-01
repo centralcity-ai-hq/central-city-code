@@ -31,6 +31,7 @@ const COLUMNS: [string, [string, string, boolean?][]][] = [
     'Open Source',
     [
       ['Agent Explorer', '/explorer'],
+      ['Analytics', '/analytics'],
       // Elric's code is on /downtown, under Repository (the product owner, 15 Oct).
       ['Downtown', '/downtown'],
       ['Verify', '/downtown/verify'],
@@ -42,6 +43,7 @@ const COLUMNS: [string, [string, string, boolean?][]][] = [
       ['About', '/about'],
       ['Contact', '/contact'],
       ['Security', '/security'],
+      ['Security audit', '/audit'],
       ['Privacy', '/privacy'],
     ],
   ],
@@ -114,11 +116,12 @@ test('every footer link resolves: no 404, and anchors exist', async ({ page }) =
       expect(href, href).toMatch(/^https:\/\/github\.com\/centralcity-ai-hq\//);
       continue;
     }
-    // The X profile (footer socials) is the one other outside link.
+    // The social links were re-added on purpose (30 Oct 2026): external, checked by origin only.
     if (url.origin === 'https://x.com') {
-      expect(href, href).toBe('https://x.com/centralcityai');
+      expect(href, href).toMatch(/^https:\/\/x\.com\/centralcity_hub/);
       continue;
     }
+    if (['https://bsky.app', 'https://medium.com', 'https://t.me'].includes(url.origin)) continue;
     expect(url.origin, href).toBe(new URL(page.url()).origin);
     if (/\.(json|md|txt)$/.test(url.pathname)) {
       expect((await page.request.get(url.toString())).status(), href).toBe(200);

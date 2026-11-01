@@ -51,6 +51,10 @@ The secret scan and a few integration tests need the checksum-pinned Gitleaks bi
 accounts and credentials in tests and fixtures. Add or update tests with every behaviour
 change, especially around authorization, credentials, OAuth/MCP and workspace isolation.
 
+Run `pnpm smoke:bundle` before merging server changes: it builds the single-file server bundle
+and sends real requests through it on an in-memory database, which catches import cycles that
+only exist in the bundle.
+
 ## Pull requests
 
 1. Open an issue first for larger changes or anything touching security boundaries, so the

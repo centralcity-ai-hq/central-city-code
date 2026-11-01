@@ -33,37 +33,61 @@ export async function lockSubject(
   subject: string,
   time: number,
 ): Promise<void> {
-  const hash = ageLockHash(subject);
-  // Without the PII key the account lock still applies; only this record is skipped.
-  if (!hash) return;
+  const hash = ageLockHashes(subject)[0];
+  // Without the PII key the account lock still applies; only this record is skipped, and that is
+  // logged (no subject, no account) so the gap can be seen.
+  if (!hash) {
+    console.warn(
+      JSON.stringify({ event: 'google.age_lock_not_recorded', at: new Date(time).toISOString() }),
+    );
+    return;
+  }
   await tx.query(
     'INSERT INTO google_age_locks(subject_hash,locked_at) VALUES($1,$2) ON CONFLICT DO NOTHING',
     [hash, time],
   );
 }
+/**
+ * True when `subject` is age-locked under any key of the ring. A lock found only under
+ * CITY_PII_KEK_PREVIOUS (during a rotation) is recorded under the current key too, with its
+ * original time, so it outlasts the previous key once that Google account is seen again.
+ */
 export async function subjectLocked(
   q: Pick<Transaction, 'query'>,
   subject: string,
 ): Promise<boolean> {
-  const hash = ageLockHash(subject);
-  if (!hash) return false;
-  return (
-    (await q.query('SELECT 1 FROM google_age_locks WHERE subject_hash=$1', [hash])).rows.length > 0
-  );
+  const hashes = ageLockHashes(subject);
+  if (!hashes.length) return false;
+  const found = (
+    await q.query<{ subject_hash: string; locked_at: string | number }>(
+      'SELECT subject_hash,locked_at FROM google_age_locks WHERE subject_hash = ANY($1::text[])',
+      [hashes],
+    )
+  ).rows;
+  if (!found.length) return false;
+  if (!found.some((row) => row.subject_hash === hashes[0]))
+    await q.query(
+      'INSERT INTO google_age_locks(subject_hash,locked_at) VALUES($1,$2) ON CONFLICT DO NOTHING',
+      [hashes[0], Number(found[0]!.locked_at)],
+    );
+  return true;
 }
 /**
- * The permanent age-lock hash: an HMAC under a key derived (HKDF, its own label) from the current
- * CITY_PII_KEK, never from CITY_RATE_LIMIT_KEY (rotating that must not drop locks). Rotating
- * CITY_PII_KEK changes this key and the subjects are not stored, so the locks cannot be re-hashed
- * (docs/GOOGLE_SIGNIN.md). Null without a key.
+ * The permanent age-lock hashes, current key first: HMACs under keys derived (HKDF, its own label)
+ * from CITY_PII_KEK and, during a rotation, CITY_PII_KEK_PREVIOUS; never from
+ * CITY_RATE_LIMIT_KEY (rotating that must not drop locks). The subjects are not stored, so a
+ * lock moves to the new key only when its Google account is seen again (subjectLocked);
+ * docs/GOOGLE_SIGNIN.md has the rotation plan. Empty without a key.
  */
-function ageLockHash(subject: string): string | null {
+function ageLockHashes(subject: string): string[] {
   const keyring = defaultPiiKeyring();
-  if (!keyring.available) return null;
-  const key = Buffer.from(
-    hkdfSync('sha256', keyring.current.key, '', 'central-city/google-age-lock/v1', 32),
-  );
-  return createHmac('sha256', key).update(`google\n${subject}`).digest('hex');
+  if (!keyring.available) return [];
+  return keyring.all.map((entry) => {
+    const key = Buffer.from(
+      hkdfSync('sha256', entry.key, '', 'central-city/google-age-lock/v1', 32),
+    );
+    return createHmac('sha256', key).update(`google\n${subject}`).digest('hex');
+  });
 }
 
 export const subjectHash = (subject: string) =>

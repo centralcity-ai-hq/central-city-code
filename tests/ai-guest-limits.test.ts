@@ -15,6 +15,7 @@ import {
   type JoinOutcome,
   type SmokeTransport,
 } from '../scripts/smoke/ai-guest.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 process.env.CITY_INVITE_FLOW = '1';
 process.env.CITY_RATE_LIMIT_KEY ??= 'synthetic-limits-test-root-stand-in-secret';
@@ -68,7 +69,7 @@ async function fixture(
     '203.0.113.40',
   );
   assert.equal(registered.statusCode, 201, registered.body);
-  const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(registered.cookies);
   const host = { cookie };
   const agent = await post(
     '/api/agents',
@@ -222,7 +223,7 @@ describe('ai-guest limits (issue #140: rooms of 100)', () => {
       '203.0.113.41',
     );
     assert.equal(registered.statusCode, 201, registered.body);
-    const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+    const cookie = sessionPair(registered.cookies);
     const other = { cookie };
     const otherAgent = await f.post(
       '/api/agents',

@@ -1,4 +1,5 @@
-import { lookup as dnsLookup, type LookupAddress } from 'node:dns';
+import type { LookupAddress } from 'node:dns';
+import { Resolver } from 'node:dns/promises';
 import { request as httpsRequest } from 'node:https';
 import { BlockList, isIP } from 'node:net';
 import { ASSERTION_ALGS, signingKeys } from './client-auth.js';
@@ -317,98 +318,201 @@ type LookupCallback = (
   address: string | LookupAddress[],
   family?: number,
 ) => void;
-
-/** DNS lookup that refuses non-public answers at connection time (no rebinding window). */
-export function publicLookup(
+/** A connect-time `lookup` (net, tls, https) in Node's callback form. */
+export type PublicLookup = (
   hostname: string,
-  options: { all?: boolean } | number | undefined,
+  options: { all?: boolean; family?: number | string } | number | undefined,
   callback: LookupCallback,
-): void {
-  dnsLookup(hostname, { all: true, verbatim: true }, (error, addresses) => {
-    if (error) return callback(error, []);
-    if (!addresses.length || !addresses.every((entry) => isPublicAddress(entry.address)))
-      return callback(
-        Object.assign(new Error('Client metadata host resolves to a non-public address.'), {
-          code: 'ENOTPUBLIC',
-        }),
-        [],
-      );
-    if (typeof options === 'object' && options?.all) return callback(null, addresses);
-    return callback(null, addresses[0]!.address, addresses[0]!.family);
-  });
+) => void;
+/** Every address a host name resolves to; rejects when it has none or the lookup failed. */
+export type ResolveAddresses = (hostname: string, signal: AbortSignal) => Promise<LookupAddress[]>;
+
+/** One lookup try waits at most this long for a name server (each transport's deadline still applies). */
+const DNS_TRY_TIMEOUT_MS = 2_000;
+
+/**
+ * Resolves through the name servers directly (c-ares: A and AAAA, every answer), never
+ * dns.lookup: getaddrinfo runs on libuv's small shared threadpool and cannot be cancelled, so a
+ * name whose servers never answer would hold a pool thread past every deadline and stall password
+ * hashing, file access and other lookups of the process (the rule feed/offers/safe-fetch.ts follows
+ * too). Each lookup has its own resolver with one try per server, and is cancelled when the signal
+ * aborts. No hosts file and no search domains are used. `servers` (host:port) defaults to the
+ * system's name servers.
+ */
+export function createResolveAddresses(
+  options: { servers?: readonly string[]; tryTimeoutMs?: number } = {},
+): ResolveAddresses {
+  return async (hostname, signal) => {
+    // Already cancelled (the deadline passed first): no query is started at all.
+    if (signal.aborted)
+      throw Object.assign(new Error('The host name lookup was cancelled.'), {
+        code: 'ECANCELLED',
+      });
+    const resolver = new Resolver({
+      timeout: options.tryTimeoutMs ?? DNS_TRY_TIMEOUT_MS,
+      tries: 1,
+    });
+    if (options.servers) resolver.setServers([...options.servers]);
+    const cancel = () => resolver.cancel();
+    signal.addEventListener('abort', cancel, { once: true });
+    try {
+      const [v4, v6] = await Promise.allSettled([
+        resolver.resolve4(hostname),
+        resolver.resolve6(hostname),
+      ]);
+      const answers: LookupAddress[] = [
+        ...(v4.status === 'fulfilled' ? v4.value : []).map((address) => ({ address, family: 4 })),
+        ...(v6.status === 'fulfilled' ? v6.value : []).map((address) => ({ address, family: 6 })),
+      ];
+      if (answers.length) return answers;
+      throw Object.assign(new Error('The host name could not be resolved.'), { code: 'ENOTFOUND' });
+    } finally {
+      signal.removeEventListener('abort', cancel);
+    }
+  };
+}
+const systemResolveAddresses = createResolveAddresses();
+
+/**
+ * A connect-time lookup that refuses non-public answers (no rebinding window): every address the
+ * name resolves to must be public. `signal` cancels a lookup still running (a transport's
+ * deadline); `resolve` replaces the name servers in tests.
+ */
+export function createPublicLookup(
+  options: { resolve?: ResolveAddresses; signal?: AbortSignal } = {},
+): PublicLookup {
+  const resolve = options.resolve ?? systemResolveAddresses;
+  return (hostname, lookupOptions, callback) => {
+    const signal = options.signal ?? new AbortController().signal;
+    resolve(hostname, signal).then(
+      (addresses) => {
+        if (!addresses.length || !addresses.every((entry) => isPublicAddress(entry.address)))
+          return callback(
+            Object.assign(new Error('Client metadata host resolves to a non-public address.'), {
+              code: 'ENOTPUBLIC',
+            }),
+            [],
+          );
+        const opts = typeof lookupOptions === 'object' ? lookupOptions : {};
+        const wanted = typeof lookupOptions === 'number' ? lookupOptions : opts?.family;
+        const family =
+          wanted === 4 || wanted === 'IPv4' ? 4 : wanted === 6 || wanted === 'IPv6' ? 6 : 0;
+        const list = family ? addresses.filter((entry) => entry.family === family) : addresses;
+        if (!list.length)
+          return callback(
+            Object.assign(new Error('No address for this family.'), { code: 'ENOTFOUND' }),
+            [],
+          );
+        if (opts?.all) return callback(null, list);
+        return callback(null, list[0]!.address, list[0]!.family);
+      },
+      (error: NodeJS.ErrnoException) => callback(error, []),
+    );
+  };
+}
+
+/** The shared connect-time lookup of the outbound transports: public addresses only. */
+export const publicLookup: PublicLookup = createPublicLookup();
+
+/**
+ * The one answer for every failure to reach a metadata document or JWK Set host: a name that
+ * resolves only to private addresses, a missing name, a refused connection and a non-200 answer
+ * look the same, so the answers do not tell an outside caller which internal names exist.
+ */
+const NOT_RETRIEVED = 'Client metadata document could not be retrieved.';
+/** Suffixes that only mean something inside a network (as feed/offers/safe-fetch.ts refuses). */
+const LOCAL_SUFFIX =
+  /(?:^|\.)(?:localhost|local|localdomain|internal|intranet|lan|home|corp|arpa|test|invalid)$/i;
+
+/**
+ * True for a host name that is never public: no dot, or a local-only suffix, also with trailing
+ * dots ("localhost." is localhost). The static check of the outbound fetchers and webhook urls,
+ * refused without a DNS query; the connect-time lookup still checks every address.
+ */
+export function localOnlyHostName(hostname: string): boolean {
+  const host = hostname.replace(/\.+$/, '');
+  return !host.includes('.') || LOCAL_SUFFIX.test(host);
+}
+
+export interface ClientMetadataFetcherOptions {
+  resolve?: ResolveAddresses;
+  /** Tests only: connect to a local TLS server (port, its CA and a lookup to its address). */
+  connect?: { port: number; ca: string | Buffer; lookup: PublicLookup };
 }
 
 /**
  * Fetches a Client ID Metadata Document: HTTPS on port 443 only, public addresses only,
- * no redirects, strict timeout and size limit, JSON content type required.
+ * no redirects, strict timeout and size limit, JSON content type required. A refused answer
+ * closes the connection at once, and the deadline also cancels a host name lookup still running.
  */
-export const fetchClientMetadataDocument: ClientMetadataFetcher = (url) =>
-  new Promise((resolve, reject) => {
-    const fail = (message: string) => reject(new ClientError(message));
-    if (url.protocol !== 'https:' || url.port || url.username || url.password)
-      return fail('Client metadata must be served over https on the default port.');
-    const host = url.hostname.startsWith('[') ? url.hostname.slice(1, -1) : url.hostname;
-    if (isIP(host) && !isPublicAddress(host))
-      return fail('Client metadata host is not a public address.');
-    let settled = false;
-    const finish = (action: () => void) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      action();
-    };
-    const req = httpsRequest(
-      url,
-      {
-        method: 'GET',
-        headers: { accept: 'application/json', 'user-agent': 'central-city-oauth/1' },
-        lookup: publicLookup as never,
-        agent: false,
-      },
-      (res) => {
-        if (res.statusCode !== 200) {
-          res.resume();
-          return finish(() => fail('Client metadata document could not be retrieved.'));
-        }
-        if (!/^application\/([a-z.+-]*\+)?json\b/i.test(res.headers['content-type'] ?? '')) {
-          res.resume();
-          return finish(() => fail('Client metadata document must be JSON.'));
-        }
-        const chunks: Buffer[] = [];
-        let length = 0;
-        res.on('data', (chunk: Buffer) => {
-          length += chunk.length;
-          if (length > CLIENT_METADATA_LIMITS.maxBytes) {
-            req.destroy();
-            finish(() => fail('Client metadata document is too large.'));
-            return;
-          }
-          chunks.push(chunk);
-        });
-        res.on('end', () =>
-          finish(() => {
-            try {
-              resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-            } catch {
-              fail('Client metadata document is not valid JSON.');
-            }
-          }),
-        );
-        res.on('error', () => finish(() => fail('Client metadata document could not be read.')));
-      },
-    );
-    const timer = setTimeout(() => {
-      req.destroy();
-      finish(() => fail('Client metadata request timed out.'));
-    }, CLIENT_METADATA_LIMITS.timeoutMs);
-    req.on('error', (error: NodeJS.ErrnoException) =>
-      finish(() =>
-        fail(
-          error.code === 'ENOTPUBLIC'
-            ? 'Client metadata host is not a public address.'
-            : 'Client metadata document could not be retrieved.',
-        ),
-      ),
-    );
-    req.end();
-  });
+export function createClientMetadataFetcher(
+  options: ClientMetadataFetcherOptions = {},
+): ClientMetadataFetcher {
+  return (url) =>
+    new Promise((resolve, reject) => {
+      const fail = (message: string) => reject(new ClientError(message));
+      if (url.protocol !== 'https:' || url.port || url.username || url.password)
+        return fail('Client metadata must be served over https on the default port.');
+      const host = url.hostname.startsWith('[') ? url.hostname.slice(1, -1) : url.hostname;
+      if (isIP(host) ? !isPublicAddress(host) : localOnlyHostName(host)) return fail(NOT_RETRIEVED);
+      const lookups = new AbortController();
+      let settled = false;
+      const finish = (action: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        lookups.abort();
+        action();
+      };
+      // A refused answer closes the socket: resuming it would keep the connection open and keep
+      // downloading past the deadline and the size limit, for as long as the host keeps sending.
+      const refuse = (message: string) => {
+        req.destroy();
+        finish(() => fail(message));
+      };
+      const req = httpsRequest(
+        url,
+        {
+          method: 'GET',
+          headers: { accept: 'application/json', 'user-agent': 'central-city-oauth/1' },
+          lookup: (options.connect?.lookup ??
+            createPublicLookup({ resolve: options.resolve, signal: lookups.signal })) as never,
+          agent: false,
+          ...(options.connect ? { port: options.connect.port, ca: options.connect.ca } : {}),
+        },
+        (res) => {
+          if (res.statusCode !== 200) return refuse(NOT_RETRIEVED);
+          if (!/^application\/([a-z.+-]*\+)?json\b/i.test(res.headers['content-type'] ?? ''))
+            return refuse('Client metadata document must be JSON.');
+          const chunks: Buffer[] = [];
+          let length = 0;
+          res.on('data', (chunk: Buffer) => {
+            length += chunk.length;
+            if (length > CLIENT_METADATA_LIMITS.maxBytes)
+              return refuse('Client metadata document is too large.');
+            chunks.push(chunk);
+          });
+          res.on('end', () =>
+            finish(() => {
+              try {
+                resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+              } catch {
+                fail('Client metadata document is not valid JSON.');
+              }
+            }),
+          );
+          res.on('error', () => finish(() => fail('Client metadata document could not be read.')));
+        },
+      );
+      const timer = setTimeout(
+        () => refuse('Client metadata request timed out.'),
+        CLIENT_METADATA_LIMITS.timeoutMs,
+      );
+      // ENOTPUBLIC (only private addresses), a missing name and connection errors look the same.
+      req.on('error', () => finish(() => fail(NOT_RETRIEVED)));
+      req.end();
+    });
+}
+
+/** The production metadata document and JWK Set fetcher. */
+export const fetchClientMetadataDocument: ClientMetadataFetcher = createClientMetadataFetcher();

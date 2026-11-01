@@ -8,6 +8,7 @@ import { createApp } from '../server/app.js';
 import { BASE_NETWORKS } from '../shared/base/chains.js';
 import { AGENT_URI_ORIGIN } from '../shared/base/on-base.js';
 import { INVITE_PATHS, type ReceivedInvitation, type SentInvitation } from '../shared/directory.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 process.env.CITY_RATE_LIMIT_KEY ??= 'synthetic-room-invitations-test-root-secret';
 
@@ -86,7 +87,7 @@ export async function fixture(
       remoteAddress: `203.0.113.${address++}`,
     });
     assert.equal(registered.statusCode, 201, registered.body);
-    const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+    const cookie = sessionPair(registered.cookies);
     const agent = await send('POST', '/api/agents', cookie, {
       name: `${name} agent`,
       capability: 'research',

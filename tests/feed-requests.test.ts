@@ -462,7 +462,8 @@ test('duplicates: the same text from anyone, the same title from the same poster
   assert.deepEqual(retry.json(), first);
 
   const changed = await post(h, { ...payload, description: 'Something else entirely.' });
-  assert.equal(changed.statusCode, 400);
+  assert.equal(changed.statusCode, 409);
+  assert.equal(changed.json().code, 'idempotency_conflict');
   assert.match(changed.json().error, /idempotencyKey/);
 
   const copy = await post(h, { ...body(payload.title), description: payload.description }, ip(9));
@@ -742,16 +743,16 @@ test('one network cannot spend the report budget of everyone', async (t) => {
   assert.equal((await report(far(5))).statusCode, 202, 'other networks still report');
 });
 
-test('close: the manage token or the posting workspace; others 403, hidden 404, twice 409', async (t) => {
+test('close: the manage token or the posting workspace; others 404 whatever the state, twice 409', async (t) => {
   const h = await harness(t);
   const { request, manageToken } = await posted(h, body('Record a voice-over'));
   const close = (id: string, payload: Record<string, unknown>) =>
     h.app.inject({ method: 'POST', url: closePath(id), payload, remoteAddress: ip(5) });
 
   const wrong = await close(request.id, { manageToken: `ccf_${'b'.repeat(43)}` });
-  assert.equal(wrong.statusCode, 403);
-  assert.equal(wrong.json().code, 'not_poster');
-  assert.equal((await close(request.id, {})).statusCode, 403);
+  assert.equal(wrong.statusCode, 404);
+  assert.equal(wrong.json().code, 'request_not_found');
+  assert.equal((await close(request.id, {})).statusCode, 404);
 
   const done = await close(request.id, { manageToken });
   assert.equal(done.statusCode, 200);
@@ -763,6 +764,10 @@ test('close: the manage token or the posting workspace; others 403, hidden 404, 
   const again = await close(request.id, { manageToken });
   assert.equal(again.statusCode, 409);
   assert.equal(again.json().code, 'request_closed');
+  // A closed request answers a stranger exactly like a hidden or unknown one.
+  const closedStranger = await close(request.id, {});
+  assert.equal(closedStranger.statusCode, 404);
+  assert.equal(closedStranger.json().code, 'request_not_found');
   assert.equal((await close('req_aaaaaaaaaaaaaaaaaaaa', { manageToken })).statusCode, 404);
 
   // Signed in: the workspace that posted closes it with its session.
@@ -773,7 +778,7 @@ test('close: the manage token or the posting workspace; others 403, hidden 404, 
   h.session.value = { ownerId: 'ws-2' };
   const theirs = await posted(h, body('Edit a short video'), ip(7));
   h.session.value = { ownerId: 'ws-1' };
-  assert.equal((await close(theirs.request.id, {})).statusCode, 403);
+  assert.equal((await close(theirs.request.id, {})).statusCode, 404);
 
   // Hidden by reports: a stranger gets the unknown answer, the poster can still close it.
   h.session.value = null;
@@ -787,7 +792,7 @@ test('close: the manage token or the posting workspace; others 403, hidden 404, 
     });
   const stranger = await close(reported.request.id, {});
   assert.equal(stranger.statusCode, 404);
-  assert.equal(stranger.json().code, 'request_not_found');
+  assert.deepEqual(stranger.json(), wrong.json(), 'hidden and open answer the same body');
   const poster = await close(reported.request.id, { manageToken: reported.manageToken });
   assert.equal(poster.statusCode, 200);
   assert.equal((poster.json() as PublicFeedRequest).status, 'closed');
@@ -845,7 +850,7 @@ test("the caller's own requests: signed in only, newest first, in review without
   await posted(h, body('Sort a box of receipts'));
   const closeAs = (id: string) =>
     h.app.inject({ method: 'POST', url: closePath(id), payload: {}, remoteAddress: ip(5) });
-  assert.equal((await closeAs(closed.request.id)).statusCode, 403);
+  assert.equal((await closeAs(closed.request.id)).statusCode, 404);
   for (const n of [30, 31, 32])
     await h.app.inject({
       method: 'POST',
@@ -2616,4 +2621,15 @@ test('search words: a lone Latin letter or digit is dropped, a single Han, kana 
   assert.equal(tsQuery('猫'), "'猫':*");
   assert.equal(tsQuery('ね 고'), "'ね':* & '고':*");
   assert.equal(tsQuery('a Lighthouse 猫'), "'lighthouse':* & '猫':*");
+});
+
+test('CCA-533: a removed request is never replayed, even for the same content and key', async (t) => {
+  const h = await harness(t, { postsPerSourceHour: 50, postsPerSourceDay: 50 });
+  const payload = body('Proofread a cover letter');
+  const first = await posted(h, payload);
+  await h.db.query("UPDATE feed_requests SET state='removed' WHERE id=$1", [first.request.id]);
+  const again = await post(h, payload);
+  assert.equal(again.statusCode, 409, again.body);
+  assert.equal(again.json().code, 'idempotency_conflict');
+  assert.ok(!again.body.includes(first.manageToken), 'no manage token is answered');
 });

@@ -300,10 +300,14 @@ export async function verify(
         claim.readAtBlock !== null && block !== claim.readAtBlock
           ? ` (the passport read block ${at(claim.readAtBlock)})`
           : '';
+      // The server says it could not read some raters: the score matches, but may leave them out.
+      const skipped = claim.ratersSkipped
+        ? `; the server could not read ${claim.ratersSkipped} more Central City rater wallet${claim.ratersSkipped === 1 ? '' : 's'}, so the score may leave ${claim.ratersSkipped === 1 ? 'it' : 'them'} out`
+        : '';
       return match
         ? {
             state: 'pass',
-            evidence: `${scoreLine(found)}: the latest rating of each wallet the passport names, recomputed ${read}`,
+            evidence: `${scoreLine(found)}: the latest rating of each wallet the passport names, recomputed ${read}${skipped}`,
           }
         : {
             state: 'fail',

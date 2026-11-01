@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { chainWords } from '../shared/base/wallet-chains';
 import {
+  FINALIZING_INFO,
   finishedId,
   retryAllowed,
   stageOf,
@@ -12,7 +14,9 @@ import {
   baseIdOf,
   baseProfileOf,
   baseRowSummary,
+  IDENTITY_ROW_LABEL,
   baseScreenState,
+  baseScreenTitle,
   finalizingLine,
   finalizingSince,
   isSlow,
@@ -202,6 +206,24 @@ test('the finalizing line says 15–30 min until 30 min have passed, then that i
   assert.equal(baseRowSummary('finalizing', '1').sub, USUAL);
 });
 
+test('the finalizing words on Arc name the agent’s chain and not Base’s wait; Base’s are untouched', () => {
+  assert.equal(finalizingLine(now - 1000, now, 5042), 'Finalizing on Arc · usually a moment');
+  assert.equal(
+    finalizingLine(now - FINALIZING_USUAL_MS - 1, now, 5042002),
+    'Finalizing on Arc Testnet · taking longer than usual',
+  );
+  assert.equal(finalizingLine(now - 1000, now, 8453), USUAL);
+  assert.equal(
+    baseRowSummary('finalizing', '1', now - 1000, now, 5042).sub,
+    'Finalizing on Arc · usually a moment',
+  );
+  assert.equal(
+    chainWords(5042).say(FINALIZING_INFO),
+    'Live now. Arc finalizes in a moment. Nothing to do: it finishes by itself and the public Central City passport appears.',
+  );
+  assert.equal(chainWords(8453).say(FINALIZING_INFO), FINALIZING_INFO);
+});
+
 test('finalizing is timed from when the Base ID was seen, else the start, and only while finalizing', () => {
   for (const stage of ['registered', 'finalizing'] as const) {
     const both = identity({ stage, provisionalAgentId: '7', idSeenAt: now - 1000, startedAt: 5 });
@@ -280,12 +302,12 @@ test('the home row says what the mockup says for every state', () => {
   assert.equal(text('registering').spinner, true);
   assert.equal(text('slow').text, 'Taking longer');
   const finalizing = text('finalizing', '99179');
-  assert.equal(finalizing.text, 'ID 99179');
+  assert.equal(finalizing.text, 'On Base · ID 99179');
   assert.equal(finalizing.tone, 'strong');
   assert.equal(finalizing.check, false);
   assert.equal(finalizing.sub, USUAL);
   const final = text('final', '99179');
-  assert.equal(final.text, 'ID 99179');
+  assert.equal(final.text, 'On Base · ID 99179');
   assert.equal(final.check, true);
   assert.equal(final.sub, null);
   assert.equal(text('rechecking').text, 'Re-checking');
@@ -317,4 +339,20 @@ test('the passport code is the last part of the agent address', () => {
   assert.equal(passportCode('https://centralcity.ai/a/fjPsW7'), 'fjPsW7');
   assert.equal(passportCode('https://centralcity.ai/a/fjPsW7/'), 'fjPsW7');
   assert.equal(passportCode('https://centralcity.ai/a/fjPsW7?x=1'), 'fjPsW7');
+});
+
+test('the title names the agent’s chain; with Arc on and none known, it may be either', () => {
+  assert.equal(baseScreenTitle(undefined, false), 'Base');
+  assert.equal(baseScreenTitle(undefined, true), 'Base or Arc');
+  assert.equal(baseScreenTitle(8453, true), 'Base');
+  assert.equal(baseScreenTitle(5042, true), 'Arc');
+});
+
+test('the identity row is labelled ERC-8004 and names the chain the agent lives on', () => {
+  assert.equal(IDENTITY_ROW_LABEL, 'ERC-8004');
+  assert.equal(baseRowSummary('start', null, null, 0, 5042).text, 'Not yet');
+  assert.equal(baseRowSummary('final', '7', null, 0, 5042).text, 'On Arc · ID 7');
+  assert.equal(baseRowSummary('finalizing', '7', 0, 1, 5042).text, 'On Arc · ID 7');
+  assert.equal(baseRowSummary('final', '7', null, 0, 8453).text, 'On Base · ID 7');
+  assert.equal(baseRowSummary('final', '7').text, 'On Base · ID 7');
 });

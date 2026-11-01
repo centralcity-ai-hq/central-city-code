@@ -14,7 +14,7 @@ import {
   type ProviderPostTransport,
   type ReplyErrorCode,
 } from './providers.js';
-import { openStoredKey, type StoredCredential } from './rotation.js';
+import { openStoredKey, UnknownRootKeyError, type StoredCredential } from './rotation.js';
 import { setResponderTarget } from './targets.js';
 
 /**
@@ -32,6 +32,9 @@ import { setResponderTarget } from './targets.js';
  *     row names and zeroized after;
  *  5. the reply is stored as 'generated' (lease-guarded) before posting, so a retry never calls the
  *     provider twice; the post re-checks "on" under the room lock (B7) and is idempotent by key;
+ *     the row is marked PROVIDER_CALLED (reason) under the lease just before the call, so if the
+ *     result is never stored (save failed, lease lost) a later attempt does not call again: it
+ *     fails the mention and counts the reservation as spent (CCA-526);
  *  6. handled mentions are acknowledged narrowly (read_at and unread_count, B6).
  *
  * Nothing here logs provider or key material; failures are fixed reason codes.
@@ -132,6 +135,7 @@ type Reply = {
   source_seq: string | number;
   trigger_owner_id: string;
   status: ReplyStatus;
+  reason: string | null;
   attempts: number;
   lease_id: string;
   reserved_microusd: string | number;
@@ -143,8 +147,20 @@ type Reply = {
 };
 
 const DAY = 86_400_000;
+/** Tokens a provider adds around the system and user text (roles, message framing): a margin. */
+const PROMPT_FRAMING_TOKENS = 64;
 const dayOf = (time: number) => new Date(time).toISOString().slice(0, 10);
 const TERMINAL_ACK: ReplyStatus[] = ['posted', 'skipped', 'failed', 'expired', 'cancelled'];
+/**
+ * The `reason` a pending reply carries while its provider call runs (CCA-526). Every outcome of the
+ * call overwrites it (finish, the 'generated' save); a pending row that still carries it had a call
+ * whose result was lost.
+ */
+export const PROVIDER_CALLED = 'provider_called';
+/** Terminal reason when a pending reply's earlier call may have been billed but was never stored. */
+export const PROVIDER_RESULT_LOST = 'provider_result_lost';
+const calledBefore = (reply: Pick<Reply, 'status'> & { reason?: string | null }) =>
+  reply.status === 'pending' && reply.reason === PROVIDER_CALLED;
 
 export function createResponderDelivery(d: DeliveryDependencies) {
   const transport = d.transport ?? fetchPostTransport;
@@ -226,6 +242,7 @@ export function createResponderDelivery(d: DeliveryDependencies) {
     reason: string,
     until: number | null,
     code: string,
+    options: { keepCredential?: boolean } = {},
   ): Promise<void> {
     await d.mutate(s.owner_id, async (workspace, tx, time) => {
       await tx.query(
@@ -233,7 +250,7 @@ export function createResponderDelivery(d: DeliveryDependencies) {
            updated_at=$4, updated_by='hosted responder' WHERE agent_id=$1`,
         [s.agent_id, reason, until, time],
       );
-      if (reason === 'invalid_key')
+      if (reason === 'invalid_key' && !options.keepCredential)
         await tx.query(
           "UPDATE responder_credentials SET status='invalid' WHERE agent_id=$1 AND status='active'",
           [s.agent_id],
@@ -268,7 +285,12 @@ export function createResponderDelivery(d: DeliveryDependencies) {
     ).rows;
     for (const row of open) {
       const lease = await takeLease(row, true);
-      if (lease) await finish(lease, 'cancelled', reason, { refund: row.status === 'pending' });
+      // A call that may have been billed keeps its reservation as spent (N4, CCA-526).
+      if (lease)
+        await finish(lease, 'cancelled', reason, {
+          refund: row.status === 'pending' && !calledBefore(row),
+          spend: calledBefore(row),
+        });
     }
   }
 
@@ -391,6 +413,29 @@ export function createResponderDelivery(d: DeliveryDependencies) {
   ): Promise<number | string> {
     const day = dayOf(time);
     return d.db.transaction(async (tx) => {
+      // CCA-526: a reservation this row still holds (an earlier attempt that stopped between its
+      // reservation and its call) is released before the new one, so it is never counted twice.
+      const prior = (
+        await tx.query<{ reserved_microusd: string | number; usage_day: string | null }>(
+          `SELECT reserved_microusd, usage_day FROM responder_replies
+            WHERE agent_id=$1 AND mention_seq=$2 AND lease_id=$3 FOR UPDATE`,
+          [reply.agent_id, reply.mention_seq, reply.lease_id],
+        )
+      ).rows[0];
+      if (!prior) throw new Error('lease lost');
+      if (prior.usage_day && Number(prior.reserved_microusd) > 0) {
+        await tx.query(
+          `UPDATE responder_usage SET reserved_microusd=GREATEST(0, reserved_microusd-$3),
+             replies=GREATEST(0, replies-1)
+           WHERE agent_id=$1 AND day=$2`,
+          [reply.agent_id, prior.usage_day, Number(prior.reserved_microusd)],
+        );
+        await tx.query(
+          `UPDATE responder_replies SET reserved_microusd=0, usage_day=NULL
+            WHERE agent_id=$1 AND mention_seq=$2`,
+          [reply.agent_id, reply.mention_seq],
+        );
+      }
       await tx.query(
         'INSERT INTO responder_usage(agent_id,day,owner_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING',
         [s.agent_id, day, s.owner_id],
@@ -510,10 +555,11 @@ export function createResponderDelivery(d: DeliveryDependencies) {
   }
 
   async function answer(
-    s: Settings,
+    initial: Settings,
     due: Due,
     deadline: number,
   ): Promise<'next' | 'paused' | 'stop'> {
+    let s = initial;
     const time = d.clock();
     const createdAt = Number(due.created_at);
     await d.db.query(
@@ -537,7 +583,17 @@ export function createResponderDelivery(d: DeliveryDependencies) {
     if (!reply) return 'next'; // another drain holds it, or it is not due yet
     const L = DELIVERY_LIMITS;
     if (time - createdAt > L.expiryMs) {
-      await finish(reply, 'expired', 'expired', { refund: reply.status === 'pending' });
+      await finish(reply, 'expired', 'expired', {
+        refund: reply.status === 'pending' && !calledBefore(reply),
+        spend: calledBefore(reply),
+      });
+      return 'next';
+    }
+    // CCA-526: an earlier attempt called the provider but its result was never stored (the save
+    // failed or its lease was lost). Never call again: the mention fails, the reservation counts
+    // as spent (the call may have been billed, N4).
+    if (calledBefore(reply)) {
+      await finish(reply, 'failed', PROVIDER_RESULT_LOST, { spend: true });
       return 'next';
     }
 
@@ -545,6 +601,16 @@ export function createResponderDelivery(d: DeliveryDependencies) {
     let provider = reply.provider;
     let modelId = reply.model;
     if (reply.status === 'pending') {
+      // CCA-620: the settings are read again for every answer, so turning Auto-reply off stops the
+      // rest of a running drain before the next reservation or provider call. The fresh row also
+      // supplies the model, instructions and provider.
+      const fresh = await settings(d.db, s.agent_id);
+      if (!isOn(fresh, d.clock())) {
+        await finish(reply, 'cancelled', 'responder_off', { refund: true });
+        await cancelOpen(s.agent_id, 'responder_off');
+        return 'paused';
+      }
+      s = fresh!;
       const refused = await precheck(d.db, s, reply);
       if (refused) {
         await finish(reply, 'skipped', refused);
@@ -573,7 +639,7 @@ export function createResponderDelivery(d: DeliveryDependencies) {
       }
       const prompt = await promptFor(s, reply, due.from_name);
       const estimate = Math.ceil(
-        (Math.ceil(prompt.chars / 3) * model.inputMicroUsdPerMTok +
+        ((prompt.bytes + PROMPT_FRAMING_TOKENS) * model.inputMicroUsdPerMTok +
           model.maxOutputTokens * model.outputMicroUsdPerMTok) /
           1_000_000,
       );
@@ -597,10 +663,42 @@ export function createResponderDelivery(d: DeliveryDependencies) {
       let key: Buffer;
       try {
         key = openStoredKey(d.keys, credential);
-      } catch {
+      } catch (error) {
         await finish(held, 'failed', 'invalid_key', { refund: true });
-        await pause(s, 'invalid_key', null, 'invalid_key');
+        // A root key this server does not have (CITY_RESPONDER_KEK_PREVIOUS removed too early, or
+        // a deploy overlap) says nothing about the owner's key: pause, but leave the credential
+        // active, so restoring the root key and turning Auto-reply on again resumes it. Only a
+        // key that fails to open under a known root is marked invalid.
+        if (error instanceof UnknownRootKeyError) {
+          console.warn(
+            JSON.stringify({
+              level: 'warn',
+              event: 'responder.root_key_unavailable',
+              agentId: s.agent_id,
+            }),
+          );
+          await pause(s, 'root_key_unavailable', null, 'root_key_unavailable', {
+            keepCredential: true,
+          });
+        } else await pause(s, 'invalid_key', null, 'invalid_key');
         return 'paused';
+      }
+      // CCA-526: marked under the lease before the call; a lost lease means another drain owns the
+      // mention now, so this one never calls.
+      const marked = await d.db
+        .query(
+          `UPDATE responder_replies SET reason=$4
+            WHERE agent_id=$1 AND mention_seq=$2 AND lease_id=$3 AND status='pending' RETURNING 1`,
+          [reply.agent_id, reply.mention_seq, reply.lease_id, PROVIDER_CALLED],
+        )
+        .then((r) => r.rows.length > 0)
+        .catch((error: unknown) => {
+          key.fill(0);
+          throw error;
+        });
+      if (!marked) {
+        key.fill(0);
+        return 'next';
       }
       let result: ModelResult;
       try {
@@ -680,7 +778,7 @@ export function createResponderDelivery(d: DeliveryDependencies) {
       // Stored before posting: a retry after a crash posts this text and never calls again.
       const stored = await d.db.transaction(async (tx) => {
         const row = await tx.query(
-          `UPDATE responder_replies SET status='generated', reply_text=$4, provider=$5, model=$6,
+          `UPDATE responder_replies SET status='generated', reason=NULL, reply_text=$4, provider=$5, model=$6,
              input_tokens=$7, output_tokens=$8, cost_microusd=$9, reserved_microusd=0
            WHERE agent_id=$1 AND mention_seq=$2 AND lease_id=$3 RETURNING usage_day`,
           [

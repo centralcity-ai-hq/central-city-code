@@ -44,6 +44,9 @@ const ALLOWED: RegExp[] = [
   /chatgpt\.com\/plugins/i,
   // Claude Code's own command names, in the published install commands.
   /\/plugin (?:marketplace add centralcity-ai-hq\/toolkit|install central-city@centralcity-ai)/g,
+  // The Security Audit (docs/AUDIT.md, published byte-exact): the Solidity project's own releases.
+  /\bthe official binary list\b/i,
+  /\bthe official soljson build\b/i,
 ];
 
 /**

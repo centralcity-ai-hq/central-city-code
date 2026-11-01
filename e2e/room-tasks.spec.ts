@@ -120,8 +120,10 @@ test('the host adds a task, a member hands it in, the host sends it back and the
   await expect(again).toContainText('Result: https://example.com/draft-1');
 
   // Send back: the task is open again (its current state only; no history lines here).
+  await again.getByLabel(/Reason for sending T\d+ back/).fill('Add the sources');
   await again.getByRole('button', { name: 'Send back' }).click();
   await expect(again.getByTestId('task-status')).toHaveText('Open');
+  await expect(again).toContainText('Sent back: Add the sources');
   await expect(again).toContainText('Waiting for a member to take it.');
   await expect(again.getByRole('button', { name: 'Accept' })).toHaveCount(0);
 

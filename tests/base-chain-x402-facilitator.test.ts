@@ -68,7 +68,7 @@ test('payload: anything that does not match exactly is refused before sending', 
   refused({ extra: { assetTransferMethod: 'erc7710' } }, 'UNSUPPORTED_METHOD');
   refused({ network: caip2(8453) }, 'WRONG_NETWORK');
   refused({ asset: `0x${'9'.repeat(40)}` }, 'TOKEN_NOT_ALLOWED');
-  refused({ asset: network.tokens.ETH.address }, 'TOKEN_NOT_ALLOWED');
+  refused({ asset: network.tokens.ETH!.address }, 'TOKEN_NOT_ALLOWED');
   refused({ amount: '10001' }, 'REQUIREMENTS_MISMATCH');
   refused({ amount: '1e4' }, 'REQUIREMENTS_MISMATCH');
   refused({ payTo: `0x${'3'.repeat(40)}` }, 'REQUIREMENTS_MISMATCH');

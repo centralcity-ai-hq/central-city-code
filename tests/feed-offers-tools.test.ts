@@ -620,6 +620,19 @@ test('a wallet that is not ready is refused with a reason, and nothing is writte
     })
   ).json();
   assert.equal(price.refusals[0].reason, 'invalid_price');
+  // The upper cap binds what's on sale, so a paused offer above it is no refusal for its price.
+  const high = (
+    await f.call('city_service_plan', {
+      offers: [offer(f.agents[0]!.id, 'b', { price_usdc: '5', state: 'active' })],
+    })
+  ).json();
+  assert.equal(high.refusals[0].reason, 'invalid_price');
+  const paused = (
+    await f.call('city_service_plan', {
+      offers: [offer(f.agents[0]!.id, 'b', { price_usdc: '5', state: 'paused' })],
+    })
+  ).json();
+  assert.notEqual(paused.refusals[0]?.reason, 'invalid_price');
   assert.match(price.refusals[0].message, /^price_usdc must be from 0\.05 to 0\.1 USDC/);
   assert.deepEqual(await f.counts(), before);
 });
@@ -921,4 +934,58 @@ test('preset: planned, published, listed by city_service_mine, changed and clear
   assert.equal(changed.json().offers[0].action, 'update');
   const after = (await f.call('city_service_mine', {})).json();
   assert.equal(after.offers.find((o: { offer_id: string }) => o.offer_id === offerId).preset, null);
+});
+
+test('the public address: off by default; with the flag, allowlisted offers answer 402 only', async (t) => {
+  const f = await fixture(t);
+  const agent = f.agents[0]!;
+  const published = await planAndPublish(f, [offer(agent.id, 'public-a', { price_usdc: '0.05' })]);
+  const offerId = published.offers[0].offer_id as string;
+  const post = (headers: Record<string, string> = {}, body: unknown = { text: 'hello' }) =>
+    f.app.inject({
+      method: 'POST',
+      url: `/api/public/x402/${offerId}`,
+      headers: { 'content-type': 'application/json', ...headers },
+      payload: JSON.stringify(body),
+    });
+  for (const name of [
+    'CITY_X402_PUBLIC_OFFERS',
+    'CITY_X402_PUBLIC_OFFERS_ALLOW',
+    'CITY_PROTOCOL_FEE_ROUTER3_ENABLED',
+    'CITY_PROTOCOL_FEES',
+    'CITY_BASE_MAINNET',
+  ]) {
+    const before = process.env[name];
+    t.after(() => {
+      if (before === undefined) delete process.env[name];
+      else process.env[name] = before;
+    });
+  }
+  // Off: as an unknown route. On, not allowlisted: the same.
+  delete process.env.CITY_X402_PUBLIC_OFFERS;
+  process.env.CITY_X402_PUBLIC_OFFERS_ALLOW = offerId;
+  assert.equal((await post()).statusCode, 404);
+  process.env.CITY_X402_PUBLIC_OFFERS = '1';
+  process.env.CITY_X402_PUBLIC_OFFERS_ALLOW = 'off_aaaaaaaaaaaaaaaa';
+  assert.equal((await post()).statusCode, 404);
+  process.env.CITY_X402_PUBLIC_OFFERS_ALLOW = offerId;
+  // Router 3 not live: asked to retry, before anyone signs.
+  assert.equal((await post()).statusCode, 503);
+  process.env.CITY_PROTOCOL_FEE_ROUTER3_ENABLED = '1';
+  process.env.CITY_BASE_MAINNET = '1';
+  const asked = await post();
+  assert.equal(asked.statusCode, 402, asked.body);
+  if (asked.statusCode === 402) {
+    const terms = asked.json().accepts[0];
+    assert.equal(terms.scheme, 'cc-router3-split-v1');
+    assert.equal(terms.amount, '50000');
+    assert.equal(terms.extra.feeAmount, '5000');
+    assert.equal(terms.extra.sellerAmount, '45000');
+    assert.equal(terms.payTo.toLowerCase(), agent.wallet.toLowerCase());
+    assert.notEqual(terms.payTo.toLowerCase(), terms.extra.router.toLowerCase());
+    assert.ok(asked.headers['payment-required']);
+    // Any payment: refused, nothing charged.
+    assert.equal((await post({ 'x-payment': 'abc' })).statusCode, 501);
+    assert.equal((await post({}, { nope: 1 })).statusCode, 400);
+  }
 });

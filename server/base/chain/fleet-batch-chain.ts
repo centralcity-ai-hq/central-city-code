@@ -11,9 +11,9 @@
  * and sends the operation, durably and idempotently on the batch's operation key. Its outcome is
  * read back with readBatchReceipt (payment-receipt.ts).
  */
+import { isRealMoneyChain } from '../../../shared/chains.js';
 import { encodeFunctionData, getAddress, parseAbi, type Hex, type PublicClient } from 'viem';
 import {
-  BASE_MAINNET,
   NATIVE_ETH,
   allowedToken,
   type Address,
@@ -22,6 +22,12 @@ import {
 import type { SpendPermission } from '../../../shared/base/types.js';
 import { deriveAddressLocal, spenderAccountRecipe } from './derive.js';
 import { checkPermission, spendPermissionManagerAbi } from './permissions.js';
+import {
+  fleetPermissionEnforced,
+  FleetPermissionRefused,
+  reviewFleetPermission,
+  type FleetPermissionPolicy,
+} from '../fleet/permission-policy.js';
 import {
   abandonBeforeBroadcast,
   keystoreSigner,
@@ -47,6 +53,7 @@ export class BatchChainError extends Error {
       | 'NO_PERMISSION'
       | 'OVER_ALLOWANCE'
       | 'SPENDER_MISMATCH'
+      | 'PERMISSION_POLICY'
       | 'FEE_BUDGET_REQUIRED'
       | 'IDEMPOTENCY_CONFLICT',
     message: string,
@@ -68,6 +75,14 @@ export interface BatchChainDeps {
   };
   /** The signer address behind a spender key ref (public data from the keystore table). */
   signerOf(keyRef: string): Promise<Address>;
+  /** Where an ALERT line goes (permission policy); default the console. */
+  log?: (line: string) => void;
+  /**
+   * Whether the CCA-709 policy refuses (true) or only ALERTs (false). Default: the
+   * CITY_FLEET_PERMISSION_ENFORCE setting ('1' refuses), so nothing changes until the owner turns
+   * it on after re-issuing the permissions.
+   */
+  enforcePermissionPolicy?: boolean;
 }
 
 export interface BatchTransferInput {
@@ -78,6 +93,14 @@ export interface BatchTransferInput {
   /** The owner's spend permission for the treasury spender, and its signature while not on-chain. */
   permission: SpendPermission;
   permissionSignature: Hex | null;
+  /**
+   * The fleet's planned spend and permission rules (audit CCA-709, ../fleet/permission-policy.ts):
+   * an allowance above twice the planned spend per period, or a permission without an end date,
+   * is a violation unless the policy carries an explicit exception (logged as ALERT). With
+   * enforcement on a violation (or no policy) is refused; off, it is one ALERT line and the batch
+   * goes on as before.
+   */
+  permissionPolicy?: FleetPermissionPolicy | null;
   token: Address;
   transfers: readonly { to: Address; amount: bigint }[];
   /** Fee budget for this operation (wei); mandatory on mainnet. */
@@ -92,7 +115,13 @@ export interface BatchTransferInput {
 }
 
 /** Validates a batch before anything is signed; returns the total it spends. */
-function validate(network: BaseNetwork, input: BatchTransferInput, nowSeconds: number) {
+function validate(
+  network: BaseNetwork,
+  input: BatchTransferInput,
+  nowSeconds: number,
+  enforce: boolean,
+  log?: (line: string) => void,
+) {
   const { transfers, permission } = input;
   if (transfers.length < 1 || transfers.length > MAX_BATCH_RECIPIENTS)
     throw new BatchChainError('INVALID_BATCH', `1 to ${MAX_BATCH_RECIPIENTS} recipients.`);
@@ -116,6 +145,13 @@ function validate(network: BaseNetwork, input: BatchTransferInput, nowSeconds: n
     throw new BatchChainError('NO_PERMISSION', 'The spend permission is for another account.');
   if (nowSeconds < permission.start || nowSeconds >= permission.end)
     throw new BatchChainError('NO_PERMISSION', 'The spend permission is not active now.');
+  try {
+    reviewFleetPermission(permission, input.permissionPolicy, { now: nowSeconds, enforce, log });
+  } catch (error) {
+    if (error instanceof FleetPermissionRefused)
+      throw new BatchChainError('PERMISSION_POLICY', `${error.code}: ${error.message}`);
+    throw error;
+  }
   if (total > permission.allowance)
     throw new BatchChainError('OVER_ALLOWANCE', 'The batch exceeds the spend permission.');
   return { total, token };
@@ -184,9 +220,15 @@ export function createBatchChain(deps: BatchChainDeps) {
           );
         return (await refreshFinality(readOnly(existing), input.operationKey)) ?? existing;
       }
-      if (deps.network.chainId === BASE_MAINNET && input.maxCostWeiCap === undefined)
+      if (isRealMoneyChain(deps.network.chainId) && input.maxCostWeiCap === undefined)
         throw new BatchChainError('FEE_BUDGET_REQUIRED', 'Mainnet batches need a fee budget.');
-      const { total, token } = validate(deps.network, input, Math.floor(Date.now() / 1000));
+      const { total, token } = validate(
+        deps.network,
+        input,
+        Math.floor(Date.now() / 1000),
+        deps.enforcePermissionPolicy ?? fleetPermissionEnforced(process.env),
+        deps.log,
+      );
 
       const signerAddress = await deps.signerOf(input.treasury.spenderKeyRef);
       const recipe = spenderAccountRecipe(deps.network, signerAddress);

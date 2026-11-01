@@ -8,6 +8,7 @@ import {
   AgentPayReadError,
   agentPayViewFrom,
   allowAgentPay,
+  AgentPaySignError,
   boundsText,
   changedText,
   consentRequest,
@@ -26,9 +27,11 @@ import {
   withoutTryAgain,
   type AgentPayRecipients,
   type AgentPayView,
+  type ConsentSigner,
   type ShownLimit,
 } from '../src/base/wallet/agentPay.js';
 import { hasMachineText } from '../src/ui/plainText.js';
+import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 
 /*
  * The owner's permission for an agent to pay on its own, in the browser (src/base/wallet/agentPay.ts;
@@ -46,6 +49,19 @@ const GRANTED = Date.UTC(2026, 9, 15, 12, 2, 0);
 const AGENTS: AgentPayRecipients = 'central-city-agents';
 const FEED: AgentPayRecipients = 'central-city-agents-and-feed-services';
 const ACTIVE: ShownLimit = { permissionHash: HASH, state: 'approved' };
+const WALLET = `0x${'1'.repeat(40)}`;
+const USDC_ADDRESS = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+const OWNER = privateKeyToAccount(generatePrivateKey());
+/** The owner key's signer (the browser unlocks the vault with the password; CCA-113). */
+const SIGN: ConsentSigner = async (typedData) => OWNER.signTypedData(typedData);
+/** A PUT body: the limit and recipients shown, plus the owner key's signature over them. */
+const unsignedBody = (body: unknown) => {
+  const { nonce, issuedAt, signature, ...rest } = body as Record<string, unknown>;
+  assert.match(String(nonce), /^0x[0-9a-f]{64}$/);
+  assert.equal(typeof issuedAt, 'number');
+  assert.match(String(signature), /^0x[0-9a-f]{130}$/);
+  return rest;
+};
 
 /** A view as the server answers it; `offer` is what confirming now stores. */
 function view(
@@ -63,7 +79,7 @@ function view(
   const allowed =
     covers && c ? (c.recipients === AGENTS || offer === AGENTS ? AGENTS : FEED) : null;
   return {
-    chainId: 84532,
+    chainId: 8453,
     token: 'USDC',
     scope: {
       recipients: allowed ?? offer,
@@ -81,6 +97,7 @@ function view(
         }
       : null,
     mayPay: covers,
+    signing: { wallet: WALLET, token: USDC_ADDRESS, owner: OWNER.address },
     confirmRecipients: offer,
     reconfirmAddsFeedServices: allowed === AGENTS && offer === FEED,
   };
@@ -324,14 +341,14 @@ test('allow: one PUT with the view’s limit and confirmRecipients; it answers t
   const fake = fakeFetch([{ json: after }]);
   try {
     // A view read while Feed pay was off: Central City agents only is what goes.
-    const result = await allowAgentPay(AGENT, view());
+    const result = await allowAgentPay(AGENT, view(), SIGN);
     assert.deepEqual(result, { kind: 'allowed', view: after });
     assert.equal(fake.requests.length, 1);
     const [put] = fake.requests;
     assert.equal(put!.method, 'PUT');
     assert.equal(put!.url, PATH);
     assert.equal(put!.headers['X-City-Request'], '1');
-    assert.deepEqual(put!.body, { permissionHash: HASH, recipients: AGENTS });
+    assert.deepEqual(unsignedBody(put!.body), { permissionHash: HASH, recipients: AGENTS });
   } finally {
     fake.restore();
   }
@@ -342,8 +359,11 @@ test('also allow Feed services: the same PUT with the wider confirmRecipients th
   const after = view({ offer: FEED, consent: { recipients: FEED } });
   const fake = fakeFetch([{ json: after }]);
   try {
-    assert.deepEqual(await allowAgentPay(AGENT, before), { kind: 'allowed', view: after });
-    assert.deepEqual(fake.requests[0]!.body, { permissionHash: HASH, recipients: FEED });
+    assert.deepEqual(await allowAgentPay(AGENT, before, SIGN), { kind: 'allowed', view: after });
+    assert.deepEqual(unsignedBody(fake.requests[0]!.body), {
+      permissionHash: HASH,
+      recipients: FEED,
+    });
     assert.equal(shown(agentPayPanel(after, ACTIVE)).recipients, FEED);
   } finally {
     fake.restore();
@@ -370,9 +390,12 @@ test('"Also allow Feed services" refused (409 scope_changed): the message matche
     { json: agentsOnly },
   ]);
   try {
-    const result = await allowAgentPay(AGENT, before);
+    const result = await allowAgentPay(AGENT, before, SIGN);
     assert.deepEqual(result, { kind: 'changed', change: 'scope', view: agentsOnly });
-    assert.deepEqual(fake.requests[0]!.body, { permissionHash: HASH, recipients: FEED });
+    assert.deepEqual(unsignedBody(fake.requests[0]!.body), {
+      permissionHash: HASH,
+      recipients: FEED,
+    });
     // Nothing on screen to check and confirm again: the page says so plainly.
     assert.equal(shown(agentPayPanel(agentsOnly, ACTIVE)).addsFeed, false);
     assert.equal(
@@ -420,18 +443,18 @@ test('409 scope_changed or limit_changed: nothing stored, the view is read again
     { status: 404, json: { error: 'Not found.' } },
   ]);
   try {
-    assert.deepEqual(await allowAgentPay(AGENT, view({ offer: FEED })), {
+    assert.deepEqual(await allowAgentPay(AGENT, view({ offer: FEED }), SIGN), {
       kind: 'changed',
       change: 'scope',
       view: narrower,
     });
     // The re-read view offers agents only: that is what the next confirm sends.
     assert.deepEqual(consentRequest(narrower), { permissionHash: HASH, recipients: AGENTS });
-    const limit = await allowAgentPay(AGENT, view());
+    const limit = await allowAgentPay(AGENT, view(), SIGN);
     assert.equal(limit.kind, 'changed');
     assert.equal(limit.kind === 'changed' && limit.change, 'limit');
     assert.equal(limit.kind === 'changed' && agentPayPanel(limit.view!, ACTIVE).k, 'mismatch');
-    assert.deepEqual(await allowAgentPay(AGENT, view()), {
+    assert.deepEqual(await allowAgentPay(AGENT, view(), SIGN), {
       kind: 'changed',
       change: 'limit',
       view: null,
@@ -440,7 +463,10 @@ test('409 scope_changed or limit_changed: nothing stored, the view is read again
       fake.requests.map((request) => request.method),
       ['PUT', 'GET', 'PUT', 'GET', 'PUT', 'GET'],
     );
-    assert.deepEqual(fake.requests[0]!.body, { permissionHash: HASH, recipients: FEED });
+    assert.deepEqual(unsignedBody(fake.requests[0]!.body), {
+      permissionHash: HASH,
+      recipients: FEED,
+    });
   } finally {
     fake.restore();
   }
@@ -453,13 +479,13 @@ test('allow: any other refusal is an error, read nothing again; a view without a
     { json: view({ limit: null }) },
   ]);
   try {
-    await assert.rejects(allowAgentPay(AGENT, view()), (error: unknown) => {
+    await assert.rejects(allowAgentPay(AGENT, view(), SIGN), (error: unknown) => {
       assert.ok(error instanceof ApiError);
       assert.equal(error.code, 'wallet_not_usable');
       return true;
     });
-    await assert.rejects(allowAgentPay(AGENT, view()), ApiError);
-    assert.deepEqual(await allowAgentPay(AGENT, view({ limit: null })), {
+    await assert.rejects(allowAgentPay(AGENT, view(), SIGN), ApiError);
+    assert.deepEqual(await allowAgentPay(AGENT, view({ limit: null }), SIGN), {
       kind: 'changed',
       change: 'limit',
       view: view({ limit: null }),
@@ -492,13 +518,13 @@ test('409 scope_changed while the limit changed too: the change is the limit, re
   ]);
   try {
     // The server checks whom it covers first; the view read again is for another limit.
-    assert.deepEqual(await allowAgentPay(AGENT, view({ offer: FEED })), {
+    assert.deepEqual(await allowAgentPay(AGENT, view({ offer: FEED }), SIGN), {
       kind: 'changed',
       change: 'limit',
       view: view({ limit: OTHER_HASH }),
     });
     // No active limit any more: the limit changed as well.
-    assert.deepEqual(await allowAgentPay(AGENT, view({ offer: FEED })), {
+    assert.deepEqual(await allowAgentPay(AGENT, view({ offer: FEED }), SIGN), {
       kind: 'changed',
       change: 'limit',
       view: view({ limit: null }),
@@ -662,13 +688,15 @@ test('against the real routes: the client reads every view the server builds and
     schema.BASE_WALLET_LIMITS_SQL,
     schema.BASE_AGENT_PAY_CONSENTS_SQL,
     schema.BASE_AGENT_PAY_CONSENT_RECIPIENTS_SQL,
+    (await import('../server/base/wallet/agent-pay-consent-schema.js'))
+      .agentPayConsentSignatureMigration.sql,
   ])
     await pg.exec(sql);
   await pg.query(
     `INSERT INTO base_wallets (wallet_id, agent_id, operator_id, chain_id, address, owner_address,
        spender_address, spender_key_ref, derivation, state, created_at, updated_at, owner_account_id)
      VALUES ('w-1',$1,'person-1',${WALLET_CHAIN_ID},$2,$3,$4,'v1:k','{}','derived',0,0,'person-1')`,
-    [AGENT, `0x${'1'.repeat(40)}`, `0x${'e'.repeat(40)}`, `0x${'f'.repeat(40)}`],
+    [AGENT, `0x${'1'.repeat(40)}`, OWNER.address, `0x${'f'.repeat(40)}`],
   );
   await pg.query(
     `INSERT INTO base_spend_permissions (permission_id, wallet_id, chain_id, permission, signature,
@@ -735,7 +763,7 @@ test('against the real routes: the client reads every view the server builds and
     addsFeed: false,
     feedOff: false,
   });
-  const allowed = await allowAgentPay(AGENT, first);
+  const allowed = await allowAgentPay(AGENT, first, SIGN, () => clock);
   assert.equal(allowed.kind, 'allowed');
   const agentsOnly = shown(agentPayPanel((allowed as { view: AgentPayView }).view, limit));
   assert.equal(agentsOnly.allowed, true);
@@ -746,7 +774,7 @@ test('against the real routes: the client reads every view the server builds and
   env.CITY_FEED_PAY = undefined;
   const offered = await read();
   assert.equal(shown(agentPayPanel(offered, limit)).addsFeed, true);
-  const wide = await allowAgentPay(AGENT, offered);
+  const wide = await allowAgentPay(AGENT, offered, SIGN, () => clock);
   assert.equal(wide.kind, 'allowed');
   assert.equal(shown(agentPayPanel((wide as { view: AgentPayView }).view, limit)).recipients, FEED);
 
@@ -757,19 +785,24 @@ test('against the real routes: the client reads every view the server builds and
   const stale = await read();
   assert.equal(stale.confirmRecipients, FEED);
   env.CITY_FEED_PAY = '0';
-  const changed = await allowAgentPay(AGENT, stale);
+  const changed = await allowAgentPay(AGENT, stale, SIGN, () => clock);
   assert.equal(changed.kind, 'changed');
   assert.equal(changed.kind === 'changed' && changed.change, 'scope');
   const again = (changed as { view: AgentPayView }).view;
   assert.equal(shown(agentPayPanel(again, limit)).recipients, AGENTS);
-  const narrow = await allowAgentPay(AGENT, again);
+  const narrow = await allowAgentPay(AGENT, again, SIGN, () => clock);
   assert.equal(narrow.kind, 'allowed');
   assert.equal(
     shown(agentPayPanel((narrow as { view: AgentPayView }).view, limit)).recipients,
     AGENTS,
   );
   assert.deepEqual(
-    sent.filter((request) => request.method !== 'GET'),
+    sent
+      .filter((request) => request.method !== 'GET')
+      .map((request) => ({
+        method: request.method,
+        body: request.method === 'PUT' ? unsignedBody(request.body) : request.body,
+      })),
     [
       { method: 'PUT', body: { permissionHash: HASH, recipients: AGENTS } },
       { method: 'PUT', body: { permissionHash: HASH, recipients: FEED } },
@@ -778,4 +811,50 @@ test('against the real routes: the client reads every view the server builds and
       { method: 'PUT', body: { permissionHash: HASH, recipients: AGENTS } },
     ],
   );
+});
+
+test('CCA-113: allowing signs exactly what is sent with the owner key; when it cannot sign, nothing is sent', async () => {
+  const after = view({ consent: { recipients: AGENTS } });
+  const fake = fakeFetch([{ json: after }]);
+  try {
+    const signed: unknown[] = [];
+    await allowAgentPay(AGENT, view(), async (typedData, owner) => {
+      signed.push({ message: typedData.message, owner });
+      return OWNER.signTypedData(typedData);
+    });
+    const body = fake.requests[0]!.body as Record<string, unknown>;
+    assert.deepEqual(signed, [
+      {
+        owner: OWNER.address,
+        message: {
+          wallet: WALLET,
+          token: USDC_ADDRESS,
+          permissionHash: HASH,
+          recipients: AGENTS,
+          nonce: body.nonce,
+          issuedAt: BigInt(body.issuedAt as number),
+        },
+      },
+    ]);
+  } finally {
+    fake.restore();
+  }
+  const none = fakeFetch([]);
+  try {
+    await assert.rejects(
+      allowAgentPay(AGENT, view(), async () => {
+        throw new AgentPaySignError('That password didn’t unlock your wallet key.');
+      }),
+      AgentPaySignError,
+    );
+    assert.equal(none.requests.length, 0, 'nothing sent');
+    // A view without what to sign (an older server) sends nothing either.
+    await assert.rejects(
+      allowAgentPay(AGENT, { ...view(), signing: undefined }, SIGN),
+      AgentPaySignError,
+    );
+    assert.equal(none.requests.length, 0);
+  } finally {
+    none.restore();
+  }
 });

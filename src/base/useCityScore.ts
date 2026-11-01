@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
-import { ON_BASE_PATHS, type OnBasePassport } from '../../shared/base/on-base';
+import { BASE_MAINNET } from '../../shared/base/chains';
+import { ON_BASE_PATHS, onChainPaths, type OnBasePassport } from '../../shared/base/on-base';
 import type { CityScore } from '../../shared/base/rating-score';
+import { chainView } from '../../shared/chains';
 
 /*
  * An agent's own Central City score in My agents (shared/base/rating-score.ts), read from its
@@ -10,20 +12,32 @@ import type { CityScore } from '../../shared/base/rating-score';
 
 const scores = new Map<string, CityScore | null>();
 
-/** The passport's score for this Base ID; null until read, without one, or while `baseId` is null. */
-export function useCityScore(baseId: string | null, paused = false): CityScore | null {
+/** An agent's passport is on its own chain: the same number on another chain is another agent. */
+const passportsOf = (chainId: number | undefined) =>
+  chainView(chainId ?? BASE_MAINNET)?.slug === 'arc'
+    ? onChainPaths('arc').passport
+    : ON_BASE_PATHS.passport;
+
+/** The passport's score for this ID; null until read, without one, or while `baseId` is null. */
+export function useCityScore(
+  baseId: string | null,
+  paused = false,
+  chainId?: number,
+): CityScore | null {
+  const passports = passportsOf(chainId);
+  const key = `${passports}/${baseId}`;
   const [score, setScore] = useState<CityScore | null>(() =>
-    baseId === null ? null : (scores.get(baseId) ?? null),
+    baseId === null ? null : (scores.get(key) ?? null),
   );
   useEffect(() => {
     if (baseId === null || !/^[0-9]{1,78}$/.test(baseId)) {
       setScore(null);
       return;
     }
-    setScore(scores.get(baseId) ?? null);
+    setScore(scores.get(key) ?? null);
     if (paused) return;
     const controller = new AbortController();
-    fetch(`${ON_BASE_PATHS.passport}/${baseId}`, {
+    fetch(key, {
       headers: { accept: 'application/json' },
       signal: controller.signal,
     })
@@ -32,11 +46,11 @@ export function useCityScore(baseId: string | null, paused = false): CityScore |
         // Not read on Base keeps the last score known; a read without one clears it.
         if (!passport || passport.reputation?.readAtBlock == null) return;
         const found = passport.reputation.score ?? null;
-        scores.set(baseId, found);
+        scores.set(key, found);
         setScore(found);
       })
       .catch(() => undefined);
     return () => controller.abort();
-  }, [baseId, paused]);
+  }, [baseId, key, paused]);
   return score;
 }

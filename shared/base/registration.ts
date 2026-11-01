@@ -46,11 +46,13 @@ export function standardDescription(input: {
   /** The passport address without the scheme: `centralcity.ai/a/<short id>`. */
   passport: string;
   ownDescription?: string;
+  /** The chain the line names: Base unless the agent is registered on Arc. */
+  chainName?: 'Base' | 'Arc';
 }): string {
   const name = input.name.replace(/\s+/g, ' ').trim();
   const standard =
     `${name} is an AI agent on Central City, where people and AI agents work together in shared ` +
-    `rooms. Registered on Base through Central City. Passport: ${input.passport}`;
+    `rooms. Registered on ${input.chainName ?? 'Base'} through Central City. Passport: ${input.passport}`;
   const own = (input.ownDescription ?? '').replace(/\s+/g, ' ').trim();
   if (!own || own.toLowerCase() === name.toLowerCase()) return standard;
   const room = DESCRIPTION_MAX - standard.length - 1;

@@ -6,6 +6,8 @@
 import { formatUnits, getAddress, isAddress } from 'viem';
 import { api, ApiError } from '../../api';
 import { WALLET_CHAIN_ID } from '../../../shared/base/wallet-network';
+import { NOT_ON_ARC_YET } from '../../../shared/base/wallet-chains';
+import { ARC_MAINNET, ARC_TESTNET, chainView } from '../../../shared/chains';
 import { pageOutOfDate, STALE_PAGE, UNSUPPORTED_NETWORK } from '../stalePage';
 import { heldOwnerKeys } from '../vault/keyPin';
 import { signedInPerson } from '../signedInPerson';
@@ -35,28 +37,74 @@ export interface WalletView {
   readAt: number;
   stale: boolean;
   explorerUrl: string | null;
+  /** Arc only: what gas is paid in ('USDC'; Arc has no ETH). */
+  gasAsset?: 'USDC' | 'ETH';
 }
 
-/** The two networks a wallet can be on, exactly as the server names them. */
+/** The networks a wallet can be on, exactly as the server names them: Base, or Circle's Arc. */
 export type WalletNetwork =
   | { chainId: 8453; network: 'Base'; testnet: false }
-  | { chainId: 84532; network: 'Base Sepolia'; testnet: true };
+  | { chainId: 84532; network: 'Base Sepolia'; testnet: true }
+  | ArcWalletNetwork;
+
+/** An Arc wallet: gas is paid in USDC (there is no ETH), links go to Arc's own explorer. */
+export interface ArcWalletNetwork {
+  chainId: typeof ARC_MAINNET | typeof ARC_TESTNET;
+  network: 'Arc' | 'Arc Testnet';
+  testnet: boolean;
+  arc: true;
+  gasAsset: 'USDC';
+  explorerUrl: string;
+}
+
+export const isArcNetwork = (network: WalletNetwork): network is ArcWalletNetwork =>
+  'arc' in network && network.arc === true;
 
 /**
- * The wallet's network when its chain, name and test flag are exactly one of the two; null for
- * anything else. Screens then show no address, QR or copy: never a funding address for a network
- * this page can't name correctly.
+ * The wallet's network when its chain, name and test flag are exactly one of the known ones; null
+ * for anything else. Screens then show no address, QR or copy: never a funding address for a
+ * network this page can't name correctly. An Arc wallet must also say its gas is USDC.
  */
 export function walletNetwork(
-  view: Pick<WalletView, 'chainId' | 'network' | 'testnet'>,
+  view: Pick<WalletView, 'chainId' | 'network' | 'testnet'> & { gasAsset?: unknown },
 ): WalletNetwork | null {
-  // And only the network this build's wallets are on (the server is built from the same commit).
+  if (view.chainId === ARC_MAINNET || view.chainId === ARC_TESTNET) {
+    const chain = chainView(view.chainId);
+    const testnet = view.chainId === ARC_TESTNET;
+    if (!chain || view.gasAsset !== 'USDC' || view.testnet !== testnet) return null;
+    if (view.network !== undefined && view.network !== chain.name) return null;
+    return {
+      chainId: view.chainId,
+      network: chain.name as ArcWalletNetwork['network'],
+      testnet,
+      arc: true,
+      gasAsset: 'USDC',
+      explorerUrl: chain.explorerUrl,
+    };
+  }
+  // And only the Base network this build's wallets are on (the server is built from the same commit).
   if (view.chainId !== WALLET_CHAIN_ID) return null;
   if (view.chainId === 8453 && view.network === 'Base' && view.testnet === false)
     return { chainId: 8453, network: 'Base', testnet: false };
   if (view.chainId === 84532 && view.network === 'Base Sepolia' && view.testnet === true)
     return { chainId: 84532, network: 'Base Sepolia', testnet: true };
   return null;
+}
+
+/** The calm line for a wallet action the server doesn't offer on Arc yet (409 not_on_arc_yet). */
+export { NOT_ON_ARC_YET };
+export const notOnArcYet = (error: unknown) =>
+  error instanceof ApiError && error.status === 409 && error.code === 'not_on_arc_yet';
+
+/** The calm line for a wallet action on another chain than the agent's (409 other_chain). */
+export const OTHER_CHAIN = 'This agent is on another chain, so this isn’t available for it.';
+
+/** A chain refusal in a calm line, or null for any other error. Nothing was signed or sent. */
+export function chainRefusal(error: unknown): string | null {
+  if (notOnArcYet(error)) return NOT_ON_ARC_YET;
+  return error instanceof ApiError && error.status === 409 && error.code === 'other_chain'
+    ? OTHER_CHAIN
+    : null;
 }
 
 export { UNSUPPORTED_NETWORK };
@@ -84,7 +132,7 @@ export type WalletCheck = { problem: string } | { problem: null; against: 'key' 
  * A wallet whose address isn't shown yet (before the backup) has nothing to check.
  */
 export function checkOwnWallet(
-  wallet: Pick<WalletView, 'address' | 'ownerAddress'>,
+  wallet: Pick<WalletView, 'address' | 'ownerAddress'> & { chainId?: number },
   vault: { accountId: string; ownerAddress: string | null },
   agentId: string,
 ): WalletCheck {
@@ -97,7 +145,10 @@ export function checkOwnWallet(
   // A key this browser held that isn't the one reported now: never shown on the report alone.
   const held = heldOwnerKeys();
   if (held.some((key) => key !== owner)) return { problem: NOT_OWN_WALLET };
-  if (!isOwnWallet(wallet.address, owner, agentId)) return { problem: NOT_OWN_WALLET };
+  // On an Arc wallet, derived for that chain; a wallet of any other chain as before.
+  const arc = wallet.chainId === ARC_MAINNET || wallet.chainId === ARC_TESTNET;
+  if (!isOwnWallet(wallet.address, owner, agentId, arc ? wallet.chainId : undefined))
+    return { problem: NOT_OWN_WALLET };
   return { problem: null, against: held.length ? 'key' : 'unlock' };
 }
 
@@ -111,7 +162,8 @@ export type WalletRead =
   | { kind: 'registered_elsewhere'; address: `0x${string}`; ownerAddress: `0x${string}` }
   | { kind: 'none' }
   | { kind: 'off' }
-  | { kind: 'chain_unavailable' };
+  /** `chainId`: said only when the chain that didn't answer is an Arc network. */
+  | { kind: 'chain_unavailable'; chainId?: number };
 
 const path = (agentId: string) => `/api/base/agents/${encodeURIComponent(agentId)}/wallet`;
 
@@ -140,7 +192,12 @@ export async function readWallet(agentId: string): Promise<WalletRead> {
     return { kind: 'wallet', wallet: body as WalletView };
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) return { kind: 'off' };
-    if (error instanceof ApiError && error.status === 503) return { kind: 'chain_unavailable' };
+    if (error instanceof ApiError && error.status === 503) {
+      const chainId = (error.details as { chainId?: unknown } | undefined)?.chainId;
+      return typeof chainId === 'number'
+        ? { kind: 'chain_unavailable', chainId }
+        : { kind: 'chain_unavailable' };
+    }
     throw error;
   }
 }

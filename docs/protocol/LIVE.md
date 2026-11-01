@@ -72,26 +72,28 @@ There, `CITY_PROTOCOL_ROUTER`, `CITY_PROTOCOL_TREASURY`, `CITY_PROTOCOL_START_BL
 (`protocol.setting_ignored`, the setting's name only) and never used. Moving the fee to another
 router or treasury is a code change and a deployment, never an environment edit.
 
-Fee router 2 (`CentralCityFeeRouter2`, payments above 0.10 up to 100 USDC) is configured by
-environment instead: `CITY_PROTOCOL_FEE_ROUTER2` (`0xb1945a2af160e84e34f7c0fb0e4dd94fd4c0af0d` on
-Base mainnet), `CITY_PROTOCOL_FEE_ROUTER2_FROM_BLOCK` (`52767258`, its deploy block, where the ledger
-starts counting it) and the switch `CITY_PROTOCOL_FEE_ROUTER2_ENABLED=1`, which admits new calls above
-0.10 USDC. Unsetting the switch stops new admissions only: calls already pinned to router 2 finish
-there, and the ledger keeps counting it. Details: [FEE_ROUTER_2.md](FEE_ROUTER_2.md). On a test network
-(`CITY_PROTOCOL_CHAIN_ID=84532`) these settings configure everything, as before.
+Fee router 2 (`CentralCityFeeRouter2`, payments above 0.10 up to 100 USDC) is fixed in code on Base
+mainnet too: `0xb1945a2aF160e84E34F7C0FB0E4dD94fd4c0AF0D`, deploy block `52767258` (where the ledger
+starts counting it). `CITY_PROTOCOL_FEE_ROUTER2` and `CITY_PROTOCOL_FEE_ROUTER2_FROM_BLOCK` are ignored
+there like the settings above (logged once when they disagree), so unsetting or changing them can
+never strand calls already pinned to router 2. The switch `CITY_PROTOCOL_FEE_ROUTER2_ENABLED=1` admits
+new calls above 0.10 USDC. Unsetting the switch stops new admissions only: calls already pinned to
+router 2 finish there, and the ledger keeps counting it. Details: [FEE_ROUTER_2.md](FEE_ROUTER_2.md).
+On a test network (`CITY_PROTOCOL_CHAIN_ID=84532`) the address and block settings configure router 2,
+as before.
 
 Fee router 3 (`CentralCityFeeRouter3`, x402 settlement, fee included, up to 100 USDC; spec
-`docs/protocol/FEE_ROUTER_3.md`) is configured the same way: `CITY_PROTOCOL_FEE_ROUTER3`
-(`0xe807a76385ec3d76d17ab955091c12329d0a1403` on Base mainnet, deployed 19 Oct 2026),
-`CITY_PROTOCOL_FEE_ROUTER3_FROM_BLOCK` (`52804453`, its deploy block, where the ledger starts
-counting it) and the switch `CITY_PROTOCOL_FEE_ROUTER3_ENABLED=1`, which only routes new payments:
+`docs/protocol/FEE_ROUTER_3.md`) is pinned the same way: `0xE807A76385EC3d76D17aB955091C12329d0A1403`
+on Base mainnet (deployed 19 Oct 2026), deploy block `52804453` (where the ledger starts counting it);
+`CITY_PROTOCOL_FEE_ROUTER3` and `CITY_PROTOCOL_FEE_ROUTER3_FROM_BLOCK` configure it on a test network
+only. The switch `CITY_PROTOCOL_FEE_ROUTER3_ENABLED=1` only routes new payments:
 while it is set, hosted Central City services sold fee-included between 0.05 and 100 USDC settle
 through router 3; other payments keep routers 1 and 2, and below 0.05 USDC router 1 is used. Router 3
 settlements are sent, and their gas paid in ETH, by Central City's own x402 facilitator
-`0xc8d6Bac2ff7182d22c4f316BffF9f713261A6cEC`, an EOA that never holds USDC.
+`0xc8d6Bac2ff7182d22c4f316BffF9f713261A6cEC`, an EOA that never receives USDC from settlements.
 The ledger and `GET /api/public/protocol/fees` count router 3's `FeeCharged` events (the same event,
-kind 1) whenever its address and deploy block are both set, whatever the switch says, exactly like
-router 2. A router configured after the scan has passed its deploy block is re-read once from that
+kind 1) whatever the switch says (on a test network, whenever its address and deploy block are both
+set), exactly like router 2. A router configured after the scan has passed its deploy block is re-read once from that
 block (migration 232).
 
 ## Optional settings

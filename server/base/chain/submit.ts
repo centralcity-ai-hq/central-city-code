@@ -169,6 +169,11 @@ export interface SponsorIntent {
   sender: Address;
   /** The deployment it expects ('0x' when the account exists), from the same records. */
   initCode: Hex;
+  /**
+   * The Central City account it is sponsored for (the owner's account for an owner operation, the
+   * agent's workspace otherwise), from the same records; null when the platform itself sponsors it.
+   */
+  accountId: string | null;
 }
 
 export interface Bundler {
@@ -181,6 +186,18 @@ export interface Bundler {
     op: UserOperation<'0.6'>,
     options?: { sponsor?: boolean; intent?: SponsorIntent },
   ): Promise<UserOperation<'0.6'>>;
+  /**
+   * The sponsored operation was handed out but will never be signed (its owner operation was
+   * cancelled or lapsed): what its sponsorship still holds is given back now. Optional (only our
+   * own paymaster holds anything); best effort, and idempotent.
+   */
+  release?(userOpHash: Hex): Promise<void>;
+  /**
+   * How many seconds before a sponsorship's signed validUntil this bundler stops sending it (our
+   * own paymaster's: VALIDITY_MARGIN_S, direct-bundler.ts). Optional; absent or 0, only the shared
+   * send margin applies (SPONSOR_SEND_MARGIN_MS, shared/base/paymasters.ts).
+   */
+  sendMarginS?(paymasterAndData: Hex): number;
   /** Broadcasts a signed operation; resending an already known operation must not fail. */
   send(op: UserOperation<'0.6'>): Promise<Hex>;
   receipt(userOpHash: Hex): Promise<BundlerReceipt | null>;
@@ -302,6 +319,8 @@ export interface SubmitInput {
   prepared?: UserOperation<'0.6'>;
   /** The flow this operation belongs to, for our own paymaster's policy (SponsorIntent). */
   sponsorFlow?: SponsorFlow;
+  /** With sponsorFlow: the account it is sponsored for (SponsorIntent.accountId; default null). */
+  sponsorAccountId?: string | null;
 }
 
 export interface PrepareInput {
@@ -321,6 +340,8 @@ export interface PrepareInput {
   sponsor?: boolean;
   /** The flow this operation belongs to, for our own paymaster's policy (SponsorIntent). */
   sponsorFlow?: SponsorFlow;
+  /** With sponsorFlow: the account it is sponsored for (SponsorIntent.accountId; default null). */
+  sponsorAccountId?: string | null;
 }
 
 export interface PreparedOperation {
@@ -377,10 +398,33 @@ export async function prepareOperation(
     {
       ...(input.sponsor === undefined ? {} : { sponsor: input.sponsor }),
       ...(input.sponsorFlow
-        ? { intent: { flow: input.sponsorFlow, calls: input.calls, sender, initCode } }
+        ? {
+            intent: {
+              flow: input.sponsorFlow,
+              calls: input.calls,
+              sender,
+              initCode,
+              accountId: input.sponsorAccountId ?? null,
+            },
+          }
         : {}),
     },
   );
+  // Refused below after a sponsorship was prepared for it: that sponsorship is never handed out.
+  const refusePrepared = async (error: SubmitError): Promise<never> => {
+    if ((unsigned.paymasterAndData ?? '0x') !== '0x')
+      await deps.bundler
+        .release?.(
+          getUserOperationHash({
+            chainId: deps.network.chainId,
+            entryPointAddress: deps.network.contracts.entryPointV06,
+            entryPointVersion: '0.6',
+            userOperation: unsigned,
+          }),
+        )
+        .catch(() => {});
+    throw error;
+  };
   if (
     getAddress(unsigned.sender) !== sender ||
     unsigned.nonce !== nonce ||
@@ -392,17 +436,21 @@ export async function prepareOperation(
       (unsigned.maxFeePerGas < input.feeFloor.maxFeePerGas ||
         unsigned.maxPriorityFeePerGas < input.feeFloor.maxPriorityFeePerGas))
   )
-    throw new SubmitError(
-      'SENDER_MISMATCH',
-      'The bundler changed the operation it was asked to prepare.',
+    return refusePrepared(
+      new SubmitError(
+        'SENDER_MISMATCH',
+        'The bundler changed the operation it was asked to prepare.',
+      ),
     );
 
   // Budget check before anything is signed: fail closed when the bound exceeds what the caller reserved.
   const bound = maxCostWei(unsigned);
   if (input.maxCostWeiCap !== undefined && bound > input.maxCostWeiCap)
-    throw new SubmitError(
-      'COST_CAP_EXCEEDED',
-      'The operation could cost more than its reserved budget.',
+    return refusePrepared(
+      new SubmitError(
+        'COST_CAP_EXCEEDED',
+        'The operation could cost more than its reserved budget.',
+      ),
     );
   return { operation: { ...unsigned, signature: '0x' }, maxCostWei: bound, deployed };
 }
@@ -702,9 +750,28 @@ async function sponsorshipLapsed(
   row: StoredOperation,
   settled: ChainHead,
 ): Promise<boolean> {
+  let operation: UserOperation<'0.6'>;
+  try {
+    operation = fromJson(row.signedOperation);
+  } catch {
+    return false;
+  }
+  return lapsedAt(
+    deps,
+    { ...operation, sender: getAddress(row.sender), nonce: BigInt(row.nonce) },
+    settled,
+  );
+}
+
+/** sponsorshipLapsed for an operation's own bytes, at a settled head already read. */
+async function lapsedAt(
+  deps: ChainReader,
+  op: Pick<UserOperation<'0.6'>, 'sender' | 'nonce' | 'paymasterAndData'>,
+  settled: ChainHead,
+): Promise<boolean> {
   let until: number | null;
   try {
-    until = sponsoredValidUntil(fromJson(row.signedOperation).paymasterAndData);
+    until = sponsoredValidUntil(op.paymasterAndData);
   } catch {
     return false;
   }
@@ -714,18 +781,34 @@ async function sponsorshipLapsed(
     .catch(() => null);
   const time = (block as { timestamp?: unknown } | null)?.timestamp;
   if (typeof time !== 'bigint' || time * 1000n <= BigInt(until)) return false;
-  const nonce = BigInt(row.nonce);
+  const nonce = op.nonce;
   const atSettled = await deps.client
     .readContract({
       address: deps.network.contracts.entryPointV06,
       abi: entryPointAbi,
       functionName: 'getNonce',
-      args: [getAddress(row.sender), nonce >> 64n],
+      args: [getAddress(op.sender), nonce >> 64n],
       blockNumber: settled.number,
     })
     .catch(() => null);
   if (atSettled === null || atSettled > nonce) return false;
   return headIsCanonical(deps, settled);
+}
+
+/**
+ * sponsorshipLapsed for a signed operation the chain module never stored (so never sent by us): its
+ * own bytes, the sender and nonce it was signed for. True only when a settled block, canonical now,
+ * is past its paymaster's signed validUntil and its nonce was still unused there: it never landed
+ * and never can, whoever holds its signature. False when it has not (provably) lapsed or has no
+ * bounded sponsorship, null when Base cannot tell right now (no settled head).
+ */
+export async function unstoredSponsorshipLapsed(
+  deps: ChainReader,
+  op: Pick<UserOperation<'0.6'>, 'sender' | 'nonce' | 'paymasterAndData'>,
+): Promise<boolean | null> {
+  const settled = await settledHead(deps).catch(() => null);
+  if (settled === null) return null;
+  return lapsedAt(deps, op, settled);
 }
 
 /**
@@ -1022,6 +1105,8 @@ export async function submitOperation(
   const sender = getAddress(input.account.address);
   let unsigned: UserOperation<'0.6'>;
   let bound: bigint;
+  /** Sponsored and prepared here: given back if it is never stored as this key's operation. */
+  let ownSponsorship: Hex | null = null;
   if (input.prepared) {
     bound = await checkPrepared(deps, { ...input, prepared: input.prepared }, sender);
     unsigned = { ...input.prepared, signature: '0x' };
@@ -1032,29 +1117,90 @@ export async function submitOperation(
       nonceKey: input.nonceKey ?? nonceLaneFor(input.idempotencyKey),
       pinnedNonce: input.pinnedNonce,
       maxCostWeiCap: input.maxCostWeiCap,
-      ...(input.sponsorFlow ? { sponsorFlow: input.sponsorFlow } : {}),
+      ...(input.sponsorFlow
+        ? { sponsorFlow: input.sponsorFlow, sponsorAccountId: input.sponsorAccountId ?? null }
+        : {}),
     });
     unsigned = prepared.operation;
     bound = prepared.maxCostWei;
+    if ((unsigned.paymasterAndData ?? '0x') !== '0x')
+      ownSponsorship = getUserOperationHash({
+        chainId: deps.network.chainId,
+        entryPointAddress: deps.network.contracts.entryPointV06,
+        entryPointVersion: '0.6',
+        userOperation: unsigned,
+      });
   }
-  const nonce = unsigned.nonce;
-  if (input.sponsorCheck && !input.sponsorCheck(unsigned.paymasterAndData ?? '0x'))
-    throw new SubmitError('NOT_SPONSORED', 'The network fee is not covered by an allowed sponsor.');
-  await input.reserveCost?.(bound);
+  // From here until it is stored, a failure means no signed operation exists anywhere but here:
+  // the sponsorship prepared for it is given back at once (Bundler.release), never left to hold
+  // its share of the budget until it lapses. Only one prepared here; a caller's own (an owner's
+  // handout) stays the caller's to release.
+  const giveBack = async () => {
+    if (ownSponsorship) await deps.bundler.release?.(ownSponsorship).catch(() => {});
+  };
+  let row: StoredOperation;
+  let userOpHash: Hex;
+  try {
+    const nonce = unsigned.nonce;
+    if (input.sponsorCheck && !input.sponsorCheck(unsigned.paymasterAndData ?? '0x'))
+      throw new SubmitError(
+        'NOT_SPONSORED',
+        'The network fee is not covered by an allowed sponsor.',
+      );
+    await input.reserveCost?.(bound);
 
-  const signature = await deps.signer.signUserOperation(unsigned, sender);
-  const signed: UserOperation<'0.6'> = { ...unsigned, signature };
-  const userOpHash = getUserOperationHash({
-    chainId: deps.network.chainId,
-    entryPointAddress: deps.network.contracts.entryPointV06,
-    entryPointVersion: '0.6',
-    userOperation: signed,
-  });
+    const signature = await deps.signer.signUserOperation(unsigned, sender);
+    const signed: UserOperation<'0.6'> = { ...unsigned, signature };
+    userOpHash = getUserOperationHash({
+      chainId: deps.network.chainId,
+      entryPointAddress: deps.network.contracts.entryPointV06,
+      entryPointVersion: '0.6',
+      userOperation: signed,
+    });
 
-  // Store before broadcast (§11.3). If another worker won the insert, reconcile its operation.
-  // The head block now is the earliest block the operation can land in (start of every search).
-  const submittedBlock = await headBlock(deps);
-  const row = await deps.store.insert({
+    // Store before broadcast (§11.3). If another worker won the insert, reconcile its operation.
+    // The head block now is the earliest block the operation can land in (start of every search).
+    const submittedBlock = await headBlock(deps);
+    row = await insertOperation(deps, input, {
+      sender,
+      nonce,
+      userOpHash,
+      signed,
+      bound,
+      submittedBlock,
+    });
+  } catch (error) {
+    // An insert that failed after all may still have stored it: then it is not given back.
+    const stored = await deps.store.get(input.idempotencyKey).catch(() => undefined);
+    if (stored === null || (stored && !sameHex(stored.userOpHash, ownSponsorship ?? '0x')))
+      await giveBack();
+    throw error;
+  }
+  if (row.userOpHash !== userOpHash) {
+    // Another worker's operation holds the key: ours is never stored, never sent.
+    await giveBack();
+    if (row.intentHash !== input.intentHash)
+      throw new SubmitError('IDEMPOTENCY_CONFLICT', 'This key was used for a different intent.');
+    return reconcile(deps, row);
+  }
+  return authorizeAndSend(deps, row, firstSend(row));
+}
+
+/** The first store of an operation (submitOperation), as 'queued'. */
+function insertOperation(
+  deps: SubmitDeps,
+  input: SubmitInput,
+  op: {
+    sender: Address;
+    nonce: bigint;
+    userOpHash: Hex;
+    signed: UserOperation<'0.6'>;
+    bound: bigint;
+    submittedBlock: bigint;
+  },
+): Promise<StoredOperation> {
+  const { sender, nonce, userOpHash, signed, bound, submittedBlock } = op;
+  return deps.store.insert({
     idempotencyKey: input.idempotencyKey,
     intentHash: input.intentHash,
     chainId: deps.network.chainId,
@@ -1073,12 +1219,6 @@ export async function submitOperation(
     submittedBlock: submittedBlock.toString(10),
     errorCode: null,
   });
-  if (row.userOpHash !== userOpHash) {
-    if (row.intentHash !== input.intentHash)
-      throw new SubmitError('IDEMPOTENCY_CONFLICT', 'This key was used for a different intent.');
-    return reconcile(deps, row);
-  }
-  return authorizeAndSend(deps, row, firstSend(row));
 }
 
 /**
@@ -1100,6 +1240,9 @@ async function authorizeAndSend(
         status: 'failed',
         errorCode: 'REFUSED_BEFORE_BROADCAST',
       });
+      // Failed while still queued: nobody ever sends it, so its sponsorship is given back now.
+      if (refused && (fromJson(row.signedOperation).paymasterAndData ?? '0x') !== '0x')
+        await deps.bundler.release?.(row.userOpHash as Hex).catch(() => {});
       return refused ?? reconcile(deps, (await deps.store.get(row.idempotencyKey)) ?? row);
     }
   }
@@ -1223,6 +1366,16 @@ export async function refreshFinality(
      * found. Never applied to an operation in another lane.
      */
     ownLane?: boolean;
+    /**
+     * The lane the operation was prepared in, when it is its own (an owner operation laned by its
+     * id: nothing outside Central City signs there), and the idempotency keys of the only other
+     * operations ever signed on it (a withdrawal's cancel, the no-op at the same nonce). A used
+     * nonce on that lane with no event found for us is taken as replaced only once one of those is
+     * recorded included or final at that nonce; otherwise (a lagging or incomplete log index) the
+     * operation stays reconciling, so a landed withdrawal is never failed and its holds never
+     * released (CCA-108). Never applied to an operation in another lane.
+     */
+    lane?: { key: bigint; peers: readonly string[] };
   } = {},
 ): Promise<StoredOperation | null> {
   const row = await deps.store.get(idempotencyKey);
@@ -1281,6 +1434,22 @@ export async function refreshFinality(
     } else {
       if (search.kind === 'unknown') return current;
       if (options.ownLane && nonce >> 64n === nonceLaneFor(idempotencyKey)) return current;
+      if (options.lane && nonce >> 64n === options.lane.key) {
+        let replaced = false;
+        for (const peer of options.lane.peers) {
+          if (peer === idempotencyKey) continue;
+          const other = await deps.store.get(peer);
+          if (
+            other &&
+            BigInt(other.nonce) === nonce &&
+            (other.status === 'included' || other.status === 'final')
+          ) {
+            replaced = true;
+            break;
+          }
+        }
+        if (!replaced) return current;
+      }
       // Only a settled block still on the chain (its hash, read live by number) proves anything: a
       // shared finalized head from another fork or a rolled-back node does not.
       if (!(await headIsCanonical(deps, settled))) return current;

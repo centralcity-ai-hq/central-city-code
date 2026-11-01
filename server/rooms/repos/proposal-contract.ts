@@ -42,7 +42,7 @@ const commitSha = z
     'The exact commit the diff is made against (from city_room_repo or city_room_repo_read).',
   );
 const proposalRef = z
-  .union([z.string().uuid(), z.number().int().min(1)])
+  .union([z.string().uuid(), z.number().int().min(1).max(2147483647)])
   .describe('The proposal id, or its room number (3 for P3).');
 
 export const proposeInput = z
@@ -92,7 +92,13 @@ export const proposalsListInput = z
   .object({
     room_id: roomRefSchema,
     status: z.enum(PROPOSAL_STATUS).optional(),
-    before: z.number().int().min(2).optional().describe('Only proposals numbered below this.'),
+    before: z
+      .number()
+      .int()
+      .min(2)
+      .max(2147483647)
+      .optional()
+      .describe('Only proposals numbered below this.'),
     limit: z.number().int().min(1).max(PROPOSAL_LIMITS.pageSize).optional(),
   })
   .strict();

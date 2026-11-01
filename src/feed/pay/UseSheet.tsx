@@ -21,7 +21,8 @@ import { rawToUsdc, type FeedService } from '../../../shared/feed';
 import { newIdempotencyKey } from '../feedApi';
 import { workspaceClick } from '../feedNav';
 import { avatarStyle } from '../../shell/avatarColor';
-import { Avatar, CopyButton } from '../FeedParts';
+import { arcEnabled } from '../../explorer/chain';
+import { Avatar, CopyButton, isHosted } from '../FeedParts';
 import { initialsOf, plain } from '../feedFormat';
 import { askFeedSignInAgain, SIGN_IN_LABEL } from '../feedSignIn';
 import { callService, PayFailure, payFailure, quoteService } from '../payApi';
@@ -726,7 +727,9 @@ export function UseSheet({
       ...(recheck ? { note: recheckWhy(recheck.why) } : {}),
     });
     try {
-      const answer = await quoteService(service.id, built.inputs);
+      const answer = await quoteService(service.id, built.inputs, {
+        agentId: agentId ?? undefined,
+      });
       if (!answer.payable) setQuote({ k: 'not_payable', reason: answer.reason });
       else {
         setQuote({
@@ -756,7 +759,11 @@ export function UseSheet({
       else {
         setQuote({
           k: 'error',
-          text: refusalText(failure, { agentName: agent?.name, period: agent?.limitPeriod }),
+          text: refusalText(failure, {
+            agentName: agent?.name,
+            period: agent?.limitPeriod,
+            chainId: agent?.chainId,
+          }),
         });
         if (failure.code === 'signed_out') setSignIn(true);
         // Signed out, or paying switched off: the drawer behind the sheet follows.
@@ -811,7 +818,8 @@ export function UseSheet({
       return;
     }
     // The server said for sure that nothing started: the payment is no longer open.
-    const text = refusalText(failure, { agentName, period });
+    const chainId = agents.find((item) => item.agentId === body.agentId)?.chainId;
+    const text = refusalText(failure, { agentName, period, chainId });
     if (!mounted.current) {
       setOpenPayment(service.id, { ...entry, phase: 'refused', problem: text });
       return;
@@ -889,7 +897,8 @@ export function UseSheet({
         if (error.code === 'invalid_inputs' && error.detail.fields?.length) {
           setProblems(serverProblems(form, error.detail.fields));
           window.setTimeout(() => summary.current?.focus(), 0);
-        } else setCallProblem(refusalText(error, { agentName: picked.name }));
+        } else
+          setCallProblem(refusalText(error, { agentName: picked.name, chainId: picked.chainId }));
       } else {
         const failure =
           error instanceof SponsoredFailure ? error : new SponsoredFailure(0, 'network');
@@ -976,6 +985,28 @@ export function UseSheet({
   const agentProblem = problemOf('agent');
   const listed = problems.filter((problem) => problem.key !== 'agent' || agentProblem);
   const noAgents = agents.length === 0 && !access.loading;
+  const [arcOn, setArcOn] = useState<boolean | null>(null);
+  // Asked only when the line below is shown. An outside service is paid on Base only, so its line
+  // is true either way; a Central City service's seller may be on Base or Arc, so the line names
+  // no chain while Arc is on. Nothing is said until the answer, so the line never changes in view.
+  const hostedService = isHosted(service.source);
+  useEffect(() => {
+    if (!noAgents || !hostedService) return;
+    let live = true;
+    void arcEnabled().then((value) => {
+      if (live) setArcOn(value);
+    });
+    return () => {
+      live = false;
+    };
+  }, [noAgents, hostedService]);
+  const noAgentLine = !hostedService
+    ? 'You have no agent with a wallet on Base yet.'
+    : arcOn === null
+      ? null
+      : arcOn
+        ? 'You have no agent with a wallet yet.'
+        : 'You have no agent with a wallet on Base yet.';
   const unpayable = quote.k === 'not_payable' ? notPayableView(quote.reason) : null;
   const signInButton = (
     <button
@@ -1144,7 +1175,10 @@ export function UseSheet({
                       setMaxSaved('');
                       setCallProblem('');
                       setProblems((list) => list.filter((problem) => problem.key !== 'agent'));
-                      if (quoted) setConfirming(true);
+                      // The answer was for the agent asked about: another chain's asks again.
+                      if (quote.k === 'error' || (quoted && item.chainId !== agent?.chainId))
+                        setQuote({ k: 'idle' });
+                      else if (quoted) setConfirming(true);
                     }}
                   />
                 ))}
@@ -1155,7 +1189,7 @@ export function UseSheet({
               </p>
             ) : (
               <p className="fp-none">
-                <span className="fd-muted">You have no agent with a wallet on Base yet.</span>
+                {noAgentLine === null ? null : <span className="fd-muted">{noAgentLine}</span>}
                 <a className="fd-link" href="/agents" onClick={workspaceClick('/agents')}>
                   Go to My agents
                 </a>

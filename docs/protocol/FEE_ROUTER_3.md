@@ -7,7 +7,11 @@ treasury, one `FeeCharged` event (kind 1).
 
 ## Contract
 
-`contracts/fees/CentralCityFeeRouter3.sol`: immutable, ownerless, never holds a balance.
+`contracts/fees/CentralCityFeeRouter3.sol`: immutable, ownerless, and never holds a balance from a
+correctly addressed settlement. It cannot refuse USDC sent to it directly, nor a settlement whose
+payer signed the router itself as payee; either is stranded there for good (no withdrawal), so
+Central City never names a router, the treasury, USDC or the facilitator as a payee
+(`reservedPayees`, `shared/protocol.ts`).
 
 - `settle(Settlement)`: one payment. `settleBatch(Settlement[])`: several in one transaction, all or
   nothing (the facilitator falls back to one by one).
@@ -31,6 +35,27 @@ submit it to USDC directly. Then `settle` reverts (nonce used) and nothing moves
 payment and never re-signs new nonces for it; the
 signatures only travel from the buyer to Central City's own resource server and facilitator, and
 Base has no public mempool.
+
+### Never re-sign a purchase (CCA-731)
+
+The router charges each `(payer, ref)` once, but each leg also stays usable directly on USDC until
+`validBefore` or until it is cancelled. A second pair for the same purchase (a new window gives new
+nonces) is independent of the first, so both pairs could be spent: up to one extra price, at most
+100 USDC, to the seller and the treasury.
+
+The app's invariant, tested in `tests/feed-pay-router3-e2e.test.ts` (CCA-731): a pair is stored
+before it is returned and a retry under the same key gets the stored pair. A call whose payment is
+planned again under a new key (`pay_attempts > 0`) signs a new pair only once every leg of its
+earlier attempts is proven unusable on Base, cancelled or expired at a safe block past its window.
+A leg still open is cancelled first with `USDC.cancelAuthorization`; a leg Base shows used is never
+followed by a new pair.
+
+Outside integrators who sign router 3 legs must keep the same rule:
+
+- Sign one pair per purchase (`ref`) and store it before handing it out; resend the stored pair.
+- Before signing a new pair for the same purchase, cancel both earlier legs on USDC
+  (`cancelAuthorization`) and wait until the cancellation, or the earlier window's expiry, is final.
+- Keep windows short (the app uses 600 seconds, CCA-745).
 
 ## Why two authorizations
 
@@ -57,8 +82,9 @@ Today's sponsored `pay` UserOp: 207,280 gas (canary, 18 Oct).
 
 `ROUTER=3 pnpm tsx scripts/protocol/build-deploy-kit.ts` writes `contracts/deploy-kit/router3.json`
 (creation bytecode hash `0xb6487fd6…7935`). `node scripts/protocol/serve-deploy-kit.mjs`, then
-`http://localhost:8790/deploy.html?router=3`, connected as the treasury
-`0xAF36084a4dc0CE760A6dCfa46Cf129e140c92aa9`.
+`http://127.0.0.1:8790/deploy.html?router=3`, connected as the treasury
+`0xAF36084a4dc0CE760A6dCfa46Cf129e140c92aa9`. To reproduce the hash from the source, see
+[CANARY.md](CANARY.md), "Deployed".
 
 Deployed on Base mainnet on 19 Oct 2026 by the treasury, source verified on Basescan:
 
@@ -70,12 +96,18 @@ Deployed on Base mainnet on 19 Oct 2026 by the treasury, source verified on Base
 | `FEE_BPS`               | `1000` (10%, fee included)                                           |
 | `MIN_INCLUDED`          | 0.05 USDC                                                            |
 | `MAX_TOTAL`             | 100 USDC                                                             |
+| Licence                 | Apache-2.0 (the source's SPDX header)                                |
+
+Basescan's licence field for router 3 shows GPLv3, which does not match the source header
+(Apache-2.0). Only the verifying account can change that label on Basescan; it is an owner step
+(audit finding CCA-748). The verified source itself is correct and unchanged.
 
 ## Live on Base mainnet
 
 - **Facilitator.** Central City's own x402 facilitator, the EOA
   `0xc8d6Bac2ff7182d22c4f316BffF9f713261A6cEC`, sends router 3 settlements and pays their gas in
-  ETH. It never holds USDC: both legs move straight from the payer.
+  ETH. It never receives USDC from settlements: both legs move straight from the payer. (Like any
+  address it can be sent USDC directly; at the audit's fork block it held 11 units, 0.000011 USDC.)
 - **Routing.** Hosted Central City services sold fee-included between 0.05 and 100 USDC settle
   through router 3 while `CITY_PROTOCOL_FEE_ROUTER3_ENABLED=1`. Other payments keep router 1
   (`0xA5f89AE25c87C21a8E2B03aaBf398A880d9be81B`, up to 0.10 USDC) and router 2
@@ -89,6 +121,30 @@ Deployed on Base mainnet on 19 Oct 2026 by the treasury, source verified on Base
   facilitator is in `dexs/x402/facilitators.ts`, so these settlements count in DefiLlama's x402
   listing). The figures include payments made by all agents created on Central City, counted under
   the same rules.
+
+## Facilitator monitoring
+
+The facilitator writes its lines to the app log (prefix `x402 facilitator:`). Each settlement is
+still simulated before it is sent and signed only within its gas budgets; these lines watch what
+those bounds allow.
+
+- **Reverted batches (CCA-744).** A failing or front-run member reverts its whole batch, and the
+  facilitator pays that batch's gas. Each one logs `<batch key> batch reverted`. When the last 3
+  batches of the EOA in a block, by nonce, all reverted, the line reads
+  `ALERT <batch key> reverted, the last N batches reverted`: look for a member that keeps failing
+  or a sender that settles our pairs first.
+- **Small settlements (CCA-754).** At the 0.05 USDC minimum the 10% fee is of the order of the
+  settlement gas. Every router 3 settlement that went through logs
+  `economics <key> items <n> gas_wei <gas plus L1 fee> fee_raw <protocol fee>`. With
+  `CITY_X402_FACILITATOR_ETH_USD` set (USD per ETH, for example `2500`) the gas is priced in USDC,
+  and above half the fee the line reads `ALERT <key> gas <g> above 50% of fee <f> (USDC units)`.
+  Unset or invalid (not a plain decimal from 1 to 1,000,000): the economics lines only, no
+  comparison.
+- **A failed check.** These checks run once, when a receipt is first recorded. If one cannot read
+  the database, the line reads
+  `ALERT <key> receipt monitoring failed (<reverted|success>), check it on Base`.
+- **Where the lines go.** The app's log sink (`logLine`), else the console; never the Fastify
+  logger, which is off in production.
 
 ## x402 wire format
 

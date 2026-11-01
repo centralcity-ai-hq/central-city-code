@@ -35,6 +35,8 @@ export const PAUSE_REASONS = [
   'forbidden',
   'key_removed',
   'repeated_failures',
+  /** The server can't open the stored key (its root key is missing); the key itself is fine. */
+  'root_key_unavailable',
 ] as const;
 export type PauseReason = (typeof PAUSE_REASONS)[number];
 

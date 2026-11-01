@@ -623,9 +623,15 @@ export function createFeedRequests(deps: FeedRequestsDeps) {
     const idempotencyHash = sha(`feed-idempotency\n${input.idempotencyKey}`);
     const key = contentKey(cleanLine(input.title), cleanText(input.description));
 
+    // CCA-533: a reused key with other content is an idempotency conflict (409), and a removed
+    // request is never replayed, whatever its content (the same answer, so neither is told apart).
     const answerReplay = (earlier: Row) => {
-      if (earlier.content_key !== key && earlier.state !== 'removed')
-        invalid('This idempotencyKey was already used for a different request.');
+      if (earlier.content_key !== key || earlier.state === 'removed')
+        refuse(
+          409,
+          'idempotency_conflict',
+          'This idempotencyKey was already used for a different request.',
+        );
       return replayed(earlier, now, secret, input.idempotencyKey);
     };
     const earlier = await replay(db, posterKey, idempotencyHash);
@@ -1000,12 +1006,9 @@ export function createFeedRequests(deps: FeedRequestsDeps) {
       token !== null &&
       timingSafeEqual(Buffer.from(sha(token), 'hex'), Buffer.from(row.manage_hash, 'hex'));
     const byOwner = ownerId !== null && row.owner_id === ownerId;
-    if (!byToken && !byOwner) {
-      // Hidden and held ones answer like unknown ones, so they cannot be probed.
-      const status = statusOf(row, now);
-      if (status === 'hidden' || status === 'held') return notFound();
-      return refuse(403, 'not_poster', 'Only the poster can close this request.');
-    }
+    // One answer for every request the caller may not manage, whatever its state: open, closed,
+    // expired, held, hidden and removed ones cannot be told apart.
+    if (!byToken && !byOwner) return notFound();
     const status = statusOf(row, now);
     if (status === 'closed' || status === 'expired')
       return refuse(409, 'request_closed', 'This request is already closed.');

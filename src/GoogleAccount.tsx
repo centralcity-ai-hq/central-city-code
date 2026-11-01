@@ -41,6 +41,8 @@ export interface GoogleLinkState {
   /** An account just created with Google that has not chosen its account name yet. */
   handle_needed?: boolean;
   linked: { email: string; hd: string | null; linked_at: string } | null;
+  /** The account signs in with Google only, so it can't be unlinked. */
+  google_only?: boolean;
   /**
    * Set here (never by the server) when GET /api/auth/google failed (network, 429, 5xx): whether
    * Google sign-in is on is unknown, which is not the same as "off".
@@ -64,6 +66,17 @@ export function GoogleLinkCheckFailed({ onRetry }: { onRetry: () => void }) {
   return (
     <div role="alert">
       <p>Couldn't check Google sign-in.</p>
+      <button type="button" className="button secondary" onClick={onRetry}>
+        Try again
+      </button>
+    </div>
+  );
+}
+
+function AgeLoadFailed({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div role="alert">
+      <p>Couldn't load your age check.</p>
       <button type="button" className="button secondary" onClick={onRetry}>
         Try again
       </button>
@@ -218,7 +231,8 @@ interface AgeView {
 
 /** Date of birth for Elric's 18+ age confirmation: view, enter or correct (not once locked). */
 function DateOfBirth() {
-  const { view, value, setValue, busy, error, saved, save } = useDateOfBirth();
+  const { view, value, setValue, busy, error, saved, save, loadFailed, retry } = useDateOfBirth();
+  if (!view && loadFailed) return <AgeLoadFailed onRetry={retry} />;
   if (!view) return null;
   return (
     <>
@@ -259,19 +273,24 @@ function useDateOfBirth() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [saved, setSaved] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let active = true;
+    setLoadFailed(false);
     api<AgeView>('/api/elric/age', undefined, 'GET')
       .then((result) => {
         if (!active) return;
         setView(result);
         setValue(result.date_of_birth ?? '');
       })
-      .catch(() => active && setView({ date_of_birth: null, age_check: 'unknown', locked: false }));
+      // Not "no date of birth yet": a failed read says nothing about what is stored.
+      .catch(() => active && setLoadFailed(true));
     return () => {
       active = false;
     };
-  }, []);
+  }, [attempt]);
+  const retry = () => setAttempt((value) => value + 1);
   async function save(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
@@ -290,7 +309,7 @@ function useDateOfBirth() {
       setBusy(false);
     }
   }
-  return { view, value, setValue, busy, error, saved, save };
+  return { view, value, setValue, busy, error, saved, save, loadFailed, retry };
 }
 
 /** The account name for an account created with Google (asked once, after the first sign-in). */
@@ -574,22 +593,26 @@ function AccountSettingsV2() {
                     <span className="stv2-pill live">Linked</span>
                   </p>
                   <p className="account-data-muted">
-                    Linked {formatLinkedDate(state.linked.linked_at)}. If you unlink it, it can’t be
-                    linked to a different Central City account for 30 days.
+                    Linked {formatLinkedDate(state.linked.linked_at)}.{' '}
+                    {state.google_only
+                      ? 'This account signs in with Google only, so it stays linked.'
+                      : 'If you unlink it, it can’t be linked to a different Central City account for 30 days.'}
                   </p>
                 </div>
-                <button
-                  ref={unlinkButton}
-                  type="button"
-                  className="button stv2-danger"
-                  onClick={() => {
-                    setError('');
-                    setUnlinked(false);
-                    setConfirming(true);
-                  }}
-                >
-                  Unlink Google
-                </button>
+                {state.google_only ? null : (
+                  <button
+                    ref={unlinkButton}
+                    type="button"
+                    className="button stv2-danger"
+                    onClick={() => {
+                      setError('');
+                      setUnlinked(false);
+                      setConfirming(true);
+                    }}
+                  >
+                    Unlink Google
+                  </button>
+                )}
               </div>
             ) : (
               <div className="stv2-row stv2-row-stack">
@@ -650,7 +673,8 @@ function formatLinkedDate(value: string): string {
 
 /** Elric's age check in Settings: its state, and the date of birth form while it may change. */
 function AgeCheck() {
-  const { view, value, setValue, busy, error, saved, save } = useDateOfBirth();
+  const { view, value, setValue, busy, error, saved, save, loadFailed, retry } = useDateOfBirth();
+  if (!view && loadFailed) return <AgeLoadFailed onRetry={retry} />;
   if (!view) return <SettingsLoading label="Loading your age check…" rows={1} />;
   if (view.locked || view.age_check === 'under_18')
     return <p className="account-data-muted">Elric is only for people aged 18 or over.</p>;

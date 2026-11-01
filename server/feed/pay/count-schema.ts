@@ -29,16 +29,13 @@ import { registerMigration, type Migration } from '../../migrations.js';
  * so the homepage can show each payment at its own moment. A payment without a block time (never
  * the case today) is stamped with the database clock.
  *
- * The starting count is exact: migrations run in one transaction, and CREATE TRIGGER takes a lock
- * (ShareRowExclusiveLock on `feed_pay_calls`) that waits for payment updates in progress and holds
- * new ones until the migration commits, so the backfill sees every settled row once.
+ * The starting count is exact: the migration runs in one transaction, and CREATE TRIGGER takes a
+ * lock (ShareRowExclusiveLock on `feed_pay_calls`) that waits for payment updates in progress and
+ * holds new ones until the migration commits, so the backfill sees every settled row once.
  *
- * Deploy: runMigrations applies every pending migration in ONE transaction, so that lock is held
- * until the whole batch commits, not only this migration. Payment saves wait meanwhile and fail
- * with 55P03 after the session's 5 s lock_timeout (the engine retries them; the payment itself is
- * already on Base). So this migration ships alone or last in its batch: never together with a
- * heavier, higher-numbered migration. Its number is re-checked at merge (other open changes take
- * numbers too), and this rule with it.
+ * Deploy: runMigrations commits each migration on its own, so that lock is held only while this
+ * migration runs. Payment saves wait meanwhile and fail with 55P03 after the session's 5 s
+ * lock_timeout (the engine retries them; the payment itself is already on Base).
  *
  * Derived data: backups skip the table (server/recovery.ts). After a restore the count is hidden
  * or low until the daily check, never too high.

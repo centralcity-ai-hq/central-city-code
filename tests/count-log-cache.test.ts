@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { checkpointsCache } from '../server/count-log/routes.js';
+import { FEED_SEALING, checkpointsCache, feedCache } from '../server/count-log/routes.js';
 import { cutInstant, nextCheckpointAt } from '../shared/count-log/index.js';
 
 const at = (iso: string) => Date.parse(iso);
@@ -106,4 +106,74 @@ test('checkpoint list: at the cut instant with the day already listed, the next 
     browser: 'public, max-age=60, s-maxage=300, stale-while-revalidate=600',
     edge: 'public, max-age=300, stale-while-revalidate=86100',
   });
+});
+
+const settled = (latest: string | null) => ({
+  cursor: true,
+  stability: 'checkpoint' as const,
+  latest,
+});
+
+test('feed page: between the noon cut and the seal a settled page is cached 5 s, not until tomorrow', () => {
+  // CEST (cut 10:00 UTC), CET (cut 11:00 UTC) and the 25 Oct 2026 switch day (cut 11:00 UTC).
+  for (const [date, cut] of [
+    ['2026-10-10', '2026-10-10T10:00:00Z'],
+    ['2026-12-02', '2026-12-02T11:00:00Z'],
+    ['2026-10-25', '2026-10-25T11:00:00Z'],
+  ] as const) {
+    const yesterday = day(at(cut) - 86_400_000);
+    // The seal is running (today's checkpoint not listed): at the cut, during settle, minutes on.
+    for (const offset of [0, 1, 30_000, 4 * 60_000, 3 * 3_600_000])
+      assert.equal(
+        feedCache(settled(yesterday), at(cut) + offset),
+        FEED_SEALING,
+        `${date} +${offset}`,
+      );
+    assert.equal(
+      feedCache(settled(null), at(cut) + 60_000),
+      FEED_SEALING,
+      `${date} no checkpoint yet`,
+    );
+    // Sealed: cached until the next day's cut, never past it.
+    const sealed = feedCache(settled(date), at(cut) + 60_000);
+    const age = Number(/max-age=(\d+)/.exec(sealed)![1]);
+    assert.equal(at(cut) + 60_000 + age * 1000 <= nextCheckpointAt(at(cut) + 60_001), true, sealed);
+    assert.ok(age > 3_600, sealed);
+    // Before the cut, yesterday's checkpoint is the latest: cached until today's cut.
+    const before = feedCache(settled(yesterday), at(cut) - 60_000);
+    assert.equal(before, 'public, max-age=60, s-maxage=60', `${date} before the cut`);
+  }
+});
+
+test('feed page: the head and pending pages stay live, removed-only pages stay final, in the window too', () => {
+  const now = at('2026-10-25T11:02:00Z');
+  const latest = '2026-10-24';
+  const live = 'public, max-age=2, s-maxage=2, stale-while-revalidate=5';
+  assert.equal(feedCache({ cursor: false, stability: 'checkpoint', latest }, now), live);
+  assert.equal(feedCache({ cursor: true, stability: 'live', latest }, now), live);
+  assert.equal(
+    feedCache({ cursor: true, stability: 'final', latest }, now),
+    'public, max-age=86400, s-maxage=86400',
+  );
+});
+
+test('feed page: a settled page never outlives a checkpoint that could change it (every 7 min over DST)', () => {
+  for (const [from, to] of [
+    ['2026-10-24T00:00:00Z', '2026-10-27T23:59:00Z'],
+    ['2027-03-27T00:00:00Z', '2027-03-29T23:59:00Z'],
+  ])
+    for (let now = at(from); now <= at(to); now += 7 * 60_000) {
+      const today = day(now);
+      // During the seal (up to 20 min after the cut) today is not listed yet; afterwards it is.
+      const latest = now >= cutInstant(today) + 20 * 60_000 ? today : day(now - 86_400_000);
+      const cache = feedCache(settled(latest), now);
+      const age = Number(/max-age=(\d+)/.exec(cache)![1]);
+      const sealing = now >= cutInstant(today) && latest < today;
+      const until = sealing ? now + 5_000 : nextCheckpointAt(now + 1);
+      assert.ok(
+        now + age * 1000 <= Math.max(until, now + 2_000),
+        `${new Date(now).toISOString()} ${cache}`,
+      );
+      assert.equal(cache === FEED_SEALING, sealing, new Date(now).toISOString());
+    }
 });

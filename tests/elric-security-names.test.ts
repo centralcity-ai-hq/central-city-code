@@ -9,6 +9,7 @@ import { isReservedElricName } from '../server/elric/names.js';
 import { injectTransport, joinWithInvite } from '../scripts/smoke/ai-guest.js';
 import { defaultPiiKeyring, storeDob } from '../server/google/pii.js';
 import { elricFixture } from './elric-fixture.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 /**
  * Elric security: the reserved name "Elric" on EVERY path that names a
@@ -144,7 +145,7 @@ test('names: an accountless invited AI (city_join_invite) cannot join as "Elric"
   const account = async (name: string) => {
     const res = await post('/api/auth/register', { name, password: `Synthetic password ${name}` });
     assert.equal(res.statusCode, 201, res.body);
-    return `cc_session=${res.cookies.find((c) => c.name === 'cc_session')!.value}`;
+    return sessionPair(res.cookies);
   };
   const host = await account('Invite host');
   const hostAgent = (

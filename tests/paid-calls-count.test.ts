@@ -61,9 +61,9 @@ test('migration 125: a table, two deferred constraint triggers and no index on f
   assert.deepEqual(await counts(db), {});
 });
 
-test('migration 125 holds a lock on feed_pay_calls that blocks payment saves until its batch commits', async (t) => {
-  // Payment saves (RowExclusiveLock) wait while it is held, and runMigrations applies every
-  // pending migration in one transaction: so 125 ships alone or last in its batch (count-schema.ts).
+test('migration 125 holds a lock on feed_pay_calls only until its own commit', async (t) => {
+  // Payment saves (RowExclusiveLock) wait while it is held. runMigrations commits each migration
+  // on its own, so a later migration of the same deployment runs without that lock.
   const db = await PGlite.create('memory://');
   t.after(() => db.close());
   await runMigrations(
@@ -75,7 +75,6 @@ test('migration 125 holds a lock on feed_pay_calls that blocks payment saves unt
   );
   const held = await db.transaction(async (tx) => {
     await tx.exec(PAID_CALL_COUNT_SQL);
-    // A later migration of the same batch would run here, with the lock still held.
     return (
       await tx.query<{ mode: string }>(
         `SELECT mode FROM pg_locks
@@ -85,14 +84,33 @@ test('migration 125 holds a lock on feed_pay_calls that blocks payment saves unt
     ).rows.map((row) => row.mode);
   });
   assert.ok(held.includes('ShareRowExclusiveLock'), held.join(', '));
-  const after = (
-    await db.query<{ n: number }>(
-      `SELECT count(*)::int AS n FROM pg_locks
-        WHERE locktype = 'relation' AND relation = 'feed_pay_calls'::regclass`,
-    )
-  ).rows[0]?.n;
-  assert.equal(after, 0, 'released at the commit');
-  assert.match(PAID_CALLS_SCHEMA_DOC, /alone or last in its batch/);
+  const locksOnPaidCalls = async (q: Pick<Database, 'query'>) =>
+    (
+      await q.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM pg_locks
+          WHERE locktype = 'relation' AND relation = 'feed_pay_calls'::regclass`,
+      )
+    ).rows[0]?.n;
+  assert.equal(await locksOnPaidCalls(db), 0, 'released at the commit');
+  // Applied by runMigrations together with a later migration: the lock is gone when it runs.
+  const fresh = await PGlite.create('memory://');
+  t.after(() => fresh.close());
+  const seen: number[] = [];
+  const later = {
+    version: 100_000,
+    name: 'later_in_batch',
+    sql: 'SELECT 1;',
+    report: {
+      event: 'later_in_batch',
+      async measure(tx: Pick<Database, 'query'>) {
+        seen.push((await locksOnPaidCalls(tx)) ?? -1);
+        return {};
+      },
+    },
+  };
+  await runMigrations(fresh, [...ALL, later], Date.now, true, quiet);
+  assert.deepEqual(seen, [0]);
+  assert.match(PAID_CALLS_SCHEMA_DOC, /commits each migration on its own/);
 });
 
 test('CI runs this file against a real PostgreSQL server (the postgres-races job)', () => {

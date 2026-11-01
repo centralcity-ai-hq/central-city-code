@@ -145,6 +145,28 @@ async function read(app: ReturnType<typeof routes>, short: string) {
   return response.json() as PassportServicePayments;
 }
 
+test('a passport on the second chain answers both routes when that chain is on, and 404 when not', async (t) => {
+  const db = await setup(t);
+  await add(db, { n: 1, chainId: 84532, kind: 'final', id: 120, name: 'Harbor' });
+  await call(db, {
+    from: 1,
+    chainId: 84532,
+    amount: 20_000,
+    fee: { raw: 2_000, state: 'charged' },
+  });
+  const off = routes(t, db);
+  assert.equal((await off.inject({ url: PATH(shortOf(1)) })).statusCode, 404);
+  assert.equal((await off.inject({ url: EARNINGS(shortOf(1)) })).statusCode, 404);
+  const on = Fastify();
+  t.after(() => on.close());
+  registerOnBaseRoutes(on, { db, now: () => NOW, passportsAlsoOn: 84532 });
+  assert.equal((await read(on, shortOf(1))).paidCalls, 1);
+  assert.equal((await read(on, shortOf(1))).totalUsdc, '0.02');
+  const earnings = await on.inject({ url: EARNINGS(shortOf(1)) });
+  assert.equal(earnings.statusCode, 200, earnings.body);
+  assert.equal((await on.inject({ url: PATH(shortOf(2)) })).statusCode, 404);
+});
+
 test('only payments confirmed on Base count, also without a result; a fee only once its own transaction is final', async (t) => {
   const db = await setup(t);
   await add(db, { n: 1, kind: 'final', id: 120, name: 'Harbor' });

@@ -10,6 +10,7 @@ const TRUST = [
   '/contact',
   '/support',
   '/security',
+  '/audit',
   '/status',
   '/privacy',
   '/privacy-choices',

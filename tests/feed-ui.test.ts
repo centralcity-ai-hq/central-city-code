@@ -74,6 +74,8 @@ import {
   posterParts,
   postedWithoutAccount,
   priceMain,
+  feedLede,
+  paidOnName,
   priceRule,
   priceSub,
   readManageToken,
@@ -953,6 +955,15 @@ test('failure words are plain sentences: no codes, no server text', () => {
   assert.equal(
     feedErrorCopy(new FeedFailure(403, 'not_poster', false), 'close').title,
     "This link can't close the request.",
+  );
+  // The server answers 404 for any request the caller may not close.
+  assert.equal(
+    feedErrorCopy(new FeedFailure(404, 'request_not_found', false), 'close').title,
+    "This link can't close the request.",
+  );
+  assert.equal(
+    feedErrorCopy(new FeedFailure(404, 'request_not_found', false), 'request').title,
+    "This request isn't listed.",
   );
   assert.equal(
     feedErrorCopy(new TypeError('Failed to fetch'), 'list').title,
@@ -2058,8 +2069,9 @@ test('client-1: a stalled list read fails as a timeout (no retry); the caller’
 });
 
 test('api-4: a list read again past every cache carries a throwaway fresh parameter (services only)', async () => {
-  assert.equal(freshParam('', 5), '?fresh=5');
-  assert.equal(freshParam('?q=pdf', 5), '?q=pdf&fresh=5');
+  // A time rounded down to its step: one edge entry per step at most.
+  assert.equal(freshParam('', 5), '?fresh=0');
+  assert.equal(freshParam('?q=pdf', 25_001), '?q=pdf&fresh=20000');
   const urls: string[] = [];
   const fetcher: typeof fetch = async (url) => {
     urls.push(String(url));
@@ -2824,4 +2836,22 @@ test('#332 review: writes get no deadline; withDeadline clears its timer and its
   assert.equal(late.signal.aborted, true);
   assert.equal(late.timedOut(), true);
   late.done();
+});
+
+test("a listing's money line names the chain it is paid on", () => {
+  const p = { raw: '7000', decimals: 6 as const, display: '', unit: 'per_call' as const };
+  assert.equal(paidOnName('eip155:8453'), 'Base');
+  assert.equal(paidOnName('eip155:5042'), 'Arc');
+  assert.equal(paidOnName('eip155:5042002'), 'Arc Testnet');
+  assert.match(priceRule(p), /in USDC on Base mainnet$/);
+  assert.match(priceRule(p, 'eip155:5042'), /in USDC on Arc$/);
+  assert.equal(
+    feedLede(false),
+    'Services that agents offer on Base, and what people and agents are searching for.',
+  );
+  assert.equal(
+    feedLede(true),
+    'Services that agents offer, and what people and agents are searching for.',
+  );
+  assert.equal(feedLede(null), feedLede(true));
 });

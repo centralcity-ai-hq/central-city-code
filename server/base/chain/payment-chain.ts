@@ -14,10 +14,10 @@
  * period (the security bound), and the owner's cap within the current Berlin calendar day, week or
  * month (calendar-limit.ts), checked in the reservation's transaction. Either one refuses.
  */
+import { isRealMoneyChain } from '../../../shared/chains.js';
 import { encodeFunctionData, getAddress, parseAbi, type Hex, type PublicClient } from 'viem';
 import type { Database, Transaction } from '../../database.js';
 import {
-  BASE_MAINNET,
   NATIVE_ETH,
   allowedToken,
   type Address,
@@ -433,10 +433,10 @@ export function createPaymentChain(deps: PaymentChainDeps) {
       if (intent.chainId !== deps.network.chainId)
         throw new PaymentChainError('WRONG_NETWORK', 'This chain adapter serves another network.');
       // Real money is never sent without a fee budget: on the real network a cap is mandatory.
-      if (deps.network.chainId === BASE_MAINNET && deps.maxCostWeiCap === undefined)
+      if (isRealMoneyChain(deps.network.chainId) && deps.maxCostWeiCap === undefined)
         throw new PaymentChainError('FEE_BUDGET_REQUIRED', 'Mainnet payments need a fee budget.');
       // Fees covered by a pinned sponsor or nothing: on the real network the allowlist is mandatory.
-      if (deps.network.chainId === BASE_MAINNET && deps.sponsors === undefined)
+      if (isRealMoneyChain(deps.network.chainId) && deps.sponsors === undefined)
         throw new PaymentChainError('SPONSOR_REQUIRED', 'Mainnet payments need a pinned sponsor.');
       const token = allowedToken(deps.network, intent.token);
       if (
@@ -491,6 +491,11 @@ export function createPaymentChain(deps: PaymentChainDeps) {
       // with a calendar period (day/week/month) is also counted on the Berlin calendar first.
       const calendar = limitPeriodOf(permission.period);
       try {
+        // Read from Base before the transaction: nothing waits on the network under the wallet lock.
+        const read = await deps.ledger.readBalance(
+          getAddress(wallet.address) as Address,
+          token.address,
+        );
         await deps.db.transaction(async (tx) => {
           // Payments sent but not on Base yet count against the period's allowance too: without
           // this, two at once each fit what Base reports and the second reverts on Base.
@@ -524,6 +529,7 @@ export function createPaymentChain(deps: PaymentChainDeps) {
             amount,
             holder: { kind: 'payment', ref: intent.operationKey },
             intentHash: intent.intentHash,
+            read,
           });
         });
       } catch (error) {
@@ -591,6 +597,7 @@ export function createPaymentChain(deps: PaymentChainDeps) {
           intentHash: intent.intentHash,
           kind: 'transfer',
           sponsorFlow: 'agentPay',
+          sponsorAccountId: intent.workspaceId,
           account: { address: spender, recipe: spenderAccountRecipe(deps.network, signerAddress) },
           calls,
           maxCostWeiCap: deps.maxCostWeiCap,

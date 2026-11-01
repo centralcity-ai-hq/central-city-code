@@ -89,7 +89,8 @@ const registered = await setup.inject({
   remoteAddress: '203.0.113.7',
 });
 if (registered.statusCode !== 201) throw new Error(registered.body);
-const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+const session = registered.cookies.find((c) => /^(?:__Host-)?cc_session$/.test(c.name))!;
+const cookie = `${session.name}=${session.value}`;
 for (let i = 0; i < 5; i++) {
   const created = await setup.inject({
     method: 'POST',

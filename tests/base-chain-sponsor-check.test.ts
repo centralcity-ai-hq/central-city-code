@@ -219,3 +219,226 @@ test('a queued operation stored under a looser rule meets the current sponsor ru
   assert.equal(sent.sends(), 1);
   assert.equal(sent.result.status, 'submitted');
 });
+
+test("a sponsorship prepared here and never stored or sent is given back; one stored for a resend, or the caller's own, is not", async () => {
+  const s = await setup();
+  // A Base that knows the account (deployed) and its next nonce, nothing else.
+  const client = createPublicClient({
+    transport: custom({
+      request: async ({ method }) => {
+        if (method === 'eth_getCode') return '0x01';
+        if (method === 'eth_call') return pad('0x', { size: 32 });
+        if (method === 'eth_blockNumber') return '0x10';
+        throw new Error(`no network in this test (${method})`);
+      },
+    }),
+  });
+  const released: string[] = [];
+  let sends = 0;
+  const bundler = {
+    prepare: async (op: UserOperation<'0.6'>) => ({
+      ...op,
+      callGasLimit: 100_000n,
+      verificationGasLimit: 100_000n,
+      preVerificationGas: 50_000n,
+      maxFeePerGas: 1_000_000n,
+      maxPriorityFeePerGas: 1_000n,
+      paymasterAndData: sponsorData(PINNED),
+    }),
+    release: async (hash: Hex) => void released.push(hash.toLowerCase()),
+    send: async () => {
+      sends++;
+      throw new Error('Base RPC down');
+    },
+    receipt: async () => null,
+  };
+  const rows = new Map<string, Record<string, unknown>>();
+  /** Keys another worker stores first, between our read and our insert. */
+  const raced = new Map<string, Record<string, unknown>>();
+  const store = {
+    get: async (key: string) => rows.get(key) ?? null,
+    insert: async (row: Record<string, unknown>) => {
+      const key = row.idempotencyKey as string;
+      if (raced.has(key)) rows.set(key, raced.get(key)!);
+      if (!rows.has(key)) rows.set(key, { ...row });
+      return rows.get(key)!;
+    },
+    transition: async (key: string, from: string[], patch: Record<string, unknown>) => {
+      const current = rows.get(key);
+      if (!current || !from.includes(current.status as string)) return null;
+      rows.set(key, { ...current, ...patch });
+      return rows.get(key)!;
+    },
+    update: async (key: string, patch: Record<string, unknown>) => {
+      rows.set(key, { ...rows.get(key)!, ...patch });
+      return rows.get(key)!;
+    },
+  };
+  const deps = {
+    network,
+    client,
+    store,
+    bundler,
+    signer: { address: SIGNER, signUserOperation: async () => '0x01' as Hex },
+  } as unknown as SubmitDeps;
+  let n = 0;
+  const submit = (extra: Record<string, unknown> = {}) =>
+    submitOperation(deps, {
+      idempotencyKey: `test:release:${++n}`,
+      intentHash: `0x${'11'.repeat(32)}`,
+      kind: 'transfer',
+      account: { address: s.sender, recipe: s.recipe },
+      calls,
+      sponsorFlow: 'agentPay',
+      ...extra,
+    });
+  const count = () => released.length;
+
+  // Over the caller's cost cap, its own fee hold refused, or its authority check refused.
+  await assert.rejects(submit({ maxCostWeiCap: 1n }), /could cost more/);
+  assert.equal(count(), 1);
+  await assert.rejects(
+    submit({
+      reserveCost: async () => {
+        throw new Error('no fee budget');
+      },
+    }),
+    /no fee budget/,
+  );
+  assert.equal(count(), 2);
+  const refused = await submit({
+    beforeBroadcast: async () => {
+      throw new Error('frozen');
+    },
+  });
+  assert.equal(refused.status, 'failed');
+  assert.equal(count(), 3);
+  assert.equal(released[2], (refused.userOpHash as string).toLowerCase());
+  // Another worker stored its operation for the key first: ours is never stored.
+  raced.set(`test:release:${n + 1}`, {
+    idempotencyKey: `test:release:${n + 1}`,
+    userOpHash: `0x${'cd'.repeat(32)}`,
+    intentHash: `0x${'22'.repeat(32)}`,
+    chainId: BASE_SEPOLIA,
+    status: 'queued',
+  });
+  await assert.rejects(submit(), /different intent/);
+  assert.equal(count(), 4);
+
+  // Stored, and the send failed on a Base outage: it stays for its resend, nothing given back.
+  const stored = await submit();
+  assert.equal(stored.status, 'unknown');
+  assert.equal(sends, 1);
+  assert.equal(count(), 4);
+  // The caller's own prepared operation (an owner's handout) is never released here.
+  await assert.rejects(
+    submitOperation(deps, {
+      idempotencyKey: KEY,
+      intentHash: `0x${'11'.repeat(32)}`,
+      kind: 'transfer',
+      account: { address: s.sender, recipe: s.recipe },
+      calls,
+      prepared: await s.operation(sponsorData(PINNED)),
+      reserveCost: async () => {
+        throw new Error('no fee budget');
+      },
+    }),
+    /no fee budget/,
+  );
+  assert.equal(count(), 4);
+});
+
+test('registrations and hand-overs with the pinned sponsors refuse any other sponsorship, whichever bundler prepared it (CCA-138)', async () => {
+  const { registerIdentities, transferIdentities } =
+    await import('../server/base/chain/identity-chain.js');
+  const seen: string[] = [];
+  const client = createPublicClient({
+    transport: custom({
+      request: async ({ method, params }) => {
+        seen.push(method);
+        if (method === 'eth_chainId') return `0x${network.chainId.toString(16)}`;
+        if (method === 'eth_getCode') return '0x6080';
+        if (method === 'eth_call') {
+          const data = String((params as [{ data?: string }])[0]?.data ?? '');
+          // ownerOf(id) of a hand-over: the spender holds it; anything else (getNonce) is 0.
+          if (data.startsWith('0x6352211e')) return pad(SENDER, { size: 32 });
+          return pad('0x0', { size: 32 });
+        }
+        if (method === 'eth_blockNumber') return '0x10';
+        if (method === 'eth_getBlockByNumber')
+          return {
+            number: '0x10',
+            hash: `0x${'ab'.repeat(32)}`,
+            timestamp: '0x1',
+            baseFeePerGas: '0x1',
+          };
+        throw new Error(`not answered here (${method})`);
+      },
+    }),
+  });
+  const SENDER = getAddress(`0x${'9'.repeat(40)}`);
+  let answer: Hex = '0x';
+  let signed = 0;
+  const deps = {
+    network,
+    client,
+    store: {
+      get: async () => null,
+      insert: async () => {
+        throw new Error('stop after store');
+      },
+    } as unknown as ChainOperationStore,
+    bundler: {
+      prepare: async (op: UserOperation<'0.6'>) => ({
+        ...op,
+        callGasLimit: 100_000n,
+        verificationGasLimit: 100_000n,
+        preVerificationGas: 50_000n,
+        maxFeePerGas: 1_000_000n,
+        maxPriorityFeePerGas: 1_000n,
+        paymasterAndData: answer,
+      }),
+      send: async () => {
+        throw new Error('never sent here');
+      },
+      receipt: async () => null,
+    } as unknown as SubmitDeps['bundler'],
+    signer: {
+      address: SIGNER,
+      signUserOperation: async () => {
+        signed++;
+        throw new Error('stop at signing');
+      },
+    },
+  } as unknown as SubmitDeps;
+  const base = {
+    intentHash: `0x${'11'.repeat(32)}` as Hex,
+    spender: { address: SENDER, recipe: spenderAccountRecipe(network, SIGNER) },
+    sponsors: SPONSORS,
+  };
+  const register = () =>
+    registerIdentities(deps, { ...base, operationKey: 'reg:1', uris: ['https://x.test/a/abc'] });
+  const handOver = () =>
+    transferIdentities(deps, {
+      ...base,
+      operationKey: 'tr:1',
+      transfers: [{ id: 5n, to: getAddress(`0x${'6'.repeat(40)}`) }],
+    });
+  for (const data of [
+    '0x' as Hex,
+    sponsorData(getAddress(`0x${'3e'.repeat(20)}`)),
+    sponsorData(PINNED, getAddress(`0x${'44'.repeat(20)}`)),
+  ]) {
+    answer = data;
+    for (const run of [register, handOver])
+      await assert.rejects(
+        run(),
+        (e: unknown) => e instanceof SubmitError && e.code === 'NOT_SPONSORED',
+        `${data.slice(0, 12)} ${seen.slice(-3).join(',')}`,
+      );
+  }
+  assert.equal(signed, 0, 'nothing signed');
+  answer = sponsorData(PINNED);
+  for (const run of [register, handOver]) await assert.rejects(run(), /stop at signing/);
+  assert.equal(signed, 2);
+});

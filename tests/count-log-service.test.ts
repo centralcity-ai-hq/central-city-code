@@ -20,6 +20,7 @@ import {
 } from '../shared/count-log/index.js';
 import type { Operator } from '../shared/types.js';
 import { CHECKPOINT_BUDGET_MS } from '../server/count-log/service.js';
+import { LEAVES_RATE } from '../server/count-log/routes.js';
 
 // server/app.ts registers migration 29; registering again is idempotent.
 registerCountLogMigration();
@@ -265,22 +266,24 @@ test('public responses reveal no ids, names or salts; routes cache and guard the
   const one = await api.inject({ url: `/api/public/count-log/checkpoints/${date}` });
   assert.match(String(one.headers['cache-control']), /immutable/);
   bodies.push(one.body);
-  const leaves = await api.inject({ url: '/api/public/count-log/leaves?from=0&to=2' });
-  assert.equal(leaves.json().leaves.length, 2);
+  const leaves = await api.inject({ url: '/api/public/count-log/leaves?from=1&to=2' });
+  assert.equal(leaves.json().leaves.length, 1);
   assert.match(String(leaves.headers['cache-control']), /immutable/);
   bodies.push(leaves.body);
-  // Without a fixed range the page follows the log's size: a short, revalidating cache, never
-  // immutable (a browser would keep an old copy). So does a range past the log's end.
+  // A block at the log's end follows the log's size: cached like the checkpoint list, never
+  // immutable (a browser would keep an old copy).
   for (const url of [
     '/api/public/count-log/leaves',
     '/api/public/count-log/leaves?from=0',
-    '/api/public/count-log/leaves?from=1&to=5',
+    '/api/public/count-log/leaves?from=0&to=100',
+    '/api/public/count-log/leaves?from=0&to=10000',
   ]) {
     const open = await api.inject({ url });
     assert.equal(open.statusCode, 200, url);
+    assert.equal(open.headers['cache-control'], list.headers['cache-control'], url);
     assert.equal(
-      open.headers['cache-control'],
-      'public, max-age=60, s-maxage=300, stale-while-revalidate=600',
+      open.headers['vercel-cdn-cache-control'],
+      list.headers['vercel-cdn-cache-control'],
       url,
     );
   }
@@ -634,6 +637,128 @@ test('the verify page lists an owner’s agents without touching the workspace',
   ).rows[0]!.data;
   assert.deepEqual(after, before, 'no workspace write');
   assert.equal((await app.inject({ url: '/api/count-log/my-agents' })).statusCode, 401);
+});
+
+test('the public leaves route serves aligned blocks only, limited per address and per /56', async (t) => {
+  const { app, log, clock, nextDay } = await fixture(t);
+  const person = await owner(app, 'Count Lena');
+  for (const name of ['L0', 'L1', 'L2']) await agent(app, person.cookie, name);
+  nextDay();
+  await log.checkpoint();
+  const hits: Array<[string, number]> = [];
+  const api = Fastify();
+  t.after(() => api.close());
+  registerCountLogRoutes(api, {
+    log,
+    now: clock,
+    owner: async () => {
+      throw Object.assign(new Error('no'), { statusCode: 401 });
+    },
+    limit: async (key, max) => {
+      hits.push([key, max]);
+    },
+  });
+  // Unaligned ranges, other spellings of an index and other keys are refused before any read.
+  for (const url of [
+    '/api/public/count-log/leaves?from=1',
+    '/api/public/count-log/leaves?from=1&to=3',
+    '/api/public/count-log/leaves?from=0&to=2',
+    '/api/public/count-log/leaves?from=50&to=150',
+    '/api/public/count-log/leaves?from=0&to=20000',
+    '/api/public/count-log/leaves?from=00&to=100',
+    '/api/public/count-log/leaves?from=0x0&to=100',
+    '/api/public/count-log/leaves?from=-1&to=0',
+    '/api/public/count-log/leaves?from=0&r=1',
+  ])
+    assert.ok((await api.inject({ url })).statusCode >= 400, url);
+  assert.deepEqual(hits, []);
+  for (const [url, idx] of [
+    ['/api/public/count-log/leaves', [0, 1, 2]],
+    ['/api/public/count-log/leaves?from=0&to=100', [0, 1, 2]],
+    ['/api/public/count-log/leaves?from=2&to=3', [2]],
+  ] as const) {
+    const res = await api.inject({ url, remoteAddress: '2001:db8:1:2a0::7' });
+    assert.equal(res.statusCode, 200, `${url}: ${res.body}`);
+    assert.deepEqual(
+      res.json().leaves.map((leaf: { idx: number }) => leaf.idx),
+      idx,
+      url,
+    );
+  }
+  // One bucket per /64 and one per /56: a neighbour in the same /56 shares the site bucket.
+  await api.inject({ url: '/api/public/count-log/leaves', remoteAddress: '2001:db8:1:2ff::9' });
+  assert.deepEqual(hits.slice(0, 2), [
+    ['count-log-leaves:2001:db8:1:2a0::/64', LEAVES_RATE.perSource],
+    ['count-log-leaves-site:2001:db8:1:200::/56', LEAVES_RATE.perSite],
+  ]);
+  assert.deepEqual(hits.slice(-2), [
+    ['count-log-leaves:2001:db8:1:2ff::/64', LEAVES_RATE.perSource],
+    ['count-log-leaves-site:2001:db8:1:200::/56', LEAVES_RATE.perSite],
+  ]);
+});
+
+test('the block at the log end is never cached across a cut: it reaches the next checkpoint at once', async (t) => {
+  const { app, log, clock, nextDay } = await fixture(t);
+  const person = await owner(app, 'Count Tess');
+  for (const name of ['T0', 'T1', 'T2']) await agent(app, person.cookie, name);
+  nextDay();
+  const { checkpoint } = await log.checkpoint();
+  assert.equal(checkpoint.tree_size, 3);
+  let now = clock();
+  const api = Fastify();
+  t.after(() => api.close());
+  registerCountLogRoutes(api, {
+    log,
+    now: () => now,
+    owner: async () => {
+      throw Object.assign(new Error('no'), { statusCode: 401 });
+    },
+  });
+  const read = async (url: string) => {
+    const res = await api.inject({ url });
+    assert.equal(res.statusCode, 200, res.body);
+    return res;
+  };
+  /** The longest any copy may be served, fresh or stale, in the browser or at the edge (s). */
+  const lifetime = (res: { headers: Record<string, unknown> }) => {
+    let most = 0;
+    for (const header of ['cache-control', 'vercel-cdn-cache-control']) {
+      const value = String(res.headers[header] ?? '');
+      const get = (name: string) => Number(new RegExp(`${name}=(\\d+)`).exec(value)?.[1] ?? 0);
+      for (const age of ['max-age', 's-maxage'])
+        most = Math.max(most, get(age) + get('stale-while-revalidate'));
+    }
+    return most;
+  };
+  const tail = ['/api/public/count-log/leaves?from=0&to=100', '/api/public/count-log/leaves'];
+  // Two minutes before the next cut (12:00 Berlin, 10:00 UTC in October).
+  const cut = Date.parse('2026-10-03T10:00:00Z');
+  now = cut - 120_000;
+  for (const url of tail) {
+    const res = await read(url);
+    assert.equal(res.json().leaves.length, 3);
+    assert.ok(lifetime(res) <= 120, `${url}: ${JSON.stringify(res.headers)}`);
+  }
+  // The cut has passed and the day's checkpoint is not listed yet: 5 s, no stale copy.
+  now = cut + 60_000;
+  for (const url of tail) {
+    const res = await read(url);
+    assert.equal(res.headers['cache-control'], 'public, max-age=5, s-maxage=5');
+    assert.equal(res.headers['vercel-cdn-cache-control'], 'public, max-age=5');
+  }
+  // The next checkpoint: the same URLs now hold its size, cached no longer than the next cut.
+  await agent(app, person.cookie, 'T3');
+  nextDay();
+  assert.equal((await log.checkpoint()).checkpoint.tree_size, 4);
+  now = cut + 300_000;
+  for (const url of tail) {
+    const res = await read(url);
+    assert.equal(res.json().leaves.length, 4);
+    assert.ok(lifetime(res) * 1000 <= cut + 86_400_000 - now, url);
+  }
+  // A filled block never changes.
+  const filled = await read('/api/public/count-log/leaves?from=3&to=4');
+  assert.match(String(filled.headers['cache-control']), /immutable/);
 });
 
 test('the public withdrawn list refuses other query keys and is paged by leaf index', async (t) => {

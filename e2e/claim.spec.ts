@@ -39,6 +39,14 @@ test('owner claims agents an anonymous AI client created, from a claim link', as
   const input = page.getByLabel('Claim agents your AI created');
   await expect(input).toHaveValue(result.claim.claim_token);
   expect(new URL(page.url()).hash).toBe('');
+  // A failed claim keeps the one-time link, so it can be tried again.
+  await page.route('**/api/agents/claim', (route) =>
+    route.fulfill({ status: 429, json: { error: 'Too many requests. Try again shortly.' } }),
+  );
+  await page.getByRole('button', { name: 'Claim', exact: true }).click();
+  await expect(page.getByRole('alert').filter({ hasText: 'Too many' })).toBeVisible();
+  await expect(input).toHaveValue(result.claim.claim_token);
+  await page.unroute('**/api/agents/claim');
   await page.getByRole('button', { name: 'Claim', exact: true }).click();
   await expect(page.getByText('The agents are now in your workspace.')).toBeVisible();
   // My agents v4: the claim sheet closes once the claim went through; opened again, it is empty.

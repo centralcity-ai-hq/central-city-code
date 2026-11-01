@@ -8,6 +8,7 @@
  * signed or sent, and the caller retries later with the same idempotency key.
  */
 import { numberToHex, type Hex, type PublicClient } from 'viem';
+import { chainParams } from './chain-params.js';
 import { countRpc } from './rpc-count.js';
 import { getUserOperationHash, type UserOperation } from 'viem/account-abstraction';
 import type { Address } from '../../../shared/base/chains.js';
@@ -96,6 +97,19 @@ export function providerRateLimit(error: unknown): { retryAfterMs: number | null
     current = e.cause;
   }
   return null;
+}
+
+/**
+ * Whether an error (or one of its causes) is our own paymaster's budget saying "not now" before it
+ * signed anything (direct-bundler.ts SponsorBudgetRefusal): nothing was signed, sent or charged.
+ */
+export function sponsorBudgetRefused(error: unknown): boolean {
+  let current = error as { sponsorBudgetNotNow?: unknown; cause?: unknown } | null | undefined;
+  for (let depth = 0; current && typeof current === 'object' && depth < 6; depth++) {
+    if (current.sponsorBudgetNotNow === true) return true;
+    current = current.cause as typeof current;
+  }
+  return false;
 }
 
 /**
@@ -333,9 +347,12 @@ export function rpcBundler(options: RpcBundlerOptions): Bundler {
           : estimate.maxPriorityFeePerGas;
       const maxFeeFloor =
         op.maxFeePerGas > maxPriorityFeePerGas ? op.maxFeePerGas : maxPriorityFeePerGas;
+      const quoted = maxFeeFloor > estimate.maxFeePerGas ? maxFeeFloor : estimate.maxFeePerGas;
+      // Never under the chain's signing fee floor (chain-params.ts; Base's is 0).
+      const chainFloor = chainParams(options.chainId).minMaxFeePerGasWei;
       const fees = {
         maxPriorityFeePerGas,
-        maxFeePerGas: maxFeeFloor > estimate.maxFeePerGas ? maxFeeFloor : estimate.maxFeePerGas,
+        maxFeePerGas: quoted > chainFloor ? quoted : chainFloor,
       };
       if (fees.maxFeePerGas > options.maxFeePerGasCap)
         throw new BundlerError('FEE_CAP_EXCEEDED', 'Network fees are above the configured cap.');

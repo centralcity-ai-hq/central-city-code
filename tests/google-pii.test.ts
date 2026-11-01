@@ -330,13 +330,14 @@ test('rotation: re-wrap under the new key by stored key id; dry run, confirm, id
   // Both keys open during the rotation (by stored id).
   assert.equal(await pii.isAdult(db, rotating, 'op-1', NOW), true);
   const dry = await pii.rewrapPiiKeys(db as never, rotating);
-  assert.deepEqual(dry, { pending: 3, rewrapped: 0, unknownRoot: 0, dryRun: true });
+  assert.deepEqual(dry, { pending: 3, rewrapped: 0, unknownRoot: 0, failed: 0, dryRun: true });
   const done = await pii.rewrapPiiKeys(db as never, rotating, { confirm: true });
-  assert.deepEqual(done, { pending: 3, rewrapped: 3, unknownRoot: 0, dryRun: false });
+  assert.deepEqual(done, { pending: 3, rewrapped: 3, unknownRoot: 0, failed: 0, dryRun: false });
   assert.deepEqual(await pii.rewrapPiiKeys(db as never, rotating, { confirm: true }), {
     pending: 0,
     rewrapped: 0,
     unknownRoot: 0,
+    failed: 0,
     dryRun: false,
   });
   // The previous key can go: the new one alone opens everything.
@@ -577,4 +578,55 @@ test('without the PII key an under-18 date still locks; the age-lock hash does n
   if (before === undefined) delete process.env.CITY_RATE_LIMIT_KEY;
   else process.env.CITY_RATE_LIMIT_KEY = before;
   await db.close();
+});
+
+test('a CITY_PII_KEK rotation keeps Google age locks: found under the previous key and carried over', async (t) => {
+  const { PGlite } = await import('@electric-sql/pglite');
+  const db = await PGlite.create();
+  await db.exec(
+    'CREATE TABLE google_age_locks (subject_hash text PRIMARY KEY, locked_at bigint NOT NULL);',
+  );
+  const { lockSubject, subjectLocked } = await import('../server/google/cooldown.js');
+  const saved = { kek: process.env.CITY_PII_KEK, previous: process.env.CITY_PII_KEK_PREVIOUS };
+  t.after(async () => {
+    for (const [name, value] of [
+      ['CITY_PII_KEK', saved.kek],
+      ['CITY_PII_KEK_PREVIOUS', saved.previous],
+    ] as const)
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    await db.close();
+  });
+  const first = randomBytes(32).toString('base64');
+  const second = randomBytes(32).toString('base64');
+  process.env.CITY_PII_KEK = first;
+  delete process.env.CITY_PII_KEK_PREVIOUS;
+  await lockSubject(db, 'subject-rotated', NOW);
+  // The documented rotation: the new key current, the old one previous.
+  process.env.CITY_PII_KEK = second;
+  process.env.CITY_PII_KEK_PREVIOUS = first;
+  assert.equal(await subjectLocked(db, 'subject-rotated'), true);
+  assert.equal(await subjectLocked(db, 'subject-unlocked'), false);
+  // Seen during the rotation, the lock is recorded under the new key with its original time...
+  const rows = (await db.query<{ locked_at: number }>('SELECT locked_at FROM google_age_locks'))
+    .rows;
+  assert.deepEqual(
+    rows.map((row) => Number(row.locked_at)),
+    [NOW, NOW],
+  );
+  // ...so it still holds after the previous key is removed.
+  delete process.env.CITY_PII_KEK_PREVIOUS;
+  assert.equal(await subjectLocked(db, 'subject-rotated'), true);
+  // Without a usable key the record is skipped, and that is logged without the subject.
+  process.env.CITY_PII_KEK = 'not-a-key';
+  const lines: string[] = [];
+  const warn = console.warn;
+  console.warn = (line: string) => lines.push(line);
+  try {
+    await lockSubject(db, 'subject-unrecorded', NOW);
+  } finally {
+    console.warn = warn;
+  }
+  assert.equal(JSON.parse(lines[0]!).event, 'google.age_lock_not_recorded');
+  assert.ok(!lines[0]!.includes('subject-unrecorded'));
 });

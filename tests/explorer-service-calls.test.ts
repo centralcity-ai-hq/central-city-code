@@ -375,6 +375,57 @@ test('search: a transaction, a block, or an address as payer or provider', async
   assert.equal(none.next_cursor, null);
 });
 
+test('a search whose match count fails or runs out of time still answers its rows, matches null', async (t) => {
+  const db = await setup(t);
+  const provider = `0x${'c4'.repeat(20)}`;
+  for (let i = 0; i < 3; i++) await call(db, { payTo: provider });
+  await call(db);
+  // The bounded count fails inside Postgres (as a statement timeout would): the transaction
+  // must recover through its savepoint and serve the page.
+  const failing: Database = {
+    ...db,
+    transaction: (action) =>
+      db.transaction((tx) =>
+        action({
+          ...tx,
+          query: (sql, params) =>
+            /SELECT 1 FROM feed_pay_calls c WHERE/.test(sql)
+              ? tx.query('SELECT count(*)::text AS n FROM no_such_table_for_the_count', [])
+              : tx.query(sql, params),
+        }),
+      ),
+  };
+  const app = Fastify();
+  t.after(() => app.close());
+  registerServiceCallsRoutes(app, { db: failing, now: () => NOW });
+  const answer = await get(app, `?q=${provider}`);
+  assert.equal(answer.statusCode, 200);
+  const page = answer.json() as ServiceCallsPage;
+  assert.equal(page.items.length, 3);
+  assert.equal(page.matches, null, 'no count is never shown as 0');
+
+  // Without the failure the same search counts exactly, through the bounded count.
+  const plain = (await get(routes(t, db), `?q=${provider}`)).json() as ServiceCallsPage;
+  assert.equal(plain.matches, 3);
+});
+
+test('a search with more matches than the bound answers matches null, at the bound it counts', async (t) => {
+  const db = await setup(t);
+  const provider = `0x${'c5'.repeat(20)}`;
+  for (let i = 0; i < 4; i++) await call(db, { payTo: provider });
+  const at = (max: number) => {
+    const app = Fastify();
+    t.after(() => app.close());
+    registerServiceCallsRoutes(app, { db, now: () => NOW, searchMatchesMax: max });
+    return app;
+  };
+  const over = (await get(at(3), `?q=${provider}`)).json() as ServiceCallsPage;
+  assert.equal(over.items.length, 4, 'the rows are served past the bound');
+  assert.equal(over.matches, null, 'over the bound the count is unknown, never the bound');
+  const exact = (await get(at(4), `?q=${provider}`)).json() as ServiceCallsPage;
+  assert.equal(exact.matches, 4, 'at the bound the count is exact');
+});
+
 test('anything else is refused with 400 and never cached', async (t) => {
   const db = await setup(t);
   const app = routes(t, db);

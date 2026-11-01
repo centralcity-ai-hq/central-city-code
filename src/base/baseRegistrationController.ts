@@ -4,6 +4,8 @@ import {
   ADDRESS,
   BACKOFF_MS,
   BASE_MAINNET,
+  chainFields,
+  otherChainText,
   RECOVERY_TIMEOUT_MS,
   REQUEST_TIMEOUT_MS,
   inProgress,
@@ -19,6 +21,7 @@ import {
   type Stage,
   type View,
 } from './baseRegistrationModel';
+import { chainView } from '../../shared/chains';
 import { forgetStatus, knownStatus, rememberStatus, statusEpoch } from './baseStatusCache';
 
 /*
@@ -68,12 +71,19 @@ const KEY_REFUSALS: Record<string, string> = {
     'Registering with your wallet key isn’t available right now. Nothing was registered.',
   wallet_conflict:
     'This agent already has a wallet another key controls, so it can’t be registered with your wallet key.',
+  sponsorship_budget:
+    'Registration is paused by the sponsorship budget for now. Nothing was signed or charged. You can try again later.',
 };
 
-function errorText(error: unknown): string {
+function errorText(error: unknown, chainId: number): string {
   if (error instanceof ApiError) {
+    if (error.code === 'other_chain') return otherChainText(error.details, error.message);
     if (error.code && KEY_REFUSALS[error.code]) return KEY_REFUSALS[error.code]!;
-    if (error.status === 503) return 'Base registration isn’t available right now.';
+    // Base's sentence on Base; an agent on another chain hears that chain's name.
+    if (error.status === 503) {
+      const chain = chainView(chainId);
+      return `${chain?.slug === 'arc' ? chain.name : 'Base'} registration isn’t available right now.`;
+    }
     return error.message;
   }
   return 'The registration could not be sent. Try again.';
@@ -188,6 +198,8 @@ export class BaseRegistrationController {
   private pollKey = '';
   private readonly pending = new Set<AbortController>();
   private mode: OwnerMode = { kind: 'address' };
+  /** The chain the owner chose (Choose a chain); Base unless Arc was picked. */
+  private chainId: number = BASE_MAINNET;
 
   constructor(
     agentId: string,
@@ -389,7 +401,15 @@ export class BaseRegistrationController {
         typeof value?.code === 'string' ? value.code : undefined,
         value?.details,
       );
-    return value?.identities?.find((row) => row.chainId === BASE_MAINNET) ?? null;
+    // The agent lives on one chain: its row on the chosen chain, else its row on any chain (an
+    // Arc agent after a reload). Later register calls then carry that chain, never Base by default.
+    const rows = value?.identities ?? [];
+    const row =
+      rows.find((r) => r.chainId === this.chainId) ??
+      rows.find((r) => r.state !== 'failed') ??
+      null;
+    if (row && row.chainId !== this.chainId) this.chainId = row.chainId;
+    return row;
   }
 
   /**
@@ -406,7 +426,7 @@ export class BaseRegistrationController {
         method: 'POST',
         credentials: 'same-origin',
         headers: this.headers(true),
-        body: JSON.stringify(body),
+        body: JSON.stringify({ ...body, ...chainFields(this.chainId) }),
         signal,
       },
     );
@@ -430,7 +450,9 @@ export class BaseRegistrationController {
               ownerAddress:
                 validAddress(value?.ownerAddress) ?? validAddress(details?.ownerAddress),
             }
-          : value?.details,
+          : code === 'other_chain'
+            ? (value?.details ?? value)
+            : value?.details,
       );
     }
     return value as RegisterReply;
@@ -602,7 +624,13 @@ export class BaseRegistrationController {
       // A server error never stops a registration in progress with an owner the server accepted:
       // the panel waits and asks again. A failed new attempt is not resent by itself; the person is
       // told, and Try again stays offered while the server accepts one.
-      else if (isServerError(err) && inProgress(this.inner.view.identity) && this.accepted(owner))
+      // The sponsorship budget's "not now" has its own sentence: asking every few seconds won't help.
+      else if (
+        isServerError(err) &&
+        (err as ApiError).code !== 'sponsorship_budget' &&
+        inProgress(this.inner.view.identity) &&
+        this.accepted(owner)
+      )
         this.set({ backoff: retry ? 'retry' : 'poll', ...(retry ? { retryFailed: true } : {}) });
       else if (
         err instanceof ApiError &&
@@ -611,7 +639,7 @@ export class BaseRegistrationController {
       ) {
         const details = err.details as { ownerAddress?: string | null } | undefined;
         this.set({ conflict: { ownerAddress: details?.ownerAddress ?? null, retry } });
-      } else this.set({ error: errorText(err) });
+      } else this.set({ error: errorText(err, this.chainId) });
     } finally {
       if (this.inFlight === run) this.inFlight = 0;
       if (this.live(run)) this.set({ busy: false, answered: this.inner.answered + 1 });
@@ -768,6 +796,12 @@ export class BaseRegistrationController {
   };
 
   // ---- the person's actions (never in read-only mode) ----
+
+  /** The chain the next register requests carry (Choose a chain). Base sends no chainId. */
+  setChain = (chainId: number) => {
+    if (this.readOnly) return;
+    this.chainId = chainId;
+  };
 
   setAddress = (address: string) => {
     if (this.readOnly) return;

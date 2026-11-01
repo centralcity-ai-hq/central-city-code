@@ -23,13 +23,17 @@ import {
   decodeOwnerCall,
   ownerOperationHash,
   userOperationFromRpc,
-  WITHDRAWAL_CHAIN_ID,
-  WITHDRAWAL_ENTRY_POINT,
   type RpcUserOperation,
   type WithdrawalState,
   type WithdrawalToken,
 } from '../../../shared/base/withdraw';
-import { BASE_MAINNET, BASE_NETWORKS } from '../../../shared/base/chains';
+import {
+  NOT_ON_ARC_YET,
+  operationChain,
+  walletChain,
+  WALLET_SPONSORS,
+} from '../../../shared/base/wallet-chains';
+import { WALLET_CHAIN_ID } from '../../../shared/base/wallet-network';
 import {
   laneNonce,
   LaneKeyError,
@@ -155,7 +159,7 @@ export function checkSigningWindow(
     userOperation: RpcUserOperation;
   },
   now = Date.now(),
-  sponsors?: SponsorAllowlist,
+  sponsors: SponsorAllowlist = WALLET_SPONSORS,
 ) {
   if (request.lanes !== true || request.userOperation.paymasterAndData === '0x') return;
   const data = request.userOperation.paymasterAndData;
@@ -319,6 +323,11 @@ export function checkOperation(input: {
   userOpHash: Hex;
   entryPoint: string;
   chainId: number;
+  /**
+   * The chain the agent is on, from its wallet view (the wallet network when not given): `chainId`
+   * must be this one, and this build must list it (shared/base/wallet-chains.ts).
+   */
+  agentChainId?: number;
   wallet: string;
   /**
    * The wallet's owner key and its agent: `wallet` must be exactly the wallet that key makes for
@@ -343,11 +352,13 @@ export function checkOperation(input: {
   /** The operation's own lane (laneFor), only when `lanes` is true. */
   lane?: LaneExpectation;
 }): Hex {
-  if (input.chainId !== WITHDRAWAL_CHAIN_ID)
+  const chain = operationChain(input.chainId, input.agentChainId);
+  if (!chain)
     throw new WithdrawalCheckError(
       pageOutOfDate(input.chainId) ? STALE_PAGE : 'This operation is for another network.',
     );
-  if (getAddress(input.entryPoint) !== getAddress(WITHDRAWAL_ENTRY_POINT))
+  if (!chain.manager) throw new WithdrawalCheckError(NOT_ON_ARC_YET);
+  if (getAddress(input.entryPoint) !== getAddress(chain.owner.entryPoint))
     throw new WithdrawalCheckError('This operation names another EntryPoint.');
   let op;
   try {
@@ -358,15 +369,17 @@ export function checkOperation(input: {
   if (getAddress(op.sender) !== getAddress(input.wallet))
     throw new WithdrawalCheckError('The operation isn’t from this agent’s wallet.');
   // The wallet itself: derived here from the owner key and the agent, never taken on trust.
-  if (!isOwnWallet(input.wallet, input.owner, input.agentId))
+  if (!isOwnWallet(input.wallet, input.owner, input.agentId, chain.chainId))
     throw new WithdrawalCheckError('This isn’t the wallet your wallet key makes for this agent.');
   // Fees are covered (the product owner's decision): an allowed sponsor pays, never the wallet
   // (shared/base/paymasters.ts), whatever the summary says. Anything else fails closed.
-  if (!sponsoredWithoutCharge(input.chainId, op.paymasterAndData, input.sponsors))
+  if (
+    !sponsoredWithoutCharge(chain.chainId, op.paymasterAndData, input.sponsors ?? WALLET_SPONSORS)
+  )
     throw new WithdrawalCheckError(
       'The network fee isn’t covered by the approved sponsor; the wallet could be charged.',
     );
-  const hash = ownerOperationHash(op);
+  const hash = ownerOperationHash(op, chain.owner);
   if (hash.toLowerCase() !== input.userOpHash.toLowerCase())
     throw new WithdrawalCheckError('The operation doesn’t match its hash.');
   // A first operation also deploys the wallet: only by the Coinbase Smart Wallet factory, with
@@ -374,12 +387,12 @@ export function checkOperation(input: {
   // EntryPoint makes sure what it deploys is `sender`; this makes sure `sender` is that wallet.
   if (
     (op.initCode ?? '0x') !== '0x' &&
-    !deploysOwnWallet(op.initCode as Hex, input.owner, input.agentId)
+    !deploysOwnWallet(op.initCode as Hex, input.owner, input.agentId, chain.chainId)
   )
     throw new WithdrawalCheckError('The operation would set up the wallet with other owners.');
   // The replayable key is never an owner operation's, laned or not; with lanes, its own lane.
   const lane = checkNonceLane(op.nonce, input.lanes, input.lane, input.expected.kind === 'noop');
-  const call = decodeOwnerCall(op.callData, getAddress(input.wallet));
+  const call = decodeOwnerCall(op.callData, getAddress(input.wallet), chain.owner);
   if (!call) throw new WithdrawalCheckError('The operation does something other than a transfer.');
   const expected = input.expected;
   if (expected.kind === 'noop') {
@@ -393,11 +406,16 @@ export function checkOperation(input: {
     } catch {
       throw new WithdrawalCheckError('The withdrawal to cancel isn’t well formed.');
     }
-    if (ownerOperationHash(original).toLowerCase() !== expected.original.userOpHash.toLowerCase())
+    if (
+      ownerOperationHash(original, chain.owner).toLowerCase() !==
+      expected.original.userOpHash.toLowerCase()
+    )
       throw new WithdrawalCheckError('The withdrawal to cancel doesn’t match its hash.');
     if (getAddress(original.sender) !== getAddress(input.wallet))
       throw new WithdrawalCheckError('The withdrawal to cancel isn’t from this agent’s wallet.');
-    if (decodeOwnerCall(original.callData, getAddress(input.wallet))?.kind !== 'withdraw')
+    if (
+      decodeOwnerCall(original.callData, getAddress(input.wallet), chain.owner)?.kind !== 'withdraw'
+    )
       throw new WithdrawalCheckError('There is no withdrawal to cancel.');
     if (op.nonce !== original.nonce)
       throw new WithdrawalCheckError(
@@ -419,7 +437,6 @@ export function checkOperation(input: {
   return hash;
 }
 
-const NETWORK = BASE_NETWORKS[WITHDRAWAL_CHAIN_ID];
 const factoryAbi = parseAbi(['function createAccount(bytes[] owners, uint256 nonce)']);
 
 /** Each owner as the factory takes it: one 32-byte word holding the address. */
@@ -433,9 +450,11 @@ export function deploysOwnWallet(
   initCode: Hex,
   owner: string | undefined,
   agentId: string | undefined,
+  chainId: number = WALLET_CHAIN_ID,
 ): boolean {
-  const factory = NETWORK.contracts.smartWalletFactory;
-  const manager = NETWORK.contracts.spendPermissionManager;
+  const chain = walletChain(chainId);
+  const factory = chain?.factory;
+  const manager = chain?.manager;
   if (!owner || !agentId || !factory || !manager || initCode.length < 42) return false;
   if (getAddress(initCode.slice(0, 42)) !== getAddress(factory)) return false;
   try {
@@ -458,7 +477,7 @@ export interface CheckedIntent {
   amount: bigint;
   from: `0x${string}`;
   to: `0x${string}`;
-  network: 'Base' | 'Base Sepolia';
+  network: string;
   testnet: boolean;
   deploysWallet: boolean;
 }
@@ -475,17 +494,18 @@ export function checkedIntent(request: SigningRequest, wallet: string): CheckedI
   } catch {
     throw new WithdrawalCheckError('The operation from the server isn’t well formed.');
   }
-  const call = decodeOwnerCall(op.callData, getAddress(wallet));
+  const chain = walletChain(request.chainId);
+  if (!chain) throw new WithdrawalCheckError('This operation is for another network.');
+  const call = decodeOwnerCall(op.callData, getAddress(wallet), chain.owner);
   if (call?.kind !== 'withdraw')
     throw new WithdrawalCheckError('The operation isn’t a withdrawal.');
-  const mainnet = request.chainId === BASE_MAINNET;
   const intent: CheckedIntent = {
     token: call.token,
     amount: call.amount,
     from: getAddress(op.sender),
     to: call.to,
-    network: mainnet ? 'Base' : 'Base Sepolia',
-    testnet: !mainnet,
+    network: chain.name,
+    testnet: chain.testnet,
     deploysWallet: (op.initCode ?? '0x') !== '0x',
   };
   const summary = request.summary;
@@ -506,9 +526,19 @@ export function checkedIntent(request: SigningRequest, wallet: string): CheckedI
 }
 
 /** The checked request's decoded amount (the 'max' case: what the server picked). */
-export function decodedAmount(userOperation: RpcUserOperation, wallet: string): bigint | null {
+export function decodedAmount(
+  userOperation: RpcUserOperation,
+  wallet: string,
+  chainId: number = WALLET_CHAIN_ID,
+): bigint | null {
   try {
-    const call = decodeOwnerCall(userOperationFromRpc(userOperation).callData, getAddress(wallet));
+    const chain = walletChain(chainId);
+    if (!chain) return null;
+    const call = decodeOwnerCall(
+      userOperationFromRpc(userOperation).callData,
+      getAddress(wallet),
+      chain.owner,
+    );
     return call?.kind === 'withdraw' ? call.amount : null;
   } catch {
     return null;
@@ -910,6 +940,22 @@ export function sentStatus(
     default:
       return { ...ended('on_its_way', 'On its way'), released: false };
   }
+}
+
+/**
+ * Whether a cancel can be signed now: none was asked, or one was asked and never signed (a wrong
+ * password, a closed tab) and is still open or has lapsed. A signed one has its own states.
+ */
+export function cancelSignable(view: {
+  state: WithdrawalState;
+  cancel: { state: string; userOperation: unknown } | null;
+}): boolean {
+  if (view.state !== 'submitted' && view.state !== 'cancel_pending') return false;
+  if (!view.cancel) return view.state === 'submitted';
+  return (
+    view.cancel.state === 'expired' ||
+    (view.cancel.state === 'awaiting_signature' && !!view.cancel.userOperation)
+  );
 }
 
 /* ---------- lanes: several operations on their way at once ---------- */

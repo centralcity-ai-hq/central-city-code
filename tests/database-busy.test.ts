@@ -4,14 +4,17 @@ import { PGlite } from '@electric-sql/pglite';
 import { btree_gin } from '@electric-sql/pglite/contrib/btree_gin';
 import Fastify from 'fastify';
 import { createApp } from '../server/app.js';
-import type { Database, Transaction } from '../server/database.js';
+import { dbPoolMax, type Database, type Transaction } from '../server/database.js';
 import {
   DATABASE_BUSY_MESSAGE,
   DATABASE_BUSY_RETRY_AFTER_S,
   DATABASE_BUSY_UNSURE_MESSAGE,
   forgetDatabaseBusyLog,
+  alertDatabaseBusy,
+  DATABASE_BUSY_ALERT_EVERY_MS,
   sendDatabaseBusy,
 } from '../server/busy.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 // 14 Oct 2026: under load the pool gave no connection within 5 s and every route answered a plain
 // 500 with nothing in the log. A transient database failure is "not now": 503 busy with
@@ -227,7 +230,7 @@ test('a write that committed a statement and then got no connection is not retry
     payload: JSON.stringify({ name: 'Busy owner', password: 'busy-owner-password-000001' }),
   });
   assert.equal(registered.statusCode, 201, registered.body);
-  const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(registered.cookies);
   const create = (name: string) =>
     app.inject({
       method: 'POST',
@@ -289,4 +292,47 @@ test('a non-retryable answer drops a Retry-After the handler set before it faile
   const read = await app.inject({ method: 'GET', url: '/x' });
   assert.equal(read.statusCode, 503);
   assert.equal(read.headers['retry-after'], String(DATABASE_BUSY_RETRY_AFTER_S));
+});
+
+function captureAlerts(t: test.TestContext) {
+  const lines: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => {
+    const line = args.map(String).join(' ');
+    if (line.includes('"event":"db.busy.alert"')) lines.push(line);
+  };
+  t.after(() => {
+    console.error = original;
+  });
+  return lines;
+}
+
+test('CCA-768: busy refusals raise one ALERT line at once, then at most one a minute with the count', async (t) => {
+  forgetDatabaseBusyLog();
+  t.after(forgetDatabaseBusyLog);
+  const { app, state } = await hostedApp(t);
+  captureWarnings(t);
+  const alerts = captureAlerts(t);
+  state.failure = new Error('timeout exceeded when trying to connect');
+  for (let i = 0; i < 3; i++) {
+    const response = await app.inject({ url: CARD, headers: { host: HOST } });
+    assert.equal(response.statusCode, 503, response.body);
+  }
+  // The first refusal alerts at once (a deploy window shows immediately); the next two wait.
+  assert.deepEqual(
+    alerts.map((line) => JSON.parse(line) as Record<string, unknown>),
+    [{ event: 'db.busy.alert', level: 'ALERT', source: 'app', refused: 1, poolMax: dbPoolMax() }],
+  );
+  assert.doesNotMatch(alerts[0]!, /agent-card|timeout exceeded/, 'no route or message');
+
+  // A minute later the next refusal alerts with every refusal since the last line.
+  alertDatabaseBusy('feed', Date.now() + DATABASE_BUSY_ALERT_EVERY_MS);
+  assert.equal(alerts.length, 2);
+  assert.deepEqual(JSON.parse(alerts[1]!), {
+    event: 'db.busy.alert',
+    level: 'ALERT',
+    source: 'feed',
+    refused: 3,
+    poolMax: dbPoolMax(),
+  });
 });

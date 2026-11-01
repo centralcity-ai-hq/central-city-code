@@ -13,6 +13,7 @@ import {
   SENT_HEADLINE,
   SENT_NOTE,
   sentStatus,
+  cancelSignable,
 } from '../src/base/wallet/withdraw.js';
 
 /*
@@ -249,4 +250,19 @@ test('done at the first read, but its record can’t be kept: the anchor stays',
     assert.equal(releaseIfDone('agent-1', anchor, { ...anchor, state: 'final' }), false);
     assert.equal(readAnchor('agent-1')?.withdrawalId, 'w-1');
   });
+});
+
+test('a cancel can be signed until one is signed: a failed attempt keeps the way back', () => {
+  const op = { sender: '0x1' };
+  const can = (state: WithdrawalState, cancel: Parameters<typeof cancelSignable>[0]['cancel']) =>
+    cancelSignable({ state, cancel });
+  assert.equal(can('submitted', null), true);
+  assert.equal(can('cancel_pending', { state: 'awaiting_signature', userOperation: op }), true);
+  assert.equal(can('cancel_pending', { state: 'expired', userOperation: null }), true);
+  assert.equal(can('submitted', { state: 'expired', userOperation: null }), true);
+  // Signed: its own states, never a second signature.
+  assert.equal(can('cancel_pending', { state: 'submitted', userOperation: null }), false);
+  assert.equal(can('submitted', { state: 'failed', userOperation: null }), false);
+  assert.equal(can('cancel_pending', { state: 'awaiting_signature', userOperation: null }), false);
+  assert.equal(can('included', null), false);
 });

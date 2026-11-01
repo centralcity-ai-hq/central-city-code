@@ -100,6 +100,8 @@ export type AgentPayErrorCode =
   | 'fee_cap_exceeded'
   | 'idempotency_conflict'
   | 'payment_not_found'
+  /** The paying agent lives on another chain: city_pay still works on Base's records only. */
+  | 'other_chain'
   /** Base, the chain runtime or the recipient reader is not configured or cannot be read. */
   | 'unavailable';
 
@@ -124,6 +126,7 @@ const STATUS: Record<AgentPayErrorCode, number> = {
   fee_cap_exceeded: 503,
   idempotency_conflict: 409,
   payment_not_found: 404,
+  other_chain: 409,
   unavailable: 503,
 };
 
@@ -229,6 +232,8 @@ export interface AgentPayDeps {
   chain(authorize: AgentPayAuthorize): Promise<PaymentChainPort>;
   /** The wallet network's ownerOf reader (pay/chain.ts); absent when no endpoint is configured. */
   recipients?: PayChainReader;
+  /** The chain an agent lives on (agentChainOf); absent: the wallet network, as with Arc off. */
+  agentChain?: (agentId: string) => Promise<number>;
   /** Canonical receipts of payment operations; chain/payment-receipt.ts by default. */
   readPaymentReceipt?: PaymentReceiptReader;
   now?: () => number;
@@ -359,9 +364,63 @@ interface StoredRow {
   authorized: Record<string, unknown> | null;
 }
 
+/**
+ * How long one instance answers city_pay_status of a payment from its stored record after it
+ * last read the bundler and Base for it. A payment in flight is then read at most once per window
+ * per instance, however often an assistant polls it; the recovery cron still settles it.
+ */
+export const AGENT_PAY_STATUS_REFRESH_MS = 5_000;
+/** Payments one instance remembers a last status read for; past it the oldest is forgotten. */
+const STATUS_READS_MAX = 10_000;
+
+/**
+ * One audit event of a kind per payment: inserted unless one already names the payment. The
+ * look-up is by (operator_id, kind, detail->>'paymentId'), the index base_audit_events_payment
+ * (migration 304, MPR1-01). $1 at, $2 actor, $3 workspace, $4 agent, $5 kind, $6 detail, $7 id.
+ */
+export const AGENT_PAY_AUDIT_ONCE_SQL = `INSERT INTO base_audit_events (at, actor, operator_id, agent_id, kind, detail)
+       SELECT $1::bigint, $2::text, $3::text, $4::text, $5::text, $6::jsonb
+       WHERE NOT EXISTS (SELECT 1 FROM base_audit_events
+         WHERE kind = $5::text AND operator_id = $3::text AND detail->>'paymentId' = $7::text)`;
+
+/**
+ * The workspace's own agent payment with its created and authorized audit details, each found by
+ * the same index as AGENT_PAY_AUDIT_ONCE_SQL. $1 payment id, $2 workspace, $3 chain id.
+ */
+export const AGENT_PAY_STORED_SQL = `SELECT p.payment_id, p.actor_id, p.source_ref, p.idempotency_key, p.recipient_address,
+         p.token_address, p.amount::text AS amount, w.address AS wallet,
+         w.spender_address AS spender, c.detail AS created, a.detail AS authorized
+       FROM base_payments p
+       JOIN base_wallets w ON w.wallet_id = p.payer_wallet_id
+       JOIN LATERAL (SELECT detail FROM base_audit_events
+         WHERE kind = 'agent_payment_created' AND operator_id = p.operator_id
+           AND detail->>'paymentId' = p.payment_id ORDER BY event_id LIMIT 1) c ON true
+       LEFT JOIN LATERAL (SELECT detail FROM base_audit_events
+         WHERE kind = 'agent_payment_authorized' AND operator_id = p.operator_id
+           AND detail->>'paymentId' = p.payment_id ORDER BY event_id LIMIT 1) a ON true
+       WHERE p.payment_id = $1 AND p.operator_id = $2 AND p.chain_id = $3
+         AND p.source_kind = 'agent' AND p.kind = 'transfer'`;
+
 export function createAgentPayService(deps: AgentPayDeps) {
   const db = deps.db;
   const now = deps.now ?? Date.now;
+  /** workspace and payment id -> when this instance last read Base for its status. */
+  const statusReads = new Map<string, number>();
+  /** True when this call may read Base for the payment; records the read before it starts. */
+  const mayReadStatus = (key: string): boolean => {
+    const at = now();
+    const last = statusReads.get(key);
+    if (last !== undefined && at - last >= 0 && at - last < AGENT_PAY_STATUS_REFRESH_MS)
+      return false;
+    statusReads.delete(key);
+    statusReads.set(key, at);
+    while (statusReads.size > STATUS_READS_MAX) {
+      const oldest = statusReads.keys().next().value;
+      if (oldest === undefined) break;
+      statusReads.delete(oldest);
+    }
+    return true;
+  };
   const resolver = createRecipientResolver({ db, chain: deps.recipients, now });
   const token = USDC.address;
 
@@ -380,6 +439,13 @@ export function createAgentPayService(deps: AgentPayDeps) {
     );
     const agent = spaces[0]?.agents?.find((item) => item.id === agentId && !item.revokedAt);
     if (!agent) throw agentNotFound();
+    // Payments between agents stay on Base (intents, recipients and receipts are Base's): an agent
+    // that lives on another chain is refused, also with an old wallet row on Base.
+    if (deps.agentChain && (await deps.agentChain(agentId)) !== CHAIN_ID)
+      throw refuse(
+        'other_chain',
+        "Paying another agent directly isn't available on this agent's chain yet. Nothing was sent.",
+      );
     if (agent.pausedAt) throw refuse('agent_paused', 'This agent is paused.');
     if (spaces[0].paused) throw refuse('workspace_paused', 'This workspace is paused.');
     const { rows } = await db.query<{
@@ -498,21 +564,15 @@ export function createAgentPayService(deps: AgentPayDeps) {
     paymentId: string,
     detail: Record<string, unknown>,
   ) {
-    await db.query(
-      `INSERT INTO base_audit_events (at, actor, operator_id, agent_id, kind, detail)
-       SELECT $1::bigint, $2::text, $3::text, $4::text, $5::text, $6::jsonb
-       WHERE NOT EXISTS (SELECT 1 FROM base_audit_events
-         WHERE kind = $5::text AND operator_id = $3::text AND detail->>'paymentId' = $7::text)`,
-      [
-        now(),
-        caller.actor,
-        caller.workspaceId,
-        agentId,
-        kind,
-        JSON.stringify({ paymentId, ...detail }),
-        paymentId,
-      ],
-    );
+    await db.query(AGENT_PAY_AUDIT_ONCE_SQL, [
+      now(),
+      caller.actor,
+      caller.workspaceId,
+      agentId,
+      kind,
+      JSON.stringify({ paymentId, ...detail }),
+      paymentId,
+    ]);
   }
 
   const amountJson = (raw: string) => ({
@@ -523,22 +583,11 @@ export function createAgentPayService(deps: AgentPayDeps) {
 
   /** The workspace's own agent payment, with what was recorded when it was created. */
   async function stored(workspaceId: string, paymentId: string): Promise<StoredRow | null> {
-    const { rows } = await db.query<StoredRow>(
-      `SELECT p.payment_id, p.actor_id, p.source_ref, p.idempotency_key, p.recipient_address,
-         p.token_address, p.amount::text AS amount, w.address AS wallet,
-         w.spender_address AS spender, c.detail AS created, a.detail AS authorized
-       FROM base_payments p
-       JOIN base_wallets w ON w.wallet_id = p.payer_wallet_id
-       JOIN LATERAL (SELECT detail FROM base_audit_events
-         WHERE kind = 'agent_payment_created' AND operator_id = p.operator_id
-           AND detail->>'paymentId' = p.payment_id ORDER BY event_id LIMIT 1) c ON true
-       LEFT JOIN LATERAL (SELECT detail FROM base_audit_events
-         WHERE kind = 'agent_payment_authorized' AND operator_id = p.operator_id
-           AND detail->>'paymentId' = p.payment_id ORDER BY event_id LIMIT 1) a ON true
-       WHERE p.payment_id = $1 AND p.operator_id = $2 AND p.chain_id = $3
-         AND p.source_kind = 'agent' AND p.kind = 'transfer'`,
-      [paymentId, workspaceId, CHAIN_ID],
-    );
+    const { rows } = await db.query<StoredRow>(AGENT_PAY_STORED_SQL, [
+      paymentId,
+      workspaceId,
+      CHAIN_ID,
+    ]);
     return rows[0] ?? null;
   }
 
@@ -753,15 +802,19 @@ export function createAgentPayService(deps: AgentPayDeps) {
       }
       const store = paymentStore();
       let record: TransferRecord;
-      try {
-        const chain = await deps.chain(async () => {
-          throw new Error('A status read never sends anything.');
-        });
-        record = await store.observe(intent, await chain.status(intent));
-      } catch {
-        // Base or the chain runtime cannot be read now: the payment as last recorded.
+      // Read recently by this instance: the payment as last recorded, without Base.
+      if (!mayReadStatus(`${caller.workspaceId}:${row.payment_id}`))
         record = await store.observe(intent, null);
-      }
+      else
+        try {
+          const chain = await deps.chain(async () => {
+            throw new Error('A status read never sends anything.');
+          });
+          record = await store.observe(intent, await chain.status(intent));
+        } catch {
+          // Base or the chain runtime cannot be read now: the payment as last recorded.
+          record = await store.observe(intent, null);
+        }
       const created = row.created;
       const checkedAt = (row.authorized?.checkedBlock ?? created.checkedBlock) as string;
       const name = await nameOf(String(created.baseId), String(created.recipientAgentId));

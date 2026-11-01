@@ -12,13 +12,14 @@ import {
   type FeeChain,
   type FeeLedgerConfig,
 } from '../server/protocol/fees/ledger.js';
+import { bloomReads } from './fee-chain-bloom.js';
 import { PROTOCOL_FEE_ROUTER_STARTS_SQL } from '../server/protocol/fees/router-starts-schema.js';
 import {
   protocolFeeConfigFromEnv,
   protocolRouter2FromEnv,
   protocolRouter3FromEnv,
 } from '../server/protocol/fees/cron.js';
-import { FEE_ROUTER2_FLAG, FEE_ROUTER3_FLAG } from '../shared/protocol.js';
+import { FEE_ROUTER2_FLAG, FEE_ROUTER3_FLAG, PROTOCOL_BASE_MAINNET } from '../shared/protocol.js';
 
 // Fee router 3 (x402 settlement, docs/protocol/FEE_ROUTER_3.md): the same FeeCharged event (kind 1)
 // from a third address. The ledger counts it exactly like router 2: from CITY_PROTOCOL_FEE_ROUTER3
@@ -116,6 +117,7 @@ function fakeChain(state: { latest: bigint; finalized: bigint; logs: ChainLog[] 
     latestBlock: async () => state.latest,
     finalizedBlock: async () => state.finalized,
     block: async (n) => ({ timestamp: 1_791_936_000n + n * 2n, hash: blockHash(n) }),
+    ...bloomReads(() => state.logs, blockHash),
     getLogs: async ({ address, fromBlock, toBlock }) =>
       state.logs.filter(
         (l) =>
@@ -167,10 +169,14 @@ test('router 3 config from env: both values valid, else none; listed after route
     { address: ROUTER3, fromBlock: 3_000n },
   ]);
   // Incomplete or invalid: none.
-  assert.deepEqual(protocolRouter3FromEnv({ CITY_PROTOCOL_FEE_ROUTER3: ROUTER3 }), []);
-  assert.deepEqual(protocolRouter3FromEnv({ CITY_PROTOCOL_FEE_ROUTER3_FROM_BLOCK: '3000' }), []);
+  assert.deepEqual(protocolRouter3FromEnv({ ...env, CITY_PROTOCOL_FEE_ROUTER3: ROUTER3 }), []);
+  assert.deepEqual(
+    protocolRouter3FromEnv({ ...env, CITY_PROTOCOL_FEE_ROUTER3_FROM_BLOCK: '3000' }),
+    [],
+  );
   assert.deepEqual(
     protocolRouter3FromEnv({
+      ...env,
       CITY_PROTOCOL_FEE_ROUTER3: 'not-an-address',
       CITY_PROTOCOL_FEE_ROUTER3_FROM_BLOCK: '1',
     }),
@@ -178,6 +184,7 @@ test('router 3 config from env: both values valid, else none; listed after route
   );
   assert.deepEqual(
     protocolRouter3FromEnv({
+      ...env,
       CITY_PROTOCOL_FEE_ROUTER3: ROUTER3,
       CITY_PROTOCOL_FEE_ROUTER3_FROM_BLOCK: '-1',
     }),
@@ -188,13 +195,16 @@ test('router 3 config from env: both values valid, else none; listed after route
     protocolFeeConfigFromEnv({ ...both, CITY_PROTOCOL_FEE_ROUTER3: ROUTER2 })?.addedRouters,
     [{ address: ROUTER2, fromBlock: 2_000n }],
   );
-  // Base mainnet (the deployment fixed in code) reads router 3 from env too.
+  // Base mainnet: router 3 is fixed in code, the environment's address and block are ignored.
   assert.deepEqual(
     protocolFeeConfigFromEnv({
       CITY_PROTOCOL_FEE_ROUTER3: ROUTER3,
       CITY_PROTOCOL_FEE_ROUTER3_FROM_BLOCK: '52900000',
-    })?.addedRouters,
-    [{ address: ROUTER3, fromBlock: 52_900_000n }],
+    })?.addedRouters?.[1],
+    {
+      address: PROTOCOL_BASE_MAINNET.feeRouter3,
+      fromBlock: PROTOCOL_BASE_MAINNET.feeRouter3DeployBlock,
+    },
   );
 });
 
@@ -283,6 +293,7 @@ test('router 3 configured after the scan passed its deploy block: its early fees
 
   // The rewind happens once: later scans read only the tail, and nothing is counted twice.
   const later = await scanFees(db, chain, config);
-  assert.ok(later!.from > 3_000n);
+  // Everything is final through the head: nothing is read again (null), never the old range.
+  assert.ok(later === null || later.from > 3_000n);
   assert.equal((await rowsOf(db)).length, 5);
 });

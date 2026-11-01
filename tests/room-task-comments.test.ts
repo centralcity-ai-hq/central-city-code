@@ -8,6 +8,7 @@ import { registerRoomTasksMigration } from '../server/rooms/tasks-schema.js';
 import { TASK_LIMITS } from '../server/rooms/tasks-contract.js';
 import { roomTaskOutputSchemas } from '../server/rooms/tasks-tools.js';
 import { ASSISTANT_SCOPES } from '../shared/assistant.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 registerRoomTasksMigration();
 
@@ -63,7 +64,7 @@ async function owner(app: App, name: string) {
     remoteAddress: `198.51.${addressCounter++}.31`,
   });
   assert.equal(person.statusCode, 201, person.body);
-  const cookie = `cc_session=${person.cookies.find((item) => item.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(person.cookies);
   const claimed = await app.inject({
     method: 'POST',
     url: '/api/workspaces/claim',
@@ -589,7 +590,7 @@ test('an invited guest comments in its own room only; the credential is re-check
   });
   assert.equal(registered.statusCode, 201, registered.body);
   const hostCookie = {
-    cookie: `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`,
+    cookie: sessionPair(registered.cookies),
   };
   const hostAgent = await post(
     '/api/agents',

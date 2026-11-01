@@ -34,8 +34,16 @@ import {
   type Hex,
 } from 'viem';
 import { getUserOperationHash, type UserOperation } from 'viem/account-abstraction';
-import { BASE_NETWORKS, type Address, type BaseChainId } from './chains.js';
+import { BASE_NETWORKS, type Address, type BaseChainId, type BaseNetwork } from './chains.js';
 import type { SpendPermission } from './types.js';
+
+/**
+ * The chain a limit lives on: a Base network by its id, or a network as chainNetwork gives it. Arc's
+ */
+export type LimitChain = BaseChainId | Pick<BaseNetwork, 'chainId' | 'contracts'>;
+
+const limitNetwork = (chain: LimitChain) =>
+  typeof chain === 'number' ? BASE_NETWORKS[chain] : chain;
 
 export const LIMIT_TIME_ZONE = 'Europe/Berlin';
 
@@ -89,14 +97,18 @@ export const SPEND_PERMISSION_TYPES = {
   ],
 } as const;
 
-/** The typed data SpendPermissionManager.getHash computes on the given network. */
-export function spendPermissionTypedData(chainId: BaseChainId, permission: SpendPermission) {
+/**
+ * The typed data SpendPermissionManager.getHash computes on the given network. The domain names the
+ * chain, so a permission signed for one chain is never valid on another, even at the same address.
+ */
+export function spendPermissionTypedData(chain: LimitChain, permission: SpendPermission) {
+  const network = limitNetwork(chain);
   return {
     domain: {
       name: 'Spend Permission Manager',
       version: '1',
-      chainId,
-      verifyingContract: BASE_NETWORKS[chainId].contracts.spendPermissionManager,
+      chainId: network.chainId,
+      verifyingContract: network.contracts.spendPermissionManager,
     },
     types: SPEND_PERMISSION_TYPES,
     primaryType: 'SpendPermission' as const,
@@ -105,8 +117,8 @@ export function spendPermissionTypedData(chainId: BaseChainId, permission: Spend
 }
 
 /** SpendPermissionManager.getHash, computed locally (no RPC). */
-export function spendPermissionHash(chainId: BaseChainId, permission: SpendPermission): Hex {
-  return hashTypedData(spendPermissionTypedData(chainId, permission));
+export function spendPermissionHash(chain: LimitChain, permission: SpendPermission): Hex {
+  return hashTypedData(spendPermissionTypedData(chain, permission));
 }
 
 /**
@@ -189,9 +201,9 @@ const smartWalletAbi = parseAbi([
 ]);
 
 /** The one call of a revoke. */
-export function revokeCall(chainId: BaseChainId, permission: SpendPermission) {
+export function revokeCall(chain: LimitChain, permission: SpendPermission) {
   return {
-    target: BASE_NETWORKS[chainId].contracts.spendPermissionManager,
+    target: limitNetwork(chain).contracts.spendPermissionManager,
     value: 0n,
     data: encodeFunctionData({ abi: revokeAbi, functionName: 'revoke', args: [permission] }),
   };
@@ -234,13 +246,14 @@ export function userOperationFromRpc(op: RpcUserOperation): UserOperation<'0.6'>
  * value, and the hash to sign is this operation's own. Returns that hash; throws on any mismatch.
  */
 export function checkRevokeOperation(
-  chainId: BaseChainId,
+  chain: LimitChain,
   rpc: RpcUserOperation,
   expected: { wallet: Address; permission: SpendPermission },
 ): Hex {
+  const network = limitNetwork(chain);
   const op = userOperationFromRpc(rpc);
   if (op.sender !== getAddress(expected.wallet)) throw new Error('Not this wallet.');
-  const call = revokeCall(chainId, expected.permission);
+  const call = revokeCall(network, expected.permission);
   const decoded = decodeFunctionData({ abi: smartWalletAbi, data: op.callData });
   if (
     decoded.functionName !== 'execute' ||
@@ -250,8 +263,8 @@ export function checkRevokeOperation(
   )
     throw new Error('Not the revoke of this limit.');
   return getUserOperationHash({
-    chainId,
-    entryPointAddress: BASE_NETWORKS[chainId].contracts.entryPointV06,
+    chainId: network.chainId,
+    entryPointAddress: network.contracts.entryPointV06,
     entryPointVersion: '0.6',
     userOperation: op,
   });

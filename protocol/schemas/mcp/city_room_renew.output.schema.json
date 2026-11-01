@@ -10,6 +10,7 @@
     "agent_id": { "type": "string" },
     "expires_at": { "type": "string" },
     "renewed": { "type": "boolean" },
+    "recovery_code": { "type": "string" },
     "keep_this": { "type": "string" }
   },
   "required": ["room_credential", "room_id", "agent_id", "expires_at", "renewed", "keep_this"]

@@ -13,7 +13,11 @@ import {
 const NOW = Date.UTC(2026, 9, 15, 12); // 2026-10-15 12:00 UTC
 const day = (d: number, h = 0) => Math.floor(Date.UTC(2026, 9, d, h) / 1000);
 
-async function setup(t: test.TestContext, enabled = true) {
+async function setup(
+  t: test.TestContext,
+  enabled = true,
+  treasury?: (chainId: number) => string | null,
+) {
   const pg = await PGlite.create('memory://');
   t.after(() => pg.close());
   await pg.exec(PROTOCOL_FEE_LEDGER_SQL);
@@ -30,6 +34,7 @@ async function setup(t: test.TestContext, enabled = true) {
     fee: number,
     finalized = true,
     chainId = 84532,
+    parties = { payer: `0x${'1'.repeat(40)}`, payee: `0x${'2'.repeat(40)}` },
   ) => {
     n++;
     const h = (c: string) => `0x${c.repeat(64 - String(n).length)}${n}`.slice(0, 66);
@@ -44,8 +49,8 @@ async function setup(t: test.TestContext, enabled = true) {
         n,
         h('b'),
         time,
-        `0x${'1'.repeat(40)}`,
-        `0x${'2'.repeat(40)}`,
+        parties.payer,
+        parties.payee,
         h('c'),
         gross,
         fee,
@@ -62,6 +67,7 @@ async function setup(t: test.TestContext, enabled = true) {
     limit: async (key) => {
       limited.push(key);
     },
+    ...(treasury ? { treasury } : {}),
   });
   t.after(() => app.close());
   return { app, insert, limited };
@@ -121,6 +127,37 @@ test('daily volume, fees and revenue from finalized rows only, as USDC strings',
     assert.ok(!JSON.stringify(body).includes(key), `no ${key} in the public response`);
 });
 
+test('CCA-105/122/126: rows stored before the write-time rules leave the public totals at read time', async (t) => {
+  const treasury = `0x${'7'.repeat(40)}`;
+  const { app, insert } = await setup(t, true, () => treasury);
+  await insert(day(14, 1), 90_000, 9_000); // a real sale
+  // A router payer paying itself (CCA-105/122) and the treasury paying itself (CCA-126).
+  const self = `0x${'3'.repeat(40)}`;
+  await insert(day(14, 2), 500_000, 50_000, true, 84532, { payer: self, payee: self });
+  await insert(day(15, 1), 300_000, 30_000, true, 84532, {
+    payer: treasury,
+    payee: `0x${'2'.repeat(40)}`,
+  });
+  const body = (await app.inject('/api/public/protocol/fees?days=2')).json();
+  assert.deepEqual(body.days, [
+    {
+      day: '2026-10-14',
+      payments: 1,
+      fee_count: 1,
+      volume_usdc: '0.090000',
+      fees_usdc: '0.009000',
+      revenue_usdc: '0.009000',
+    },
+  ]);
+  assert.deepEqual(body.totals, {
+    payments: 1,
+    fee_count: 1,
+    volume_usdc: '0.090000',
+    fees_usdc: '0.009000',
+    revenue_usdc: '0.009000',
+  });
+});
+
 test('days must be an integer from 1 to 365', async (t) => {
   const { app } = await setup(t);
   for (const bad of ['0', '366', '-1', '1.5', 'abc', '9999'])
@@ -140,6 +177,21 @@ test('one cache key per window: unknown query keys and leading zeros are refused
     assert.equal((await app.inject(url)).statusCode, 400, url);
   assert.equal((await app.inject('/api/public/protocol/fees')).statusCode, 200);
   assert.equal((await app.inject('/api/public/protocol/fees?days=30')).statusCode, 200);
+});
+
+test('equivalent spellings of the URL are refused, so each window is one cache key (CCA-135)', async (t) => {
+  const { app } = await setup(t);
+  for (const url of [
+    '/api/public/protocol/fees?days=30&',
+    '/api/public/protocol/fees?&days=30',
+    '/api/public/protocol/fees?days=30&&&&',
+    '/api/public/protocol/fees?%64ays=30',
+    '/api/public/protocol/fees?days=%33%30',
+    '/api/public/protocol/fees?&',
+  ])
+    assert.equal((await app.inject(url)).statusCode, 400, url);
+  assert.equal((await app.inject('/api/public/protocol/fees?days=30')).statusCode, 200);
+  assert.equal((await app.inject('/api/public/protocol/fees?days=7')).statusCode, 200);
 });
 
 test('migration 172: the daily totals read their window through the (chain_id, block_time) index', async (t) => {

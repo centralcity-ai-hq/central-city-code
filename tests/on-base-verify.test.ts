@@ -543,6 +543,29 @@ test('the readAllFeedback call and its answer, by hand, agree with viem', () => 
   assert.throws(() => decodeFeedback('0x1234'));
 });
 
+test('a matching score whose passport could not read some raters passes with a warning', async () => {
+  const result = await checked({ feedback: RATINGS }, ROW, { ...CLAIM, ratersSkipped: 2 });
+  assert.deepEqual(result.score, {
+    state: 'pass',
+    evidence:
+      '4.0 ★ from 3 Central City agents: the latest rating of each wallet the passport names, recomputed on Base at block 52,431,000; the server could not read 2 more Central City rater wallets, so the score may leave them out',
+  });
+  const passport = (ratersSkipped?: number) => ({
+    agentWallet: AGENT_WALLET,
+    reputation: {
+      readAtBlock: 1,
+      readAt: 1,
+      count: 1,
+      entries: [],
+      score: { average: '4.0', raters: 1 },
+      scoredBy: [],
+      ...(ratersSkipped === undefined ? {} : { ratersSkipped }),
+    },
+  });
+  assert.equal(scoreClaim(passport(1))?.ratersSkipped, 1);
+  assert.equal('ratersSkipped' in scoreClaim(passport())!, false);
+});
+
 test('a passport score that matches Base passes, read at the block the passport was read at', async () => {
   const result = await checked({ feedback: RATINGS }, ROW, CLAIM);
   assert.deepEqual(result.score, {

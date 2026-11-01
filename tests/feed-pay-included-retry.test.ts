@@ -498,6 +498,36 @@ test('an ambiguous send (a 429 on eth_sendUserOperation) is reconciled, never re
   assert.ok(f.base.state.feeCharges.length <= 1);
 });
 
+test('an ambiguous first send is never re-sent after the owner stops the agent (CCA-110)', async (t) => {
+  const { f, serviceId } = await ready(t);
+  captureLog(t);
+  // Every send of the payment while the call's worker runs is ambiguous (a 429 on the send).
+  f.base.state.rateLimit = { left: 1_000, retryAfter: '1', at: 'send', feeOnly: true };
+  const { callId } = await start(f, serviceId);
+  await workerGone(f, callId);
+  assert.equal(f.base.state.feeCharges.length, 0, 'no send reached the bundler');
+  f.base.state.rateLimit = null;
+  // The owner uses the documented stop while the payment's first send is unconfirmed.
+  await f.sql(
+    `UPDATE workspaces SET data = jsonb_set(data, '{paused}', 'true'::jsonb)
+     WHERE operator_id = $1`,
+    [f.owner.id],
+  );
+  const sendsAtStop = f.base.state.sends.length;
+  for (let i = 0; i < 6; i++) {
+    f.advance(2 * 60_000);
+    assert.equal((await f.cron()).statusCode, 200);
+  }
+  assert.deepEqual(
+    f.base.state.sends.slice(sendsAtStop),
+    [],
+    'nothing is broadcast for the call after the stop',
+  );
+  assert.equal(f.base.state.feeCharges.length, 0, 'the seller is not paid after the stop');
+  const ops = await payOps(f, callId);
+  assert.equal(ops.length, 1, 'one payment operation, ever');
+});
+
 test('two workers on one due call: exactly one new payment operation', async (t) => {
   const { f, serviceId } = await ready(t);
   captureLog(t, { stopAfterPlan: true });

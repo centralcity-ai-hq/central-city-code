@@ -89,6 +89,8 @@ export const agentMessageMirror = z.object({
   context_id: contextIdSchema,
   reply_to: z.string().uuid().nullable(),
   parts: z.array(messagePartSchema),
+  /** The text parts joined (a convenience; parts stay the message). */
+  text: z.string().optional(),
   created_at: z.iso.datetime(),
   room_id: z.string().nullable().optional(),
 });
@@ -101,6 +103,8 @@ export const inboxPageMirror = z.object({
   unread: z.number().int().min(0),
   next_since: z.number().int().min(0),
   has_more: z.boolean(),
+  /** Advisory text: how to reply to the newest messages and mark them handled. */
+  next_actions: z.array(z.string()).optional(),
 });
 
 const a2aIdentifier = z
@@ -498,7 +502,7 @@ export const PROTOCOL_SCHEMAS: ProtocolSchemaEntry[] = [
         },
       ],
     },
-    semantics: `${MESSAGE_SEMANTICS} Title, method and terms are trimmed before length checks and contain no control characters. The server also refuses sources that are not https, carry credentials or look like secrets in their path (docs/ANSWERS.md), and expires_at more than 365 days ahead; it drops the query string and fragment of every source.`,
+    semantics: `Not expressible in JSON Schema: a data part holds plain JSON (at most 16 levels, 4000 values, 32768 bytes serialized); all parts together serialize to at most 32768 bytes. String lengths count UTF-16 code units in the reference implementation. Title, method and terms are trimmed before length checks and contain no control characters. The server also refuses sources that are not https, carry credentials or look like secrets in their path (docs/ANSWERS.md), and expires_at more than 365 days ahead; it drops the query string and fragment of every source.`,
   },
   {
     file: 'mcp/city_unpublish_result.input.schema.json',

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { AGENT_ROWS_SQL } from '../server/agent-rows/schema.js';
 import { WORKSPACE_AGENT_PATH_SQL } from '../server/agent-rows/agent-lookup-schema.js';
+import { AGENT_PUBLIC_CARDS_SQL } from '../server/agent-rows/public-cards-schema.js';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { randomUUID } from 'node:crypto';
@@ -564,6 +565,8 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }, options
     // workspace_agent() (245, then 254), which the public name reads the agent through.
     AGENT_ROWS_SQL,
     WORKSPACE_AGENT_PATH_SQL,
+    // The current public cards (280), which the public name is read from.
+    AGENT_PUBLIC_CARDS_SQL,
   ])
     await pg.exec(sql);
   const db: Database = {
@@ -2200,7 +2203,12 @@ test('interim: a payer wallet with no owner account cannot pay (only an owner ac
     method: 'POST',
     url: `/api/base/agents/${OLD}/wallet/withdrawals`,
     headers: as('person-1'),
-    payload: JSON.stringify({ idempotencyKey: key(2), token: 'USDC', amount: '1000', to: OUTSIDE }),
+    payload: JSON.stringify({
+      idempotencyKey: key(2),
+      token: 'USDC',
+      amount: '10000',
+      to: OUTSIDE,
+    }),
   });
   assert.equal(withdrawal.statusCode, 404, withdrawal.body);
   assert.equal(f.base.state.reads.length, reads, 'Base not read for it');
@@ -2359,7 +2367,7 @@ test('sponsorship only: a payment never uses the owner-funded fallback, even whe
     payload: JSON.stringify({
       idempotencyKey: key(2),
       token: 'USDC',
-      amount: '1000',
+      amount: '10000',
       to: OUTSIDE,
     }),
   });
@@ -2425,7 +2433,12 @@ test('a payment cancel never uses the owner-funded fallback, even when it is on'
     method: 'POST',
     url: `/api/base/agents/${AGENT_A2}/wallet/withdrawals`,
     headers: as('person-1'),
-    payload: JSON.stringify({ idempotencyKey: key(2), token: 'USDC', amount: '1000', to: OUTSIDE }),
+    payload: JSON.stringify({
+      idempotencyKey: key(2),
+      token: 'USDC',
+      amount: '10000',
+      to: OUTSIDE,
+    }),
   });
   assert.equal(withdrawal.statusCode, 201, withdrawal.body);
   await sign(f, withdrawal.json(), AGENT_A2);
@@ -2510,7 +2523,7 @@ test('idempotency: the same key and body give the same payment; anything else is
       payload: JSON.stringify({
         idempotencyKey: key(n),
         token: 'USDC',
-        amount: '1000',
+        amount: '10000',
         to: OUTSIDE,
       }),
     });
@@ -2605,7 +2618,7 @@ test('pay without waiting: payments and withdrawals share one hold and one cap, 
   assert.equal(capped.json().code, 'too_many_open');
   assert.equal(capped.json().max, 3);
   assert.equal(capped.json().open, 3);
-  assert.equal((await withdraw(11, '1')).json().code, 'too_many_open');
+  assert.equal((await withdraw(11, '10000')).json().code, 'too_many_open');
   // The first payment is final: its slot frees at the next create, with no read in between. Its
   // amount still counts until a balance read is past its block (this node's balance never drops).
   f.ops.land(first.userOpHash, 'final');

@@ -15,10 +15,8 @@ import {
   stringToBytes,
   type Hex,
 } from 'viem';
-import { BASE_NETWORKS } from '../../../shared/base/chains';
+import { walletChain } from '../../../shared/base/wallet-chains';
 import { WALLET_CHAIN_ID } from '../../../shared/base/wallet-network';
-
-const NETWORK = BASE_NETWORKS[WALLET_CHAIN_ID];
 
 /**
  * Init-code hash of the Coinbase Smart Wallet v1 proxy for the pinned factory, as the factory's
@@ -35,11 +33,20 @@ export function walletAccountIndex(agentId: string): bigint {
   return BigInt(sha256(stringToBytes(`cc.base.wallet.v1:${agentId}`)));
 }
 
-/** The wallet [owner key, SpendPermissionManager] makes at this agent's index, on this network. */
-export function expectedWallet(owner: string, agentId: string): `0x${string}` {
-  if (getAddress(NETWORK.contracts.smartWalletFactory) !== FACTORY)
+/**
+ * The wallet [owner key, SpendPermissionManager] makes at this agent's index, on `chainId` (the
+ * wallet network when not given). Arc's factory and manager are at Base's addresses, so the wallet
+ * is the same one; a chain without them recorded (Arc mainnet for now) derives nothing.
+ */
+export function expectedWallet(
+  owner: string,
+  agentId: string,
+  chainId: number = WALLET_CHAIN_ID,
+): `0x${string}` {
+  const chain = walletChain(chainId);
+  if (!chain?.factory || !chain.manager || getAddress(chain.factory) !== FACTORY)
     throw new Error('This network’s wallet factory isn’t the one this page derives for.');
-  const owners = [getAddress(owner), NETWORK.contracts.spendPermissionManager].map((each) =>
+  const owners = [getAddress(owner), chain.manager].map((each) =>
     encodeAbiParameters([{ type: 'address' }], [getAddress(each)]),
   );
   const salt = keccak256(
@@ -57,9 +64,14 @@ export function expectedWallet(owner: string, agentId: string): `0x${string}` {
 }
 
 /** Whether `wallet` is exactly the wallet `owner`'s key makes for this agent. */
-export function isOwnWallet(wallet: string, owner: string, agentId: string): boolean {
+export function isOwnWallet(
+  wallet: string,
+  owner: string,
+  agentId: string,
+  chainId: number = WALLET_CHAIN_ID,
+): boolean {
   try {
-    return getAddress(wallet) === expectedWallet(owner, agentId);
+    return getAddress(wallet) === expectedWallet(owner, agentId, chainId);
   } catch {
     return false;
   }

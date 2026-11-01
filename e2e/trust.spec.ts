@@ -5,6 +5,7 @@ const pages = [
   { path: '/support', title: 'Support Center', text: 'Questions, problems and feedback' },
   { path: '/status', title: 'Status', text: 'Report an outage' },
   { path: '/security', title: 'Security', text: 'Responsible disclosure' },
+  { path: '/audit', title: 'Central City Security Audit', text: 'not an independent third-party audit' },
   { path: '/privacy', title: 'Privacy Policy', text: 'We do not sell personal data' },
   {
     path: '/privacy-choices',
@@ -164,6 +165,23 @@ test('privacy choices list exactly the cookies the server sets', async ({ page }
   for (const name of ['cc_session', 'cc_device', 'cc_oauth_…'])
     await expect(main.getByRole('cell', { name, exact: true })).toBeVisible();
   await expect(main).toContainText('no cookie banner');
+});
+
+test('the audit opens a finding from its short link and offers the versioned PDF', async ({
+  page,
+}) => {
+  await page.goto('/audit#cca-731');
+  const finding = page.locator('h3[id^="cca-731-"]');
+  await expect(finding).toBeInViewport();
+  const pdf = page.getByRole('link', { name: /^Download the report \(PDF/ });
+  await expect(pdf).toHaveAttribute(
+    'href',
+    /^\/audit\/central-city-audit-\d{4}-\d{2}-v\d+\.\d+\.pdf$/,
+  );
+  const response = await page.request.get((await pdf.getAttribute('href'))!);
+  expect(response.status()).toBe(200);
+  expect((await response.body()).subarray(0, 5).toString()).toBe('%PDF-');
+  await expect(page.locator('.audit-hash code')).toHaveText(/^[0-9a-f]{64}$/);
 });
 
 test('security has a responsible disclosure anchor that leads with security@', async ({ page }) => {

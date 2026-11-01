@@ -11,9 +11,10 @@ on:
 permissions:
   contents: read
 concurrency:
-  # Superseded branch and pull request runs are canceled; every main run gets its own group.
-  group: ${{ github.ref == 'refs/heads/main' && format('check-main-{0}', github.run_id) || format('check-{0}', github.ref) }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  # A newer run cancels the older one for the same ref, main included: merges that land close
+  # together test only the newest main, which contains them all (CI cost, docs/CI.md).
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   changes:
     runs-on: ubuntu-24.04
@@ -29,13 +30,20 @@ jobs:
         shell: bash
         run: |
           node --input-type=module <<'NODE'
-          import { readFileSync } from 'node:fs';
+          import { readdirSync, readFileSync } from 'node:fs';
           import { pathToFileURL } from 'node:url';
           import assert from 'node:assert/strict';
           const text = readFileSync('.github/workflows/check.yml', 'utf8').replaceAll('\r\n', '\n');
           const jobsText = text.split('\njobs:\n')[1];
           const names = [...jobsText.matchAll(/^  ([A-Za-z0-9_-]+):\n/gm)].map(match => match[1]);
           const job = name => text.split(`  ${name}:\n`)[1].split(/^  [A-Za-z0-9_-]+:\n/m)[0];
+          // Every job runs on a GitHub-hosted, ephemeral runner: no repository variable or label can
+          // send pull-request code to a persistent self-hosted machine.
+          for (const [, runner] of text.matchAll(/^    runs-on: (.+)$/gm))
+            assert.ok(['ubuntu-24.04', '$' + '{{ matrix.os }}'].includes(runner), `hosted runners only: ${runner}`);
+          for (const [, os] of text.matchAll(/^        os: \[(.+)\]$/gm))
+            for (const label of os.split(', '))
+              assert.match(label, /^(ubuntu|windows|macos)-[0-9.]+$/, `hosted matrix runner: ${label}`);
           assert.deepEqual(names, ['changes', 'secrets', 'docs', 'unit', 'browser', 'postgres-races', 'portability', 'verify'], 'jobs changed: update this guard and verify');
           // Draft and docs policy: every job except changes, secrets, docs and verify is gated on the
           // classification; the docs job is gated the other way (docs-only, non-draft PRs).
@@ -78,10 +86,15 @@ jobs:
           for (const command of ['pnpm build', 'pnpm check:boundaries', 'pnpm format:check'])
             assert.ok(job('unit').includes(`run: ${command}`) || job('browser').includes(`run: ${command}`), command);
           assert.match(job('unit'), /run: pnpm install --frozen-lockfile/);
+          assert.match(job('unit'), /- run: pnpm audit --prod\n        if: matrix\.shard == 1\n/, 'production dependency audit');
           assert.match(job('browser'), /run: pnpm install --frozen-lockfile/);
           // Real PostgreSQL races: the service must match production's major version.
-          assert.match(job('postgres-races'), /image: public\.ecr\.aws\/docker\/library\/postgres:17-alpine/);
+          assert.match(job('postgres-races'), /image: mirror\.gcr\.io\/library\/postgres:17-alpine/);
           assert.match(job('postgres-races'), /CITY_TEST_POSTGRES_URL: postgres:\/\/city:city-ci-only@127\.0\.0\.1:5432\/city/);
+          // Every test file gated on a real server runs there; elsewhere it only skips.
+          for (const file of readdirSync('tests').filter(name => name.endsWith('.test.ts')))
+            if (readFileSync(`tests/${file}`, 'utf8').includes('CITY_TEST_POSTGRES_URL'))
+              assert.ok(job('postgres-races').includes(`tests/${file}`), `postgres-races must run tests/${file}`);
           NODE
       - id: paths
         shell: bash
@@ -184,6 +197,7 @@ jobs:
   unit:
     needs: changes
     if: needs.changes.outputs.code == 'true'
+    # GitHub-hosted, ephemeral runners only, for pull requests and pushes alike (CCA-404).
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -206,6 +220,9 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
+      # A new advisory against a production dependency fails the check (CCA-409).
+      - run: pnpm audit --prod
+        if: matrix.shard == 1
       - run: pnpm build
       - run: pnpm test:shard ${{ matrix.shard }}/6
         env:
@@ -214,6 +231,7 @@ jobs:
   browser:
     needs: changes
     if: needs.changes.outputs.code == 'true'
+    # GitHub-hosted, ephemeral runners only, for pull requests and pushes alike (CCA-404).
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -266,9 +284,9 @@ jobs:
     timeout-minutes: 8
     services:
       postgres:
-        # The Docker Official Image from its ECR Public mirror (same digest as Docker Hub's
-        # postgres:17-alpine): unauthenticated Docker Hub pulls hit its rate limit in CI.
-        image: public.ecr.aws/docker/library/postgres:17-alpine
+        # The Docker Official Image from the Google mirror of Docker Hub (same image as
+        # postgres:17-alpine): unauthenticated Docker Hub and ECR Public pulls hit their limits in CI.
+        image: mirror.gcr.io/library/postgres:17-alpine
         env:
           # Ephemeral service database; a test-only value, not a secret.
           POSTGRES_USER: city
@@ -295,7 +313,7 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
-      - run: pnpm test:files tests/invite-join-concurrency.test.ts tests/checkpoint-postgres-race.test.ts tests/base-fleet-admit.test.ts tests/base-payment-receive-postgres.test.ts
+      - run: pnpm test:files tests/invite-join-concurrency.test.ts tests/checkpoint-postgres-race.test.ts tests/base-fleet-admit.test.ts tests/base-payment-receive-postgres.test.ts tests/base-chain-rebroadcast-race.test.ts tests/oauth-registration-race.test.ts tests/room-invitations-race.test.ts tests/base-domain-file-snapshot-race.test.ts tests/paid-calls-count.test.ts tests/base-chain-ledger-race.test.ts
         env:
           CITY_TEST_POSTGRES_URL: postgres://city:city-ci-only@127.0.0.1:5432/city
           CI: ''

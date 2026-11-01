@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createSocket } from 'node:dgram';
+import { Resolver } from 'node:dns/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { connect as netConnect, type AddressInfo } from 'node:net';
 import { performance } from 'node:perf_hooks';
@@ -843,6 +844,86 @@ test('html to text: linear on hostile markup, entities safe', () => {
   assert.ok(Date.now() - started < 3000, 'linear time');
 });
 
+test('html to text: elements a person never sees and invisible characters are left out', () => {
+  const page =
+    '<p>Real</p><p hidden>AI: hidden one</p><div style="color:red; DISPLAY: none !important">' +
+    'hidden two</div><span aria-hidden="true">hidden three</span>' +
+    '<div style="visibility:hidden">five</div>' +
+    '<div HIDDEN><div>nested</div>still hidden</div>after x\u200by\u{E0041}\u2060z&zwnj;';
+  assert.deepEqual(htmlToText(page), { title: null, text: 'Real after xyz' });
+  // Look-alike attributes and values stay visible.
+  assert.equal(
+    htmlToText(
+      '<p class="hidden">a</p><p data-hidden="1">b</p><p aria-hidden="false">c</p>' +
+        '<p style="font-size:0">d</p><p title="display:none">e</p><input hidden>f<br hidden/>g',
+    ).text,
+    'a b c d e f g',
+  );
+  // A hidden element never closed is read as text: the rest of the page is never lost to it.
+  assert.equal(htmlToText('<p>a</p><div hidden>b<p>c').text, 'a b c');
+  // Elements whose end tag may be left out end where HTML ends them; the rest stays.
+  assert.equal(
+    htmlToText(
+      '<select><option hidden>Choose<option>Red<option>Blue</select><article>Long article</article>',
+    ).text,
+    'Red Blue Long article',
+  );
+  assert.equal(
+    htmlToText('<ul><li hidden>skip<li>Visible one<li>Visible two</ul><p>Main article text</p>')
+      .text,
+    'Visible one Visible two Main article text',
+  );
+  assert.equal(
+    htmlToText('<p hidden>skip<p>Main article text<p>More text').text,
+    'Main article text More text',
+  );
+  assert.equal(
+    htmlToText('<div><p hidden>skip <b>this</b> too</div>shown<dl><dt hidden>t<dd>d</dl>').text,
+    'shown d',
+  );
+  assert.equal(htmlToText('<table><tr hidden><td>x<tr><td>y</table><p hidden>a</p>z').text, 'y z');
+  // A zero font size on a parent (the inline-block gap trick) hides nothing its children show.
+  assert.equal(
+    htmlToText(
+      '<div style="font-size:0"><span style="font-size:16px">Nav A</span> <span>Nav B</span></div>',
+    ).text,
+    'Nav A Nav B',
+  );
+  // XML has no hidden attribute.
+  assert.equal(htmlToText('<rss><item hidden="1">kept</item></rss>', { xml: true }).text, 'kept');
+  const started = Date.now();
+  htmlToText('<div hidden>'.repeat(100_000));
+  htmlToText('<div hidden></div>'.repeat(100_000));
+  htmlToText('<p style="display:none">'.repeat(50_000) + '</p>'.repeat(50_000));
+  htmlToText('<div hidden><span hidden>'.repeat(50_000) + 'end');
+  assert.equal(htmlToText('<div hidden>'.repeat(10_000) + 'end').text, 'end');
+  assert.ok(Date.now() - started < 3000, 'linear time');
+});
+
+test('html to text: an end tag inside a comment or a script does not end a hidden element; <div hidden/> hides', () => {
+  // The browser hides everything up to the real end tag, so none of it may reach the reader.
+  assert.equal(htmlToText('<div hidden><!-- </div> -->secret</div>shown').text, 'shown');
+  assert.equal(htmlToText('<div hidden><!doctype </div>>secret</div>shown').text, 'shown');
+  assert.equal(
+    htmlToText('<div hidden><script>var s = "</div>"</script>secret</div>shown').text,
+    'shown',
+  );
+  assert.equal(
+    htmlToText('<div hidden><style>a::after{content:"</div>"}</style>secret</div>shown').text,
+    'shown',
+  );
+  assert.equal(htmlToText('<div hidden/>secret</div>shown').text, 'shown');
+  // Never closed: read as text, as before (the rest of the page is never lost).
+  assert.equal(htmlToText('<p>a</p><div hidden/>b').text, 'a b');
+  // A comment never closed runs to the end of the page (as in the browser).
+  assert.equal(htmlToText('<p>a</p><div hidden><!-- never closed <p>b').text, 'a');
+  const started = Date.now();
+  htmlToText('<div hidden><script>'.repeat(50_000) + 'end');
+  htmlToText('<div hidden><!--'.repeat(50_000) + 'end');
+  htmlToText('<div hidden><script></script>'.repeat(50_000) + 'end');
+  assert.ok(Date.now() - started < 3000, 'linear time');
+});
+
 // ---------------------------------------------------------------- text-stats
 
 test('text-stats: counts and top words', async () => {
@@ -1661,6 +1742,26 @@ async function withNameServer(
     socket.close();
   }
 }
+
+test('dns: a lookup whose signal is already aborted starts no query', async (t) => {
+  // Each started query is counted and then fails as a cancelled one would (no network).
+  let starts = 0;
+  const query = () => {
+    starts++;
+    return Promise.reject(Object.assign(new Error('cancelled'), { code: 'ECANCELLED' }));
+  };
+  t.mock.method(Resolver.prototype, 'resolve4', query);
+  t.mock.method(Resolver.prototype, 'resolve6', query);
+  t.after(() => t.mock.restoreAll());
+  const controller = new AbortController();
+  controller.abort();
+  const outcome = await createSystemResolve()('aborted.example.com', controller.signal).then(
+    () => 'resolved',
+    (error: NodeJS.ErrnoException) => error.code,
+  );
+  assert.equal(starts, 0, `${starts} DNS queries started after the abort`);
+  assert.equal(outcome, 'ECANCELLED');
+});
 
 test('dns: the production resolver asks the name servers directly and is cancelled at the deadline', async () => {
   await withNameServer(

@@ -33,6 +33,13 @@ import { z } from 'zod';
 import type { Database } from '../../database.js';
 import { baseNetwork, type Address } from '../../../shared/base/chains.js';
 import {
+  chainNetwork,
+  isRealMoneyChain,
+  usdcOf,
+  type ChainId,
+  type ChainUsdc,
+} from '../../../shared/chains.js';
+import {
   calendarPeriod,
   limitPeriodOf,
   type LimitPeriod,
@@ -51,6 +58,7 @@ import {
   AgentPayConsentError,
   assertAgentPayConsent,
 } from '../../base/wallet/agent-pay-consent.js';
+import { agentChainOf } from '../../base/wallet/routes.js';
 import { feedListedSql } from '../services-schema.js';
 import {
   FEED_HTTP_METHODS,
@@ -67,6 +75,7 @@ import {
   DEFAULT_FLOAT_RAW,
   DEFAULT_PER_CALL_MAX_RAW,
   FEED_PAY_ERROR_MESSAGES,
+  feedPayUnavailableMessage,
   FEED_PAY_ERRORS,
   FEED_PAY_IDEMPOTENCY_KEY,
   FEED_PAY_LIMITS,
@@ -82,6 +91,8 @@ import {
   type FeedPayAgent,
   type FeedPayAgentList,
   type FeedPayAlert,
+  FEED_PAY_SCREENING_ALERT_EVERY_MS,
+  type FeedPayAsset,
   type FeedPayCall,
   type FeedPayCallState,
   type FeedPayError,
@@ -155,6 +166,7 @@ import {
   MAX_LISTED_PRICE_ROUTER2,
   MAX_TOTAL,
   MAX_TOTAL_ROUTER2,
+  FeeQuoteError,
   payCalls,
   quoteFeeIncluded,
   quoteFeeOnTop,
@@ -163,6 +175,7 @@ import {
 } from '../../protocol/fees/fee-call.js';
 import { feeRouter2Live } from './router2.js';
 import {
+  ARC_ROUTER3_FLAG,
   batchWorkspacesFromEnv,
   feeRouter3Live,
   LEG_SELLER,
@@ -192,11 +205,16 @@ import {
   type OfferKind,
 } from '../offers/kinds.js';
 import {
+  protocolArcChainIdFromEnv,
+  arcTreasuryFor,
+  protocolArcFeeConfigFromEnv,
   protocolFeeConfigFromEnv,
   protocolRouter2FromEnv,
   protocolFeesEnabled,
+  protocolReservedPayees,
   protocolTreasuryFor,
 } from '../../protocol/fees/cron.js';
+import { isReservedPayee, PROTOCOL_CHAIN_ID } from '../../../shared/protocol.js';
 import { markServiceVerified } from '../../protocol/fees/ledger.js';
 import {
   screeningEnabled,
@@ -213,8 +231,37 @@ import {
   type PaymentRequired,
 } from './x402-buyer.js';
 
-const CHAIN_ID = WALLET_CHAIN_ID;
-const USDC = WALLET_NETWORK.tokens.USDC.address;
+/** The chain one engine pays on and its USDC: one chain per engine, never read from a request. */
+interface OnChain {
+  chainId: number;
+  usdc: Address;
+}
+
+/**
+ * Everything an engine reads that belongs to its chain (createFeedPayEngine has one engine per
+ * chain). Base's are the same reads as ever. Arc's are built from Arc's own settings and never reach
+ * Base's routers: Arc has fee router 3 only, so a call there is router 3's or none.
+ */
+interface ChainSetup extends OnChain {
+  asset: FeedPayAsset;
+  /** Fee router 3 only: no outside x402 service, no router 1 or 2 to fall back on. */
+  router3Only: boolean;
+  /** Whether payments are screened now. Arc's always are, like its withdrawals: no emergency off. */
+  screeningOn(): boolean;
+  /** Whether this chain is on and complete now. */
+  available(): boolean;
+  feeConfig(): { chainId: number; router: string | null } | null;
+  router2Live(): boolean;
+  router2Address(): Hex | null;
+  router3Live(): boolean;
+  router3Address(): Hex | null;
+  /** The treasury this chain's fees must reach (lowercase); null: nothing to compare. */
+  treasury(): string | null;
+  reserved(): ReadonlySet<string>;
+  chain(): Promise<FeedPayChainPort>;
+  facilitator?: () => Promise<Router3FacilitatorPort | null>;
+  screening?: ScreeningGate;
+}
 
 /** A worker holds a call this long; the cron takes calls whose lease ran out. */
 export const FEED_PAY_LEASE_MS = 3 * 60_000;
@@ -233,6 +280,27 @@ export const FEED_PAY_CANCEL_MARGIN_S = 15;
 export const FEED_PAY_WORK_MS = 150_000;
 /** Balance reads of the agents list give up after this (null = not known now). */
 export const FEED_PAY_BALANCE_TIMEOUT_MS = 2_500;
+/**
+ * The agents list's Base reads (each agent's USDC, its spender's USDC and its limit's allowance)
+ * are shared this long across requests of one instance: a list reads Base three times per agent,
+ * and the endpoint it reads also carries the bundler. Holds are still subtracted fresh from the
+ * database, a call by this instance forgets its wallet's reads at once, and paying itself always
+ * reads Base anew.
+ */
+export const FEED_PAY_AGENT_READ_TTL_MS = 10_000;
+/**
+ * Listed agents per minute, for the whole deployment, whose agent-list reads go to Base (three
+ * reads each; agents whose reads are still shared do not count). Past it, a list answers those
+ * agents' balances and allowance as "not known now" until the next minute.
+ */
+export const FEED_PAY_AGENT_CHAIN_READS_PER_MINUTE = 1_000;
+/** The most wallets whose agent-list reads one instance keeps (cleared when it grows past this). */
+export const FEED_PAY_AGENT_READS_MAX = 10_000;
+/** A spend permission's identity, for its shared allowance read. */
+const permissionKey = (permission: object) =>
+  JSON.stringify(permission, (_key, value: unknown) =>
+    typeof value === 'bigint' ? value.toString(10) : value,
+  );
 
 const TERMINAL: ReadonlySet<FeedPayCallState> = new Set([
   'result_saved',
@@ -262,6 +330,10 @@ export class FeedPayRefusal extends Error {
     return { error: this.message, code: this.code, retryable: this.retryable, ...this.extra };
   }
 }
+
+/** 'unavailable' on this chain: Base's sentence on Base, the chain's own name elsewhere. */
+const unavailableOn = (chainId: number) =>
+  new FeedPayRefusal('unavailable', {}, feedPayUnavailableMessage(chainId));
 
 const refuse = (code: FeedPayErrorCode, extra: FeedPayRefusal['extra'] = {}) =>
   new FeedPayRefusal(code, extra);
@@ -307,6 +379,13 @@ export interface FeedPayEngineDeps {
   /** The outbound transport (transport.ts) by default; tests pass a fake service. */
   http?: FeedPayHttp;
   alert?: (alert: FeedPayAlert) => void | Promise<void>;
+  /**
+   * The agents list's deployment-wide Base read budget: called once per listed agent whose reads
+   * are not shared yet (FEED_PAY_AGENT_READ_TTL_MS), it throws to refuse (a 429 from the shared
+   * limiter, or the limiter down). Refused, that agent's balances and allowance answer "not known
+   * now" (null) and Base is not asked; the rest of that list asks no more. Absent: no budget.
+   */
+  admitAgentReads?: () => Promise<void>;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   /** How often the worker looks again at a step that waits on Base (default pollMs). */
@@ -336,6 +415,16 @@ export interface FeedPayEngineDeps {
    * null or unset: router 3 is never live and nothing is pinned to it.
    */
   facilitator?: () => Promise<Router3FacilitatorPort | null>;
+  /**
+   * An Arc network's side, used only with Arc on (CITY_ARC=1) and its network complete. Absent, or Arc
+   * off: this engine is Base's alone, and asks nothing about any other chain.
+   */
+  arc?: {
+    chain(chainId: ChainId): Promise<FeedPayChainPort>;
+    facilitator(chainId: ChainId): Promise<Router3FacilitatorPort | null>;
+    /** Screening on Arc reads the sanctions oracle on Base (sanctions-oracle.ts). */
+    screening?: ScreeningGate;
+  };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -666,12 +755,14 @@ function payerOfRow(row: PayerRow): Payer | null {
       address: getAddress(row.address) as Address,
       spender: getAddress(row.spender_address) as Address,
       spenderKeyRef: row.spender_key_ref,
+      accountId: row.operator_id,
     },
   };
 }
 
-/** The agent with a wallet on Base that this caller may pay from, or null (one answer). */
-async function payerFor(
+/** The agent with a wallet on this chain that this caller may pay from, or null (one answer). */
+async function payerOn(
+  on: OnChain,
   q: Queryable,
   caller: FeedPayCaller,
   agentId: string,
@@ -680,7 +771,7 @@ async function payerFor(
     `${PAYER_SELECT} WHERE w.agent_id = $1 AND w.chain_id = $2 AND ${
       caller.origin === 'feed' ? 'w.owner_account_id' : 'w.operator_id'
     } = $3`,
-    [agentId, CHAIN_ID, caller.origin === 'feed' ? caller.accountId : caller.workspaceId],
+    [agentId, on.chainId, caller.origin === 'feed' ? caller.accountId : caller.workspaceId],
   );
   return rows[0] ? payerOfRow(rows[0]) : null;
 }
@@ -716,11 +807,11 @@ interface Limit {
   createdAtMs: number;
 }
 
-async function limitOf(q: Queryable, payer: Payer): Promise<Limit | null> {
+async function limitOn(on: OnChain, q: Queryable, payer: Payer): Promise<Limit | null> {
   const ref = await activePaymentLimit(q, {
-    chainId: CHAIN_ID,
+    chainId: on.chainId,
     walletId: payer.walletId,
-    token: USDC,
+    token: on.usdc,
     spender: payer.wallet.spender,
   });
   if (!ref) return null;
@@ -759,7 +850,8 @@ async function limitOf(q: Queryable, payer: Payer): Promise<Limit | null> {
  * room left for a top-up is Base's `left` minus this. A limit not on Base yet (state 'signed')
  * counts everything settled in the period, as agent Pay does.
  */
-async function limitLeftNow(
+async function limitLeftOn(
+  on: OnChain,
   q: Queryable,
   walletId: string,
   limit: Limit,
@@ -768,8 +860,8 @@ async function limitLeftNow(
 ): Promise<bigint> {
   const inFlight = await periodAllowanceInFlight(q, {
     walletId,
-    chainId: CHAIN_ID,
-    token: USDC,
+    chainId: on.chainId,
+    token: on.usdc,
     window: basePeriodWindow(limit.permission, Math.floor(read.readAtMs / 1000)),
     limitCreatedAtMs: limit.createdAtMs,
     chainReadAtMs: limit.state === 'onchain' ? read.readAtMs : null,
@@ -791,7 +883,8 @@ const permissionRef = (limit: Limit): PermissionRef => ({
  * limit, and confirmed for Feed services. A consent the owner gave for Central City agents only
  * refuses with a sentence saying they can confirm again to include Feed services. Null: consented.
  */
-async function consentRefusal(
+async function consentRefusalOn(
+  on: OnChain,
   q: Queryable,
   payer: Payer,
   limit: Limit,
@@ -799,9 +892,9 @@ async function consentRefusal(
   if (!limit.permissionHash) return refuse('no_consent');
   try {
     await assertAgentPayConsent(q, {
-      chainId: CHAIN_ID,
+      chainId: on.chainId,
       walletId: payer.walletId,
-      token: USDC,
+      token: on.usdc,
       permissionId: limit.permissionId,
       permissionHash: limit.permissionHash,
       recipient: 'feed-service',
@@ -814,9 +907,6 @@ async function consentRefusal(
       : refuse('no_consent');
   }
 }
-
-const hasConsent = async (q: Queryable, payer: Payer, limit: Limit) =>
-  (await consentRefusal(q, payer, limit)) === null;
 
 const HARD_MAX_RAW = BigInt(FEED_PAY_LIMITS.perCallMaxMaxRaw);
 
@@ -878,11 +968,17 @@ function limitNotLive(limit: Limit, phase: AllowanceLeft['phase']): FeedPayRefus
 }
 
 /** What the calendar cap still allows now (null: the limit has no calendar period). */
-async function calendarLeft(q: Queryable, limit: Limit, walletId: string, nowMs: number) {
+async function calendarLeftOn(
+  on: OnChain,
+  q: Queryable,
+  limit: Limit,
+  walletId: string,
+  nowMs: number,
+) {
   if (!limit.period) return null;
   const spent = await calendarSpent(q, {
     walletId,
-    token: USDC,
+    token: on.usdc,
     window: calendarPeriod(limit.period, nowMs),
   });
   const left = limit.capRaw - spent;
@@ -975,8 +1071,84 @@ export const RECOVER_URGENT_SHARE = 0.3;
 /** The share of a recover run's budget the calls may use; the rest is for float moves and sweeps. */
 export const RECOVER_CALLS_SHARE = 0.7;
 
-export function createFeedPayEngine(deps: FeedPayEngineDeps) {
+/** Base's engine reads what it always read, from the settings it always read them from. */
+function baseSetup(deps: FeedPayEngineDeps): ChainSetup {
+  const { env } = deps;
+  return {
+    chainId: WALLET_CHAIN_ID,
+    usdc: WALLET_NETWORK.tokens.USDC.address,
+    asset: FEED_USDC,
+    router3Only: false,
+    screeningOn: () => screeningEnabled(env),
+    available: () => baseNetwork(WALLET_CHAIN_ID, env) !== null,
+    feeConfig: () => protocolFeeConfigFromEnv(env),
+    router2Live: () => feeRouter2Live(env),
+    router2Address: () => protocolRouter2FromEnv(env)[0]?.address ?? null,
+    router3Live: () => feeRouter3Live(env),
+    router3Address: () => router3AddressFromEnv(env),
+    treasury: () => protocolTreasuryFor(env, WALLET_CHAIN_ID),
+    reserved: () => protocolReservedPayees(env),
+    chain: () => deps.chain(),
+    ...(deps.facilitator ? { facilitator: deps.facilitator } : {}),
+    ...(deps.screening ? { screening: deps.screening } : {}),
+  };
+}
+
+export { arcTreasuryFor };
+
+/** Arc's engine: Arc's USDC and router 3, its own chain side, and none of Base's routers. */
+function arcSetup(deps: FeedPayEngineDeps, chainId: ChainId): ChainSetup {
+  const { env } = deps;
+  const usdc = (usdcOf(chainId) as ChainUsdc).address;
+  const config = () => {
+    const found = protocolArcFeeConfigFromEnv(env);
+    return found && found.chainId === chainId ? found : null;
+  };
+  return {
+    chainId,
+    usdc,
+    asset: { address: usdc, symbol: 'USDC', decimals: 6 },
+    router3Only: true,
+    screeningOn: () => true,
+    available: () => chainNetwork(chainId, env) !== null,
+    feeConfig: config,
+    router2Live: () => false,
+    router2Address: () => null,
+    // Its own switch: Base's router 3 being on says nothing about Arc's.
+    router3Live: () => env[ARC_ROUTER3_FLAG]?.trim() === '1' && config() !== null,
+    router3Address: () => (config()?.router as Hex | undefined) ?? null,
+    treasury: () => arcTreasuryFor(env, chainId),
+    reserved: () => {
+      const treasury = arcTreasuryFor(env, chainId);
+      return new Set([...protocolReservedPayees(env), ...(treasury ? [treasury] : [])]);
+    },
+    chain: () => deps.arc!.chain(chainId),
+    facilitator: () => deps.arc!.facilitator(chainId),
+    ...(deps.arc?.screening ? { screening: deps.arc.screening } : {}),
+  };
+}
+
+function createChainEngine(deps: FeedPayEngineDeps, setup: ChainSetup) {
   const { db, env } = deps;
+  const CHAIN_ID = setup.chainId;
+  const unavailableHere = () => unavailableOn(CHAIN_ID);
+  const USDC = setup.usdc;
+  const payerFor = (q: Queryable, caller: FeedPayCaller, agentId: string) =>
+    payerOn(setup, q, caller, agentId);
+  const limitOf = (q: Queryable, payer: Payer) => limitOn(setup, q, payer);
+  const limitLeftNow = (
+    q: Queryable,
+    walletId: string,
+    limit: Limit,
+    read: { left: bigint; readAtMs: number },
+    excludeHolderRef = '',
+  ) => limitLeftOn(setup, q, walletId, limit, read, excludeHolderRef);
+  const consentRefusal = (q: Queryable, payer: Payer, limit: Limit) =>
+    consentRefusalOn(setup, q, payer, limit);
+  const hasConsent = async (q: Queryable, payer: Payer, limit: Limit) =>
+    (await consentRefusal(q, payer, limit)) === null;
+  const calendarLeft = (q: Queryable, limit: Limit, walletId: string, nowMs: number) =>
+    calendarLeftOn(setup, q, limit, walletId, nowMs);
   const now = deps.now ?? Date.now;
   const http = deps.http ?? feedPayHttps;
   const sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
@@ -990,13 +1162,15 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
       // Alerts never stop a payment.
     }
   };
+  /** When this chain's screening outage was last alerted (FEED_PAY_SCREENING_ALERT_EVERY_MS). */
+  let screeningAlertedAt: number | null = null;
 
   async function chain(): Promise<FeedPayChainPort> {
-    if (!baseNetwork(CHAIN_ID, env)) throw refuse('unavailable');
+    if (!setup.available()) throw unavailableHere();
     try {
-      return await deps.chain();
+      return await setup.chain();
     } catch {
-      throw refuse('unavailable');
+      throw unavailableHere();
     }
   }
 
@@ -1094,8 +1268,8 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
               ? 'lower'
               : 'higher',
       payTo: found.option.payTo,
-      network: 'eip155:8453',
-      asset: FEED_USDC,
+      network: `eip155:${CHAIN_ID}`,
+      asset: setup.asset,
       x402Version: found.required.x402Version,
       validityS: found.validityS,
       quotedAt,
@@ -1125,6 +1299,13 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
   async function checkedService(serviceId: string, inputs: FeedPayInputs) {
     const service = await listedService(db, serviceId);
     if (!service) throw refuse('service_not_found');
+    // An outside x402 service is paid on Base only. Before the service or the chain is asked.
+    if (setup.router3Only && !isHosted(service))
+      throw new FeedPayRefusal(
+        'other_chain',
+        {},
+        "This outside service is paid on Base, and this agent isn't on Base. Payments don't cross chains.",
+      );
     const reason = feedPayListingCheck({
       url: service.url,
       method: service.method,
@@ -1161,12 +1342,24 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
       price_raw: string;
       state: string;
       preset: OfferPreset | null;
+      seller_chain_id: number | null;
     }>(
-      `SELECT offer_id, kind, version, pay_to, price_raw::text AS price_raw, state, preset
-       FROM city_offers WHERE offer_id = $1`,
+      `SELECT o.offer_id, o.kind, o.version, o.pay_to, o.price_raw::text AS price_raw, o.state,
+         o.preset, (SELECT w.chain_id FROM base_wallets w WHERE w.wallet_id = o.wallet_id)
+           AS seller_chain_id
+       FROM city_offers o WHERE o.offer_id = $1`,
       [offerId],
     );
     const row = rows[0];
+    // The seller's chain is its wallet's. No payment crosses chains: before anything is signed.
+    // An offer whose wallet can't be found is refused where only one chain's wallets can sell.
+    if (
+      row &&
+      (row.seller_chain_id === null
+        ? setup.router3Only === true
+        : Number(row.seller_chain_id) !== CHAIN_ID)
+    )
+      throw refuse('other_chain');
     if (
       !row ||
       row.state !== 'active' ||
@@ -1246,8 +1439,8 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
       feeIncluded: true,
       vsListing: 'same',
       payTo: getAddress(offer.payTo) as Address,
-      network: 'eip155:8453',
-      asset: FEED_USDC,
+      network: `eip155:${CHAIN_ID}`,
+      asset: setup.asset,
       x402Version: 2,
       validityS: AUTH_VALIDITY_MAX_S,
       quotedAt,
@@ -1292,7 +1485,7 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
     if (isHosted(service)) {
       const offer = await hostedOfferOf(service);
       offerInputOf(offer, inputs);
-      if (!protocolFee()) throw refuse('unavailable');
+      if (!protocolFee()) throw unavailableHere();
       return storeIncludedQuote(accountId, service, inputs, offer);
     }
     const found = await live(service, inputs);
@@ -1382,7 +1575,11 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
     if (existing) {
       await admission.reread?.();
       if (existing.request_hash !== requestHashOf(input)) throw refuse('idempotency_conflict');
-      return { call: callView(existing), work: follow(existing.call_id, caller) };
+      return {
+        call: callView(existing),
+        // Only the engine of the call's own chain ever works it.
+        work: Number(existing.chain_id) === CHAIN_ID ? follow(existing.call_id, caller) : null,
+      };
     }
     await admission.fresh?.();
     const { service, reason } = await checkedService(input.serviceId, input.inputs);
@@ -1462,7 +1659,7 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
     let fee: bigint;
     if (hosted) {
       // The fee is part of the price: without the fee router nothing can be paid.
-      if (!feeConfig) throw refuse('unavailable');
+      if (!feeConfig) throw unavailableHere();
       payTo = hosted.payTo;
       price = hosted.split.gross;
       amount = hosted.split.net;
@@ -1511,6 +1708,8 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
       feeConfig && hosted && total >= MIN_INCLUDED_ROUTER3 && total <= MAX_TOTAL_ROUTER3
         ? await router3ForNewCall()
         : null;
+    // Arc has no router 1 or 2 to fall back on: router 3 or nothing.
+    if (setup.router3Only && !router3) throw unavailableHere();
     const route = !feeConfig
       ? null
       : router3
@@ -1552,7 +1751,7 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
         port.usdcBalance(payer.wallet.spender),
       ]);
     } catch {
-      throw refuse('unavailable');
+      throw unavailableHere();
     }
     // Base's own clock may still be a little before the limit's start: the same refusal.
     if (read.phase !== 'active') throw limitNotLive(limit, read.phase)!;
@@ -1769,7 +1968,7 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
       try {
         walletRead = await port.usdcBalance(payer.wallet.address);
       } catch {
-        throw refuse('unavailable');
+        throw unavailableHere();
       }
       id = await reserveOnce();
     }
@@ -1832,6 +2031,7 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
         // Without the result's text: no step reads it, and this re-read runs every pollMs.
         const row = await loadCall(db, callId, { text: false });
         if (!row || row.lease_token !== token) return;
+        if (Number(row.chain_id) !== CHAIN_ID) return;
         if (TERMINAL.has(row.state) && !openPayment(row) && !feeOwed(row)) return;
         const moved = await step(row, ctx);
         if (moved) {
@@ -1868,7 +2068,7 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
   /** The fee router configuration while protocol fees are on for Feed pay's chain, else null. */
   function protocolFee() {
     if (!protocolFeesEnabled(env)) return null;
-    const config = protocolFeeConfigFromEnv(env);
+    const config = setup.feeConfig();
     return config && config.chainId === CHAIN_ID && config.router ? config : null;
   }
 
@@ -1877,12 +2077,12 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
    * CITY_PROTOCOL_FEE_ROUTER2_ENABLED exactly '1' (docs/protocol/FEE_ROUTER_2.md section 2).
    */
   function router2Live(): boolean {
-    return feeRouter2Live(env) && Boolean(protocolFee());
+    return setup.router2Live() && Boolean(protocolFee());
   }
 
   /** Fee router 2's address from the one parser the ledger uses too (protocolRouter2FromEnv). */
   function router2Address(): Hex | null {
-    return protocolRouter2FromEnv(env)[0]?.address ?? null;
+    return setup.router2Address();
   }
 
   /**
@@ -1890,7 +2090,7 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
    * or router 3 is switched on (router 3's on-chain readiness is checked on the call path).
    */
   function perCallCap(): bigint {
-    return router2Live() || (feeRouter3Live(env) && Boolean(protocolFee()))
+    return router2Live() || (setup.router3Live() && Boolean(protocolFee()))
       ? BigInt(FEED_PAY_LIMITS.perCallMaxMaxRouter2Raw)
       : HARD_MAX_RAW;
   }
@@ -1898,27 +2098,29 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
   /**
    * The cap of a router pinned on a call: router 1's or router 2's, whatever the switches say now
    * (a pinned call is finished on its router); null for any other address, which is never paid.
+   * Where router 3 is the only router (Arc) a pin is router 3's whatever the settings say now, as in
+   * pinnedToRouter3: a paid call must not read as an anomaly after a router change. Only a new call
+   * pins (router3ForNewCall), and startPay signs for nothing but the configured router.
    */
   function pinnedMaxTotal(pinned: string): bigint | null {
-    const config = protocolFeeConfigFromEnv(env);
+    if (setup.router3Only) return /^0x[0-9a-fA-F]{40}$/.test(pinned) ? MAX_TOTAL_ROUTER3 : null;
+    const config = setup.feeConfig();
     if (!config || config.chainId !== CHAIN_ID) return null;
     const same = (a: string | null) => a !== null && a.toLowerCase() === pinned.toLowerCase();
     if (same(config.router)) return MAX_TOTAL;
     if (same(router2Address())) return MAX_TOTAL_ROUTER2;
-    if (same(router3AddressFromEnv(env))) return MAX_TOTAL_ROUTER3;
+    if (same(setup.router3Address())) return MAX_TOTAL_ROUTER3;
     return null;
   }
 
   /** True for a call pinned to fee router 3 (settled by the facilitator, never by a UserOp). */
-  const onRouter3 = (row: { fee_router: string | null }) => {
-    const r3 = router3AddressFromEnv(env);
-    return !!r3 && !!row.fee_router && row.fee_router.toLowerCase() === r3.toLowerCase();
-  };
+  const onRouter3 = (row: { fee_router: string | null }) =>
+    pinnedToRouter3(row, setup.router3Only === true, setup.router3Address());
 
   /**
    * Payment screening of a NEW submission (docs/protocol/SCREENING-GATE.md): null while
-   * CITY_PROTOCOL_SCREENING is '0' (nothing changes), else the gate's decision; a missing gate or a
-   * gate that throws is unavailable, never clearance. Reconciliation of anything already broadcast
+   * CITY_PROTOCOL_SCREENING is '0' on Base (nothing changes; Arc always asks), else the gate's
+   * decision; a missing gate or a gate that throws is unavailable, never clearance. Reconciliation of anything already broadcast
    * never asks. Logged with ids and reasons only, never addresses.
    */
   async function screen(
@@ -1926,19 +2128,19 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
     intentId: string,
     parties: ScreeningParty[],
   ): Promise<ScreeningDecision | null> {
-    if (!screeningEnabled(env)) return null;
+    if (!setup.screeningOn()) return null;
     const unavailable = (): ScreeningDecision => ({
       allowed: false,
       outcome: 'unavailable',
       decisionId: null,
-      reason: deps.screening ? 'provider_unavailable' : 'not_configured',
+      reason: setup.screening ? 'provider_unavailable' : 'not_configured',
       expiresAt: now(),
       reused: false,
     });
     let decision: ScreeningDecision;
     try {
-      decision = deps.screening
-        ? await deps.screening.screen({
+      decision = setup.screening
+        ? await setup.screening.screen({
             chainId: CHAIN_ID,
             token: USDC,
             amountRaw,
@@ -1959,14 +2161,28 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
         reused: decision.reused,
       }),
     );
+    // Refused with nothing but a log line is how an outage goes unseen; every call would be too many.
+    if (
+      decision.outcome === 'unavailable' &&
+      (screeningAlertedAt === null ||
+        now() - screeningAlertedAt >= FEED_PAY_SCREENING_ALERT_EVERY_MS)
+    ) {
+      screeningAlertedAt = now();
+      alert({ kind: 'screening_unavailable', detail: `chain_${CHAIN_ID}:${decision.reason}` });
+    }
     return decision;
   }
 
   const screeningFailure = (decision: ScreeningDecision): FeedPayFailureCode =>
     decision.outcome === 'blocked' ? 'screening_blocked' : 'screening_unavailable';
 
-  /** The seller leg before anything is signed: the paying wallet, its spender and the payee. */
+  /**
+   * The seller leg before anything is signed: a payee no payment may name (a fee router, the
+   * treasury, USDC, the facilitator or zero) is refused whatever screening says; then the paying
+   * wallet, its spender and the payee are screened.
+   */
   async function screenSeller(row: CallRow): Promise<FeedPayFailureCode | null> {
+    if (isReservedPayee(row.pay_to, setup.reserved())) return 'payee_reserved';
     const decision = await screen(row.amount_raw, `feed-pay:${row.call_id}`, [
       { role: 'payer', address: row.wallet_address },
       { role: 'spender', address: row.spender_address },
@@ -2029,7 +2245,7 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
       routerBindings.set(cacheKey, binding);
     }
     if (binding.token !== USDC.toLowerCase()) return { hold: 'fee_router_token_mismatch' };
-    const expected = protocolTreasuryFor(env, CHAIN_ID);
+    const expected = setup.treasury();
     if (expected && expected !== binding.treasury) return { hold: 'fee_recipient_mismatch' };
     return { treasury: binding.treasury };
   }
@@ -2088,7 +2304,7 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
   /** The facilitator, or null when none is wired or it cannot be built right now. */
   async function facilitator(): Promise<Router3FacilitatorPort | null> {
     try {
-      return (await deps.facilitator?.()) ?? null;
+      return (await setup.facilitator?.()) ?? null;
     } catch {
       return null;
     }
@@ -2119,6 +2335,8 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
   async function router3Unready(
     port: FeedPayChainPort,
     router: string | null,
+    /** false: the router's own probe only (a sender with its own facilitator checks its gas). */
+    withFacilitator = true,
   ): Promise<Router3Unready | null> {
     if (!router || !/^0x[0-9a-fA-F]{40}$/.test(router)) return 'bad_address';
     const key = `${CHAIN_ID}:${router.toLowerCase()}`;
@@ -2154,11 +2372,12 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
       }
       router3Verified.add(key);
     }
+    if (!withFacilitator) return null;
     // A facilitator that could not be built right now (its key or runtime threw) is unreachable,
     // not absent: only none wired (null) is a real 'no_facilitator'.
     let f: Router3FacilitatorPort | null;
     try {
-      f = (await deps.facilitator?.()) ?? null;
+      f = (await setup.facilitator?.()) ?? null;
     } catch {
       return 'facilitator_unreachable';
     }
@@ -2183,8 +2402,8 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
    * call 'unavailable' instead of rerouting it.
    */
   async function router3ForNewCall(): Promise<Hex | null> {
-    if (!feeRouter3Live(env) || !protocolFee()) return null;
-    const router = router3AddressFromEnv(env);
+    if (!setup.router3Live() || !protocolFee()) return null;
+    const router = setup.router3Address();
     if (!router) return null;
     let reason: Router3Unready | null = null;
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -2196,15 +2415,51 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
     }
     const transient = reason === 'probe_failed' || reason === 'facilitator_unreachable';
     log(JSON.stringify({ event: 'feed_pay.router3_unready', reason, fallback: !transient }));
-    if (transient) throw refuse('unavailable');
+    if (transient) throw unavailableHere();
     return null;
   }
 
   /** Router 3 for a new fee-included call: its address while switched on and ready, else null. */
   async function liveRouter3(port: FeedPayChainPort | null): Promise<Hex | null> {
-    if (!port || !feeRouter3Live(env) || !protocolFee()) return null;
-    const router = router3AddressFromEnv(env);
+    if (!port || !setup.router3Live() || !protocolFee()) return null;
+    const router = setup.router3Address();
     return router && (await router3Ready(port, router)) ? router : null;
+  }
+
+  /**
+   * The checks this engine runs before it signs a router-3 payment (startPay), for a payment it
+   * does not own: the sponsored first purchase, whose sponsor account signs both legs. In order: a
+   * reserved payee is refused; the payer and the payee are screened (the seller leg); router 3
+   * passes its readiness probe (code, limits, token, its treasury() equal to the protocol treasury
+   * fixed in code, nonceFor) and its treasury is screened as the fee recipient. Null: clear to sign.
+   * 'hold': not decidable now (Base unread, router not ready, treasury unknown or mismatched):
+   * nothing is signed, ask again later. A failure code: refused, nothing is signed. Fail closed.
+   */
+  async function router3PreSign(input: {
+    intentId: string;
+    payer: string;
+    payee: string;
+    grossRaw: bigint;
+    feeRaw: bigint;
+  }): Promise<FeedPayFailureCode | 'hold' | null> {
+    if (isReservedPayee(input.payee, setup.reserved())) return 'payee_reserved';
+    const seller = await screen(input.grossRaw, input.intentId, [
+      { role: 'payer', address: input.payer },
+      { role: 'payee', address: input.payee },
+    ]);
+    if (seller && !seller.allowed) return screeningFailure(seller);
+    const router = setup.router3Address();
+    const port = await chain().catch(() => null);
+    if (!port || !router) return 'hold';
+    if (await router3Unready(port, router, false)) return 'hold';
+    const recipient = await feeRecipientOf(port, router);
+    if ('hold' in recipient) return 'hold';
+    const fee = await screen(input.feeRaw, `${input.intentId}:fee`, [
+      { role: 'payer', address: input.payer },
+      { role: 'fee_recipient', address: recipient.treasury },
+    ]);
+    if (fee && !fee.allowed) return screeningFailure(fee);
+    return null;
   }
 
   /** The readiness of the 100-USDC router a call is pinned to: router 3's or router 2's. */
@@ -2223,7 +2478,7 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
    * fee goes (an earlier screening hold is released at once).
    */
   async function feeHeld(row: CallRow, port: FeedPayChainPort): Promise<boolean> {
-    const screening = screeningEnabled(env);
+    const screening = setup.screeningOn();
     const last = num(row.fee_held_at);
     const recent = last !== null && now() - last < FEED_PAY_FEE_HOLD_RETRY_MS;
     if (screening && recent) return true;
@@ -2269,6 +2524,39 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
     row.payment_state === 'sent' ||
     row.payment_state === 'cancelling';
 
+  // The agents list's shared Base reads (FEED_PAY_AGENT_READ_TTL_MS), per wallet id and read. A
+  // read that failed is never kept.
+  const agentReads = new Map<string, Map<string, { at: number; read: Promise<unknown> }>>();
+  /** Whether the wallet's agent-list read `kind` is shared now (no Base read needed for it). */
+  const agentReadShared = (walletId: string, kind: string) => {
+    const hit = agentReads.get(walletId)?.get(kind);
+    return !!hit && now() - hit.at < FEED_PAY_AGENT_READ_TTL_MS;
+  };
+  /** `mayRead` false (the budget refused): a read not shared now fails ("not known now"). */
+  function sharedAgentRead<T>(
+    walletId: string,
+    kind: string,
+    read: () => Promise<T>,
+    mayRead = true,
+  ): Promise<T> {
+    let reads = agentReads.get(walletId);
+    const hit = reads?.get(kind);
+    if (hit && now() - hit.at < FEED_PAY_AGENT_READ_TTL_MS) return hit.read as Promise<T>;
+    if (!mayRead) return Promise.reject(new Error('Agent list Base read budget spent.'));
+    if (!reads) {
+      if (agentReads.size >= FEED_PAY_AGENT_READS_MAX) agentReads.clear();
+      agentReads.set(walletId, (reads = new Map()));
+    }
+    const entry = { at: now(), read: read() as Promise<unknown> };
+    reads.set(kind, entry);
+    entry.read.catch(() => {
+      if (reads.get(kind) === entry) reads.delete(kind);
+    });
+    return entry.read as Promise<T>;
+  }
+  /** A call of this wallet moved: its next agent-list reads go to Base. */
+  const forgetAgentReads = (walletId: string) => agentReads.delete(walletId);
+
   /** Compare-and-set of a call's state (and fields); false when it moved meanwhile. */
   async function move(
     row: CallRow,
@@ -2296,6 +2584,7 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
       if (end) await ended(tx, row, end.state, end.failure);
       return true;
     });
+    if (result) forgetAgentReads(row.wallet_id);
     return result;
   }
 
@@ -2369,6 +2658,7 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
     address: getAddress(row.wallet_address) as Address,
     spender: getAddress(row.spender_address) as Address,
     spenderKeyRef: row.spender_key_ref,
+    accountId: row.operator_id,
   });
 
   /** One step of a call; true when it moved (the loop goes on at once). */
@@ -2674,8 +2964,24 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
    * send, and nothing else would ever send or end it. It then reads as never sent, and each step
    * ends what waited on it as for any operation that never went out (nothing paid, holds released).
    */
-  const opOf = (port: FeedPayChainPort, key: string, walletId: string) =>
-    port.opStatus(key, walletId, { expireQueuedBefore: now() - FEED_PAY_RECOVER_GRACE_MS });
+  const opOf = (
+    port: FeedPayChainPort,
+    key: string,
+    walletId: string,
+    /** The call whose authority a re-send of an unconfirmed first send needs (CCA-110). */
+    call?: { row: CallRow; ctx: WorkContext },
+  ) =>
+    port.opStatus(key, walletId, {
+      expireQueuedBefore: now() - FEED_PAY_RECOVER_GRACE_MS,
+      ...(call
+        ? {
+            beforeRebroadcast: async () => {
+              const refusal = await authority(call.row, call.ctx);
+              if (refusal) throw new Error(`Not re-sent: ${refusal}.`);
+            },
+          }
+        : {}),
+    });
 
   async function moveOf(moveId: string | null): Promise<MoveRow | null> {
     if (!moveId) return null;
@@ -2699,7 +3005,7 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
     if (!port) return false;
     const moveRow = await moveOf(row.topup_move_id);
     if (!moveRow) return refused(row, 'float_topup_failed');
-    let op = await opOf(port, moveRow.op_key, row.wallet_id).catch(() => undefined);
+    let op = await opOf(port, moveRow.op_key, row.wallet_id, { row, ctx }).catch(() => undefined);
     if (op === undefined) return false;
     /** Fences the never-stored top-up (nothing can send it later) and ends the call. */
     const endUnsent = async (failure: FeedPayFailureCode) => {
@@ -2719,7 +3025,7 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
       const limit = payer ? await limitOf(db, payer) : null;
       if (!limit || limit.permissionId !== row.permission_id) return endUnsent('limit_changed');
       await sendTopUp(row, ctx, port, permissionRef(limit));
-      op = await opOf(port, moveRow.op_key, row.wallet_id).catch(() => undefined);
+      op = await opOf(port, moveRow.op_key, row.wallet_id, { row, ctx }).catch(() => undefined);
       if (op === null && ctx.refusal) return endUnsent(ctx.refusal);
       if (!op) return false;
     }
@@ -3080,6 +3386,28 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
    * before anything is broadcast, so a crash afterwards is found again; a resend reuses the key
    * (one operation per key) and the router refuses a second charge for the same ref on-chain.
    */
+  /**
+   * The x402 seller settlement of a fee-on-top call is at or below Base's safe block, and Base
+   * still shows the call's authorization used there (CCA-120). An unknown safe block, a settlement
+   * above it or a read that does not answer 'used' at a safe block: not yet (false).
+   */
+  async function settlementSafe(row: CallRow, port: FeedPayChainPort): Promise<boolean> {
+    const block = num(row.settled_block);
+    if (block === null || row.nonce === null || row.valid_before === null) return false;
+    const safe = await port.safeBlock().catch(() => null);
+    if (safe === null || BigInt(block) > safe) return false;
+    const outcome = await port
+      .outcome({
+        payer: getAddress(row.spender_address) as Address,
+        nonce: row.nonce as Hex,
+        fromBlock: BigInt(num(row.search_from_block) ?? 0),
+        validBefore: Number(row.valid_before),
+        claimedTx: (row.tx_hash as Hex | null) ?? null,
+      })
+      .catch(() => null);
+    return outcome?.kind === 'used' && outcome.blockNumber <= safe;
+  }
+
   async function stepFee(row: CallRow): Promise<boolean> {
     const port = await chain().catch(() => null);
     if (!port) return false;
@@ -3101,9 +3429,32 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
         quote = null;
       }
       if (!quote || quote.fee !== BigInt(row.fee_raw)) return feeFailed(row, 'fee_mismatch', null);
+      // The seller settlement first reaches Base's safe block and is read again there (CCA-120):
+      // a fee is never charged on a settlement a reorg can still take away. Until then the fee
+      // stays pending with its one key.
+      if (!(await settlementSafe(row, port))) return false;
       // Payment screening (CITY_PROTOCOL_SCREENING) before the fee's first submission: a held fee
       // stays pending with its one key and is screened again later; it is never charged meanwhile.
       if (await feeHeld(row, port)) return false;
+      // Built before the state moves: a payee no router call may name is never sent.
+      let calls;
+      try {
+        calls = feeCalls({
+          usdc: USDC as Hex,
+          router,
+          payee: getAddress(row.pay_to) as Hex,
+          quote,
+          paymentIntentId: row.call_id,
+          maxTotal: cap,
+          reserved: setup.reserved(),
+        });
+      } catch (error) {
+        return feeFailed(
+          row,
+          error instanceof FeeQuoteError ? error.code.toLowerCase() : 'fee_calls_invalid',
+          null,
+        );
+      }
       if (
         !(await move(row, {
           fee_state: 'sent',
@@ -3112,14 +3463,6 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
         }))
       )
         return false;
-      const calls = feeCalls({
-        usdc: USDC as Hex,
-        router,
-        payee: getAddress(row.pay_to) as Hex,
-        quote,
-        paymentIntentId: row.call_id,
-        maxTotal: cap,
-      });
       await port
         .chargeFee({
           key,
@@ -3256,6 +3599,10 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
     const port = await chain().catch(() => null);
     if (!port) return false;
     if (!row.fee_router || !splitOf(row)) return refused(row, 'interrupted');
+    // Arc, nothing signed yet and the router changed since: the call ends with nothing paid. Nothing
+    // is signed for a router no longer configured, and the facilitator only sends to the configured one.
+    if (setup.router3Only && row.fee_router.toLowerCase() !== setup.router3Address()?.toLowerCase())
+      return refused(row, 'interrupted');
     // The router pays its own treasury: it must be the protocol's (read from the router itself).
     const recipient = await feeRecipientOf(port, row.fee_router);
     if ('hold' in recipient) {
@@ -3268,11 +3615,22 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
       return false;
     // Router 3 (any amount): nothing is signed until router 3 and its facilitator are ready.
     if (onRouter3(row) && !(await router3Ready(port, row.fee_router))) return false;
+    // Router 3, a call planned again: no new pair while a pair of an earlier attempt could still
+    // be used directly on USDC (CCA-731).
+    if (onRouter3(row) && !(await router3EarlierPairsClosed(row, port))) return false;
     // The treasury's share moves in this same operation: screened here, on every attempt that could
     // still send it, before the state moves and before anything is signed.
     const treasuryScreened = await screenTreasury(row, recipient.treasury);
     if (treasuryScreened) return refused(row, treasuryScreened);
     const key = payKeyOf(row);
+    // Router 3: where Base is searched for the pair's AuthorizationUsed, stored before it is signed
+    // (a few blocks back, as for an x402 authorization), so a late look still finds it (CCA-739).
+    let searchFrom: string | null = null;
+    if (onRouter3(row)) {
+      const head = await port.headBlock().catch(() => null);
+      if (head === null) return false;
+      searchFrom = (head > 5n ? head - 5n : 0n).toString(10);
+    }
     if (
       !(await move(
         row,
@@ -3283,6 +3641,7 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
           fee_op_key: key,
           pay_retry_at: null,
           pay_first_at: row.pay_first_at ?? now(),
+          ...(searchFrom !== null ? { search_from_block: searchFrom } : {}),
         },
         'settling',
       ))
@@ -3314,6 +3673,7 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
           // splitOf above is null for a router that is neither ours nor router 2, so the call never
           // gets here with one; 0 would make payCalls refuse, never fall back to another cap (N2).
           maxTotal: pinnedMaxTotal(row.fee_router) ?? 0n,
+          reserved: setup.reserved(),
         }),
         // A new payment: the authority behind it is checked right before its first send.
         beforeBroadcast: async () => {
@@ -3384,6 +3744,8 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
     );
     const grantOf = new Map(grants.map((g) => [g.op_key, g]));
     for (const row of rows) {
+      // A batch is one chain's: a member of another chain is refused, whatever else it is.
+      if (Number(row.chain_id) !== CHAIN_ID) continue;
       if (row.payment_state !== 'sent' || !row.fee_op_key) continue;
       if (!batchWorkspacesFromEnv(env).has(row.operator_id)) continue;
       const ctx: WorkContext = {};
@@ -3451,6 +3813,20 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
             throw new Error('refused');
           }
         },
+        // The batch lane, as for a UserOp payment: allowlisted workspaces only (the server's own
+        // operator_id); an MCP purchase is batched only with its grant's ids.
+        ...(batchWorkspacesFromEnv(env).has(row.operator_id)
+          ? {
+              batch: {
+                authorize: batchAuthorize,
+                ...(row.origin === 'feed'
+                  ? { grant: null }
+                  : ctx.grant
+                    ? { grant: ctx.grant }
+                    : {}),
+              },
+            }
+          : {}),
       });
     } catch (error) {
       if (error instanceof FeedPayChainError)
@@ -3469,6 +3845,76 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
   }
 
   /**
+   * Never re-signing a router-3 purchase (CCA-731). Each signed leg stays usable directly on USDC
+   * until its window ends or it is cancelled, and the router's (payer, ref) check does not cover a
+   * leg spent outside the router, so a second pair next to a live one could pay the price twice.
+   * A call whose payment was planned again (pay_attempts > 0) therefore signs its new pair only
+   * once every leg of its earlier attempts is proven unusable on Base: cancelled, or expired at a
+   * safe block past its window. A leg still open gets a cancelAuthorization (one per leg, under
+   * its own key: a cancel stored and failed is never resent, one refused before it was stored is
+   * asked again on a later step; either way the leg at worst runs out at validBefore) and the
+   * call waits; a leg Base shows used is logged and the call is never signed again (the pay retry
+   * window ends it). True: nothing earlier can still move money.
+   */
+  async function router3EarlierPairsClosed(row: CallRow, port: FeedPayChainPort): Promise<boolean> {
+    if (row.pay_attempts <= 0) return true;
+    let fromBlock = row.search_from_block === null ? null : BigInt(row.search_from_block);
+    if (fromBlock === null) {
+      const head = await port.headBlock().catch(() => null);
+      if (head === null) return false;
+      fromBlock = head > AUTHORIZATION_SEARCH_BLOCKS ? head - AUTHORIZATION_SEARCH_BLOCKS : 0n;
+    }
+    let closed = true;
+    for (let attempt = 0; attempt < row.pay_attempts; attempt++) {
+      const key = feedPayKey(row.call_id, attempt);
+      for (const leg of ['seller', 'fee'] as const) {
+        const stored = await port.stored(`${key}:${leg}`).catch(() => undefined);
+        if (stored === undefined) return false;
+        if (!stored) continue;
+        const outcome = await port.outcome({
+          payer: stored.authorization.from,
+          nonce: stored.authorization.nonce,
+          fromBlock,
+          validBefore: Number(stored.authorization.validBefore),
+          claimedTx: null,
+        });
+        if (outcome.kind === 'expired' || outcome.kind === 'canceled') continue;
+        closed = false;
+        if (outcome.kind !== 'pending') {
+          log(
+            JSON.stringify({
+              event: 'feed_pay.router3_earlier_leg_used',
+              callId: row.call_id,
+              attempt,
+              leg,
+              outcome: outcome.kind,
+            }),
+          );
+          continue;
+        }
+        const cancelKey = `feed-pay:r3cancel:${key}:${leg}`;
+        try {
+          await port.cancel({
+            key: cancelKey,
+            intentHash: opIntentHash({
+              cancel: `${key}:${leg}`,
+              nonce: stored.authorization.nonce,
+            }),
+            wallet: walletRef(row),
+            nonce: stored.authorization.nonce,
+            beforeBroadcast: async () => {},
+          });
+        } catch {
+          // Not sent: the leg simply runs out at validBefore.
+        }
+      }
+    }
+    if (!closed)
+      log(JSON.stringify({ event: 'feed_pay.router3_resign_held', callId: row.call_id }));
+    return closed;
+  }
+
+  /**
    * The facilitator's operation of a router-3 call, in the shape of a chain operation: what
    * stepIncluded reads for a UserOp. undefined: not readable now.
    */
@@ -3481,9 +3927,13 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
   /**
    * A router-3 settlement that did not go through (never sent, or reverted). Its two signed
    * authorizations stay valid until validBefore, so the call is declared unpaid only when Base
-   * shows both nonces unused at a safe block past the window (or cancelled); a leg used anyway
-   * (outside the router) is money that moved: recorded as an anomaly, never paid again under new
-   * nonces and never sent through router 1 or 2 (security review, room x402 #20). Pending: wait.
+   * shows both nonces unused at a safe block past the window (or cancelled). Both legs used in one
+   * transaction whose receipt passes the same checks as our own settlement (payMatches and
+   * router3TransfersMatch) is this payment, sent by someone else: paid, once that block is final
+   * (CCA-738). Any other use is money that moved but not as this call says: recorded as an
+   * anomaly, never paid again under new nonces and never sent through router 1 or 2 (security
+   * review, room x402 #20); so is a nonce Base shows used whose event is not in the searched
+   * window. The search starts at the block stored before signing (CCA-739). Pending: wait.
    */
   async function router3NotMade(
     row: CallRow,
@@ -3504,8 +3954,14 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
         op.neverSent ? (ctx.refusal ?? 'interrupted') : 'payment_rejected',
         op.neverSent ? null : { txHash: op.txHash },
       );
-    const fromBlock = (await port.headBlock().catch(() => null)) ?? null;
-    if (fromBlock === null) return false;
+    // Stored right before the pair was signed (startPay). A call that went out before it was
+    // stored falls back to the last 2,000 blocks, as before.
+    let fromBlock = row.search_from_block === null ? null : BigInt(row.search_from_block);
+    if (fromBlock === null) {
+      const head = await port.headBlock().catch(() => null);
+      if (head === null) return false;
+      fromBlock = head > AUTHORIZATION_SEARCH_BLOCKS ? head - AUTHORIZATION_SEARCH_BLOCKS : 0n;
+    }
     const outcomes = await Promise.all(
       [seller, fee]
         .filter((leg): leg is NonNullable<typeof leg> => !!leg)
@@ -3513,17 +3969,26 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
           port.outcome({
             payer: leg.authorization.from,
             nonce: leg.authorization.nonce,
-            fromBlock:
-              fromBlock > AUTHORIZATION_SEARCH_BLOCKS
-                ? fromBlock - AUTHORIZATION_SEARCH_BLOCKS
-                : 0n,
+            fromBlock: fromBlock!,
             validBefore: Number(leg.authorization.validBefore),
             claimedTx: op.txHash,
           }),
         ),
     );
-    if (outcomes.some((o) => o.kind === 'used'))
-      return payAnomaly(row, { txHash: op.txHash, blockNumber: op.blockNumber }, false);
+    const used = outcomes.flatMap((o) => (o.kind === 'used' ? [o] : []));
+    if (used.length === 2 && seller && fee && used[0]!.txHash === used[1]!.txHash) {
+      const paid = await router3PaidElsewhere(row, port, used[0]!);
+      if (paid !== 'mismatch') return paid;
+    }
+    if (used.length)
+      return payAnomaly(row, { txHash: used[0]!.txHash, blockNumber: used[0]!.blockNumber }, false);
+    if (outcomes.some((o) => o.kind === 'used_unseen'))
+      return payAnomaly(
+        row,
+        { txHash: null, blockNumber: null },
+        false,
+        'authorization_used_unseen',
+      );
     if (outcomes.every((o) => o.kind === 'expired' || o.kind === 'canceled'))
       return payNotMade(
         row,
@@ -3531,6 +3996,46 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
         op.neverSent ? null : { txHash: op.txHash },
       );
     return false;
+  }
+
+  /**
+   * Both legs of a router-3 call used in one transaction that is not our facilitator's (anyone may
+   * submit a broadcast pair to the router). Its receipt gets exactly the checks of our own
+   * settlement in stepIncluded; on a match the call is paid, recorded only once that block is at
+   * or below Base's safe block (no later facilitator receipt can confirm it). 'mismatch': an
+   * anomaly; false: not decidable now (receipt or treasury binding unreadable, not final yet).
+   */
+  async function router3PaidElsewhere(
+    row: CallRow,
+    port: FeedPayChainPort,
+    used: { txHash: Hex; blockNumber: bigint },
+  ): Promise<boolean | 'mismatch'> {
+    if (row.payment_state !== 'sent') return false;
+    const receipt = await port.receiptLogs(used.txHash);
+    if (!receipt) return false;
+    if (receipt.status !== 'success' || !payMatches(row, receipt.logs)) return 'mismatch';
+    const transfers = await router3TransfersMatch(row, port, receipt.logs);
+    if (transfers !== 'match') return transfers === 'unknown' ? false : 'mismatch';
+    const safe = await port.safeBlock().catch(() => null);
+    if (safe === null || receipt.blockNumber > safe) return false;
+    const tx = used.txHash.toLowerCase();
+    const block = receipt.blockNumber.toString(10);
+    // Paid: the seller has 90% and the treasury 10% of the price, in that one transaction.
+    return move(
+      row,
+      {
+        state: 'settled',
+        payment_state: 'settled',
+        tx_hash: tx,
+        settled_block: block,
+        settled_at: now(),
+        fee_state: 'charged',
+        fee_tx_hash: tx,
+        fee_block: block,
+        pay_final_at: now(),
+      },
+      'paid',
+    );
   }
 
   /**
@@ -3738,6 +4243,7 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
     row: CallRow,
     op: { txHash: Hex | null; blockNumber: bigint | null },
     final: boolean,
+    detail: 'fee_charged_mismatch' | 'authorization_used_unseen' = 'fee_charged_mismatch',
   ): Promise<boolean> {
     const ok = await move(
       row,
@@ -3765,7 +4271,7 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
         host: row.host,
         walletId: row.wallet_id,
         amountRaw: paidAmountRaw(row),
-        detail: 'fee_charged_mismatch',
+        detail,
       });
     return ok;
   }
@@ -3819,8 +4325,8 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
              COALESCE(SUM(amount_raw + fee_raw), 0)::text AS total
            FROM feed_pay_calls
            WHERE pay_kind = 'included' AND delivered_at IS NOT NULL AND pay_final_at IS NULL
-             AND payment_state = 'settled' AND call_id <> $2`,
-          [row.pay_to.toLowerCase(), row.call_id],
+             AND payment_state = 'settled' AND call_id <> $2 AND chain_id = $3`,
+          [row.pay_to.toLowerCase(), row.call_id, CHAIN_ID],
         );
         const seller = BigInt(rows[0]?.seller ?? '0');
         const total = BigInt(rows[0]?.total ?? '0');
@@ -3998,7 +4504,7 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
     const r3 = onRouter3(row);
     const op = r3
       ? await router3OpOf(key)
-      : await opOf(port, key, row.wallet_id).catch(() => undefined);
+      : await opOf(port, key, row.wallet_id, { row, ctx }).catch(() => undefined);
     if (op === undefined) return false;
     if (op === null) {
       // Moved to 'calling' but never stored (a crash between): past the grace nothing sends it any
@@ -4031,7 +4537,12 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
       return payNotMade(row, ctx.refusal ?? 'interrupted', null);
     }
     if (op.neverSent || op.status === 'failed' || (op.status === 'final' && op.errorCode)) {
-      if (row.payment_state === 'settled') return payDropped(row);
+      // Router 3: a payment recorded from another transaction (router3NotMade) is not dropped by
+      // our own settlement failing; only our own transaction failing after it was recorded is.
+      if (row.payment_state === 'settled')
+        return r3 && (!row.tx_hash || row.tx_hash !== op.txHash?.toLowerCase())
+          ? false
+          : payDropped(row);
       if (r3) return router3NotMade(row, port, op, ctx);
       // Refused only for the provider's rate, and provably never sent: a new payment later
       // (planPayAgain), unless its attempts or its time are used up.
@@ -4169,11 +4680,17 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
       );
       return ok;
     }
-    // Still open: a call that did not settle gets its authorization cancelled while that helps.
+    // Still open: a call that did not settle gets its authorization cancelled while that helps,
+    // and so does one whose answer was lost (a timeout, or a failure after the request went out):
+    // its result can no longer arrive, so a settlement after it would pay for nothing. Base stays
+    // the judge: a settlement that lands before the cancel still ends paid_no_result.
     const nowS = Math.floor(now() / 1000);
+    const answerLost =
+      row.state === 'reconciling' &&
+      (row.failure_code === 'service_timeout' || row.failure_code === 'service_unreachable');
     // One cancel per payment: one that could not be sent is not tried again (it runs out instead).
     if (
-      row.state === 'not_settled' &&
+      (row.state === 'not_settled' || answerLost) &&
       row.payment_state === 'sent' &&
       !row.cancel_op_key &&
       Number(row.valid_before) - nowS > FEED_PAY_CANCEL_MARGIN_S
@@ -4235,24 +4752,59 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
     port: FeedPayChainPort,
     walletId: string,
     spender: Address,
+    shared = false,
+    mayRead = true,
   ): Promise<bigint | null> {
-    const read = await withTimeout(port.usdcBalance(spender), FEED_PAY_BALANCE_TIMEOUT_MS);
+    const balance = () => port.usdcBalance(spender);
+    const read = await withTimeout(
+      shared ? sharedAgentRead(walletId, 'float', balance, mayRead) : balance(),
+      FEED_PAY_BALANCE_TIMEOUT_MS,
+    );
     if (!read) return null;
     const held = await floatHeld(db, { walletId, block: read.blockNumber });
     return max(read.balance - held, 0n);
   }
 
-  /** One of the person's agents that could pay (FeedPayAgent). */
-  async function agentView(port: FeedPayChainPort | null, payer: Payer): Promise<FeedPayAgent> {
+  /**
+   * One of the person's agents that could pay (FeedPayAgent). `shared`: the agents list, whose Base
+   * reads are shared for FEED_PAY_AGENT_READ_TTL_MS (a single agent's view reads anew) and are
+   * admitted by the deployment-wide budget (admitAgentReads); `shared.refused` is that list's
+   * memory of a refusal, so the rest of it neither asks the budget nor Base again.
+   */
+  async function agentView(
+    port: FeedPayChainPort | null,
+    payer: Payer,
+    shared: false | { refused: boolean } = false,
+  ): Promise<FeedPayAgent> {
     const limit = await limitOf(db, payer);
     const perCallMax = await perCallMaxOf(db, payer.walletId, perCallCap());
     const floatTarget = await floatTargetOf(db, payer.walletId);
     const usable = payer.walletState === 'derived' || payer.walletState === 'deployed';
+    const allowanceKind = limit ? `allowance:${permissionKey(limit.permission)}` : null;
+    let mayRead = true;
+    if (
+      shared &&
+      port &&
+      (['usdc', 'float', ...(allowanceKind ? [allowanceKind] : [])] as string[]).some(
+        (kind) => !agentReadShared(payer.walletId, kind),
+      )
+    ) {
+      if (shared.refused) mayRead = false;
+      else if (deps.admitAgentReads)
+        try {
+          await deps.admitAgentReads();
+        } catch {
+          shared.refused = true;
+          mayRead = false;
+        }
+    }
+    const baseRead = <T>(kind: string, work: () => Promise<T>) =>
+      shared ? sharedAgentRead(payer.walletId, kind, work, mayRead) : work();
     const [usdc, float, allowance] = await Promise.all([
       port
         ? withTimeout(
             (async () => {
-              const read = await port.usdcBalance(payer.wallet.address);
+              const read = await baseRead('usdc', () => port.usdcBalance(payer.wallet.address));
               const holds = await unavailableAmount(db, {
                 walletId: payer.walletId,
                 token: USDC,
@@ -4263,9 +4815,15 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
             FEED_PAY_BALANCE_TIMEOUT_MS,
           )
         : null,
-      port ? floatOf(port, payer.walletId, payer.wallet.spender).catch(() => null) : null,
-      port && limit
-        ? withTimeout(port.allowanceLeft(limit.permission), FEED_PAY_BALANCE_TIMEOUT_MS)
+      port
+        ? floatOf(port, payer.walletId, payer.wallet.spender, !!shared, mayRead).catch(() => null)
+        : null,
+      port && limit && allowanceKind
+        ? withTimeout(
+            // One limit's allowance: a new limit is a new read.
+            baseRead(allowanceKind, () => port.allowanceLeft(limit.permission)),
+            FEED_PAY_BALANCE_TIMEOUT_MS,
+          )
         : null,
     ]);
     // Base's word on the limit's window when it answered, else the clock's.
@@ -4346,7 +4904,8 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
     const port = await chain().catch(() => null);
     const { payers, more } = await payersOf(accountId, FEED_PAY_LIMITS.agentsMax);
     // A few agents at a time: each reads Base three times and the database a few times.
-    const list = await pooled(payers, 4, (payer) => agentView(port, payer));
+    const budget = { refused: false };
+    const list = await pooled(payers, 4, (payer) => agentView(port, payer, budget));
     // Agents that can pay first; the order within each group stays.
     const ordered = [...list.filter((a) => a.ready), ...list.filter((a) => !a.ready)];
     return {
@@ -4477,7 +5036,7 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
     const perCallMax = await perCallMaxOf(db, wallet.wallet_id, perCallCap());
     return {
       calls: rows.map(historyItem),
-      moves: moves.map(moveView),
+      moves: moves.map((move) => moveView(move, CHAIN_ID)),
       readyForServices: float === null ? null : amountOf(float),
       perCallMax: amountOf(perCallMax ?? BigInt(DEFAULT_PER_CALL_MAX_RAW)),
       perCallMaxCapRaw: perCallCap().toString(10),
@@ -4557,12 +5116,12 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
       `SELECT ${MOVE_COLUMNS} FROM feed_pay_float_moves WHERE move_id IN (
          SELECT m.move_id FROM feed_pay_float_moves m
          JOIN base_chain_ops o ON o.idempotency_key = m.op_key
-         WHERE m.state = 'pending' AND m.kind = 'top_up'
+         WHERE m.state = 'pending' AND m.kind = 'top_up' AND m.chain_id = $2
            AND o.status = 'included' AND o.error_code IS NOT NULL
          ORDER BY m.checked_at LIMIT $1)`,
       // At most half the page: reverted moves not final on Base yet stay pending and come first
       // again each run; the other half always goes to the backlog (review #566).
-      [Math.max(1, Math.floor(limit / 2))],
+      [Math.max(1, Math.floor(limit / 2)), CHAIN_ID],
     );
     const taken = new Set(blocking.map((m) => m.move_id));
     const rest =
@@ -4570,10 +5129,11 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
         ? (
             await db.query<MoveRow>(
               `SELECT ${MOVE_COLUMNS} FROM feed_pay_float_moves m WHERE state = 'pending'
+                 AND m.chain_id = $2
                  AND NOT EXISTS (SELECT 1 FROM base_chain_ops o WHERE o.idempotency_key = m.op_key
                    AND o.status = 'included' AND o.error_code IS NOT NULL)
                ORDER BY checked_at, updated_at LIMIT $1`,
-              [limit - blocking.length],
+              [limit - blocking.length, CHAIN_ID],
             )
           ).rows.filter((m) => !taken.has(m.move_id))
         : [];
@@ -4645,11 +5205,11 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
       intent_hash: string;
     }>(
       `SELECT r.reservation_id, r.holder_ref, r.wallet_id, r.intent_hash FROM base_wallet_reservations r
-       WHERE r.holder_kind = 'float' AND r.state = 'held' AND r.updated_at < $1
+       WHERE r.holder_kind = 'float' AND r.state = 'held' AND r.updated_at < $1 AND r.chain_id = $3
          AND NOT EXISTS (SELECT 1 FROM feed_pay_float_moves m
            WHERE m.op_key = r.holder_ref AND m.state = 'pending')
        ORDER BY r.checked_at, r.updated_at LIMIT $2`,
-      [now() - FEED_PAY_RECOVER_GRACE_MS, limit],
+      [now() - FEED_PAY_RECOVER_GRACE_MS, limit, CHAIN_ID],
     );
     if (!rows.length) return 0;
     const port = await chain().catch(() => null);
@@ -4759,6 +5319,7 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
       address: getAddress(w.address) as Address,
       spender: getAddress(w.spender_address) as Address,
       spenderKeyRef: w.spender_key_ref,
+      accountId: w.operator_id,
     };
     const before = await floatSnapshot(db, walletId);
     const free = await floatOf(port, walletId, wallet.spender);
@@ -4834,9 +5395,11 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
       float_permission_id: string | null;
       float_period_end: string | number | null;
     }>(
-      `SELECT wallet_id, float_permission_id, float_period_end FROM feed_pay_agent_settings
-       WHERE float_open ORDER BY sweep_checked_at, wallet_id LIMIT $1`,
-      [limit],
+      `SELECT s.wallet_id, s.float_permission_id, s.float_period_end FROM feed_pay_agent_settings s
+       WHERE s.float_open AND EXISTS (SELECT 1 FROM base_wallets w
+         WHERE w.wallet_id = s.wallet_id AND w.chain_id = $2)
+       ORDER BY s.sweep_checked_at, s.wallet_id LIMIT $1`,
+      [limit, CHAIN_ID],
     );
     let swept = 0;
     for (const row of rows) {
@@ -4996,6 +5559,7 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
          AND (pay_retry_at IS NULL OR pay_retry_at < $2)
          AND NOT (call_id = ANY($4::text[]))
          AND (NOT $6 OR payment_state IN ('signed','sent','cancelling'))
+         AND chain_id = $7
        ORDER BY checked_at, updated_at LIMIT $3`,
         [
           started,
@@ -5004,6 +5568,7 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
           [...seen],
           started - FEED_PAY_FINALITY_WAIT_MS,
           urgent,
+          CHAIN_ID,
         ],
       );
       for (const { call_id } of rows) {
@@ -5050,6 +5615,8 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
         logFailure('feed_pay_sweeps_failed', {}, error);
         return 0;
       });
+    // Old results and quotes are one table's chores, not a chain's: Base's engine does them.
+    if (setup.router3Only) return result;
     const at = now();
     const deleted = await db.query<{ call_id: string }>(
       `UPDATE feed_pay_calls SET result_text = NULL, result_deleted_at = $1
@@ -5115,6 +5682,157 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
     recover,
     hostedForSponsor,
     runHostedOffer,
+    router3PreSign,
+  };
+}
+
+type ChainEngine = ReturnType<typeof createChainEngine>;
+
+/** How long one recover run waits for Arc's pass: it runs beside Base's and never holds it up. */
+export const ARC_RECOVER_BUDGET_MS = 15_000;
+
+/**
+ * The Feed pay engine: one per chain, the buyer's chain decides which. With Arc off this is Base's
+ * engine and nothing else: no query, no read. With Arc on (CITY_ARC=1) a paying agent's chain is its
+ * wallet's (agentChainOf), and no payment crosses chains: the seller's chain is its offer's wallet's,
+ * and a different one is refused (other_chain) before anything is signed. An agent on an Arc network
+ * that isn't complete yet is refused too, never moved to Base. The sponsored first purchase and the
+ * offers' public address stay on Base (hostedForSponsor, router3PreSign: Base's engine).
+ */
+export function createFeedPayEngine(deps: FeedPayEngineDeps) {
+  const { db, env } = deps;
+  const log = deps.log ?? ((line: string) => console.info(line));
+  const base = createChainEngine(deps, baseSetup(deps));
+  const arcEngines = new Map<number, ChainEngine>();
+
+  /** The Arc network that is on, whether or not its engine can run yet; null with Arc off. */
+  const arcIdNow = (): ChainId | null => protocolArcChainIdFromEnv(env) as ChainId | null;
+
+  /** Arc's engine, built on first use; null while its network isn't complete or nothing is wired. */
+  const arcEngine = (chainId: ChainId): ChainEngine | null => {
+    if (!deps.arc || !chainNetwork(chainId, env)) return null;
+    let engine = arcEngines.get(chainId);
+    if (!engine) {
+      engine = createChainEngine(deps, arcSetup(deps, chainId));
+      arcEngines.set(chainId, engine);
+    }
+    return engine;
+  };
+
+  /** The engine of this agent's chain. Arc off: Base's, with no query. */
+  async function engineOf(agentId: string): Promise<ChainEngine> {
+    const arcId = arcIdNow();
+    if (arcId === null) return base;
+    const chainId = await agentChainOf(db, env, agentId);
+    if (chainId !== arcId) return base;
+    const engine = arcEngine(arcId);
+    if (!engine) throw unavailableOn(arcId);
+    return engine;
+  }
+
+  /** The engine of the chain a hosted listing's seller is on; Base's for anything else. */
+  async function sellerEngine(arcId: ChainId, serviceId: string): Promise<ChainEngine> {
+    const { rows } = await db.query<{ chain_id: number }>(
+      `SELECT w.chain_id FROM feed_services s
+       JOIN city_offers o ON s.record_id = 'cc:' || o.offer_id
+       JOIN base_wallets w ON w.wallet_id = o.wallet_id
+       WHERE s.id = $1`,
+      [serviceId],
+    );
+    return Number(rows[0]?.chain_id) === arcId ? (arcEngine(arcId) ?? base) : base;
+  }
+
+  /** Which of these agents, listed on both chains, are on Arc (agentChainOf's rule), in one read. */
+  async function livingOnArc(arcId: ChainId, agentIds: string[]) {
+    if (!agentIds.length) return new Set<string>();
+    const { rows } = await db.query<{ agent_id: string }>(
+      `SELECT agent_id FROM base_identities
+       WHERE agent_id = ANY($1::text[]) AND chain_id = $2 AND state <> 'failed'`,
+      [agentIds, arcId],
+    );
+    return new Set(rows.map((row) => row.agent_id));
+  }
+
+  return {
+    ...base,
+
+    /** With an agent, on its chain; without one, on the chain of the listing's seller. */
+    async quote(accountId: string, serviceId: string, body: unknown) {
+      const arcId = arcIdNow();
+      if (arcId === null) return base.quote(accountId, serviceId, body);
+      const agentId = (body as { agentId?: unknown } | null | undefined)?.agentId;
+      const engine =
+        typeof agentId === 'string'
+          ? await engineOf(agentId)
+          : await sellerEngine(arcId, serviceId);
+      return engine.quote(accountId, serviceId, body);
+    },
+
+    async call(caller: FeedPayCaller, input: FeedPayCallInput, admission: FeedPayAdmission = {}) {
+      return (await engineOf(input.agentId)).call(caller, input, admission);
+    },
+
+    async setPerCallMax(accountId: string, agentId: string, body: unknown) {
+      return (await engineOf(agentId)).setPerCallMax(accountId, agentId, body);
+    },
+
+    async history(accountId: string, agentId: string) {
+      return (await engineOf(agentId)).history(accountId, agentId);
+    },
+
+    /** Base's agents, then Arc's, each agent once and on its own chain; those that can pay first. */
+    async agents(accountId: string): Promise<FeedPayAgentList> {
+      const arcId = arcIdNow();
+      const arc = arcId === null ? null : arcEngine(arcId);
+      if (arcId === null || !arc) return base.agents(accountId);
+      const [onBase, onArc] = await Promise.all([base.agents(accountId), arc.agents(accountId)]);
+      const arcIds = new Set(onArc.agents.map((agent) => agent.agentId));
+      const both = onBase.agents.map((a) => a.agentId).filter((id) => arcIds.has(id));
+      const living = await livingOnArc(arcId, both);
+      const listed = [
+        ...onBase.agents
+          .filter((a) => !living.has(a.agentId))
+          .map((a) => ({ ...a, chainId: WALLET_CHAIN_ID as number })),
+        ...onArc.agents
+          .filter((a) => living.has(a.agentId) || !both.includes(a.agentId))
+          .map((a) => ({ ...a, chainId: arcId as number })),
+      ];
+      return {
+        ...onBase,
+        agents: [...listed.filter((a) => a.ready), ...listed.filter((a) => !a.ready)],
+        ...(onBase.more || onArc.more ? { more: true } : {}),
+      };
+    },
+
+    /**
+     * Base's run as ever, beside it Arc's over Arc's rows only: Arc failing or stalling leaves Base's
+     * run and its answer as they are. A run with Arc off leaves Arc's rows alone, until it is on again.
+     */
+    async recover(options: { budgetMs?: number; page?: number } = {}) {
+      const arcId = arcIdNow();
+      const arc = arcId === null ? null : arcEngine(arcId);
+      if (!arc) return base.recover(options);
+      const arcRun = arc
+        .recover({
+          ...options,
+          budgetMs: Math.min(options.budgetMs ?? ARC_RECOVER_BUDGET_MS, ARC_RECOVER_BUDGET_MS),
+        })
+        .catch(() => {
+          log(JSON.stringify({ event: 'feed_pay.arc_recover_failed' }));
+          return null;
+        });
+      const result = await base.recover(options);
+      const other = await Promise.race([
+        arcRun,
+        new Promise<null>((resolve) => {
+          setTimeout(() => resolve(null), ARC_RECOVER_BUDGET_MS * 2).unref?.();
+        }),
+      ]);
+      if (!other) return result;
+      const summed = { ...result };
+      for (const key of Object.keys(summed) as (keyof typeof summed)[]) summed[key] += other[key];
+      return summed;
+    },
   };
 }
 
@@ -5226,3 +5944,18 @@ export function resultOf(
 /** USDC decimal text of a raw amount (MCP details). */
 export const usdcText = (raw: string | bigint) =>
   rawToUsdc(typeof raw === 'bigint' ? raw.toString(10) : raw);
+
+/**
+ * Whether a call is settled by the facilitator. Where router 3 is the only router (Arc) a pinned call
+ * always is: the answer never hangs on a setting, or a changed one would read a paid call as never
+ * sent and end it as unpaid.
+ */
+export function pinnedToRouter3(
+  row: { fee_router: string | null },
+  router3Only: boolean,
+  router3: string | null,
+): boolean {
+  if (!row.fee_router) return false;
+  if (router3Only) return true;
+  return !!router3 && row.fee_router.toLowerCase() === router3.toLowerCase();
+}

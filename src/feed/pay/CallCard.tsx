@@ -14,6 +14,7 @@ import {
   CALL_GONE,
   callLine,
   callMoneyLines,
+  callTxLabel,
   FEE_FOLLOW_MS,
   feeOpen,
   paymentLine,
@@ -233,7 +234,7 @@ export function CallCard({
           {note ? <span className="fp-tag">{note}</span> : null}
           {call.payment?.explorerUrl ? (
             <OutLink className="fd-link" href={call.payment.explorerUrl} hidden="">
-              Base transaction
+              {callTxLabel(call)}
             </OutLink>
           ) : null}
         </p>

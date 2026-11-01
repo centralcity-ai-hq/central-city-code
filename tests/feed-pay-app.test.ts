@@ -2,9 +2,14 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { getAddress } from 'viem';
+import { getAddress, type Hex } from 'viem';
 import { createApp } from '../server/app.js';
-import { createFeedPayEngine } from '../server/feed/pay/engine.js';
+import {
+  createFeedPayEngine,
+  FEED_PAY_AGENT_CHAIN_READS_PER_MINUTE,
+  FEED_PAY_AGENT_READ_TTL_MS,
+} from '../server/feed/pay/engine.js';
+import { MemoryRateLimiter } from '../server/rate-limit.js';
 import { FEED_TOOL_NOTICE } from '../shared/feed.js';
 import {
   CITY_PAY_SERVICE_HINT,
@@ -14,7 +19,11 @@ import {
   FEED_TOOL_NOTICE_WITH_PAY,
   type FeedPayCall,
 } from '../shared/feed-pay.js';
-import { FEED_INSTRUCTIONS, FEED_INSTRUCTIONS_WITH_PAY } from '../server/remote-mcp/tools.js';
+import {
+  FEED_INSTRUCTIONS,
+  FEED_INSTRUCTIONS_WITH_PAY,
+  FEED_INSTRUCTIONS_WITH_PAY_BY_CHAIN,
+} from '../server/remote-mcp/tools.js';
 import { fullFlow, mcpCall, OWNER, PASSWORD, rpcResult } from './oauth-helpers.js';
 import { BODY, json, PAY_TO, setup, SVC, USDC } from './helpers/feed-pay-app.js';
 
@@ -461,28 +470,154 @@ test('payment refused by the service: not settled, cancelled on Base, nothing pa
   assert.deepEqual(await paidCallCounts(f), []);
 });
 
-test('a lost answer is reconciled on Base, never sent again; unused it expires', async (t) => {
+test('a lost answer is reconciled on Base, never sent again, and its authorization cancelled', async (t) => {
   const f = await setup(t);
   await f.list({ paid: 'timeout' });
   await f.limit();
   const res = await f.pay();
   assert.equal(res.statusCode, 200, res.body);
   const callId = res.json().callId as string;
-  // The worker follows it until its budget ends; Base decides once validBefore passed.
+  // The worker follows it until its budget ends; Base decides.
   let call = (await f.status(callId)).json() as FeedPayCall;
   for (let i = 0; i < 400 && !call.done; i++) {
     await new Promise((resolve) => setTimeout(resolve, 5));
     call = (await f.status(callId)).json();
   }
   if (!call.done) {
-    f.advance(5 * 60_000);
     assert.equal((await f.cron()).statusCode, 200);
     call = (await f.status(callId)).json();
   }
-  assert.equal(call.state, 'expired', JSON.stringify(call));
+  // Its result can no longer arrive: the one cancel goes out while the window is still open.
+  assert.equal(call.state, 'cancelled', JSON.stringify(call));
   assert.equal(call.moneyMoved, 'no');
+  assert.equal(call.payment!.state, 'cancelled');
   assert.equal(call.failure!.code, 'service_timeout');
+  assert.equal(f.base.state.effects.filter((effect) => effect === 'cancel').length, 1);
   assert.equal(f.service.paid().length, 1, 'the paid request went out once');
+  // A seller that settles after its own work finishes can no longer use the authorization.
+  const sent = f.service.paid()[0]!.payment!.payload as {
+    signature: Hex;
+    authorization: Record<string, string>;
+  };
+  const a = sent.authorization;
+  assert.ok(Number(a.validBefore) > Math.floor(f.clock() / 1000), 'the window was still open');
+  await assert.rejects(
+    f.base.settle({
+      from: a.from!,
+      to: a.to!,
+      value: BigInt(a.value!),
+      validAfter: BigInt(a.validAfter!),
+      validBefore: BigInt(a.validBefore!),
+      nonce: a.nonce as Hex,
+      signature: sent.signature,
+    }),
+  );
+  assert.equal(f.base.balanceOf(PAY_TO), 0n);
+});
+
+test("a float top-up reads the agent wallet's balance before its transaction, never under the lock", async (t) => {
+  const f = await setup(t);
+  await f.list();
+  await f.limit();
+  const db = f.app.city.db;
+  const transaction = db.transaction.bind(db);
+  let open = 0;
+  db.transaction = (async (action: Parameters<typeof transaction>[0]) => {
+    open += 1;
+    try {
+      return await transaction(action);
+    } finally {
+      open -= 1;
+    }
+  }) as typeof db.transaction;
+  const reads: boolean[] = [];
+  f.base.state.beforeBalanceRead = async (address: string) => {
+    if (address.toLowerCase() === f.wallet.toLowerCase()) reads.push(open > 0);
+  };
+  // The first call tops up the float from the agent wallet.
+  assert.equal((await f.pay()).json().state, 'result_saved');
+  assert.ok(reads.length > 0, 'the wallet balance was read');
+  assert.deepEqual(
+    reads.filter((inside) => inside),
+    [],
+    'no read of the wallet balance while a transaction was open',
+  );
+});
+
+test("the agents list shares its Base reads for a moment; a call of the agent's wallet reads anew", async (t) => {
+  const f = await setup(t);
+  await f.list();
+  await f.limit();
+  let reads = 0;
+  f.base.state.beforeBalanceRead = async () => {
+    reads++;
+  };
+  const first = (await f.agents()).json().agents[0];
+  const once = reads;
+  assert.ok(once >= 2, 'the wallet and its spender were read');
+  // Within FEED_PAY_AGENT_READ_TTL_MS: the same answer, no new read of Base.
+  assert.deepEqual((await f.agents()).json().agents[0], first);
+  assert.equal(reads, once);
+  // A call of this wallet: the next list reads Base again and shows what the call moved.
+  assert.equal((await f.pay()).json().state, 'result_saved');
+  reads = 0;
+  const after = (await f.agents()).json().agents[0];
+  assert.ok(reads >= 2, 'read again after the call');
+  assert.notEqual(after.floatRaw, first.floatRaw);
+  // Past the lifetime: read again.
+  reads = 0;
+  f.advance(FEED_PAY_AGENT_READ_TTL_MS);
+  await f.agents();
+  assert.ok(reads >= 2);
+});
+
+test('the agents list reads Base only within one deployment-wide budget; refused or the limiter down, Base is not asked', async (t) => {
+  const inner = new MemoryRateLimiter();
+  const budgetHits: number[] = [];
+  let budget: 'open' | 'spent' | 'down' = 'open';
+  const f = await setup(t, {
+    rateLimiter: {
+      count: (key, windowMs) => inner.count(key, windowMs),
+      hit: async (key, max, windowMs) => {
+        if (!key.startsWith('feed-pay-agents-chain:')) return inner.hit(key, max, windowMs);
+        budgetHits.push(max);
+        if (budget === 'down') throw new Error('limiter store unreachable');
+        return budget === 'open'
+          ? { allowed: true, retryAfterMs: 0 }
+          : { allowed: false, retryAfterMs: 1_000 };
+      },
+    },
+  });
+  await f.list();
+  await f.limit();
+  let reads = 0;
+  f.base.state.beforeBalanceRead = async () => {
+    reads++;
+  };
+  const first = (await f.agents()).json().agents[0];
+  assert.ok(reads >= 2, 'read within the budget');
+  assert.notEqual(first.usdcRaw, null);
+  assert.deepEqual(budgetHits, [FEED_PAY_AGENT_CHAIN_READS_PER_MINUTE], 'one admission per agent');
+  // Shared reads never ask the budget.
+  await f.agents();
+  assert.equal(budgetHits.length, 1);
+  for (const state of ['spent', 'down'] as const) {
+    budget = state;
+    f.advance(FEED_PAY_AGENT_READ_TTL_MS);
+    reads = 0;
+    const res = await f.agents();
+    assert.equal(res.statusCode, 200, res.body);
+    const agent = res.json().agents[0];
+    assert.equal(reads, 0, `${state}: Base is not asked`);
+    assert.equal(agent.usdcRaw, null, `${state}: balance not known now`);
+    assert.equal(agent.floatRaw, null);
+    assert.equal(agent.limitLeftRaw, null);
+  }
+  // Open again: the list reads Base again.
+  budget = 'open';
+  reads = 0;
+  assert.notEqual((await f.agents()).json().agents[0].usdcRaw, null);
+  assert.ok(reads >= 2);
 });
 
 test('the kill switch: a call not yet signed ends refused; the float goes back', async (t) => {
@@ -752,6 +887,15 @@ test('city_service_call: pays alone within consent and limits; refusals carry de
       ).result.instructions,
     );
   assert.ok((await instructions()).endsWith(FEED_INSTRUCTIONS_WITH_PAY));
+  // A second chain on: what is paid where, never naming a chain that isn't Base.
+  process.env.CITY_ARC = '1';
+  try {
+    const byChain = await instructions();
+    assert.ok(byChain.endsWith(FEED_INSTRUCTIONS_WITH_PAY_BY_CHAIN));
+    assert.doesNotMatch(byChain, /\bArc\b/);
+  } finally {
+    delete process.env.CITY_ARC;
+  }
   await f.app.inject({
     method: 'PUT',
     url: FEED_PAY_PATHS.agent.replace(':agentId', f.agentId),

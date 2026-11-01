@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { ElricToolCall, ElricToolSpec } from './adapter.js';
 import type { ToolCallStatus } from './turns.js';
+import { PENDING_DETAIL_CHARS, PENDING_SUMMARY_CHARS } from './activity.js';
 
 /**
  * Elric's tool allowlist (docs/ELRIC.md; THREAT_PRIVACY_REVIEW §10.5). Two room tools, both
@@ -25,6 +26,13 @@ export const CONSEQUENTIAL_TOOLS: ReadonlySet<string> = new Set<ElricToolName>([
 
 const roomId = z.string().min(1).max(200);
 const noControl = (value: string) => !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value);
+/**
+ * The owner approves a task as the approval card shows it (activity.ts: NFKC, then capped). A
+ * compatibility character can expand under NFKC (U+FDFA is 18 characters), so the cap is checked
+ * on that form too: a proposed title or body never shows cut short, so nothing executed is hidden.
+ */
+const shownWithin = (max: number) => (value: string) =>
+  Array.from(value.normalize('NFKC')).length <= max;
 
 export const toolArgs = {
   room_read: z
@@ -37,8 +45,18 @@ export const toolArgs = {
   room_task_create: z
     .object({
       room_id: roomId,
-      title: z.string().trim().min(1).max(200).refine(noControl),
-      body: z.string().max(4_000).optional(),
+      title: z
+        .string()
+        .trim()
+        .min(1)
+        .max(PENDING_SUMMARY_CHARS)
+        .refine(noControl)
+        .refine(shownWithin(PENDING_SUMMARY_CHARS)),
+      body: z
+        .string()
+        .max(PENDING_DETAIL_CHARS)
+        .refine(shownWithin(PENDING_DETAIL_CHARS))
+        .optional(),
     })
     .strict(),
   city_help: z.object({ query: z.string().trim().min(1).max(200).refine(noControl) }).strict(),

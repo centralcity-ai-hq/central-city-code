@@ -6,6 +6,7 @@ import { createApp } from '../server/app.js';
 import { personMemberId } from '../server/rooms/person.js';
 import { createPrivateRoom } from '../server/rooms/private.js';
 import { ASSISTANT_SCOPES } from '../shared/assistant.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 process.env.CITY_INVITE_FLOW = '1';
 process.env.CITY_RATE_LIMIT_KEY ??= 'synthetic-room-creator-person-test-root-secret';
@@ -66,7 +67,7 @@ async function fixture(t: { after(fn: () => Promise<unknown>): void }) {
       remoteAddress: `203.0.113.${address++}`,
     });
     assert.equal(registered.statusCode, 201, registered.body);
-    const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+    const cookie = sessionPair(registered.cookies);
     const operatorId = (await get('/api/session', { cookie })).json().operator.id as string;
     return { cookie, operatorId, agentId: await agent(cookie, agentName) };
   };
@@ -657,4 +658,51 @@ test('without agent_id the console acts as its person and an AI as its only AI: 
   });
   assert.notEqual(aiPinAsPerson.statusCode, 200, aiPinAsPerson.body);
   assert.match(aiPinAsPerson.body, /not_a_member/);
+});
+
+test("a person's owner label differs per room and is shared with its own AIs in each room", async (t) => {
+  const f = await fixture(t);
+  const ann = await f.account('Ann Labels');
+  const bob = await f.account('Bob Labels');
+  const labels = async (roomId: string, ownerId: string) =>
+    (
+      await f.app.city.db.query<{ owner_label: string }>(
+        'SELECT DISTINCT owner_label FROM room_members WHERE room_id=$1 AND owner_id=$2',
+        [roomId, ownerId],
+      )
+    ).rows.map((row) => row.owner_label);
+  const first = await f.create(ann.cookie, { name: 'Ann one', agent_id: ann.agentId });
+  const second = await f.create(ann.cookie, { name: 'Ann two', agent_id: ann.agentId });
+  assert.equal(first.statusCode, 201, first.body);
+  assert.equal(second.statusCode, 201, second.body);
+  // In each room the person and its host agent carry one label; the two rooms' labels differ.
+  const one = await labels(first.json().room.id, ann.operatorId);
+  const two = await labels(second.json().room.id, ann.operatorId);
+  assert.equal(one.length, 1);
+  assert.equal(two.length, 1);
+  assert.match(one[0]!, /^Account [0-9a-f]{8}$/);
+  assert.match(two[0]!, /^Account [0-9a-f]{8}$/);
+  assert.notEqual(one[0], two[0]);
+  // Ann joins Bob's room as herself and with her AI: one label there too, unlike her own rooms.
+  const bobs = await f.create(bob.cookie, { name: 'Bob room', agent_id: bob.agentId });
+  assert.equal(bobs.statusCode, 201, bobs.body);
+  const link = bobs.json().link.link as string;
+  const joined = await f.post(
+    '/api/rooms/join',
+    { link, name: 'Ann', idempotency_key: randomUUID() },
+    { cookie: ann.cookie },
+  );
+  assert.equal(joined.statusCode, 200, joined.body);
+  const token = await f.grant(ann.cookie);
+  const ai = await f.tool(token, 'city_join_room', {
+    link,
+    agent_id: ann.agentId,
+    idempotency_key: randomUUID(),
+  });
+  assert.equal(ai.statusCode, 200, ai.body);
+  const there = await labels(bobs.json().room.id, ann.operatorId);
+  assert.equal(there.length, 1);
+  assert.ok(![one[0], two[0]].includes(there[0]), there[0]);
+  // Bob's own label in his room is not Ann's.
+  assert.notDeepEqual(await labels(bobs.json().room.id, bob.operatorId), there);
 });

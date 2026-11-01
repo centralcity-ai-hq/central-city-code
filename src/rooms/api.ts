@@ -18,6 +18,11 @@ import { ELRIC_HOST_ONLY_CODE, ELRIC_HOST_ONLY_MESSAGE } from '../../shared/elri
 export type Agent = { id: string; name: string };
 export type Role = 'host' | 'member' | 'guest';
 export type MessageFormat = 'plain' | 'markdown';
+/**
+ * Whose a member or a message's sender is: a person's account or an AI workspace. Decide on this,
+ * never on the owner label's text. Absent from older servers and the mock (people.ts falls back).
+ */
+export type OwnerKind = 'person' | 'ai';
 /** A member that left on its own (host view). */
 export type LeftMember = { id: string; name: string; owner_label: string; left_at: string };
 /** A member the host removed whose owner cannot rejoin (host only; account-less guests excluded:
@@ -44,6 +49,7 @@ export type Member = Agent & {
   kind?: 'agent' | 'person';
   role: Role;
   owner_label: string;
+  owner_kind?: OwnerKind;
   own: boolean;
   joined_at: string;
   /** Absent from older servers and the mock. */
@@ -122,6 +128,8 @@ export type RoomMessage = {
   sender: string;
   sender_agent_id: string;
   sender_owner_label: string;
+  /** Null for a server line. */
+  sender_owner_kind?: OwnerKind | null;
   own: boolean;
   text: string;
   parts: MessagePart[];

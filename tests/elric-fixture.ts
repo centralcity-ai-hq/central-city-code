@@ -50,6 +50,8 @@ export async function elricFixture(
     log?: (line: string) => void;
     /** Receives the retry backoff waits (default: not waited for). */
     sleep?: (ms: number) => Promise<void>;
+    /** The hosted responder (Auto-reply) wiring, for tests that need its console routes. */
+    responder?: NonNullable<Parameters<typeof createApp>[0]>['responder'];
   } = {},
 ) {
   let now = Date.UTC(2026, 8, 30, 12, 0, 0);
@@ -62,6 +64,7 @@ export async function elricFixture(
     startWorkers: false,
     now: () => now,
     ...(options.rateLimiter ? { rateLimiter: options.rateLimiter } : {}),
+    ...(options.responder ? { responder: options.responder } : {}),
     elric: {
       enabled: true,
       adapterFor: options.models

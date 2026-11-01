@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { createApp } from '../server/app.js';
 import type { Agent } from '../shared/types.js';
 import type { ProviderRequest } from '../server/responder/providers.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 /**
  * Hosted responder console routes, wired in server/app.ts behind CITY_RESPONDER=1: only the signed-in owner,
@@ -47,7 +48,7 @@ async function setup(
       payload: JSON.stringify({ name, password: `Synthetic route password ${name}` }),
     });
     assert.equal(res.statusCode, 201, res.body);
-    return `cc_session=${res.cookies.find((item) => item.name === 'cc_session')!.value}`;
+    return sessionPair(res.cookies);
   };
   const cookie = await register('Route owner');
   const call = async (

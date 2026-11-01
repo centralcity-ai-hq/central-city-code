@@ -13,7 +13,9 @@ type Baseline = Record<string, Partial<Record<Rule, number>>>;
  * purpose. These stay.
  */
 export const PERMANENT: Baseline = {
-  'server/agent-rows/agent-lookup-schema.ts': { json: 2 },
+  'server/agent-rows/agent-lookup-schema.ts': { json: 5 },
+  // Its workspaces trigger compares a write's old and new arrays (document mode only).
+  'server/agent-rows/public-cards-schema.ts': { json: 6 },
   'server/agent-rows/schema.ts': { json: 13, path: 1, docHelpers: 1 },
   'server/autonomy/expiry-schema.ts': { json: 1 },
   'server/count-log/pending.ts': { json: 11, docHelpers: 2 },

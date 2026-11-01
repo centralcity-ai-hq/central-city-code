@@ -176,9 +176,17 @@ export function setFloatTarget(
 }
 
 /** One unpaid request to the service: what it asks now, or why it can't be paid as listed. */
-export function quoteService(serviceId: string, inputs: FeedPayInputs, options: Options = {}) {
+export function quoteService(
+  serviceId: string,
+  inputs: FeedPayInputs,
+  options: Options & { agentId?: string } = {},
+) {
   if (!FEED_SERVICE_ID.test(serviceId)) return notListed();
-  const body: FeedPayQuoteRequest = { inputs };
+  // With the paying agent the server answers for its chain, before a Pay button is offered.
+  const body: FeedPayQuoteRequest = {
+    inputs,
+    ...(options.agentId ? { agentId: options.agentId } : {}),
+  };
   return send<FeedPayQuoteAnswer>(
     fill(FEED_PAY_PATHS.quote, 'id', serviceId),
     'POST',

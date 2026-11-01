@@ -32,7 +32,11 @@ import {
 import { descendants, revokeStoredAgent, setAgentPaused } from '../agent-lifecycle.js';
 import { ELRIC_MANAGED, elricAgentIds } from '../elric/access.js';
 import { ELRIC_RESERVED_NAME_MESSAGE, reservedName } from '../elric/names.js';
-import { baseRegistrationStarted } from '../base/identity/short-links.js';
+import {
+  baseRegistrationStarted,
+  registeredChainName,
+  staysPublicMessage,
+} from '../base/identity/short-links.js';
 import { syncOfferProviderName } from '../feed/offers/store.js';
 
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -176,6 +180,21 @@ export const agentCardUrl = (origin: string, agentId: string) =>
   `${origin}/a2a/${agentId}/.well-known/agent-card.json`;
 
 export function createAutonomyService(caps: CityLimits) {
+  /** The agent exists in its owner's workspace, is not revoked, and its current revision is public. */
+  async function publicNow(db: Queryable, agentId: string, ownerId: string): Promise<boolean> {
+    const row = (
+      await db.query<{ live: boolean; visibility: string | null }>(
+        `SELECT (x.a->>'revokedAt') IS NULL AS live, m.manifest->'spec'->>'visibility' AS visibility
+           FROM workspaces ws
+           CROSS JOIN LATERAL (SELECT workspace_agent(ws.operator_id, ws.data, $1) AS a) x
+           LEFT JOIN agent_manifests m ON m.agent_id=$1 AND m.revision=(x.a->>'revision')::int
+          WHERE ws.operator_id=$2 AND x.a IS NOT NULL`,
+        [agentId, ownerId],
+      )
+    ).rows[0];
+    return Boolean(row?.live && row.visibility === 'public');
+  }
+
   async function preloadForks(
     db: Queryable,
     actor: Actor,
@@ -194,6 +213,9 @@ export function createAutonomyService(caps: CityLimits) {
       const sameOwner = actor.mode === 'owned' && row.operator_id === actor.operatorId;
       // Tenant isolation: another partition's agent is visible only when published as public.
       if (!sameOwner && row.manifest.spec.visibility !== 'public') continue;
+      // CCA-618: and only while it is public now. An agent since made private or revoked keeps its
+      // earlier public revisions stored, but nobody else may build on them any more.
+      if (!sameOwner && !(await publicNow(db, agentId!, row.operator_id))) continue;
       loaded.set(`${agentId}@${revision}`, { manifest: row.manifest, sameOwner });
     }
     return (id, revision) => loaded.get(`${id}@${revision}`);
@@ -474,20 +496,25 @@ export function createAutonomyService(caps: CityLimits) {
       if (item.action === 'update') {
         // A Base agent's on-chain URI (/a/<id>) is read from its public card, so it stays public
         // (the same rule as My agents' Make private).
-        if (manifest.spec.visibility !== 'public' && (await baseRegistrationStarted(tx, agent.id)))
+        if (
+          manifest.spec.visibility !== 'public' &&
+          (await baseRegistrationStarted(tx, agent.id))
+        ) {
+          const chainName = await registeredChainName(tx, agent.id);
           throw new AutonomyError(
             409,
-            "A Base agent's profile stays public.",
+            staysPublicMessage(chainName),
             [
               manifestIssue(
                 'BASE_AGENT_PUBLIC',
                 'spec.visibility',
-                `${agent.name} is registered on Base, so its visibility must stay public.`,
+                `${agent.name} is registered on ${chainName}, so its visibility must stay public.`,
                 'Set spec.visibility to "public" in the manifest.',
               ),
             ],
             'base_stays_public',
           );
+        }
         const previousName = agent.name;
         Object.assign(agent, fields);
         // The stored copy mirrors the manifest (the owner's pages read it).
@@ -655,9 +682,13 @@ export function createAutonomyService(caps: CityLimits) {
         depth: agent.depth ?? 0,
         status: publicAgent(agent, workspace.jobs, time).status,
         agent_card_url: agentCardUrl(actor.origin, agent.id),
-        enrollment: issueSecrets
-          ? await enrollmentFor(tx, actor.operatorId, agent, time, actor.origin)
-          : null,
+        // CCA-625: a code goes only with the response that created the agent. A later apply that
+        // merely matches it (noop or update), even by another agents:create credential of the
+        // owner, gets none and never supersedes the creator's unused code.
+        enrollment:
+          issueSecrets && item.action === 'create'
+            ? await enrollmentFor(tx, actor.operatorId, agent, time, actor.origin)
+            : null,
       });
     }
     const claim =

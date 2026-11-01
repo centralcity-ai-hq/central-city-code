@@ -20,7 +20,8 @@ import { setup, type FeedPayApp } from './helpers/feed-pay-app.js';
  */
 
 const ROUTER = PROTOCOL_BASE_MAINNET.feeRouter;
-const ROUTER2 = getAddress(`0x${'42'.repeat(20)}`);
+// Base mainnet: router 2 is fixed in code (shared/protocol.ts); its setting is ignored there.
+const ROUTER2 = PROTOCOL_BASE_MAINNET.feeRouter2;
 const TREASURY = PROTOCOL_BASE_MAINNET.treasury;
 const SELLER = getAddress(`0x${'5e'.repeat(20)}`);
 const ORIGIN = 'https://centralcity.ai';
@@ -185,10 +186,12 @@ for (const [name, spoil] of WRONG)
     assert.equal(f.base.state.feeCharges.length, 0, 'no router charged');
   });
 
-test('router 2 removed from the config after the call is reserved: never signed, never router 1', async (t) => {
+test('a call pinned to a router the code does not know: never signed, never router 1', async (t) => {
   const f = await ready(t);
   const id = await listOffer(f, '10000000');
   const before = { signatures: f.base.state.signatures, sends: f.base.state.sends.length };
+  // Neither router 1, 2 nor 3 (on Base mainnet unsetting router 2's setting changes nothing).
+  const unknown = `0x${'42'.repeat(20)}`;
   let removed = false;
   f.base.state.beforeBalanceRead = async () => {
     if (removed) return;
@@ -196,21 +199,20 @@ test('router 2 removed from the config after the call is reserved: never signed,
       "SELECT state FROM feed_pay_calls WHERE state = 'reserved'",
     );
     if (!reserved.length) return;
-    // The operator rolls back by unsetting router 2 after the call was pinned to it.
-    delete process.env.CITY_PROTOCOL_FEE_ROUTER2;
+    await f.sql("UPDATE feed_pay_calls SET fee_router = $1 WHERE state = 'reserved'", [unknown]);
     removed = true;
   };
   const { call } = await buy(f, id);
   f.base.state.beforeBalanceRead = null;
-  assert.ok(removed, 'the config changed after the call was reserved');
+  assert.ok(removed, 'the pinned router changed after the call was reserved');
   assert.ok(call, 'a call was made');
-  assert.equal(await routerOf(f), ROUTER2.toLowerCase(), 'pinned to router 2, never re-routed');
+  assert.equal(await routerOf(f), unknown, 'never re-routed');
   // Let the engine and the cron look at it again: still nothing signed or charged.
   for (let i = 0; i < 4; i++) {
     f.advance(2 * 60_000);
     await f.cron();
   }
-  assert.equal(await routerOf(f), ROUTER2.toLowerCase());
+  assert.equal(await routerOf(f), unknown);
   assert.equal(f.base.state.feeCharges.length, 0, 'neither router charged');
   assert.equal(
     f.base.state.feeCharges.filter((c) => c.router === ROUTER).length,

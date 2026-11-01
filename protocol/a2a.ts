@@ -82,7 +82,13 @@ const sendParameters = z
                 .string()
                 .min(1)
                 .max(A2A_LIMITS.inputCharacters)
-                .refine((text) => text.trim().length > 0),
+                .refine((text) => text.trim().length > 0)
+                // Text the database can't store (a NUL, half an emoji): invalid params, not a 500.
+                .refine(
+                  (text) =>
+                    !text.includes('\u0000') &&
+                    (text as string & { isWellFormed(): boolean }).isWellFormed(),
+                ),
               mediaType: z.literal('text/plain').optional(),
             })
             .strict(),

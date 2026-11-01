@@ -1,5 +1,5 @@
 import type { AgentActivityItem, AgentActivityPage, Job } from '../shared/types.js';
-import { BASE_NETWORKS } from '../shared/base/chains.js';
+import { chainView } from '../shared/chains.js';
 import { iso, type Workspace } from './model.js';
 
 /**
@@ -99,9 +99,7 @@ export function agentActivity(
     });
   }
   for (const identity of identities) {
-    const network =
-      (BASE_NETWORKS as Record<number, { name: string } | undefined>)[identity.chainId]?.name ??
-      'Base';
+    const network = chainView(identity.chainId)?.name ?? 'Base';
     const id = `base.registered:${identity.chainId}`;
     all.push({
       time: identity.confirmedAt,

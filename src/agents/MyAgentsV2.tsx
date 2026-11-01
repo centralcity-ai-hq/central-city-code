@@ -347,10 +347,15 @@ export function MyAgentsV2({
     if (header) header.inert = true;
     const overflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
+    // A long list may be scrolled far down: the open agent starts at the top of the page, as a
+    // view of its own, and closing it returns to the row where the list was.
+    const scrolled = window.scrollY;
+    if (scrolled) window.scrollTo(0, 0);
     return () => {
       list.inert = false;
       if (header) header.inert = headerInert;
       document.body.style.overflow = overflow;
+      if (scrolled) window.scrollTo(0, scrolled);
     };
   }, [panelOpen, side, phone]);
 

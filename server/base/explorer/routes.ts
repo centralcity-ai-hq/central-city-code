@@ -1,3 +1,5 @@
+import { createHistoryObserver } from './history-observer.js';
+import { ARC_MAINNET, ARC_TESTNET, chainView } from '../../../shared/chains.js';
 /*
  * Public, read-only, cached routes of the Agent Explorer's "On Base" view (store.ts decides what
  * is listed). No cookies, no session, no chain write. The chain reads are the server's own, never
@@ -5,6 +7,15 @@
  * feedback in the Reputation Registry at that block.
  *
  *   GET /api/public/base/agents?q=&before=   newest first, ON_BASE_PAGE_SIZE per page, + totals
+ *                                            ?q= reads a Base ID, short id or passport number,
+ *                                            agent wallet, and a name of 3+ letters or digits
+ *                                            (shared/base/on-base.ts onBaseSearchReadings); a
+ *                                            text with none of them is 400 unsupported_reading;
+ *                                            a transaction hash is 503 tx_search_unavailable
+ *                                            until ON_BASE_TX_SEARCH_AVAILABLE (migration 291)
+ *   GET /api/public/base/rated               the highest Base IDs with a final Central City
+ *                                            rating (base_rated_agents, its primary key only),
+ *                                            for the Rated agents proof page to sample
  *   GET /api/public/base/agents/:baseId      one agent's passport, with its feedback and its
  *                                            Central City score (shared/base/rating-score.ts)
  *   GET /api/public/passports/:short/earnings  what the agent was paid through Central City:
@@ -41,8 +52,8 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { formatUnits, getAddress } from 'viem';
 import { z } from 'zod';
-import type { Database } from '../../database.js';
-import { clientAddressKey } from '../../rate-limit.js';
+import { readTimeoutError, type Database } from '../../database.js';
+import { clientAddressKey, clientAddressPrefixes } from '../../rate-limit.js';
 import {
   ANVIL,
   BASE_MAINNET,
@@ -52,8 +63,17 @@ import {
 import {
   feedbackScore,
   ON_BASE_PATHS,
+  onChainPaths,
+  type ExplorerChainSlug,
   ON_BASE_QUERY_MAX,
+  ON_BASE_RATED_MAX,
   ON_BASE_REPUTATION_MAX,
+  ON_BASE_SEARCH_NOTICES,
+  ON_BASE_TX_SEARCH_UNAVAILABLE_CODE,
+  ON_BASE_TX_SEARCH_UNAVAILABLE_MESSAGE,
+  ON_BASE_UNSUPPORTED_CODE,
+  onBaseTxSearchUnavailable,
+  onBaseUnsupportedReading,
   type OnBaseList,
   type OnBaseReputation,
   type OnBaseTotals,
@@ -71,8 +91,8 @@ import {
   sqlPublicStatsStore,
   writeStatParts,
 } from '../../stats/public-stats.js';
-import type { FeedbackRead, OnBaseChainReader } from './head.js';
-import { createOnBaseStore, type RecordedOwner } from './store.js';
+import { FEEDBACK_CLIENTS_MAX, type FeedbackRead, type OnBaseChainReader } from './head.js';
+import { createOnBaseStore, parseQuery, type RecordedOwner } from './store.js';
 
 /** Browsers always revalidate; shared caches at most 10 s fresh + 5 s stale. */
 export const ON_BASE_LIVE = 'public, max-age=0, s-maxage=10, stale-while-revalidate=5';
@@ -86,6 +106,11 @@ export const ON_BASE_LIVE_EDGE = 'public, max-age=10, stale-while-revalidate=5';
  * edge keeps serving longer (ON_BASE_LIST_LIVE_EDGE). The page names the block it
  * was read at. A passport keeps ON_BASE_LIVE: someone who just registered sees it within 15 s.
  */
+/** How long one instance keeps the rated Base IDs before it reads them again. */
+export const RATED_IDS_TTL_MS = 60_000;
+/** How long one instance waits after a failed read of the rated Base IDs before it asks again. */
+export const RATED_IDS_RETRY_MS = 15_000;
+
 export const ON_BASE_LIST_LIVE = 'public, max-age=0, s-maxage=10, stale-while-revalidate=50';
 /**
  * Vercel's edge only (never forwarded to browsers): fresh 10 s, then its copy is served for up to a
@@ -99,9 +124,47 @@ export const ON_BASE_LIST_LIVE_EDGE = 'public, max-age=10, stale-while-revalidat
 export const ON_BASE_NOT_FOUND = 'public, max-age=0, s-maxage=10';
 /** Per client address, under the degraded 'ip' prefix like /api/public/stats. */
 export const ON_BASE_RATE = { max: 60, windowMs: 60_000 } as const;
+/**
+ * Name searches per IPv6 /56 (one subscriber's network, rate-limit.ts clientAddressPrefixes), on
+ * top of ON_BASE_RATE per /64: rotating /64s inside one /56 cannot multiply the search budget. Not
+ * for IPv4, where a /24 is commonly shared by unrelated visitors.
+ */
+export const ON_BASE_SEARCH_SITE_RATE = { max: 120, windowMs: 60_000 } as const;
+/** One search gets at most this long in the database; past it the list answers 503, busy. */
+export const SEARCH_TIMEOUT_MS = 4_000;
+/** A search that ran out of time reads as null (busy); any other failure rejects as it was. */
+export const busyOnTimeout = (error: unknown): null => {
+  if (readTimeoutError(error)) return null;
+  throw error;
+};
+/**
+ * One instance answers the same search (the same reading of q, the same page) from its last read
+ * for this long, and identical searches in flight share one read. Each spelling of q is its own
+ * edge-cache entry; this joins the spellings that mean the same search.
+ */
+export const SEARCH_CACHE_MS = 10_000;
+/** Searches kept per instance; cleared when it grows past this. */
+export const SEARCH_CACHE_MAX = 500;
+/**
+ * Per IPv6 /56 and /48 as well (a subscriber commonly holds a whole /56 or /48 and could rotate
+ * /64s to multiply ON_BASE_RATE): a few /64s' worth each. IPv4 keeps its per-address limit only.
+ */
+export const ON_BASE_RATE_SITE = { max: 240, windowMs: 60_000 } as const;
+export const ON_BASE_RATE_NETWORK = { max: 600, windowMs: 60_000 } as const;
+/**
+ * Passport reads that go to Base (an id not read at the current head) per minute, for the whole
+ * deployment (the shared limiter). The configured Base endpoint also carries the bundler and
+ * every wallet read, so anonymous passports may only spend this much of it; past it a passport
+ * answers with its last read (or Central City's record), with that read's own block and time.
+ */
+export const ON_BASE_CHAIN_READS = { max: 600, windowMs: 60_000 } as const;
 /** The server reads the chain head at most this often, and gives one read this long. */
 export const HEAD_TTL_MS = 5_000;
 export const READ_TIMEOUT_MS = 3_000;
+/** Each of the passport's two record reads (rater names, rater wallets) gets at most this long. */
+export const RECORDS_TIMEOUT_MS = 4_000;
+/** A passport slower than this logs its stage durations (event passport_slow). */
+export const PASSPORT_SLOW_LOG_MS = 2_000;
 /**
  * Totals are counted about this often globally (one shared public_stats row and its parts); after
  * a failed count an instance waits as long before it asks the database again.
@@ -113,10 +176,12 @@ export const TOTALS_TTL_MS = 30_000;
  */
 export const TOTALS_LEASE_MS = 60_000;
 /** The public_stats row of each network's totals; its parts are `<key>_<part>` (TOTALS_PARTS). */
-export const TOTALS_KEYS: Readonly<Record<BaseChainId, string>> = {
+export const TOTALS_KEYS: Readonly<Record<number, string>> = {
   [BASE_MAINNET]: 'base_explorer_totals_mainnet',
   [BASE_SEPOLIA]: 'base_explorer_totals_sepolia',
   [ANVIL]: 'base_explorer_totals_local',
+  [ARC_MAINNET]: 'arc_explorer_totals_mainnet',
+  [ARC_TESTNET]: 'arc_explorer_totals_testnet',
 };
 /** The totals stored beside the on-Base count; 0 for a block or time means none recorded. */
 export const TOTALS_PARTS = ['finalizing', 'new_day', 'block', 'at'] as const;
@@ -126,10 +191,12 @@ export const TOTALS_PARTS = ['finalizing', 'new_day', 'block', 'at'] as const;
  */
 export const RATED_TTL_MS = 30_000;
 /** The public_stats row of each network's rated agents (keys are lower-case letters only). */
-export const RATED_KEYS: Readonly<Record<BaseChainId, string>> = {
+export const RATED_KEYS: Readonly<Record<number, string>> = {
   [BASE_MAINNET]: 'base_rated_agents_mainnet',
   [BASE_SEPOLIA]: 'base_rated_agents_sepolia',
   [ANVIL]: 'base_rated_agents_local',
+  [ARC_MAINNET]: 'arc_rated_agents_mainnet',
+  [ARC_TESTNET]: 'arc_rated_agents_testnet',
 };
 /** ownerOf reads kept per instance (the newest read per id); cleared when it grows past this. */
 export const OWNER_CACHE_MAX = 10_000;
@@ -149,12 +216,19 @@ const listQuery = z
 const noQuery = z.object({}).strict();
 /** A passport is addressed by its numeric Base ID only: never a short id. */
 const baseIdParams = z.object({ baseId: z.string().regex(/^[0-9]{1,78}$/) }).strict();
+/** A Base ID written with leading zeros: the same passport as its canonical form. */
+const PADDED_BASE_ID = /^0+[0-9]+$/;
 const shortParams = z.object({ short: z.string().regex(/^[0-9A-Za-z]{6}$/) }).strict();
 
 export interface OnBaseRouteDeps {
   db: Database;
   /** The network listed; Base mainnet unless a test or local run says otherwise. */
-  chainId?: BaseChainId;
+  chainId?: number;
+  /**
+   * The slug of its public paths (/api/public/<slug>/...): 'base' unless a second chain is mounted
+   * beside it (Arc), which then needs its own chainId too.
+   */
+  slug?: ExplorerChainSlug;
   now?: () => number;
   /** The shared rate limiter (server/app.ts); absent in unit tests. */
   limit?: (key: string, max: number, windowMs: number) => Promise<void>;
@@ -162,6 +236,11 @@ export interface OnBaseRouteDeps {
   chain?: OnBaseChainReader;
   /** The agent URI origin (tests); defaults to https://centralcity.ai. */
   uriOrigin?: string;
+  /**
+   * Another chain whose passports the routes by short id also answer (Arc, while it is on): a short
+   * id belongs to one agent on one chain, and these routes are mounted once. Unset: this chain only.
+   */
+  passportsAlsoOn?: number | null;
 }
 
 /** One read that answered: what it found, at which block, and when (ms). */
@@ -189,15 +268,56 @@ function tagOf(tag: string): string {
 
 export function registerOnBaseRoutes(app: FastifyInstance, deps: OnBaseRouteDeps): void {
   const chainId = deps.chainId ?? BASE_MAINNET;
+  const paths = deps.slug ? onChainPaths(deps.slug) : ON_BASE_PATHS;
+  // What a 404 calls the chain: every Base network stays "Base", as it always read.
+  const view = chainView(chainId);
+  const chainName = view && view.slug !== 'base' ? view.name : 'Base';
   const clock = deps.now ?? Date.now;
+  const observeHistory = createHistoryObserver(deps.db, clock);
   const store = createOnBaseStore(deps.db, { chainId, uriOrigin: deps.uriOrigin });
 
-  const limited = (request: FastifyRequest) =>
-    deps.limit?.(
-      `ip:onbase:${clientAddressKey(request.ip)}`,
-      ON_BASE_RATE.max,
-      ON_BASE_RATE.windowMs,
+  const limited = async (request: FastifyRequest) => {
+    if (!deps.limit) return;
+    const scopes = clientAddressPrefixes(request.ip);
+    await deps.limit(`ip:onbase:${scopes.source}`, ON_BASE_RATE.max, ON_BASE_RATE.windowMs);
+    if (!scopes.source.endsWith('::/64')) return;
+    await deps.limit(
+      `ip:onbase-site:${scopes.site}`,
+      ON_BASE_RATE_SITE.max,
+      ON_BASE_RATE_SITE.windowMs,
     );
+    await deps.limit(
+      `ip:onbase-network:${scopes.network}`,
+      ON_BASE_RATE_NETWORK.max,
+      ON_BASE_RATE_NETWORK.windowMs,
+    );
+  };
+  const searchLimited = async (request: FastifyRequest) => {
+    const { source, site } = clientAddressPrefixes(request.ip);
+    if (source.endsWith('::/64'))
+      await deps.limit?.(
+        `ip:onbase-search:${site}`,
+        ON_BASE_SEARCH_SITE_RATE.max,
+        ON_BASE_SEARCH_SITE_RATE.windowMs,
+      );
+  };
+  /**
+   * Whether a passport may read Base now (ON_BASE_CHAIN_READS, deployment-wide). Spent, or the
+   * limiter not answering: no chain read, the last read stands.
+   */
+  const chainReadAllowed = async (): Promise<boolean> => {
+    if (!deps.limit) return true;
+    try {
+      await deps.limit(
+        'onbase-chain:passport',
+        ON_BASE_CHAIN_READS.max,
+        ON_BASE_CHAIN_READS.windowMs,
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  };
   const badRequest = (reply: FastifyReply, error: string) =>
     reply.code(400).header('Cache-Control', 'no-store').send({ error, code: 'bad_request' });
   const live = (reply: FastifyReply) =>
@@ -253,48 +373,100 @@ export function registerOnBaseRoutes(app: FastifyInstance, deps: OnBaseRouteDeps
   /** The owner to publish for an id: the server's newest read, else Central City's record. */
   const ownerOf = (id: string, recorded: RecordedOwner): Read => owners.get(id) ?? recorded;
 
+  /**
+   * Whether a passport reads Base now: only when its owner or feedback was not read at the current
+   * head (otherwise nothing is read anyway), and then only within ON_BASE_CHAIN_READS.
+   */
+  async function freshPassport(baseId: string): Promise<boolean> {
+    if (!deps.chain) return false;
+    const head = await readHead();
+    if (!head) return false;
+    const owned = (owners.get(baseId)?.block ?? -1) >= head.block;
+    const rated = !deps.chain.feedback || (feedbacks.get(baseId)?.block ?? -1) >= head.block;
+    if (owned && rated) return false;
+    return chainReadAllowed();
+  }
+
   // The newest feedback read per id, like owners: read again once the head moves; when Base does
   // not answer, the last read stands with its own block and time; never read is "not read".
-  // Each read is bounded (head.ts FEEDBACK_READ_MAX): the rater wallets first, so spam feedback
-  // from other wallets can neither hide the score nor make the read too big to answer.
+  // Each read is bounded (head.ts FEEDBACK_READ_MAX): each rater wallet on its own, so spam
+  // feedback from other wallets can neither hide the score nor make the read too big to answer,
+  // and no rater's entries can push another rater out. When the registry's client list cannot be
+  // read, the raters in the records are asked instead.
   const feedbacks = new Map<
     string,
-    { block: number; at: number; entries: FeedbackRead[]; total: number }
+    {
+      block: number;
+      at: number;
+      entries: FeedbackRead[];
+      total: number;
+      bounded: boolean;
+      ratersSkipped: number;
+    }
   >();
   const raterFirst = (clients: readonly string[]) => store.raterWallets(clients);
+  // Read only when the client list is not, and bounded like the passport's other record reads.
+  const recordedRaters = (baseId: string) =>
+    deps.db.transaction(async (tx) => {
+      await tx.query('SET TRANSACTION READ ONLY');
+      await tx.query(`SET LOCAL statement_timeout = ${RECORDS_TIMEOUT_MS}`);
+      return createOnBaseStore(tx, { chainId, uriOrigin: deps.uriOrigin }).recordedRaters(
+        baseId,
+        FEEDBACK_CLIENTS_MAX,
+      );
+    });
+  /** Feedback reads in flight, per id and head block. */
+  const feedbackInflight = new Map<
+    string,
+    ReturnType<NonNullable<OnBaseChainReader['feedback']>>
+  >();
   /** `agentWallet`: the rated agent's own wallet, never one of its raters. */
-  async function reputationOf(baseId: string, agentWallet: string): Promise<OnBaseReputation> {
+  async function reputationOf(
+    baseId: string,
+    agentWallet: string,
+    stages: Record<string, number | string> = {},
+    mayRead = true,
+  ): Promise<OnBaseReputation> {
     const chain = deps.chain;
+    let at = clock();
     const head = chain?.feedback ? await readHead() : null;
+    stages.headMs = clock() - at;
     let read = feedbacks.get(baseId);
-    if (chain?.feedback && head && (read?.block ?? -1) < head.block) {
+    if (mayRead && chain?.feedback && head && (read?.block ?? -1) < head.block) {
+      at = clock();
       try {
-        const { entries, total } = await withTimeout(
-          chain.feedback(baseId, BigInt(head.block), raterFirst),
-        );
-        read = { block: head.block, at: head.at, entries, total };
+        // Concurrent passports of one id at one head share one read of Base.
+        const key = `${baseId}@${head.block}`;
+        let pending = feedbackInflight.get(key);
+        if (!pending) {
+          pending = withTimeout(
+            chain.feedback(baseId, BigInt(head.block), raterFirst, () => recordedRaters(baseId)),
+          );
+          feedbackInflight.set(key, pending);
+          const done = () => feedbackInflight.delete(key);
+          pending.then(done, done);
+        }
+        const { entries, total, bounded, ratersSkipped } = await pending;
+        read = { block: head.block, at: head.at, entries, total, bounded, ratersSkipped };
         if (feedbacks.size >= OWNER_CACHE_MAX) feedbacks.clear();
         feedbacks.set(baseId, read);
+        stages.feedback = 'read';
       } catch {
         // Base did not answer: the earlier read (if any) stands.
+        stages.feedback = 'failed';
       }
+      stages.feedbackMs = clock() - at;
     }
     if (!read)
       return { readAtBlock: null, readAt: null, count: 0, entries: [], score: null, scoredBy: [] };
+    // Said only when it is so: an answer of a fully read passport is unchanged.
+    const partial = {
+      ...(read.bounded ? { bounded: true as const } : {}),
+      ...(read.ratersSkipped > 0 ? { ratersSkipped: read.ratersSkipped } : {}),
+    };
     const shown = read.entries.slice(-ON_BASE_REPUTATION_MAX).reverse();
-    // The score counts every entry read, not only the ones shown.
-    const [listed, raters] = await Promise.all([
-      store.listedByAddress(shown.map((entry) => entry.client)),
-      store.raterWallets(read.entries.map((entry) => entry.client)),
-    ]);
-    const counted = latestRatings(read.entries, raters, agentWallet);
-    return {
-      readAtBlock: read.block,
-      readAt: read.at,
-      count: read.total,
-      score: averageOf(counted),
-      scoredBy: counted.map((rating) => getAddress(rating.client)),
-      entries: shown.map((entry) => {
+    const entriesOf = (listed: Map<string, { name: string; baseId: string }>) =>
+      shown.map((entry) => {
         const from = listed.get(entry.client.toLowerCase()) ?? null;
         return {
           client: entry.client,
@@ -305,7 +477,53 @@ export function registerOnBaseRoutes(app: FastifyInstance, deps: OnBaseRouteDeps
           // Anyone can give feedback: only our own agents' tags are printed on our page.
           tags: from ? [entry.tag1, entry.tag2].map(tagOf).filter(Boolean) : [],
         };
-      }),
+      });
+    // The score counts every entry read, not only the ones shown. Both reads run READ ONLY with
+    // RECORDS_TIMEOUT_MS each: a slow read never holds the passport (24 Oct 2026: > 60 s for
+    // agents with many raters); the passport then answers with Base's entries, unnamed, and
+    // scoreUnread instead of a score.
+    let records: [Map<string, { name: string; baseId: string }>, Set<string>];
+    at = clock();
+    stages.entries = read.entries.length;
+    try {
+      records = await deps.db.transaction(async (tx) => {
+        await tx.query('SET TRANSACTION READ ONLY');
+        await tx.query(`SET LOCAL statement_timeout = ${RECORDS_TIMEOUT_MS}`);
+        const bounded = createOnBaseStore(tx, { chainId, uriOrigin: deps.uriOrigin });
+        return [
+          await bounded.listedByAddress(shown.map((entry) => entry.client)),
+          // Never a wallet of the rated wallet's own owner key (CCA-144).
+          await bounded.raterWallets(
+            read!.entries.map((entry) => entry.client),
+            agentWallet,
+          ),
+        ] as [Map<string, { name: string; baseId: string }>, Set<string>];
+      });
+    } catch {
+      stages.recordsMs = clock() - at;
+      stages.records = 'failed';
+      return {
+        readAtBlock: read.block,
+        readAt: read.at,
+        count: read.total,
+        score: null,
+        scoredBy: [],
+        scoreUnread: true,
+        entries: entriesOf(new Map()),
+        ...partial,
+      };
+    }
+    stages.recordsMs = clock() - at;
+    const [listed, raters] = records;
+    const counted = latestRatings(read.entries, raters, agentWallet);
+    return {
+      readAtBlock: read.block,
+      readAt: read.at,
+      count: read.total,
+      score: averageOf(counted),
+      scoredBy: counted.map((rating) => getAddress(rating.client)),
+      entries: entriesOf(listed),
+      ...partial,
     };
   }
 
@@ -318,7 +536,7 @@ export function registerOnBaseRoutes(app: FastifyInstance, deps: OnBaseRouteDeps
     count: store.ratedAgents,
     clock,
     ttlMs: RATED_TTL_MS,
-    store: sqlPublicStatsStore(deps.db),
+    store: sqlPublicStatsStore(deps.db, observeHistory),
     failureBackoffMs: RATED_TTL_MS,
     countWithoutLease: false,
     staleWhileRevalidate: true,
@@ -352,6 +570,7 @@ export function registerOnBaseRoutes(app: FastifyInstance, deps: OnBaseRouteDeps
           value.recorded?.at ?? 0,
         ].map((part, index) => [partKeys[index]!, part] as const),
         at,
+        observeHistory,
       );
       counted = { at, value };
       return value.onBase;
@@ -359,7 +578,7 @@ export function registerOnBaseRoutes(app: FastifyInstance, deps: OnBaseRouteDeps
     clock,
     ttlMs: TOTALS_TTL_MS,
     leaseMs: TOTALS_LEASE_MS,
-    store: sqlPublicStatsStore(deps.db),
+    store: sqlPublicStatsStore(deps.db, observeHistory),
     failureBackoffMs: TOTALS_TTL_MS,
     staleWhileRevalidate: true,
   });
@@ -385,15 +604,61 @@ export function registerOnBaseRoutes(app: FastifyInstance, deps: OnBaseRouteDeps
     return read.value;
   }
 
-  app.get(ON_BASE_PATHS.list, async (request, reply) => {
+  // Searches: one READ ONLY transaction each with SEARCH_TIMEOUT_MS, kept SEARCH_CACHE_MS by
+  // their reading of q (parseQuery) and page; a failed one is never kept.
+  type Page = Awaited<ReturnType<typeof store.list>>;
+  const searches = new Map<string, { at: number; page: Promise<Page> }>();
+  function search(q: string, before: string | undefined): Promise<Page> {
+    const key = JSON.stringify([parseQuery(q), before ?? null]);
+    const kept = searches.get(key);
+    if (kept && clock() - kept.at < SEARCH_CACHE_MS) return kept.page;
+    if (searches.size >= SEARCH_CACHE_MAX) searches.clear();
+    const page = deps.db.transaction(async (tx) => {
+      await tx.query('SET TRANSACTION READ ONLY');
+      await tx.query(`SET LOCAL statement_timeout = ${SEARCH_TIMEOUT_MS}`);
+      return createOnBaseStore(tx, { chainId, uriOrigin: deps.uriOrigin }).list({ before, q });
+    });
+    searches.set(key, { at: clock(), page });
+    page.catch(() => {
+      if (searches.get(key)?.page === page) searches.delete(key);
+    });
+    return page;
+  }
+
+  app.get(paths.list, async (request, reply) => {
     await limited(request);
     const parsed = listQuery.safeParse(request.query ?? {});
     if (!parsed.success) return badRequest(reply, 'Use ?q=<search> and ?before=<Base ID>.');
     const q = parsed.data.q?.trim() || undefined;
+    // A text the list has no reading for (a transaction hash, a 1-2 character name) is refused by
+    // type, never answered as an empty list ("no match" for a search that was not made).
+    const unsupported = q === undefined ? null : onBaseUnsupportedReading(q);
+    if (unsupported)
+      return reply.code(400).header('Cache-Control', 'no-store').send({
+        error: ON_BASE_SEARCH_NOTICES[unsupported],
+        code: ON_BASE_UNSUPPORTED_CODE,
+        reading: unsupported,
+      });
+    // A transaction hash while its indexes are not built (ON_BASE_TX_SEARCH_AVAILABLE): answered
+    // at once, explicitly unavailable, never the full read of the registrations it would take.
+    if (q !== undefined && onBaseTxSearchUnavailable(q))
+      return reply.code(503).header('Cache-Control', 'no-store').send({
+        error: ON_BASE_TX_SEARCH_UNAVAILABLE_MESSAGE,
+        code: ON_BASE_TX_SEARCH_UNAVAILABLE_CODE,
+      });
+    if (q !== undefined && parseQuery(q).name) await searchLimited(request);
+    const before = parsed.data.before;
+    // A search that cannot finish in time is busy (503); any other failure stays a 500.
     const [page, counted] = await Promise.all([
-      store.list({ before: parsed.data.before, q }),
+      q === undefined ? store.list({ before }) : search(q, before).catch(busyOnTimeout),
       totals(),
     ]);
+    if (!page)
+      return reply
+        .code(503)
+        .header('Cache-Control', 'no-store')
+        .header('Retry-After', '10')
+        .send({ error: 'Search is busy right now. Try again shortly.', code: 'busy' });
     // Scores: Central City's own final ratings, from the records (the passport verifies on Base).
     // Rated agents here, not beside the page and totals: at most two pooled connections at once.
     const [, scores, ratedNow] = await Promise.all([
@@ -431,6 +696,8 @@ export function registerOnBaseRoutes(app: FastifyInstance, deps: OnBaseRouteDeps
       } satisfies OnBaseTotals,
       registry: store.registry,
       nextBefore: page.nextBefore,
+      ...(page.incomplete ? { incomplete: true as const } : {}),
+      ...(page.notice ? { notice: page.notice } : {}),
     };
     return reply
       .header('Cache-Control', ON_BASE_LIST_LIVE)
@@ -438,35 +705,129 @@ export function registerOnBaseRoutes(app: FastifyInstance, deps: OnBaseRouteDeps
       .send(body);
   });
 
-  app.get(`${ON_BASE_PATHS.passport}/:baseId`, async (request, reply) => {
+  // The rated Base IDs: an index-only read of base_rated_agents' primary key (chain_id,
+  // rated_base_id), highest first, kept RATED_IDS_TTL_MS per instance with one read in flight.
+  // A failed read keeps the last answer; with none, 503.
+  let ratedIds: { at: number; ids: string[] } | null = null;
+  let ratedRead: Promise<void> | null = null;
+  // After a failed read (cold or not), the next one waits RATED_IDS_RETRY_MS: a database that
+  // cannot answer is never asked again on every request. The last good answer keeps its own time.
+  let ratedRetryAt = 0;
+  app.get(paths.rated, async (request, reply) => {
     await limited(request);
-    const params = baseIdParams.safeParse(request.params);
     if (!noQuery.safeParse(request.query ?? {}).success)
       return badRequest(reply, 'This address takes no query.');
+    if (
+      (!ratedIds || clock() - ratedIds.at >= RATED_IDS_TTL_MS) &&
+      !ratedRead &&
+      clock() >= ratedRetryAt
+    )
+      ratedRead = deps.db
+        .transaction(async (tx) => {
+          await tx.query('SET TRANSACTION READ ONLY');
+          await tx.query('SET LOCAL statement_timeout = 2000');
+          const { rows } = await tx.query<{ id: string }>(
+            `SELECT rated_base_id::text AS id FROM base_rated_agents WHERE chain_id = $1
+             ORDER BY rated_base_id DESC LIMIT ${ON_BASE_RATED_MAX}`,
+            [chainId],
+          );
+          ratedIds = { at: clock(), ids: rows.map((row) => row.id) };
+        })
+        .catch(() => {
+          ratedRetryAt = clock() + RATED_IDS_RETRY_MS;
+        })
+        .finally(() => {
+          ratedRead = null;
+        });
+    if (!ratedIds && ratedRead) await ratedRead;
+    if (!ratedIds)
+      return reply
+        .code(503)
+        .header('Cache-Control', 'no-store')
+        .header('Retry-After', '15')
+        .send({ error: 'Rated agents cannot be read right now.', code: 'unavailable' });
+    return reply
+      .header('Cache-Control', 'public, max-age=0, s-maxage=60, stale-while-revalidate=60')
+      .send({ baseIds: ratedIds.ids, asOf: ratedIds.at });
+  });
+
+  app.get(`${paths.passport}/:baseId`, async (request, reply) => {
+    const params = baseIdParams.safeParse(request.params);
+    // A bare '?' or a stray '&' parses as no query but is another edge cache entry: refused too.
+    if (!noQuery.safeParse(request.query ?? {}).success || request.url.includes('?'))
+      return badRequest(reply, 'This address takes no query.');
+    // One address per passport, so the edge cache keeps one entry for it: a padded id is sent on
+    // to its canonical form before the limiter and the database.
+    if (params.success && PADDED_BASE_ID.test(params.data.baseId))
+      return reply
+        .code(308)
+        .header('Cache-Control', 'public, max-age=3600, s-maxage=86400')
+        .header('Location', `${paths.passport}/${BigInt(params.data.baseId).toString(10)}`)
+        .send();
+    await limited(request);
+    const started = clock();
+    const stages: Record<string, number | string> = {};
     const found = params.success ? await store.passport(params.data.baseId) : null;
+    stages.passportMs = clock() - started;
     if (!found)
       return reply
         .code(404)
         .header('Cache-Control', ON_BASE_NOT_FOUND)
-        .send({ error: 'No registered agent on Base with that id.', code: 'not_found' });
-    await readOwners([found.passport.baseId]);
+        .send({ error: `No registered agent on ${chainName} with that id.`, code: 'not_found' });
+    let at = clock();
+    // Base is read only for an id not read at the current head, within the deployment's budget.
+    const fresh = await freshPassport(found.passport.baseId);
+    if (fresh) await readOwners([found.passport.baseId]);
+    stages.ownerMs = clock() - at;
     const owner = ownerOf(found.passport.baseId, found.recorded).owner;
-    const reputation = await reputationOf(found.passport.baseId, found.passport.agentWallet);
+    at = clock();
+    const reputation = await reputationOf(
+      found.passport.baseId,
+      found.passport.agentWallet,
+      stages,
+      fresh,
+    );
+    stages.reputationMs = clock() - at;
+    // A slow passport names its slow stage in the function log (no addresses, no names).
+    const totalMs = clock() - started;
+    if (totalMs >= PASSPORT_SLOW_LOG_MS)
+      console.log(
+        JSON.stringify({
+          event: 'passport_slow',
+          baseId: found.passport.baseId,
+          totalMs,
+          ...stages,
+        }),
+      );
     // The owner can change on Base at any time, so a passport is as short-lived as the list.
     return live(reply).send({ ...found.passport, owner, reputation });
   });
 
+  // Earnings and service payments are addressed by passport short id (any chain): mounted once,
+  // with Base's routes.
+  if (deps.slug && deps.slug !== 'base') return;
+  const other =
+    deps.passportsAlsoOn == null
+      ? null
+      : createOnBaseStore(deps.db, { chainId: deps.passportsAlsoOn, uriOrigin: deps.uriOrigin });
   app.get(EARNINGS_PATHS.passport, async (request, reply) => {
     await limited(request);
     const params = shortParams.safeParse(request.params);
     if (!noQuery.safeParse(request.query ?? {}).success)
       return badRequest(reply, 'This address takes no query.');
-    const found = params.success ? await store.earnings(params.data.short) : null;
+    const found = params.success
+      ? ((await store.earnings(params.data.short)) ??
+        (await other?.earnings(params.data.short)) ??
+        null)
+      : null;
     if (!found)
       return reply
         .code(404)
         .header('Cache-Control', ON_BASE_NOT_FOUND)
-        .send({ error: 'No registered agent on Base with that passport.', code: 'not_found' });
+        .send({
+          error: `No registered agent on ${chainName} with that passport.`,
+          code: 'not_found',
+        });
     const body: PassportEarnings = {
       paidTimes: found.paidTimes,
       // USDC has 6 decimals; "8.4", never "8.400000".
@@ -483,12 +844,19 @@ export function registerOnBaseRoutes(app: FastifyInstance, deps: OnBaseRouteDeps
     const params = shortParams.safeParse(request.params);
     if (!noQuery.safeParse(request.query ?? {}).success)
       return badRequest(reply, 'This address takes no query.');
-    const found = params.success ? await store.servicePayments(params.data.short) : null;
+    const found = params.success
+      ? ((await store.servicePayments(params.data.short)) ??
+        (await other?.servicePayments(params.data.short)) ??
+        null)
+      : null;
     if (!found)
       return reply
         .code(404)
         .header('Cache-Control', ON_BASE_NOT_FOUND)
-        .send({ error: 'No registered agent on Base with that passport.', code: 'not_found' });
+        .send({
+          error: `No registered agent on ${chainName} with that passport.`,
+          code: 'not_found',
+        });
     // Totals only, built field by field: nothing else of a call can reach the answer.
     const body: PassportServicePayments = {
       paidCalls: found.paidCalls,

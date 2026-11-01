@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createApp } from '../server/app.js';
 import { rpcResult } from './oauth-helpers.js';
+import { sessionPair } from './session-cookie-pair.js';
 process.env.CITY_INVITE_FLOW = '1';
 process.env.CITY_RATE_LIMIT_KEY ??= 'synthetic-open-invite-bearer-test-root-secret';
 const headers = {
@@ -38,7 +39,7 @@ async function fixture(t: { after(fn: () => Promise<unknown>): void }) {
   });
   assert.equal(registered.statusCode, 201, registered.body);
   const host = {
-    cookie: `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`,
+    cookie: sessionPair(registered.cookies),
   };
   const agent = await post(
     '/api/agents',

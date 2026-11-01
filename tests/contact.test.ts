@@ -69,3 +69,23 @@ test('only official mailboxes appear in the site and its public files', () => {
         assert.doesNotMatch(domain!, /gmail|outlook|hotmail|icloud|yahoo/i, `${file}: ${domain}`);
     }
 });
+
+test('SECURITY.md supports the current release line and scopes every live surface (CCA-529)', () => {
+  const policy = read('SECURITY.md');
+  const version = (JSON.parse(read('package.json')) as { version: string }).version;
+  // No fixed, stale release line: the table names the latest line, which package.json defines.
+  assert.doesNotMatch(policy, /0\.6\.x/);
+  assert.match(policy, /\| Latest release line \(`0\.x\.y`\) +\| Yes +\|/);
+  assert.match(version, /^0\.\d+\.\d+$/, 'still a 0.x release line');
+  for (const surface of ['Elric', 'Base wallets and payments', 'Own paymaster', 'x402 facilitator'])
+    assert.ok(policy.includes(surface), surface);
+  const model = read('docs/THREAT_MODEL.md');
+  assert.doesNotMatch(model, /not part of this model yet/);
+  for (const linked of [
+    'ELRIC.md',
+    'base/WALLET-THREAT-MODEL.md',
+    'base/OWN_PAYMASTER.md',
+    'X402_FACILITATOR.md',
+  ])
+    assert.ok(model.includes(`(${linked})`), linked);
+});

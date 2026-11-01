@@ -6,10 +6,12 @@ import {
   APP_SHELL,
   isClientRoute,
   movedPath,
+  movedStatus,
   shellFor,
   withoutTrailingSlash,
 } from '../shared/routes.js';
-import { CONTENT_SECURITY_POLICY } from './security-headers.js';
+import { edgeReferrerPolicy } from './security-headers.js';
+import type { FastifyReply } from 'fastify';
 
 const port = Number(process.env.PORT ?? 4310);
 if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Invalid local port');
@@ -28,6 +30,9 @@ const docsIndex = existsSync(resolve(dist, 'docs-index.md'));
 // for the e2e suite (playwright.config.ts) so the specs pass at any time of day. Deployments
 // never set it; the gate then reads the app clock.
 const countLogCronNow = process.env.CITY_COUNT_LOG_CRON_NOW;
+// Answers that come from the edge in production (static files, the app shell, 404.html).
+const edgeServed = new WeakSet<FastifyReply>();
+const fromEdge = (reply: FastifyReply) => (edgeServed.add(reply), reply);
 if (countLogCronNow !== undefined && Number.isNaN(Date.parse(countLogCronNow)))
   throw new Error('CITY_COUNT_LOG_CRON_NOW must be an ISO instant (e.g. 2026-10-01T10:00:00Z).');
 const app = await createApp({
@@ -36,14 +41,19 @@ const app = await createApp({
   notFound: (request, reply) => {
     const path = request.url.split(/[?#]/)[0]!;
     const read = request.method === 'GET' || request.method === 'HEAD';
-    if (spa && read && isClientRoute(path)) return reply.type('text/html').sendFile(shellFor(path));
-    if (notFoundPage && read) return reply.code(404).type('text/html').sendFile('404.html');
+    if (spa && read && isClientRoute(path))
+      return fromEdge(reply).type('text/html').sendFile(shellFor(path));
+    if (notFoundPage && read)
+      return fromEdge(reply).code(404).type('text/html').sendFile('404.html');
     return reply.code(404).send({ error: 'Page not found' });
   },
   // A browser at /a/<short> gets the passport page, like vercel.json's rewrite; resolvers keep
   // the registration file.
   ...(spa
-    ? { passportPage: (_request, reply) => reply.type('text/html').sendFile(APP_SHELL.slice(1)) }
+    ? {
+        passportPage: (_request, reply) =>
+          fromEdge(reply).type('text/html').sendFile(APP_SHELL.slice(1)),
+      }
     : {}),
 });
 if (spa) {
@@ -52,7 +62,7 @@ if (spa) {
 if (docsIndex)
   for (const path of ['/docs/index.md', '/docs.md'])
     app.get(path, (_request, reply) =>
-      reply.type('text/markdown; charset=utf-8').sendFile('docs-index.md'),
+      fromEdge(reply).type('text/markdown; charset=utf-8').sendFile('docs-index.md'),
     );
 // `/path/` → `/path` (308, query kept) for non-server-owned paths, like vercel.json's redirect
 // (shared/routes.ts TRAILING_SLASH_REDIRECT).
@@ -67,18 +77,14 @@ app.addHook('onRequest', async (request, reply) => {
 app.addHook('onRequest', async (request, reply) => {
   if (request.method !== 'GET' && request.method !== 'HEAD') return;
   const target = movedPath(request.url);
-  if (target) return reply.redirect(target, 301);
+  if (target) return reply.redirect(target, movedStatus(request.url));
 });
+// createApp sends the security headers of a function answer (server/security-headers.ts). Static
+// files (the @fastify/static route) and the answers marked above get the edge's Referrer-Policy
+// instead, as vercel.json gives them in production.
 app.addHook('onSend', async (request, reply) => {
-  reply.header('X-Content-Type-Options', 'nosniff');
-  reply.header('X-Frame-Options', 'DENY');
-  // OAuth consent pages need same-origin so browsers send a real Origin on their form POSTs.
-  reply.header(
-    'Referrer-Policy',
-    request.url.startsWith('/oauth/') ? 'same-origin' : 'no-referrer',
-  );
-  reply.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-  reply.header('Content-Security-Policy', CONTENT_SECURITY_POLICY);
+  if (request.routeOptions.url === '/*' || edgeServed.has(reply))
+    reply.header('Referrer-Policy', edgeReferrerPolicy(request.url.split('?')[0]!));
 });
 let stopping = false;
 async function shutdown() {

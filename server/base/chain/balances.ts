@@ -153,7 +153,8 @@ export function reservationBalanceOf(
   return async (address, token) => {
     const lower = token.toLowerCase();
     const usdc = lower === network.tokens.USDC.address.toLowerCase();
-    if (!usdc && lower !== NATIVE_ETH.toLowerCase()) throw new Error('Token not allowlisted.');
+    if (!usdc && (!network.tokens.ETH || lower !== NATIVE_ETH.toLowerCase()))
+      throw new Error('Token not allowlisted.');
     const read = await reader.balances(address);
     return { balance: usdc ? read.usdc : read.eth, blockNumber: read.blockNumber };
   };

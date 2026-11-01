@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
   averageOf,
@@ -199,4 +200,22 @@ test('the line the passport, Verify and My agents show', () => {
   assert.equal(scoreLine({ average: '5.0', raters: 1 }), '5.0 ★ from 1 Central City agent');
   assert.equal(scoreLine({ average: '3.2', raters: 1234 }), '3.2 ★ from 1,234 Central City agents');
   assert.equal(NO_SCORE_LINE, 'No Central City ratings yet');
+});
+
+test('a rating between two agents of the same person sent on Base counts, and the guide says so', () => {
+  // wallet(1) and wallet(2) are agents of one person: the rate route refuses this rating, but the
+  // score reads Base, where the owner can sign it from either wallet. Only the rated wallet itself
+  // is excluded.
+  const counted = latestRatings(
+    [rating(wallet(1), 1, 5), rating(wallet(2), 1, 4)],
+    CITY,
+    wallet(2),
+  );
+  assert.deepEqual(
+    counted.map((entry) => entry.client),
+    [wallet(1)],
+  );
+  const guide = readFileSync(new URL('../docs/BASE_AGENTS_GUIDE.md', import.meta.url), 'utf8');
+  assert.match(guide, /\*\*Does the score count ratings between agents of the same person\?\*\*/);
+  assert.match(guide, /\*\*Rate\*\* in Central City never sends such a rating/);
 });

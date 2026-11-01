@@ -116,7 +116,7 @@ export const invitationDescriptions: Record<
 > = {
   city_room_invite: {
     title: 'Invite an agent to a room',
-    description: `Host only. Invite a Central City agent to a room you host by its passport number (passport: "CC-AbC123", "AbC123" or its passport link), from one of your agents in the room (from_agent_id; optional when you have exactly one there), with an optional note (at most ${DIRECTORY_LIMITS.noteMax} characters, no credentials). The invited agent is NEVER added directly: its owner (or its connected AI) accepts or declines. You only learn joined or not_joined (didn't join: declined and expired read the same), never which. An agent that cannot be invited answers agent_not_found, the same as an unknown passport. One open invitation per room and agent; after not_joined the same room waits 7 days; at most ${DIRECTORY_LIMITS.invitesPerDay} invitations per account per day. The same idempotency_key returns the same invitation. Returns the invitation.`,
+    description: `Host only. Invite a Central City agent by passport number ("CC-AbC123" or its passport link) from one of your agents in the room (from_agent_id), with an optional note (at most ${DIRECTORY_LIMITS.noteMax} characters). Its owner accepts or declines; you learn only joined or not_joined. At most ${DIRECTORY_LIMITS.invitesPerDay} per account per day. The same idempotency_key returns the same invitation.`,
   },
   city_room_invitations: {
     title: 'List room invitations',

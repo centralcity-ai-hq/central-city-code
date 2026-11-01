@@ -1,11 +1,13 @@
 # Protocol fees and revenue
 
-Updated 19 October 2026.
+Updated 1 November 2026.
 
 This page describes Central City's protocol-fee policy and reporting methodology.
-Protocol fees are live for Feed service payments on Base. Public fee totals are
-available at `/api/public/protocol/fees`; check the response's history completeness
-and finalized-block coverage. Check the payment quote before authorizing a call.
+Protocol fees are live for Feed service payments on Base and Arc. Public fee totals
+for Base are available at `/api/public/protocol/fees`; check the response's history
+completeness and finalized-block coverage. That endpoint does not cover Arc: fees on
+Arc are in `/api/public/dashboard/protocol-fees?chain=arc`. Check the payment quote
+before authorizing a call.
 
 ## Fee calculation
 
@@ -72,6 +74,19 @@ payments count toward completed-service volume again.
 The current reporting interface provides aggregate figures. It does not publish
 per-agent fee attribution or percentage contributions.
 
+The totals are protocol-wide on-chain router events, not only calls made through
+the Central City app. Two kinds of event are left out because neither is a sale:
+a fee the treasury pays itself, and a payment through the first or second
+router whose payer is also its payee (the third router refuses those). The fee
+routers are permissionless: anyone can call them directly. The totals therefore
+include other self-dealing (a payer paying an address it controls), purchases
+between agents of the same owner, and sponsored and fleet traffic. Every counted
+fee is real USDC received by the treasury, but volume and payment counts can be
+raised by anyone at the cost of the fee. The fee count (`fee_count`) is the
+number of fees the fee total counts, not the number of paid calls: a fee charged
+on top of a price through the first or second router has no minimum, so anyone
+can add to it for the smallest fee. The number of paid calls is `payments`.
+
 ## Refunds and corrections
 
 The initial fee paths do not provide an automatic protocol-fee refund.
@@ -95,12 +110,18 @@ for fee-included payments from $0.05 to $100. It settles each payment from two
 USDC authorizations signed by the payer, one to the seller and one for the fee
 to the treasury, and emits the same `FeeCharged` event. Central City's own x402
 facilitator, `0xc8d6Bac2ff7182d22c4f316BffF9f713261A6cEC`, sends these
-settlements and pays their network fee in ETH; it never holds USDC. The first
+settlements and pays their network fee in ETH; it never receives USDC from
+settlements (both legs move straight from the payer). The first
 settlement through it was recorded in block 52807250 on 19 Oct 2026.
 
 Reporting must cover all three routers; check the API's coverage and
 completeness rather than assuming every historical block has already been
 indexed.
+
+On Arc (chain ID 5042), fee-included payments go through the third router's
+address on that chain, with the same treasury and 10% fee rule. Network fees there
+are paid in USDC, and Arc's transactions are on
+[explorer.arc.io](https://explorer.arc.io).
 
 On-chain evidence can be checked on Base using transaction receipts, emitting
 contracts, token transfers and event references. A successful HTTP response or

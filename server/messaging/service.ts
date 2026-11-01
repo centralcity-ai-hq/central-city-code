@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Database, Transaction as Tx } from '../database.js';
 import { hasPermission, iso, type StoredAgent, type Workspace } from '../model.js';
 import { messageDelivered } from '../wake/hooks.js';
+import { textOf } from '../wake/mentions.js';
 import { feedEnabled } from '../feed/flag.js';
 import {
   HIDES_PER_MINUTE,
@@ -19,7 +20,11 @@ import {
   type InboxSummaryPage,
   type MessagePart,
 } from './contract.js';
+import { rowsWithinPageBytes } from './body-limits.js';
 import { authorizeRoomPair, roomMemberNames, type RoomPair } from './room-direct.js';
+import { SENDER_CONTEXT_INDEX } from './sender-index-schema.js';
+import { storedOwnerKind } from '../rooms/owner-labels.js';
+import { partsContainCredential } from '../rooms/contract.js';
 
 /**
  * Agent messaging v0 (docs/MESSAGING.md). Every operation runs in one short transaction that
@@ -190,12 +195,6 @@ export function pairKey(first: string, second: string): [string, string] {
 }
 /** Latest messages of each inbox searched for the pair's current conversation (a bounded PK range). */
 const PAIR_LOOKBACK = 1000;
-/**
- * Newest sent rows of an owner searched for threads it only sent into (the conversation list).
- * Threads the owner received in are always found; a thread with no reply whose last send is older
- * than these rows is listed again when it gets a reply or a new send.
- */
-export const CONVERSATION_SEND_SCAN = 2000;
 
 /**
  * The id #61 (reverted) gave a pair's default conversation: an RFC 4122 version 5 UUID over the
@@ -266,6 +265,8 @@ export function createMessaging(d: MessagingDependencies): Messaging {
       context_id: row.context_id,
       reply_to: row.reply_to,
       parts: row.parts,
+      // The text parts joined, as room messages carry it (parts stay the full message).
+      text: textOf(row.parts),
       created_at: iso(Number(row.created_at)),
       room_id: row.room_id ?? null,
     };
@@ -525,6 +526,7 @@ export function createMessaging(d: MessagingDependencies): Messaging {
           name: pair.from.name,
           kind: pair.from.kind,
           owner_label: pair.from.ownerLabel,
+          owner_kind: pair.from.ownerKind,
           is_self: true,
           own: true,
         },
@@ -533,6 +535,7 @@ export function createMessaging(d: MessagingDependencies): Messaging {
           name: pair.to.name,
           kind: pair.to.kind,
           owner_label: pair.to.ownerLabel,
+          owner_kind: pair.to.ownerKind,
           is_self: false,
           own: pair.sameOwner,
         },
@@ -766,6 +769,10 @@ export function createMessaging(d: MessagingDependencies): Messaging {
     if (!parts.length) fail(400, 'invalid_arguments', 'Pass exactly one of text or parts.');
     if (Buffer.byteLength(JSON.stringify(parts)) > MESSAGE_LIMITS.totalBytes)
       fail(413, 'message_too_large', `Messages are limited to ${MESSAGE_LIMITS.totalBytes} bytes.`);
+    // CCA-624: the room post rule for every principal, before any budget, receipt or transaction,
+    // so a prompt-injected agent cannot be talked into sending a credential privately either.
+    if (partsContainCredential(parts))
+      fail(400, 'credential_in_message', 'Never include a Central City credential in a message.');
     const requestHash = sha(
       canonical({
         to: input.to_agent_id,
@@ -1135,8 +1142,10 @@ export function createMessaging(d: MessagingDependencies): Messaging {
             [agentId, before, limit + 1],
           )
         ).rows;
-        hasMore = rows.length > limit;
-        rows = rows.slice(0, limit).reverse();
+        // Newest first: the byte cap keeps the newest messages; `before` pages on from the oldest.
+        const fit = rowsWithinPageBytes(rows.slice(0, limit));
+        hasMore = rows.length > fit;
+        rows = rows.slice(0, fit).reverse();
       } else {
         const since = query.since ?? cursor.acked;
         rows = (
@@ -1145,8 +1154,9 @@ export function createMessaging(d: MessagingDependencies): Messaging {
             [agentId, since, limit + 1],
           )
         ).rows;
-        hasMore = rows.length > limit;
-        rows = rows.slice(0, limit);
+        const fit = rowsWithinPageBytes(rows.slice(0, limit));
+        hasMore = rows.length > fit;
+        rows = rows.slice(0, fit);
       }
       const names = await namesFor(
         tx,
@@ -1163,8 +1173,31 @@ export function createMessaging(d: MessagingDependencies): Messaging {
         unread: cursor.unread,
         next_since: messages.at(-1)?.seq ?? query.since ?? cursor.acked,
         has_more: hasMore,
+        ...(messages.length ? { next_actions: inboxNextActions(messages, cursor.acked) } : {}),
       };
     });
+  }
+
+  /**
+   * What to do with an inbox page: reply to the newest few (reply_to keeps the thread, and a
+   * private room message its room), then mark them handled. Surface-neutral tool names: members
+   * use city_send_message / city_ack_inbox, a room credential city_room_dm_send / _dm_ack.
+   * Only ids and seqs: never a sender's name (another owner's text) inside a server line.
+   */
+  function inboxNextActions(messages: readonly AgentMessage[], acked: number): string[] {
+    const replies = messages
+      .slice(-3)
+      .map(
+        (m) =>
+          `Reply to message ${m.seq} with reply_to: ${m.id} (city_send_message, or city_room_dm_send with a room credential).`,
+      );
+    const last = messages.at(-1)!.seq;
+    return last > acked
+      ? [
+          ...replies,
+          `Then mark them handled with seq: ${last} (city_ack_inbox, or city_room_dm_ack with a room credential).`,
+        ]
+      : replies;
   }
 
   async function ack(
@@ -1238,6 +1271,33 @@ export function createMessaging(d: MessagingDependencies): Messaging {
       conversation_reads r WHERE r.owner_id=${owner} AND r.context_id=m.context_id), -1)
       AND m.created_at > COALESCE((SELECT h.hidden_at FROM conversation_hidden h
       WHERE h.owner_id=${owner} AND h.context_id=m.context_id), -1)`;
+
+  // Whether every thread has its summary row (migration 302's backfill); once true it stays true.
+  let backfilledSeen = false;
+  async function summariesBackfilled(tx: Pick<Tx, 'query'>): Promise<boolean> {
+    if (backfilledSeen) return true;
+    const row = (
+      await tx.query<{ done: boolean }>(
+        'SELECT backfilled_at IS NOT NULL AS done FROM conversation_summaries_meta WHERE id',
+      )
+    ).rows[0];
+    backfilledSeen = row?.done === true;
+    return backfilledSeen;
+  }
+
+  // Whether messages_sender_owner_context (migration 305) exists and is valid. On a large table
+  // the owner builds it concurrently (scripts/lookup-indexes.ts); until then, or while a failed
+  // build left it invalid, the list reads the sent side without walking it. One catalog probe,
+  // only on the list's path before the summaries are backfilled.
+  async function senderContextIndexValid(tx: Pick<Tx, 'query'>): Promise<boolean> {
+    const row = (
+      await tx.query<{ valid: boolean }>(
+        `SELECT COALESCE((SELECT indisvalid FROM pg_index
+            WHERE indexrelid = to_regclass('${SENDER_CONTEXT_INDEX}')), false) AS valid`,
+      )
+    ).rows[0];
+    return row?.valid === true;
+  }
 
   // Whether room invitations exist on this database (migration 101); checked until they do.
   let invitationsTable = false;
@@ -1350,8 +1410,15 @@ export function createMessaging(d: MessagingDependencies): Messaging {
     // the room's member list shows (ownerLabel in connections/service.ts), never owner details.
     const labels = new Map(
       (
-        await tx.query<{ room_id: string; agent_id: string; owner_label: string }>(
-          `SELECT DISTINCT ON (room_id, agent_id) room_id, agent_id, owner_label FROM room_members
+        await tx.query<{
+          room_id: string;
+          agent_id: string;
+          owner_label: string;
+          owner_kind: string | null;
+          kind: string | null;
+        }>(
+          `SELECT DISTINCT ON (room_id, agent_id) room_id, agent_id, owner_label, owner_kind, kind
+            FROM room_members
             WHERE room_id = ANY($1::text[]) AND agent_id = ANY($2::text[])
             ORDER BY room_id, agent_id, joined_at DESC`,
           [
@@ -1359,13 +1426,23 @@ export function createMessaging(d: MessagingDependencies): Messaging {
             [...new Set(direct.flatMap((row) => [row.sender_id, row.recipient_id]))],
           ],
         )
-      ).rows.map((row) => [`${row.room_id}:${row.agent_id}`, row.owner_label]),
+      ).rows.map((row) => [
+        `${row.room_id}:${row.agent_id}`,
+        {
+          label: row.owner_label,
+          kind:
+            row.kind === 'person'
+              ? ('person' as const)
+              : storedOwnerKind(row.owner_kind, row.owner_label),
+        },
+      ]),
     );
     const side = (id: string, roomId: string, isSelf: boolean, own: boolean): DirectParty => ({
       id,
       name: members.get(id)?.name ?? 'Unknown member',
       kind: members.get(id)?.kind ?? ('agent' as const),
-      owner_label: labels.get(`${roomId}:${id}`) ?? null,
+      owner_label: labels.get(`${roomId}:${id}`)?.label ?? null,
+      owner_kind: labels.get(`${roomId}:${id}`)?.kind ?? null,
       is_self: isSelf,
       own,
     });
@@ -1397,13 +1474,43 @@ export function createMessaging(d: MessagingDependencies): Messaging {
   ): Promise<{ conversations: ConversationSummary[] }> {
     return d.db.transaction(async (tx) => {
       const workspace = await workspaceOf(tx, operatorId);
-      // The newest threads first, without reading the owner's whole history: the threads the
-      // owner received in come from a skip scan over (recipient_owner_id, context_id), one index
-      // probe per thread, and the threads the owner only sent into from the newest
-      // CONVERSATION_SEND_SCAN sent rows. Only the chosen page of threads is aggregated below.
+      // The newest threads first, without reading the owner's whole history. Once every thread
+      // has its summary row (migration 302, conversation_summaries_meta.backfilled_at), the page
+      // comes from conversation_summaries_recent, ordered by the newest message. Until then: a
+      // skip scan over (recipient_owner_id, context_id), one index probe per thread the owner
+      // received in, and the same over (sender_owner_id, context_id) (migration 305, R1-6), one
+      // probe per thread the owner sent into, each with its newest message by one more probe.
+      // Without that index (a large table the owner has not indexed yet) the sent side is one
+      // grouped read of the owner's sent rows: the same threads and times, at a cost linear in
+      // what the owner sent, instead of a walk that would rescan them for every thread.
+      const limited = Math.min(Math.max(limit, 1), 100);
+      const backfilled = await summariesBackfilled(tx);
+      const sent =
+        !backfilled && (await senderContextIndexValid(tx))
+          ? `WITH RECURSIVE sent(context_id) AS (
+             (SELECT context_id FROM messages WHERE sender_owner_id=$1 ORDER BY context_id LIMIT 1)
+             UNION ALL
+             SELECT (SELECT m.context_id FROM messages m WHERE m.sender_owner_id=$1
+                       AND m.context_id > sent.context_id ORDER BY m.context_id LIMIT 1)
+               FROM sent WHERE sent.context_id IS NOT NULL
+           ) SELECT s.context_id, (SELECT max(m.created_at) FROM messages m
+                        WHERE m.sender_owner_id=$1 AND m.context_id=s.context_id) AS last_at
+               FROM sent s WHERE s.context_id IS NOT NULL`
+          : `SELECT context_id, max(created_at) AS last_at FROM messages
+               WHERE sender_owner_id=$1 GROUP BY context_id`;
       const page = (
-        await tx.query<{ context_id: string }>(
-          `WITH RECURSIVE recv(context_id) AS (
+        backfilled
+          ? await tx.query<{ context_id: string }>(
+              `SELECT s.context_id FROM conversation_summaries s
+                WHERE s.owner_id=$1
+                  AND s.last_at > COALESCE((SELECT h.hidden_at FROM conversation_hidden h
+                        WHERE h.owner_id=$1 AND h.context_id=s.context_id), -1)
+                  AND ($3::text IS NULL OR $3 = ANY(s.senders) OR $3 = ANY(s.recipients))
+                ORDER BY s.last_at DESC, s.context_id LIMIT $2`,
+              [operatorId, limited, agentId ?? null],
+            )
+          : await tx.query<{ context_id: string }>(
+              `WITH RECURSIVE recv(context_id) AS (
              (SELECT context_id FROM messages WHERE recipient_owner_id=$1 ORDER BY context_id LIMIT 1)
              UNION ALL
              SELECT (SELECT m.context_id FROM messages m WHERE m.recipient_owner_id=$1
@@ -1415,8 +1522,7 @@ export function createMessaging(d: MessagingDependencies): Messaging {
                         WHERE m.recipient_owner_id=$1 AND m.context_id=r.context_id) AS last_at
                  FROM recv r WHERE r.context_id IS NOT NULL
                UNION ALL
-               SELECT context_id, created_at FROM (SELECT context_id, created_at FROM messages
-                 WHERE sender_owner_id=$1 ORDER BY created_at DESC LIMIT $4) s
+               SELECT context_id, last_at FROM (${sent}) s
              ) c GROUP BY context_id
            )
            SELECT c.context_id FROM candidates c
@@ -1428,39 +1534,79 @@ export function createMessaging(d: MessagingDependencies): Messaging {
                 OR EXISTS (SELECT 1 FROM messages m WHERE m.context_id=c.context_id
                              AND m.recipient_id=$3 AND m.recipient_owner_id=$1))
             ORDER BY c.last_at DESC, c.context_id LIMIT $2`,
-          [operatorId, Math.min(Math.max(limit, 1), 100), agentId ?? null, CONVERSATION_SEND_SCAN],
-        )
+              [operatorId, limited, agentId ?? null],
+            )
       ).rows.map((row) => row.context_id);
       if (!page.length) return { conversations: [] };
-      const groups = (
+      // Counts, participants and the newest message of each page thread: from its summary row
+      // when that counts every message (one primary-key read per thread, whatever its size);
+      // otherwise (a thread older than the summaries and not backfilled yet) aggregated as before.
+      const summaries = (
         await tx.query<{
           context_id: string;
           message_count: number | string;
           last_at: number | string;
           senders: string[];
           recipients: string[];
+          last_recipient_id: string;
+          last_seq: number | string;
         }>(
-          `SELECT context_id, count(*) AS message_count, max(created_at) AS last_at,
+          `SELECT context_id, message_count, last_at, senders, recipients, last_recipient_id, last_seq
+             FROM conversation_summaries
+            WHERE owner_id=$1 AND context_id = ANY($2::text[]) AND complete`,
+          [operatorId, page],
+        )
+      ).rows;
+      const summarized = new Set(summaries.map((row) => row.context_id));
+      const rest = page.filter((contextId) => !summarized.has(contextId));
+      const aggregated = rest.length
+        ? (
+            await tx.query<{
+              context_id: string;
+              message_count: number | string;
+              last_at: number | string;
+              senders: string[];
+              recipients: string[];
+            }>(
+              `SELECT context_id, count(*) AS message_count, max(created_at) AS last_at,
              jsonb_agg(DISTINCT sender_id) AS senders, jsonb_agg(DISTINCT recipient_id) AS recipients
            FROM messages WHERE context_id = ANY($2::text[])
              AND (recipient_owner_id=$1 OR sender_owner_id=$1)
            GROUP BY context_id`,
-          [operatorId, page],
-        )
-      ).rows.sort(
+              [operatorId, rest],
+            )
+          ).rows
+        : [];
+      const groups = [...summaries, ...aggregated].sort(
         (x, y) =>
           Number(y.last_at) - Number(x.last_at) ||
           (x.context_id < y.context_id ? -1 : x.context_id > y.context_id ? 1 : 0),
       );
       if (!groups.length) return { conversations: [] };
-      const latest = (
-        await tx.query<MessageRow>(
-          `SELECT DISTINCT ON (context_id) ${COLUMNS} FROM messages
+      const latest = [
+        ...(summaries.length
+          ? (
+              await tx.query<MessageRow>(
+                `SELECT ${COLUMNS} FROM messages
+                  WHERE (recipient_id, seq) IN (SELECT * FROM unnest($1::text[], $2::bigint[]))`,
+                [
+                  summaries.map((row) => row.last_recipient_id),
+                  summaries.map((row) => String(row.last_seq)),
+                ],
+              )
+            ).rows
+          : []),
+        ...(rest.length
+          ? (
+              await tx.query<MessageRow>(
+                `SELECT DISTINCT ON (context_id) ${COLUMNS} FROM messages
            WHERE (recipient_owner_id=$1 OR sender_owner_id=$1) AND context_id IN (SELECT jsonb_array_elements_text($2::jsonb))
            ORDER BY context_id, created_at DESC, seq DESC, id DESC`,
-          [operatorId, JSON.stringify(groups.map((group) => group.context_id))],
-        )
-      ).rows;
+                [operatorId, JSON.stringify(rest)],
+              )
+            ).rows
+          : []),
+      ];
       const names = await namesFor(
         tx,
         operatorId,
@@ -1548,8 +1694,9 @@ export function createMessaging(d: MessagingDependencies): Messaging {
             : [operatorId, contextId, limit + 1],
         )
       ).rows;
-      const hasMore = rows.length > limit;
-      const page = rows.slice(0, limit);
+      const fit = rowsWithinPageBytes(rows.slice(0, limit));
+      const hasMore = rows.length > fit;
+      const page = rows.slice(0, fit);
       const oldest = page.at(-1);
       const names = await namesFor(
         tx,
@@ -1633,9 +1780,10 @@ export function createMessaging(d: MessagingDependencies): Messaging {
         kind: string | null;
         name: string | null;
         owner_label: string;
+        owner_kind: string | null;
         own: boolean;
       }>(
-        `SELECT r.id AS room_id, r.name AS room_name, t.agent_id AS member_id, t.kind,
+        `SELECT r.id AS room_id, r.name AS room_name, t.agent_id AS member_id, t.kind, t.owner_kind,
             CASE WHEN t.kind='person' THEN t.display_name ELSE (
               SELECT a->>'name' FROM workspaces w CROSS JOIN LATERAL jsonb_array_elements(
                 CASE WHEN jsonb_typeof(w.data->'agents')='array' THEN w.data->'agents' ELSE '[]'::jsonb END) a
@@ -1677,6 +1825,11 @@ export function createMessaging(d: MessagingDependencies): Messaging {
         name: row.name,
         kind: row.kind === 'person' ? 'person' : 'agent',
         owner_label: row.own ? null : row.owner_label,
+        owner_kind: row.own
+          ? null
+          : row.kind === 'person'
+            ? 'person'
+            : storedOwnerKind(row.owner_kind, row.owner_label),
         own: row.own,
       });
       if (recipients.length >= RECIPIENT_CAP) break;

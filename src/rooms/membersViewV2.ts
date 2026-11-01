@@ -1,4 +1,4 @@
-import type { Member, MemberStatus } from './api';
+import type { Member, MemberStatus, OwnerKind } from './api';
 import { agentLabel } from './people';
 import { ELRIC_MEMBER_BADGE } from '../../shared/elric-copy';
 
@@ -27,7 +27,7 @@ export const isAi = (member: Member) => (member.kind ?? 'agent') === 'agent';
  */
 export function memberBadges(
   member: Member,
-  ownerOf: (label: string) => string | null,
+  ownerOf: (label: string, kind?: OwnerKind | null) => string | null,
 ): MemberBadge[] {
   const badges: MemberBadge[] = [];
   if (member.role === 'host') badges.push({ kind: 'host', text: 'Host' });
@@ -38,7 +38,7 @@ export function memberBadges(
     if (isElric(member)) badges.push({ kind: 'elric', text: ELRIC_MEMBER_BADGE });
     else if (member.own) badges.push({ kind: 'ai', text: 'AI · your agent' });
     else {
-      const owner = ownerOf(member.owner_label);
+      const owner = ownerOf(member.owner_label, member.owner_kind);
       badges.push({
         kind: 'ai',
         text: agentLabel(owner),

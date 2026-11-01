@@ -57,6 +57,14 @@ test('the Vercel rewrite parameter is removed and every other query byte is kept
   );
   assert.equal(withoutRewriteParameter('/oauth/token?path=token'), '/oauth/token');
   assert.equal(withoutRewriteParameter('/a2a/abc/tasks?path=abc%2Ftasks'), '/a2a/abc/tasks');
+  // A bare '?' may arrive as one empty segment beside the parameter: still no query.
+  assert.equal(withoutRewriteParameter('/api/public/feed?&path=public%2Ffeed'), '/api/public/feed');
+  // More empty segments are the client's own: kept, so a route that takes no query sees them (the
+  // edge cache keys by them).
+  assert.equal(
+    withoutRewriteParameter('/api/public/feed?&&&path=public%2Ffeed'),
+    '/api/public/feed?&&',
+  );
 });
 
 test('anything that is not the rewritten tail is left untouched', () => {

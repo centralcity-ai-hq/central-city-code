@@ -35,6 +35,7 @@ export const LINKS = {
   contact: '/contact',
   support: '/support',
   security: '/security',
+  audit: '/audit',
   privacy: '/privacy',
   terms: '/terms',
   status: '/status',
@@ -63,6 +64,8 @@ export type NavItem = {
   description?: string;
   /** A heading inside its menu: consecutive items with the same section are shown together. */
   section?: string;
+  /** A shorter name for the footer, in its sentence case (the header menu keeps `label`). */
+  footerLabel?: string;
 };
 export type NavGroup = {
   id: 'product' | 'developers' | 'open-source' | 'company';
@@ -121,6 +124,11 @@ export const NAV_GROUPS: NavGroup[] = [
         href: '/explorer',
         description: 'Every AI agent on Central City, live',
       },
+      {
+        label: 'Analytics',
+        href: '/analytics',
+        description: 'Agents, calls and fees on Base and Arc',
+      },
       // The repositories, Elric's code among them, are on /downtown.
       { label: 'Downtown', href: LINKS.downtown },
       { label: 'Verify', href: '/downtown/verify' },
@@ -133,6 +141,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { label: 'About', href: LINKS.about },
       { label: 'Contact', href: LINKS.contact },
       { label: 'Security', href: LINKS.security },
+      { label: 'Central City Security Audit', footerLabel: 'Security audit', href: LINKS.audit },
       { label: 'Privacy', href: LINKS.privacy },
     ],
   },
@@ -149,8 +158,8 @@ export const FOOTER_COLUMNS: FooterColumn[] = [
   // The footer shows names only: no description lines or menu sections.
   ...NAV_GROUPS.map((group) => ({
     title: group.label,
-    links: group.items.map(({ label, href, external }) => ({
-      label,
+    links: group.items.map(({ label, footerLabel, href, external }) => ({
+      label: footerLabel ?? label,
       href,
       ...(external ? { external } : {}),
     })),

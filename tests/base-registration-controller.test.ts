@@ -841,3 +841,33 @@ test('last answer: only the most recent ones are kept, and another person starts
   forgetAllStatuses();
   assert.equal(knownStatus('limit-new', 'ws-1'), null);
 });
+
+test('the sponsorship budget’s 503 says so plainly, on either chain', async () => {
+  const h = harness();
+  const id = agent('arc-budget');
+  const controller = await privateAgent(h, id, null);
+  controller.setChain(5042);
+  controller.askMakePublic();
+  controller.makePublicAndRegister();
+  await settle();
+  await h.open('PATCH')[0]!.reply(200, madePublic(id));
+  await h.open('POST')[0]!.reply(503, { error: 'x', code: 'sponsorship_budget' });
+  assert.match(controller.getSnapshot().error, /Nothing was signed or charged/);
+  assert.match(controller.getSnapshot().error, /try again later/);
+});
+
+test('a 503 on the register call names the chain the owner chose; Base reads as ever', async () => {
+  const h = harness();
+  const id = agent('arc-503');
+  const controller = await privateAgent(h, id, null);
+  controller.setChain(5042);
+  controller.askMakePublic();
+  controller.makePublicAndRegister();
+  await settle();
+  await h.open('PATCH')[0]!.reply(200, madePublic(id));
+  await h.open('POST')[0]!.reply(503, {
+    error: 'The network fee could exceed its budget, so nothing was signed or sent.',
+    code: 'fee_cap_exceeded',
+  });
+  assert.equal(controller.getSnapshot().error, 'Arc registration isn’t available right now.');
+});

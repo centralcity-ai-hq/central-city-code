@@ -3,11 +3,17 @@ import test from 'node:test';
 import Fastify from 'fastify';
 import { PGlite } from '@electric-sql/pglite';
 import type { Database } from '../server/database.js';
+import {
+  FEED_PAY_SPONSOR_FLEET_CEILING_SQL,
+  FEED_PAY_SPONSOR_FLEET_CEILING_40_SQL,
+} from '../server/feed/pay/sponsor-ceiling-schema.js';
 import { FEED_PAY_SPONSOR_SQL } from '../server/feed/pay/sponsor-schema.js';
+import { FEED_PAY_SPONSORED_SQL } from '../server/feed/pay/sponsored.js';
 import {
   createSponsorCredits,
   sponsorConfig,
   SFP_CREDIT_CEILING_RAW,
+  SFP_FLEET_CREDIT_CEILING_RAW,
   type SponsorRequest,
 } from '../server/feed/pay/sponsor.js';
 import { registerSponsorStatsRoute, SFP_STATS_PATH } from '../server/feed/pay/sponsor-routes.js';
@@ -33,6 +39,14 @@ async function setup(
     CREATE TABLE operator_links (human_operator_id text, ai_operator_id text);
     CREATE TABLE elric_verified_identities (operator_id text);`);
   await pg.exec(FEED_PAY_SPONSOR_SQL);
+  // Migrations 260 and 307 widen the credit's CHECK to 40 USDC; only the fleets get there.
+  for (const sql of [FEED_PAY_SPONSOR_FLEET_CEILING_SQL, FEED_PAY_SPONSOR_FLEET_CEILING_40_SQL])
+    await pg.exec(
+      sql
+        .split(';')
+        .filter((s) => s.includes('feed_pay_sponsor_credits'))
+        .join(';'),
+    );
   const db: Database = {
     query: (sql, params) => pg.query(sql, params) as never,
     exec: (sql) => pg.exec(sql),
@@ -115,6 +129,191 @@ test('sponsorConfig is off unless enabled with a start, and clamps the credit to
   // Unset: a first service up to 2 USDC, fee included.
   const plain = sponsorConfig({ CITY_SFP_ENABLED: '1', CITY_SFP_START_MS: String(START) })!;
   assert.equal(plain.creditMaxRaw, 2_000_000n);
+  // The fleets' own limit: unset follows the normal limit; set, it is clamped to 40 USDC.
+  assert.equal(plain.fleetCreditMaxRaw, 2_000_000n);
+  const lower = sponsorConfig({
+    CITY_SFP_ENABLED: '1',
+    CITY_SFP_START_MS: String(START),
+    CITY_SFP_CREDIT_MAX_RAW: '500000',
+  })!;
+  assert.equal(lower.fleetCreditMaxRaw, 500_000n, 'unset: the normal limit, whatever it is');
+  const fleet = (raw: string) =>
+    sponsorConfig({
+      CITY_SFP_ENABLED: '1',
+      CITY_SFP_START_MS: String(START),
+      CITY_SFP_FLEET_CREDIT_MAX_RAW: raw,
+    })!;
+  assert.equal(fleet('20000000').fleetCreditMaxRaw, 20_000_000n);
+  assert.equal(fleet('20000000').creditMaxRaw, 2_000_000n, 'real users stay at 2 USDC');
+  assert.equal(fleet('40000000').fleetCreditMaxRaw, 40_000_000n);
+  assert.equal(fleet('40000000').creditMaxRaw, 2_000_000n, 'real users stay at 2 USDC');
+  assert.equal(SFP_FLEET_CREDIT_CEILING_RAW, 40_000_000n);
+  assert.equal(fleet('40000001').fleetCreditMaxRaw, 40_000_000n);
+  assert.equal(fleet('90000000').fleetCreditMaxRaw, SFP_FLEET_CREDIT_CEILING_RAW);
+  assert.equal(fleet('abc').fleetCreditMaxRaw, 2_000_000n, 'unreadable: the normal limit');
+});
+
+test('fleet credit limit: fleet agents buy up to CITY_SFP_FLEET_CREDIT_MAX_RAW, real users stay at 2 USDC', async (t) => {
+  const f = await setup(t, {
+    CITY_SFP_FLEET_WORKSPACES: 'ws-fleet-o',
+    CITY_SFP_FLEET_OFFERS: 'offer-20',
+    CITY_SFP_FLEET_CREDIT_MAX_RAW: '40000000',
+    CITY_SFP_DAILY_BUDGET_RAW: '1000000000000',
+  });
+  await f.owner('owner-fleet', { verified: false });
+  const fleetBuy = (agentId: string, priceRaw: bigint) =>
+    request(agentId, {
+      operatorId: 'ws-fleet-o',
+      ownerAccountId: 'owner-fleet',
+      offerId: 'offer-20',
+      priceRaw,
+    });
+  await f.rawAgent('f20');
+  assert.deepEqual(await f.credits.reserve(fleetBuy('f20', 40_000_000n)), { ok: true });
+  const held = await f.pg.query<{ amount_raw: string; fleet: boolean }>(
+    "SELECT amount_raw::text AS amount_raw, fleet FROM feed_pay_sponsor_credits WHERE agent_id = 'f20'",
+  );
+  assert.equal(held.rows[0]!.amount_raw, '40000000', 'the 40 USDC credit fits the table');
+  assert.equal(held.rows[0]!.fleet, true, 'stored as a fleet credit, from the server config');
+  await f.rawAgent('f21');
+  assert.deepEqual(await f.credits.reserve(fleetBuy('f21', 40_000_001n)), {
+    ok: false,
+    reason: 'over_price',
+  });
+  // A real user with the same price is refused: the fleets' limit is theirs alone.
+  await f.agent('u20');
+  assert.deepEqual(await f.credits.reserve(request('u20', { priceRaw: 40_000_000n })), {
+    ok: false,
+    reason: 'over_price',
+  });
+  assert.deepEqual(await f.credits.reserve(request('u20', { priceRaw: 2_000_001n })), {
+    ok: false,
+    reason: 'over_price',
+  });
+  assert.deepEqual(await f.credits.reserve(request('u20', { priceRaw: 2_000_000n })), { ok: true });
+  const user = await f.pg.query<{ fleet: boolean }>(
+    "SELECT fleet FROM feed_pay_sponsor_credits WHERE agent_id = 'u20'",
+  );
+  assert.equal(user.rows[0]!.fleet, false, "a real user's credit is never stored as fleet");
+  // The day's budget counts the 40 USDC credit like any other.
+  const day = await f.pg.query<{ spent: string }>(
+    'SELECT spent_raw::text AS spent FROM feed_pay_sponsor_days',
+  );
+  assert.equal(day.rows[0]!.spent, '42000000');
+});
+
+test('migration 307: fleet CHECKs up to 40 USDC, real users still 2 USDC; old rows stay', async (t) => {
+  const pg = await PGlite.create('memory://');
+  t.after(() => pg.close());
+  await pg.exec(FEED_PAY_SPONSOR_SQL);
+  await pg.exec(FEED_PAY_SPONSORED_SQL);
+  await pg.exec(FEED_PAY_SPONSOR_FLEET_CEILING_SQL);
+  await pg.exec(
+    `INSERT INTO feed_pay_sponsor_credits
+       (agent_id, chain_id, owner_account_id, call_id, amount_raw, state, created_at, updated_at, fleet)
+     VALUES ('old-fleet', 8453, 'o', 'c-old-fleet', 20000000, 'used', 1, 1, true)`,
+  );
+  await pg.exec(FEED_PAY_SPONSOR_FLEET_CEILING_40_SQL);
+  const credit = (id: string, raw: number, fleet: boolean) =>
+    pg.query(
+      `INSERT INTO feed_pay_sponsor_credits
+         (agent_id, chain_id, owner_account_id, call_id, amount_raw, state, created_at, updated_at, fleet)
+       VALUES ($1, 8453, 'o', $2, $3, 'reserved', 1, 1, $4)`,
+      [id, `c-${id}`, raw, fleet],
+    );
+  await credit('fleet-40', 40_000_000, true);
+  await assert.rejects(credit('fleet-over', 40_000_001, true), /check/i, 'a fleet: 40 USDC');
+  await credit('user-2', 2_000_000, false);
+  await assert.rejects(credit('user-over', 2_000_001, false), /check/i, 'a real user: 2 USDC');
+  await assert.rejects(credit('user-40', 40_000_000, false), /check/i);
+  const call = (id: string, raw: number, fleet: boolean) =>
+    pg.query(
+      `INSERT INTO feed_pay_sponsored_calls (call_id, owner_account_id, idempotency_key,
+         request_hash, operator_id, agent_id, service_id, offer_id, offer_kind, offer_version,
+         pay_to, gross_raw, fee_raw, input, state, op_key, created_at, updated_at, fleet)
+       VALUES ($1, 'o', $1, 'h', 'w', 'a', 's', 'f', 'k', 1, '0x1', $2, 1, '', 'reserved', $1, 1, 1, $3)`,
+      [id, raw, fleet],
+    );
+  await call('call-fleet-40', 40_000_000, true);
+  await assert.rejects(call('call-fleet-over', 40_000_001, true), /check/i);
+  await assert.rejects(call('call-user-40', 40_000_000, false), /check/i);
+  await assert.rejects(call('call-user-over', 2_000_001, false), /check/i);
+  await call('call-user-2', 2_000_000, false);
+  // Running it again changes nothing.
+  await pg.exec(FEED_PAY_SPONSOR_FLEET_CEILING_40_SQL);
+  const { rows } = await pg.query<{ n: number }>(
+    'SELECT COUNT(*)::int AS n FROM feed_pay_sponsor_credits',
+  );
+  assert.equal(rows[0]!.n, 3);
+});
+
+test('migration 260: kind-specific CHECKs, 2 USDC unless fleet, fleet up to 20 USDC; old rows stay', async (t) => {
+  const pg = await PGlite.create('memory://');
+  t.after(() => pg.close());
+  await pg.exec(FEED_PAY_SPONSOR_SQL);
+  await pg.exec(FEED_PAY_SPONSORED_SQL);
+  // A row an older build wrote (no fleet column yet).
+  await pg.exec(
+    "INSERT INTO feed_pay_sponsor_credits VALUES ('old', 8453, 'o', 'c-old', 2000000, 'used', 1, 1)",
+  );
+  await pg.exec(FEED_PAY_SPONSOR_FLEET_CEILING_SQL);
+  const old = await pg.query<{ fleet: boolean }>(
+    "SELECT fleet FROM feed_pay_sponsor_credits WHERE agent_id = 'old'",
+  );
+  assert.equal(old.rows[0]!.fleet, false, 'existing rows are real-user kind');
+  const credit = (id: string, raw: number, fleet?: boolean) =>
+    fleet === undefined
+      ? // An older build's insert: no fleet column, so the default (false) applies.
+        pg.query(
+          `INSERT INTO feed_pay_sponsor_credits VALUES ($1, 8453, 'o', $2, $3, 'reserved', 1, 1)`,
+          [id, `c-${id}`, raw],
+        )
+      : pg.query(
+          `INSERT INTO feed_pay_sponsor_credits
+             (agent_id, chain_id, owner_account_id, call_id, amount_raw, state, created_at, updated_at, fleet)
+           VALUES ($1, 8453, 'o', $2, $3, 'reserved', 1, 1, $4)`,
+          [id, `c-${id}`, raw, fleet],
+        );
+  await credit('user-2', 2_000_000, false);
+  await assert.rejects(credit('user-over', 2_000_001, false), /check/i, 'a real user: 2 USDC');
+  await assert.rejects(credit('user-20', 20_000_000, false), /check/i);
+  await assert.rejects(credit('legacy-20', 20_000_000), /check/i, 'an older build: 2 USDC');
+  await credit('legacy-2', 2_000_000);
+  await credit('fleet-20', 20_000_000, true);
+  await assert.rejects(credit('fleet-over', 20_000_001, true), /check/i, 'a fleet: 20 USDC');
+  await assert.rejects(credit('fleet-zero', 0, true), /check/i);
+  // A credit's kind cannot be flipped to hide a dear amount, nor a real user's raised past 2.
+  await assert.rejects(
+    pg.query("UPDATE feed_pay_sponsor_credits SET fleet = false WHERE agent_id = 'fleet-20'"),
+    /check/i,
+  );
+  await assert.rejects(
+    pg.query("UPDATE feed_pay_sponsor_credits SET amount_raw = 3000000 WHERE agent_id = 'user-2'"),
+    /check/i,
+  );
+  // The sponsored call row: the same kind-specific bound.
+  const call = (id: string, raw: number, fleet: boolean) =>
+    pg.query(
+      `INSERT INTO feed_pay_sponsored_calls (call_id, owner_account_id, idempotency_key,
+         request_hash, operator_id, agent_id, service_id, offer_id, offer_kind, offer_version,
+         pay_to, gross_raw, fee_raw, input, state, op_key, created_at, updated_at, fleet)
+       VALUES ($1, 'o', $1, 'h', 'w', 'a', 's', 'f', 'k', 1, '0x1', $2, 1, '', 'reserved', $1, 1, 1, $3)`,
+      [id, raw, fleet],
+    );
+  await call('call-fleet-20', 20_000_000, true);
+  await assert.rejects(call('call-fleet-over', 20_000_001, true), /check/i);
+  await assert.rejects(call('call-user-20', 20_000_000, false), /check/i);
+  await call('call-user-2', 2_000_000, false);
+  // Running it again changes nothing (columns IF NOT EXISTS, constraints replaced by name).
+  await pg.exec(FEED_PAY_SPONSOR_FLEET_CEILING_SQL);
+  const { rows } = await pg.query<{ n: number }>(
+    'SELECT COUNT(*)::int AS n FROM feed_pay_sponsor_credits',
+  );
+  assert.equal(
+    rows[0]!.n,
+    4,
+    'old, user-2, legacy-2 and fleet-20; every refused one wrote nothing',
+  );
 });
 
 test('one credit per eligible agent: reserved once, released and reserved again, used for good', async (t) => {

@@ -332,3 +332,19 @@ test('manifest update: keeps the stored visibility in step and cannot make a Bas
   assert.equal(renamed.statusCode, 200, renamed.body);
   assert.equal(renamed.json().agent.visibility, 'public');
 });
+
+test('an Arc agent is told its Arc profile stays public, never Base', async (t) => {
+  const { app, cookie } = await fixture(t);
+  const arc = await agent(app, cookie, 'Arc Scout', { visibility: 'public' });
+  const ownerId = (await app.city.db.query<{ id: string }>('SELECT id FROM operators')).rows[0]!.id;
+  await app.city.db.query(
+    `INSERT INTO base_identities (agent_id, chain_id, operator_id, registry_address,
+       agent_card_uri, owner_of_identity, state, updated_at)
+     VALUES ($1, 5042, $2, $3, 'https://example.test/a/abc123', $4, 'pending', 1)`,
+    [arc, ownerId, `0x${'8'.repeat(40)}`, `0x${'1'.repeat(40)}`],
+  );
+  const refused = await patch(app, cookie, arc, { visibility: 'private' });
+  assert.equal(refused.statusCode, 409, refused.body);
+  assert.equal(refused.json().error, "An Arc agent's profile stays public.");
+  assert.equal(refused.json().code, 'base_stays_public');
+});

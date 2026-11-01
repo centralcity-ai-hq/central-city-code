@@ -1,0 +1,57 @@
+{
+  "title": "Central City Security Audit",
+  "version": "1.1",
+  "date": "2026-10-27",
+  "draft": false,
+  "reportCommit": "88e7aab8b09079e73c674befa03b76fac35bba5b",
+  "pdf": {
+    "path": "/audit/central-city-audit-2026-10-v1.1.pdf",
+    "bytes": 924294,
+    "pages": 34,
+    "sha256": "8228bd525afaee319c663163fd74e3c4122fee349a6701a143ebe572c37998c0"
+  },
+  "github": "https://github.com/centralcity-ai-hq/central-city-code/tree/main/audits/2026-10-v1.1",
+  "summary": {
+    "statuses": [
+      "Fixed"
+    ],
+    "rows": {
+      "Critical": {
+        "byStatus": {
+          "Fixed": 0
+        },
+        "total": 0
+      },
+      "High": {
+        "byStatus": {
+          "Fixed": 0
+        },
+        "total": 0
+      },
+      "Medium": {
+        "byStatus": {
+          "Fixed": 0
+        },
+        "total": 0
+      },
+      "Low": {
+        "byStatus": {
+          "Fixed": 9
+        },
+        "total": 9
+      },
+      "Info": {
+        "byStatus": {
+          "Fixed": 5
+        },
+        "total": 5
+      }
+    },
+    "total": {
+      "byStatus": {
+        "Fixed": 14
+      },
+      "total": 14
+    }
+  }
+}

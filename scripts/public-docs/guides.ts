@@ -38,7 +38,7 @@ export interface Guide {
 /** The placeholder module whose content the plugin replaces. */
 const CONTENT_MODULE = 'src/docs/guide-content.ts';
 
-function sourceOf(slug: GuideSlug) {
+function sourceOf(slug: string) {
   const doc = PUBLIC_DOCS.find((entry) => entry.slug === slug);
   if (!doc) throw new Error(`public-doc-guides: no public doc "${slug}"`);
   return doc;
@@ -55,27 +55,50 @@ function withoutPositions(root: Root): Root {
   return root;
 }
 
+/** The parsed Markdown of one public doc: exactly the text served at /docs/<slug>.md. */
+function parsedDoc(root: string, slug: string): Root {
+  const doc = sourceOf(slug);
+  const markdown = renderPublicDoc(doc, readFileSync(join(root, 'docs', doc.source), 'utf8'));
+  assertPublicSafe(`docs/${slug}.md`, markdown);
+  const tree = fromMarkdown(markdown, {
+    extensions: [gfm()],
+    mdastExtensions: [gfmFromMarkdown()],
+  });
+  return withoutPositions(tree);
+}
+
 /** The parsed Markdown of each guide: exactly the text served at /docs/<slug>.md. */
 export function renderGuides(root: string): Guide[] {
   return GUIDE_SLUGS.map((slug) => {
     const doc = sourceOf(slug);
-    const markdown = renderPublicDoc(doc, readFileSync(join(root, 'docs', doc.source), 'utf8'));
-    assertPublicSafe(`docs/${slug}.md`, markdown);
-    const tree = fromMarkdown(markdown, {
-      extensions: [gfm()],
-      mdastExtensions: [gfmFromMarkdown()],
-    });
-    return { slug, title: doc.title, summary: doc.summary, tree: withoutPositions(tree) };
+    return { slug, title: doc.title, summary: doc.summary, tree: parsedDoc(root, slug) };
   });
+}
+
+/**
+ * The Central City Security Audit (/audit, a trust page: src/trust/Audit.tsx) is rendered the same way from
+ * /docs/audit.md. It has its own module, so only that page loads the report's text.
+ */
+export const AUDIT_SLUG = 'audit';
+const AUDIT_MODULE = 'src/trust/audit-content.ts';
+
+export function renderAudit(root: string): Root {
+  return parsedDoc(root, AUDIT_SLUG);
 }
 
 export function publicDocGuides(root: string): Plugin {
   const content = normalizePath(join(root, CONTENT_MODULE)).toLowerCase();
+  const audit = normalizePath(join(root, AUDIT_MODULE)).toLowerCase();
   return {
     name: 'central-city:public-doc-guides',
     enforce: 'pre',
     load(id) {
-      if (normalizePath(id.split('?')[0]!).toLowerCase() !== content) return null;
+      const file = normalizePath(id.split('?')[0]!).toLowerCase();
+      if (file === audit) {
+        this.addWatchFile(join(root, 'docs', sourceOf(AUDIT_SLUG).source));
+        return `export default ${JSON.stringify(renderAudit(root))};`;
+      }
+      if (file !== content) return null;
       for (const slug of GUIDE_SLUGS) this.addWatchFile(join(root, 'docs', sourceOf(slug).source));
       return `export default ${JSON.stringify(renderGuides(root))};`;
     },

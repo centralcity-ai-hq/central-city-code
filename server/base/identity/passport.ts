@@ -4,9 +4,12 @@
  * the test network when both exist.
  * Reads only confirmed rows and only the final `erc8004_agent_id`; the identity service's
  * provisional columns (migration 85: provisional_agent_id, mint_*, handover_*) are never read here.
+ * An id its holder moved away (identity/moves.ts: transferred, or its agent URI pointed elsewhere)
+ * gives no passport until it is re-verified.
  */
 import type { Database } from '../../database.js';
 import type { PassportInput } from '../../../shared/base/passport.js';
+import { NOT_MOVED } from './moves.js';
 
 export async function basePassport(db: Database, agentId: string): Promise<PassportInput | null> {
   const { rows } = await db.query<{
@@ -23,6 +26,7 @@ export async function basePassport(db: Database, agentId: string): Promise<Passp
      JOIN base_wallets w ON w.agent_id = i.agent_id AND w.chain_id = i.chain_id
      JOIN base_short_ids s ON s.agent_id = i.agent_id
      WHERE i.agent_id = $1 AND i.state = 'confirmed' AND i.erc8004_agent_id IS NOT NULL
+       AND ${NOT_MOVED}
      ORDER BY (i.chain_id = 8453) DESC, i.chain_id
      LIMIT 1`,
     [agentId],

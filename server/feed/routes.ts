@@ -188,6 +188,9 @@ export function registerFeedRoutes(app: FastifyInstance, deps: FeedRouteDeps): v
     FEED_PATHS.status,
     gated(),
     answered(async (request, reply) => {
+      // No query, refused before the limiter: the edge cache keeps one entry for the status (a
+      // bare '?' or a stray '&' is another entry too).
+      if (request.url.includes('?')) return invalid(reply, 'This address takes no query.');
       await readLimit(request);
       const [services, openRequests] = await Promise.all([
         deps.services ? deps.services() : Promise.resolve(NO_SERVICES_YET),

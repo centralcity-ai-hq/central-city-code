@@ -16,11 +16,14 @@ import {
   OWN_PAYMASTER_KEYS_SQL,
   PAYMASTER_KEYS_PATH,
   PAYMASTER_PUBLIC_PATH,
+  paymasterKeySettingsMismatch,
+  provisionedPaymasterKeys,
   provisionPaymasterKeys,
   provisionPaymasterKeysAtStart,
   registerOwnPaymasterKeysRoute,
   registerPaymasterPublicRoute,
 } from '../server/base/chain/own-paymaster-keys.js';
+import { createDirectBundler } from '../server/base/chain/direct-bundler.js';
 import {
   SPONSOR_DATA_BYTES,
   sponsoredValidUntil,
@@ -302,28 +305,30 @@ test('paymaster keys: 404 without the ops secret, nothing created', async (t) =>
   );
 });
 
-test('paymaster keys: signer + 2 submitters, distinct, committed, idempotent; addresses and refs only', async (t) => {
+test('paymaster keys: signer + 2 submitters, distinct, committed, idempotent; addresses only, never keyRefs (CCA-716)', async (t) => {
   const { app, pg } = await setup(t, { CITY_OPS_SECRET: SECRET, CITY_BASE_SPENDER_KEK: KEK });
   const first = await post(app, `Bearer ${SECRET}`);
   assert.equal(first.statusCode, 200);
   assert.equal(first.headers['cache-control'], 'no-store');
   const body = first.json() as {
-    signer: { address: string; keyRef: string };
-    submitters: Array<{ address: string; keyRef: string }>;
-    env: Record<string, string>;
+    signer: { address: string };
+    submitters: Array<{ address: string }>;
   };
+  assert.deepEqual(Object.keys(body).sort(), ['signer', 'submitters']);
   const addresses = [body.signer.address, ...body.submitters.map((s) => s.address)];
   assert.equal(new Set(addresses.map((a) => a.toLowerCase())).size, 3, 'three different keys');
   for (const key of [body.signer, ...body.submitters]) {
-    assert.deepEqual(Object.keys(key).sort(), ['address', 'keyRef']);
-    assert.match(key.keyRef, /^v1:[0-9a-f-]{36}$/);
+    assert.deepEqual(Object.keys(key), ['address']);
+    assert.match(key.address, /^0x[0-9a-fA-F]{40}$/);
   }
-  assert.equal(body.env.CITY_BASE_PAYMASTER_SIGNER_KEY_REF, body.signer.keyRef);
-  // The canary config activates ONE lane (submitter 1); submitter 2 is listed, never activated.
-  assert.equal(body.env.CITY_BASE_SUBMITTER_KEY_REFS, body.submitters[0]!.keyRef);
-  assert.equal(
-    (body as unknown as { laterLaneKeyRef: string }).laterLaneKeyRef,
-    body.submitters[1]!.keyRef,
+  assert.doesNotMatch(first.body, /v1:|keyRef|key_ref|KEY_REF/);
+  const recorded = await pg.query<{ address: string }>(
+    "SELECT address FROM own_paymaster_keys ORDER BY array_position(ARRAY['paymaster_signer','paymaster_submitter_1','paymaster_submitter_2'], purpose)",
+  );
+  assert.deepEqual(
+    recorded.rows.map((r) => r.address),
+    addresses,
+    'the recorded keys, in order',
   );
   assert.deepEqual(
     (await post(app, `Bearer ${SECRET}`)).json(),
@@ -399,6 +404,73 @@ test('prepare mode at start: off does nothing; prepare provisions once; no KEK n
   assert.equal(await count(), 3, 'one key per purpose, whatever the concurrency');
   assert.equal(await provisionPaymasterKeysAtStart({ db, env }), 'ready');
   assert.equal(await count(), 3);
+});
+
+test('key settings are asserted against the recorded keys; a mismatch fails closed at start and in the bundler (CCA-716)', async (t) => {
+  const { pg } = await setup(t, {});
+  const db = {
+    query: (sql: string, params?: unknown[]) => pg.query(sql, params) as never,
+    transaction: (action: (tx: never) => Promise<unknown>) =>
+      pg.transaction((tx) => action(tx as never)),
+  } as unknown as Database;
+  const base = { CITY_BASE_OWN_PAYMASTER: 'prepare', CITY_BASE_SPENDER_KEK: KEK };
+  // Set before the keys exist: nothing recorded can match it.
+  assert.deepEqual(
+    paymasterKeySettingsMismatch(
+      { CITY_BASE_PAYMASTER_SIGNER_KEY_REF: 'v1:fake' },
+      await provisionedPaymasterKeys(db),
+    ),
+    'CITY_BASE_PAYMASTER_SIGNER_KEY_REF',
+  );
+  assert.equal(
+    await provisionPaymasterKeysAtStart({ db, env: base }),
+    'ready',
+    'unset: no assertion',
+  );
+  const keys = await provisionedPaymasterKeys(db);
+  const ref = (purpose: 'paymaster_signer' | 'paymaster_submitter_1' | 'paymaster_submitter_2') =>
+    keys.get(purpose)!.keyRef;
+  const matching = {
+    ...base,
+    CITY_BASE_PAYMASTER_SIGNER_KEY_REF: ref('paymaster_signer'),
+    CITY_BASE_SUBMITTER_KEY_REFS: `${ref('paymaster_submitter_1')}, ${ref('paymaster_submitter_2')}`,
+  };
+  assert.equal(paymasterKeySettingsMismatch(matching, keys), null);
+  assert.equal(await provisionPaymasterKeysAtStart({ db, env: matching }), 'ready');
+  const mismatches: Array<[Record<string, string>, string]> = [
+    [
+      { ...matching, CITY_BASE_PAYMASTER_SIGNER_KEY_REF: ref('paymaster_submitter_1') },
+      'CITY_BASE_PAYMASTER_SIGNER_KEY_REF',
+    ],
+    [
+      { ...matching, CITY_BASE_SUBMITTER_KEY_REFS: ref('paymaster_submitter_2') },
+      'CITY_BASE_SUBMITTER_KEY_REFS',
+    ],
+    [
+      { ...matching, CITY_BASE_SUBMITTER_KEY_REFS: `${ref('paymaster_submitter_1')},v1:fake` },
+      'CITY_BASE_SUBMITTER_KEY_REFS',
+    ],
+  ];
+  for (const [env, setting] of mismatches) {
+    assert.equal(paymasterKeySettingsMismatch(env, keys), setting);
+    assert.equal(await provisionPaymasterKeysAtStart({ db, env }), 'settings_mismatch');
+    // Our own bundler refuses to be built (CDP keeps serving); the error names the setting only.
+    await assert.rejects(
+      createDirectBundler({
+        db,
+        env: { ...env, CITY_BASE_OWN_PAYMASTER: 'on', CITY_BASE_BUNDLER: 'direct' },
+        client: {} as never,
+        chainId: 8453,
+        network: {} as never,
+        keystore: {} as never,
+      }),
+      (error: Error) => {
+        assert.match(error.message, new RegExp(`${setting} does not match`));
+        assert.doesNotMatch(error.message, /v1:/);
+        return true;
+      },
+    );
+  }
 });
 
 test('GET /api/public/paymaster: 404 while off; public addresses only, never keyRefs; it creates nothing', async (t) => {

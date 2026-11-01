@@ -37,6 +37,7 @@ import {
 } from '../src/base/vault/index.js';
 import { SIGNATURE_REFUSED } from '../src/base/vault/vault.js';
 import { pageOutOfDate, STALE_PAGE, StalePageError } from '../src/base/stalePage.js';
+import { setSignedInPerson } from '../src/base/signedInPerson.js';
 import { networkProblem, UNSUPPORTED_NETWORK } from '../src/base/wallet/api.js';
 import { BASE_MAINNET, BASE_SEPOLIA } from '../shared/base/chains.js';
 import { WALLET_CHAIN_ID } from '../shared/base/wallet-network.js';
@@ -128,8 +129,8 @@ test('a sealed key opens with its password only; its envelope is exactly what th
   assert.ok(vaultCiphertextAllowed(envelope.encryptedKey));
   assert.equal(await openKey(envelope, PASSWORD, owner.address), `0x${'42'.repeat(32)}`);
   // The same password typed in another Unicode form opens it too.
-  const accented = await sealKey(`0x${'42'.repeat(32)}`, 'café 12345678');
-  assert.equal(await openKey(accented, 'café 12345678'), `0x${'42'.repeat(32)}`);
+  const accented = await sealKey(`0x${'42'.repeat(32)}`, 'café au lait 7319');
+  assert.equal(await openKey(accented, 'café au lait 7319'), `0x${'42'.repeat(32)}`);
   await assert.rejects(openKey(envelope, `${PASSWORD}!`), (e: unknown) => {
     assert.ok(e instanceof VaultCryptoError);
     assert.equal(e.code, 'wrong_password');
@@ -232,6 +233,13 @@ test('a weak password is refused before anything is read, derived or written', a
       sealKey(`0x${'42'.repeat(32)}`, weak),
       (e: unknown) => (e as VaultCryptoError).code === 'weak_password',
     );
+  }
+  // The signed-in person's account name is refused too (CCA-101).
+  setSignedInPerson('person-1', 'marlowe-quinn');
+  try {
+    await assert.rejects(createVault('marlowe-quinn vault 2026'), /account name/);
+  } finally {
+    setSignedInPerson(null);
   }
   assert.equal(sent.length, 0, 'no request was made for a weak password');
   // A cost outside the contract is refused before deriving (fast), never stored.

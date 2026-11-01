@@ -1,3 +1,4 @@
+import { FEED_PAY_SPONSOR_FLEET_CEILING_SQL } from '../server/feed/pay/sponsor-ceiling-schema.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { PGlite } from '@electric-sql/pglite';
@@ -14,7 +15,7 @@ import type { FeedPayOp } from '../server/base/chain/feed-pay-chain.js';
 import type { Router3FacilitatorPort } from '../server/feed/pay/router3.js';
 import { FEED_PAY_SPONSOR_SQL } from '../server/feed/pay/sponsor-schema.js';
 import { createSponsorCredits } from '../server/feed/pay/sponsor.js';
-import { createSponsorSigner } from '../server/feed/pay/sponsor-signer.js';
+import { createSponsorSigner, pgSponsorReservations } from '../server/feed/pay/sponsor-signer.js';
 import {
   createSponsoredCalls,
   FEED_PAY_SPONSORED_SQL,
@@ -99,6 +100,7 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }) {
     CREATE TABLE elric_verified_identities (operator_id text PRIMARY KEY);`);
   await pg.exec(FEED_PAY_SPONSOR_SQL);
   await pg.exec(FEED_PAY_SPONSORED_SQL);
+  await pg.exec(FEED_PAY_SPONSOR_FLEET_CEILING_SQL);
   // The buyer: owner o1 (verified, onboarded) with agent a1 in workspace ws1, identity final.
   await pg.exec(`INSERT INTO operators VALUES ('o1','x','owner'), ('o2','x','owner');
     INSERT INTO elric_verified_identities VALUES ('o1');
@@ -130,6 +132,8 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }) {
     now: () => clock.now,
     router: ROUTER,
     treasuryOf: async () => TREASURY,
+    // The signer reads the stored reservation itself (lazily: the database exists by the first sign).
+    reservationOf: (key) => pgSponsorReservations(db)(key),
   });
   const facilitator = fakeFacilitator();
   const credits = createSponsorCredits({ db, env, now: () => clock.now });
@@ -138,6 +142,17 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }) {
   const wallet = { usdc: 1_000_000_000n };
   /** What Base shows for the legs past validBefore: unused (true) or not yet / used (false). */
   const chain = { expiredUnused: false, asked: 0 };
+  /** The engine's pre-sign checks as the sponsored path sees them (answer: null clears). */
+  const gate = {
+    answer: null as string | null,
+    asked: [] as {
+      intentId: string;
+      payer: string;
+      payee: string;
+      grossRaw: bigint;
+      feeRaw: bigint;
+    }[],
+  };
   const calls = createSponsoredCalls({
     db,
     env,
@@ -178,6 +193,10 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }) {
       },
     }),
     serviceIdOf: (offerId) => (offerId === 'of_1' ? 'svc-1' : `svc-${offerId}`),
+    preSign: async (input) => {
+      gate.asked.push(input);
+      return gate.answer;
+    },
   });
   const credit = async (agentId: string) =>
     (
@@ -200,6 +219,7 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }) {
     },
     wallet,
     chain,
+    gate,
   };
 }
 
@@ -426,6 +446,46 @@ test('sponsored call: a reservation never handed over is fenced, then failed and
   const done = (await f.calls.callFor('o1', c.callId))!;
   assert.deepEqual([done.state, done.failure], ['failed', 'not_sent']);
   assert.equal(await f.credit('a1'), 'released');
+});
+
+test('sponsored call: the engine pre-send checks run before the first signature (payer, payee, price, fee)', async (t) => {
+  const f = await setup(t);
+  const c = await f.calls.start('o1', ask());
+  assert.equal(c.state, 'sent');
+  assert.deepEqual(f.gate.asked, [
+    {
+      intentId: `sfp:${c.callId}`,
+      payer: f.sponsor.address,
+      payee: getAddress(PAYEE),
+      grossRaw: 1_500_000n,
+      feeRaw: 150_000n,
+    },
+  ]);
+});
+
+for (const code of ['screening_blocked', 'screening_unavailable', 'payee_reserved'])
+  test(`sponsored call: refused by the pre-send checks (${code}): nothing signed or sent, fenced, failed, credit back`, async (t) => {
+    const f = await setup(t);
+    f.gate.answer = code;
+    const c = await f.calls.start('o1', ask());
+    const done = (await f.calls.callFor('o1', c.callId))!;
+    assert.deepEqual([done.state, done.failure], ['failed', code]);
+    assert.equal(f.facilitator.submitted.size, 0, 'nothing handed to a facilitator');
+    assert.equal(await f.credit('a1'), 'released');
+  });
+
+test('sponsored call: pre-send checks undecided (hold): nothing signed, retried later, then sent', async (t) => {
+  const f = await setup(t);
+  f.gate.answer = 'hold';
+  const c = await f.calls.start('o1', ask());
+  assert.equal(c.state, 'reserved');
+  assert.equal(f.facilitator.submitted.size, 0);
+  assert.equal(await f.calls.step(c.callId), false);
+  assert.equal(f.facilitator.submitted.size, 0);
+  f.gate.answer = null;
+  f.clock.now += 61_000; // past the lease
+  assert.equal(await f.calls.step(c.callId), true);
+  assert.equal(f.facilitator.submitted.size, 1);
 });
 
 test('sponsored call: the credit and the call row commit together (C2)', async (t) => {

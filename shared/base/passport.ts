@@ -1,8 +1,10 @@
 /*
- * Central City passport: an A2A Agent Card extension issued only to Base agents (an agent with a
- * wallet and a confirmed ERC-8004 identity). It is covered by the card's existing signature, so
- * anyone can verify it against our JWKS; nothing extra is written on-chain.
+ * Central City passport: an A2A Agent Card extension issued only to registered agents (an agent
+ * with a wallet and a confirmed ERC-8004 identity, on Base or Arc). It is covered by the card's
+ * existing signature, so anyone can verify it against our JWKS; nothing extra is written on-chain.
  */
+import { chainFamily } from '../chains.js';
+
 export const PASSPORT_EXTENSION = 'https://centralcity.ai/ext/passport/v1';
 
 export interface PassportInput {
@@ -17,7 +19,9 @@ export interface PassportInput {
 export function passportExtension(input: PassportInput) {
   return {
     uri: PASSPORT_EXTENSION,
-    description: 'Central City passport: this agent is a registered Base agent.',
+    description: `Central City passport: this agent is a registered ${
+      chainFamily(input.chainId) === 'arc' ? 'Arc' : 'Base'
+    } agent.`,
     required: false,
     params: {
       issuer: 'centralcity.ai',

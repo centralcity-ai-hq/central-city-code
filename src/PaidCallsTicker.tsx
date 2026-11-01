@@ -240,7 +240,8 @@ function useLiveLine() {
             previous && counted.asOf < previous.asOf
               ? previous
               : {
-                  total: counted.total,
+                  // Base plus Arc: the ERC-8004 agents Central City registered (ercAgentsTotal).
+                  total: counted.total + (response.arc?.total ?? 0),
                   asOf: counted.asOf,
                   ageS: response.ageS,
                   arrived: response.arrived,

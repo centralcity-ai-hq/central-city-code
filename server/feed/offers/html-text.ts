@@ -1,9 +1,10 @@
 /*
  * Visible text of an HTML (or XML) page for web-read: one linear pass, no regular expression that
  * can backtrack over the whole page. Scripts, styles, templates, SVG, comments and the like are
- * dropped; the first <title> is kept apart; entities are decoded; whitespace is collapsed. A '>'
- * inside a quoted attribute value does not end its tag. The walk can stop once it has more text
- * than the caller sends.
+ * dropped, and so are HTML elements a person never sees (hidden, aria-hidden or an inline style
+ * that hides them) and invisible format characters; the first <title> is kept apart; entities are
+ * decoded; whitespace is collapsed. A '>' inside a quoted attribute value does not end its tag.
+ * The walk can stop once it has more text than the caller sends.
  */
 
 /** Elements whose content is never visible text. */
@@ -170,10 +171,15 @@ export function decodeEntities(text: string): string {
   );
 }
 
-/** Characters that are neither visible nor whitespace (C0/C1 controls other than whitespace). */
-const CONTROLS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
+/**
+ * Characters that are neither visible nor whitespace: C0/C1 controls other than whitespace, format
+ * characters and every default-ignorable code point (zero-width spaces and joiners, tags), as the
+ * Feed's own text policy drops them.
+ */
+const CONTROLS =
+  /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
 
-/** Collapses every whitespace run to one space and trims; drops invisible control characters. */
+/** Collapses every whitespace run to one space and trims; drops invisible characters. */
 export function collapseWhitespace(text: string): string {
   return text.replace(CONTROLS, '').replace(/\s+/g, ' ').trim();
 }
@@ -190,7 +196,259 @@ export function cutUtf8(text: string, maxBytes: number): { text: string; cut: bo
 
 const TAG = /<(\/?)([a-zA-Z][a-zA-Z0-9:-]*)/y;
 
-/** One closing-tag pattern per element name (only fixed names from HIDDEN and title). */
+/** Elements that have no content, so a hidden one hides nothing past its own tag. */
+const VOID = new Set([
+  'area',
+  'base',
+  'br',
+  'col',
+  'embed',
+  'hr',
+  'img',
+  'input',
+  'link',
+  'meta',
+  'param',
+  'source',
+  'track',
+  'wbr',
+]);
+
+/**
+ * The attributes of a tag (names lowercased, the last of a repeated name wins), read from the
+ * text between its name and its '>'. Linear, quoted values skipped whole as in tagEnd.
+ */
+function attributes(text: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const n = text.length;
+  let i = 0;
+  while (i < n) {
+    while (i < n && (isSpace(text.charCodeAt(i)) || text[i] === '/')) i++;
+    const start = i;
+    while (i < n && !isSpace(text.charCodeAt(i)) && text[i] !== '=' && text[i] !== '/') i++;
+    if (i === start) {
+      i++;
+      continue;
+    }
+    const name = text.slice(start, i).toLowerCase();
+    while (i < n && isSpace(text.charCodeAt(i))) i++;
+    let value = '';
+    if (text[i] === '=') {
+      i++;
+      while (i < n && isSpace(text.charCodeAt(i))) i++;
+      const quote = text[i];
+      if (quote === '"' || quote === "'") {
+        const close = text.indexOf(quote, i + 1);
+        value = text.slice(i + 1, close < 0 ? n : close);
+        i = close < 0 ? n : close + 1;
+      } else {
+        const begin = i;
+        while (i < n && !isSpace(text.charCodeAt(i))) i++;
+        value = text.slice(begin, i);
+      }
+    }
+    out.set(name, decodeEntities(value));
+  }
+  return out;
+}
+
+/** An inline style declaration that hides its element's text from a person reading the page. */
+const HIDING_STYLE = /^(?:display:none|visibility:hidden)(?:!important)?$/;
+
+/**
+ * Whether a person never sees this element's text: the hidden attribute, aria-hidden="true", or an
+ * inline style of display:none or visibility:hidden.
+ */
+function concealed(attrs: string): boolean {
+  if (!/hidden|style/i.test(attrs)) return false;
+  const read = attributes(attrs);
+  if (read.has('hidden')) return true;
+  if (read.get('aria-hidden')?.trim().toLowerCase() === 'true') return true;
+  const style = read.get('style');
+  if (!style) return false;
+  return style
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .split(';')
+    .some((declaration) => HIDING_STYLE.test(declaration));
+}
+
+/** A paragraph ends at the start of any of these (HTML's implied end of a <p>). */
+const ENDS_P = new Set([
+  'address',
+  'article',
+  'aside',
+  'blockquote',
+  'details',
+  'div',
+  'dl',
+  'fieldset',
+  'figcaption',
+  'figure',
+  'footer',
+  'form',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'header',
+  'hgroup',
+  'hr',
+  'main',
+  'menu',
+  'nav',
+  'ol',
+  'p',
+  'pre',
+  'section',
+  'table',
+  'ul',
+]);
+/** Elements a phrase is made of: their end tags never end a <p>; any other end tag does. */
+const PHRASING = new Set([
+  'a',
+  'abbr',
+  'b',
+  'bdi',
+  'bdo',
+  'cite',
+  'code',
+  'data',
+  'del',
+  'dfn',
+  'em',
+  'font',
+  'i',
+  'ins',
+  'kbd',
+  'label',
+  'mark',
+  'q',
+  's',
+  'samp',
+  'small',
+  'span',
+  'strong',
+  'sub',
+  'sup',
+  'time',
+  'u',
+  'var',
+]);
+const set = (...names: string[]) => new Set(names);
+const TABLE_ENDS = set('table', 'tbody', 'thead', 'tfoot');
+/**
+ * Elements whose end tag HTML lets a page leave out: the start tags (`starts`) and end tags
+ * (`ends`, the parent's) that end one implicitly.
+ */
+const OPTIONAL_END = new Map<string, { starts: ReadonlySet<string>; ends: ReadonlySet<string> }>([
+  ['li', { starts: set('li'), ends: set('ul', 'ol', 'menu') }],
+  ['dt', { starts: set('dt', 'dd'), ends: set('dl', 'div') }],
+  ['dd', { starts: set('dt', 'dd'), ends: set('dl', 'div') }],
+  [
+    'option',
+    { starts: set('option', 'optgroup', 'hr'), ends: set('select', 'datalist', 'optgroup') },
+  ],
+  ['optgroup', { starts: set('optgroup', 'hr'), ends: set('select') }],
+  ['tr', { starts: set('tr', 'tbody', 'thead', 'tfoot'), ends: TABLE_ENDS }],
+  [
+    'td',
+    { starts: set('td', 'th', 'tr', 'tbody', 'thead', 'tfoot'), ends: set('tr', ...TABLE_ENDS) },
+  ],
+  [
+    'th',
+    { starts: set('td', 'th', 'tr', 'tbody', 'thead', 'tfoot'), ends: set('tr', ...TABLE_ENDS) },
+  ],
+  ['thead', { starts: set('tbody', 'tfoot'), ends: set('table') }],
+  ['tbody', { starts: set('tbody', 'tfoot'), ends: set('table') }],
+  ['tfoot', { starts: set('tbody'), ends: set('table') }],
+  ['caption', { starts: set('colgroup', 'thead', 'tbody', 'tfoot', 'tr'), ends: set('table') }],
+  ['colgroup', { starts: set('thead', 'tbody', 'tfoot', 'tr', 'colgroup'), ends: set('table') }],
+  ['rb', { starts: set('rb', 'rt', 'rtc', 'rp'), ends: set('ruby') }],
+  ['rt', { starts: set('rb', 'rt', 'rtc', 'rp'), ends: set('ruby') }],
+  ['rp', { starts: set('rb', 'rt', 'rtc', 'rp'), ends: set('ruby') }],
+  ['p', { starts: ENDS_P, ends: set() }],
+]);
+
+/**
+ * Where the walk goes on after an element whose content starts at `from`: past its end tag, or at
+ * the tag that ends it implicitly (OPTIONAL_END; a <p> also at any end tag that is not of a
+ * phrase). Same elements nested inside it are counted. -1 when it is not closed before `until`.
+ */
+function findElementEnd(html: string, name: string, from: number, until: number): number {
+  const implied = OPTIONAL_END.get(name);
+  let depth = 1;
+  let i = from;
+  while (i < until) {
+    const lt = html.indexOf('<', i);
+    if (lt < 0 || lt >= until) return -1;
+    // A comment, doctype or processing instruction holds no tags: an end tag written inside one
+    // does not end the element (the browser keeps hiding what follows it).
+    if (html.startsWith('<!--', lt)) {
+      const end = html.indexOf('-->', lt + 4);
+      if (end < 0) return -1;
+      i = end + 3;
+      continue;
+    }
+    if (html[lt + 1] === '!' || html[lt + 1] === '?') {
+      const end = html.indexOf('>', lt + 2);
+      if (end < 0) return -1;
+      i = end + 1;
+      continue;
+    }
+    TAG.lastIndex = lt;
+    const tag = TAG.exec(html);
+    if (!tag) {
+      i = lt + 1;
+      continue;
+    }
+    const gt = tagEnd(html, lt + tag[0].length);
+    if (gt < 0) return -1;
+    i = gt + 1;
+    const tagName = tag[2]!.toLowerCase();
+    const closing = tag[1] === '/';
+    // Raw text (a script, a style...): nothing inside is a tag, so its own end tag is searched.
+    if (!closing && RAW_TEXT.has(tagName) && tagName !== name) {
+      const close = findClose(html, tagName, i);
+      if (close < 0 || close >= until) return -1;
+      const end = html.indexOf('>', close);
+      if (end < 0) return -1;
+      i = end + 1;
+      continue;
+    }
+    if (tagName === name) {
+      if (closing) {
+        depth--;
+        if (depth === 0) return i;
+      } else if (implied) return lt;
+      else if (html[gt - 1] !== '/') depth++;
+      continue;
+    }
+    if (!implied) continue;
+    const ends = closing
+      ? implied.ends.has(tagName) || (name === 'p' && !PHRASING.has(tagName))
+      : implied.starts.has(tagName);
+    if (ends) return lt;
+  }
+  return -1;
+}
+
+/** Elements whose content HTML reads as raw text up to their own end tag (no tags inside). */
+const RAW_TEXT = new Set([
+  'script',
+  'style',
+  'textarea',
+  'title',
+  'xmp',
+  'iframe',
+  'noembed',
+  'noframes',
+  'noscript',
+]);
+
+/** One closing-tag pattern per element name (only fixed names: HIDDEN, title and RAW_TEXT). */
 const CLOSERS = new Map<string, RegExp>();
 /** Finds `</name` (any case) at or after `from`; -1 when missing. */
 function findClose(html: string, name: string, from: number): number {
@@ -264,6 +522,7 @@ export function htmlToText(
   const maxTextBytes = options.maxTextBytes ?? Number.POSITIVE_INFINITY;
   let collected = 0;
   let checkAt = maxTextBytes;
+  let unclosedScan = 2 * n;
   const add = (piece: string) => {
     out.push(piece);
     collected += piece.length;
@@ -323,6 +582,23 @@ export function htmlToText(
       if (close < 0) break;
       const end = html.indexOf('>', close);
       i = end < 0 ? n : end + 1;
+      add(' ');
+      continue;
+    }
+    // An HTML element a person never sees is left out with everything inside it. One never closed
+    // is read as if it were not hidden, so the rest of the page is never lost to it; the searches
+    // that find no end may scan the page twice over in all, then hidden ones are read as text.
+    if (!xml && unclosedScan > 0 && concealed(html.slice(lt + tag[0].length, gt))) {
+      // A '/' before '>' does not close an HTML element that is not void (`<div hidden/>`): the
+      // browser hides what follows up to its end tag, so it is searched like any other.
+      if (VOID.has(name)) continue;
+      const until = Math.min(n, i + unclosedScan);
+      const next = findElementEnd(html, name, i, until);
+      if (next < 0) {
+        unclosedScan -= until - i;
+        continue;
+      }
+      i = next;
       add(' ');
     }
   }

@@ -92,6 +92,35 @@ test('a presence the second endpoint proves is taken from it; the configured one
   ]);
 });
 
+test('a fee quote from the second endpoint is capped: above 1 gwei or twice the configured last quote, the configured endpoint answers (CCA-111)', async (t) => {
+  let secondQuote = '0x174876e800'; // 100 gwei: an inflated quote from the keyless node
+  const { asked, request } = endpoints(t, {
+    first: () => ({ result: '0x1000' }),
+    second: (m) => chainId(m) ?? { result: secondQuote },
+  });
+  assert.equal(await request('eth_gasPrice'), '0x1000', 'above the ceiling: not taken');
+  assert.equal(await request('eth_maxPriorityFeePerGas'), '0x1000');
+  // The configured endpoint said 0x1000: up to twice that is taken from the second, more is not.
+  secondQuote = '0x2000';
+  assert.equal(await request('eth_gasPrice'), '0x2000');
+  secondQuote = '0x2001';
+  assert.equal(await request('eth_gasPrice'), '0x1000');
+  secondQuote = 'not a number';
+  assert.equal(await request('eth_maxPriorityFeePerGas'), '0x1000');
+  assert.deepEqual(asked, [
+    'second eth_chainId',
+    'second eth_gasPrice',
+    'first eth_gasPrice',
+    'second eth_maxPriorityFeePerGas',
+    'first eth_maxPriorityFeePerGas',
+    'second eth_gasPrice',
+    'second eth_gasPrice',
+    'first eth_gasPrice',
+    'second eth_maxPriorityFeePerGas',
+    'first eth_maxPriorityFeePerGas',
+  ]);
+});
+
 test('absence, a revert or a failure there: the configured endpoint answers', async (t) => {
   for (const [name, second] of [
     ['null receipt', { result: null }],

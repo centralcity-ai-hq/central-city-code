@@ -3,7 +3,13 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createApp } from '../server/app.js';
 import { ASSISTANT_SCOPES } from '../shared/assistant.js';
-import { BRIEF_HEADER, PIN_LIMITS, createRoomPins } from '../server/rooms/pins.js';
+import {
+  BRIEF_HEADER,
+  BRIEF_SHORT_HEADER,
+  BRIEF_TIERS,
+  PIN_LIMITS,
+  createRoomPins,
+} from '../server/rooms/pins.js';
 import { RoomError } from '../server/rooms/service.js';
 import {
   ROOM_PIN_TOOLS,
@@ -539,6 +545,96 @@ test('pin writes and briefs are rate limited before any work', async (t) => {
   // Both prefixes have an outage policy (reads stay available during a limiter outage).
   assert.equal(outageMode('room-pin:x'), 'degraded');
   assert.equal(outageMode('room-brief:x'), 'degraded');
+});
+
+test('an empty room brief says "none yet", never sounding like a permission problem', async (t) => {
+  const app = await fixture(t);
+  const { a, roomId } = await room(app);
+  const empty = (await ok(app, a.key, 'city_room_brief', { room_id: roomId })).brief as string;
+  assert.match(empty, /Latest messages: none yet/);
+  assert.doesNotMatch(empty, /none you can read/);
+  // A later joiner of a from_join room with earlier messages is told why it sees none.
+  const late = await room(app, 'from_join');
+  await post(app, late.a.key, late.roomId, 'Before you joined.');
+  const b = await member(app, late.link, 'Late');
+  const brief = (await ok(app, b.key, 'city_room_brief', { room_id: late.roomId })).brief as string;
+  assert.match(brief, /none since you joined \(earlier ones are outside your history\)/);
+});
+
+test('the brief shows a submitted result for review, not "not claimed"', async (t) => {
+  const app = await fixture(t);
+  const { a, roomId, link } = await room(app);
+  const b = await member(app, link, 'Bravo');
+  const created = await task(app, a.key, roomId, 'Recount the totals');
+  const claimed = await ok(app, b.key, 'city_room_task_claim', {
+    room_id: roomId,
+    task_id: created.id,
+    idempotency_key: randomUUID(),
+  });
+  await ok(app, b.key, 'city_room_task_result', {
+    room_id: roomId,
+    task_id: created.id,
+    claim_token: claimed.claim_token,
+    summary: 'Row 14 was counted twice; the corrected total is 1,204.',
+  });
+  const brief = (await ok(app, a.key, 'city_room_brief', { room_id: roomId })).brief as string;
+  assert.match(
+    brief,
+    new RegExp(
+      `T${created.number} Recount the totals \\(in review; submitted by Bravo AI: "Row 14 was counted twice; the corrected total is 1,204\\."\\)`,
+    ),
+  );
+  assert.doesNotMatch(brief, /in review; not claimed/);
+});
+
+test('brief tiers: short, standard and full, with decisions current first', async (t) => {
+  const app = await fixture(t);
+  const { a, roomId, link } = await room(app);
+  const b = await member(app, link, 'Bravo');
+  for (let i = 1; i <= 12; i++)
+    await post(app, a.key, roomId, `Progress note ${i}: ${'x'.repeat(300)}`);
+  await task(app, a.key, roomId, 'Tag the release');
+  await ok(app, a.key, 'city_room_decision_record', {
+    room_id: roomId,
+    title: 'Ship on Friday',
+    idempotency_key: randomUUID(),
+  });
+  await ok(app, a.key, 'city_room_decision_record', {
+    room_id: roomId,
+    title: 'Ship on Monday instead',
+    supersedes: '#d-1',
+    idempotency_key: randomUUID(),
+  });
+
+  const short = await ok(app, b.key, 'city_room_brief', { room_id: roomId, tier: 'short' });
+  assert.equal(short.tier, 'short');
+  assert.ok(short.brief.startsWith(BRIEF_SHORT_HEADER));
+  assert.ok(short.brief.length <= BRIEF_SHORT_HEADER.length + 1 + BRIEF_TIERS.short.chars);
+  assert.match(short.brief, /Launch desk: \d+ msgs, 1 open tasks, 0 pins\./);
+  assert.match(short.brief, /Latest decision #d-2: Ship on Monday instead/);
+  assert.doesNotMatch(short.brief, /Progress note/);
+
+  // The default is standard, the same text the first read delivers.
+  const standard = await ok(app, b.key, 'city_room_brief', { room_id: roomId });
+  assert.equal(standard.tier, 'standard');
+  assert.ok(standard.brief.startsWith(BRIEF_HEADER));
+  assert.ok(standard.brief.length <= PIN_LIMITS.briefChars);
+  assert.match(
+    standard.brief,
+    /Decisions \(current first\):\n- #d-2 Ship on Monday instead\n- #d-1 Ship on Friday \(superseded by #d-2\)/,
+  );
+  assert.match(standard.brief, /… \(more omitted\)/, 'twelve long notes overflow 2,000 characters');
+
+  const full = await ok(app, b.key, 'city_room_brief', { room_id: roomId, tier: 'full' });
+  assert.equal(full.tier, 'full');
+  assert.ok(full.brief.length > standard.brief.length);
+  assert.ok(full.brief.length <= BRIEF_TIERS.full.chars);
+  for (let i = 1; i <= 12; i++) assert.match(full.brief, new RegExp(`Progress note ${i}:`));
+  assert.doesNotMatch(full.brief, /more omitted/);
+  for (const body of [short, standard, full])
+    assert.ok(roomPinOutputSchemas.city_room_brief.safeParse(body).success);
+
+  await fails(app, b.key, 'city_room_brief', { room_id: roomId, tier: 'huge' }, 'invalid_request');
 });
 
 test('MCP: the four tools are registered with the posting scope and strict outputs', () => {

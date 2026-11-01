@@ -11,6 +11,7 @@
  * Both are ordinary durable operations (stored before broadcast, idempotent on the operation key).
  * The identity service persists `base_identities`; this module never writes it.
  */
+import { isRealMoneyChain } from '../../../shared/chains.js';
 import {
   encodeFunctionData,
   getAddress,
@@ -19,7 +20,8 @@ import {
   type Hex,
   type PublicClient,
 } from 'viem';
-import { BASE_MAINNET, type Address } from '../../../shared/base/chains.js';
+import { type Address } from '../../../shared/base/chains.js';
+import { sponsoredWithoutCharge, type SponsorAllowlist } from '../../../shared/base/paymasters.js';
 import type { DerivationRecipe } from './derive.js';
 import { submitOperation, type StoredOperation, type SubmitDeps } from './submit.js';
 
@@ -63,7 +65,20 @@ export interface IdentityOperationInput {
   pinnedNonce?: bigint;
   /** Current authority right before the first broadcast (see submitOperation). */
   beforeBroadcast?: () => Promise<void>;
+  /** The account the sponsorship counts against (SponsorIntent.accountId; default none). */
+  sponsorAccountId?: string | null;
+  /**
+   * The pinned sponsors: given, the prepared operation must be sponsored by one of them without a
+   * token charge (sponsoredWithoutCharge), whichever bundler prepared it, or nothing is signed
+   * (NOT_SPONSORED; CCA-138). The chain runtime passes the pinned list on Base mainnet.
+   */
+  sponsors?: SponsorAllowlist;
 }
+
+const sponsorRule = (deps: SubmitDeps, sponsors: SponsorAllowlist | undefined) =>
+  sponsors
+    ? { sponsorCheck: (data: Hex) => sponsoredWithoutCharge(deps.network.chainId, data, sponsors) }
+    : {};
 
 function registryOf(deps: SubmitDeps): Address {
   const registry = deps.network.contracts.identityRegistry;
@@ -73,7 +88,7 @@ function registryOf(deps: SubmitDeps): Address {
 
 function requireBudget(deps: SubmitDeps, cap: bigint | undefined) {
   // Real money is never spent without a fee budget: on the real network a cap is mandatory.
-  if (deps.network.chainId === BASE_MAINNET && cap === undefined)
+  if (isRealMoneyChain(deps.network.chainId) && cap === undefined)
     throw new IdentityChainError('FEE_BUDGET_REQUIRED', 'Mainnet identities need a fee budget.');
 }
 
@@ -100,6 +115,8 @@ export async function registerIdentities(
     intentHash: input.intentHash,
     kind: 'register',
     sponsorFlow: 'registration',
+    sponsorAccountId: input.sponsorAccountId,
+    ...sponsorRule(deps, input.sponsors),
     account: input.spender,
     calls: input.uris.map((uri) => ({
       target: registry,
@@ -332,6 +349,8 @@ export async function transferIdentities(
     intentHash: input.intentHash,
     kind: 'transfer',
     sponsorFlow: 'registration',
+    sponsorAccountId: input.sponsorAccountId,
+    ...sponsorRule(deps, input.sponsors),
     account: input.spender,
     calls: transfers.map(({ id, to }) => ({
       target: registry,

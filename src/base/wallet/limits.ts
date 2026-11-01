@@ -48,13 +48,18 @@ import { pageOutOfDate, STALE_PAGE } from '../stalePage';
 import { userOperationFromRpc } from '../../../shared/base/withdraw';
 import { unlockVault } from '../vault';
 import { sponsoredWithoutCharge, type SponsorAllowlist } from '../../../shared/base/paymasters';
+import {
+  NOT_ON_ARC_YET,
+  operationChain,
+  WALLET_SPONSORS,
+} from '../../../shared/base/wallet-chains';
 import { isOwnWallet } from './derive';
 import { deploysOwnWallet, WithdrawalLockedError } from './withdraw';
 
 export type { LimitPeriod, OnchainCapModel };
 
-const NETWORK = BASE_NETWORKS[WALLET_CHAIN_ID];
-const USDC = NETWORK.tokens.USDC;
+/** USDC's decimals: the same on every chain a wallet can be on. */
+const USDC_DECIMALS = BASE_NETWORKS[WALLET_CHAIN_ID].tokens.USDC.decimals;
 
 export type LimitState = 'signed' | 'approved' | 'revoke_pending' | 'revoked';
 export type RevokeState =
@@ -207,7 +212,7 @@ export const currentLimit = (view: LimitsView): LimitView | null =>
 
 /** USDC base units as text, at least two decimals ("20.00", "10.005"). */
 export function usdcText(raw: bigint | string): string {
-  const text = formatUnits(BigInt(raw), USDC.decimals);
+  const text = formatUnits(BigInt(raw), USDC_DECIMALS);
   const [whole, fraction = ''] = text.split('.');
   return `${whole}.${fraction.padEnd(2, '0')}`;
 }
@@ -260,6 +265,11 @@ export interface CheckedLimit {
  */
 export function checkLimit(input: {
   prepared: Pick<PreparedLimit, 'chainId' | 'permission' | 'permissionHash' | 'onchainModel'>;
+  /**
+   * The chain the agent is on, from its wallet view (the wallet network when not given): the limit
+   * must be for this one, and this build must list it (shared/base/wallet-chains.ts).
+   */
+  agentChainId?: number;
   wallet: string;
   /** The wallet's owner key and agent: `wallet` must be the one that key makes for this agent. */
   owner: string;
@@ -272,10 +282,12 @@ export function checkLimit(input: {
 }): CheckedLimit {
   const { prepared, period } = input;
   const now = input.now ?? Date.now();
-  if (prepared.chainId !== WALLET_CHAIN_ID)
+  const chain = operationChain(prepared.chainId, input.agentChainId);
+  if (!chain)
     throw new LimitCheckError(
       pageOutOfDate(prepared.chainId) ? STALE_PAGE : 'This limit is for another network.',
     );
+  if (!chain.limit) throw new LimitCheckError(NOT_ON_ARC_YET);
   // The product owner's decision: on Base the allowance is half the cap per period. Another model
   // needs a change here and its review, never only a server setting.
   const model = prepared.onchainModel;
@@ -283,23 +295,23 @@ export function checkLimit(input: {
     throw new LimitCheckError('The limit uses a different on-chain cap than this page allows.');
   const permission = permissionFromJson(prepared.permission);
   if (!permission) throw new LimitCheckError('The limit from the server isn’t well formed.');
-  const hash = spendPermissionHash(WALLET_CHAIN_ID, permission);
+  const hash = spendPermissionHash(chain.limit, permission);
   if (typeof prepared.permissionHash !== 'string' || hash !== prepared.permissionHash.toLowerCase())
     throw new LimitCheckError('The limit doesn’t match its hash.');
   if (permission.account !== getAddress(input.wallet))
     throw new LimitCheckError('The limit isn’t for this agent’s wallet.');
-  if (!isOwnWallet(input.wallet, input.owner, input.agentId))
+  if (!isOwnWallet(input.wallet, input.owner, input.agentId, chain.chainId))
     throw new LimitCheckError('This isn’t the wallet your wallet key makes for this agent.');
   if (typeof input.spender !== 'string' || !isAddress(input.spender))
     throw new LimitCheckError('This page can’t tell which key the agent spends with.');
   if (permission.spender !== getAddress(input.spender))
     throw new LimitCheckError('The limit lets a different key spend than this agent’s.');
-  if (permission.token !== getAddress(USDC.address))
+  if (permission.token !== getAddress(chain.owner.usdc))
     throw new LimitCheckError('The limit is for a different token.');
   if (!/^[1-9][0-9]*$/.test(input.capRaw)) throw new LimitCheckError('The limit has no amount.');
   const allowance = onchainAllowance(BigInt(input.capRaw), model);
   if (allowance < 1n || permission.allowance !== allowance)
-    throw new LimitCheckError('Base would allow a different amount than your limit.');
+    throw new LimitCheckError(`${chain.name} would allow a different amount than your limit.`);
   if (permission.period !== LIMIT_PERIOD_SECONDS[period])
     throw new LimitCheckError('The limit counts a different period.');
   // 00:00 today in Berlin, so the limit works at once. Just before midnight the server may already
@@ -319,8 +331,8 @@ export function checkLimit(input: {
   return {
     permission,
     hash,
-    typedData: smartWalletMessageTypedData(WALLET_CHAIN_ID, permission.account, hash),
-    chainId: WALLET_CHAIN_ID,
+    typedData: smartWalletMessageTypedData(chain.chainId, permission.account, hash),
+    chainId: chain.chainId,
     capRaw: input.capRaw,
     period,
     model,
@@ -333,13 +345,18 @@ export function checkLimit(input: {
  * The agent's spending key as the owner confirmed it, kept per wallet in this browser (trust on
  * first use). The wallet route and the prepared limit are two answers of the same server; a key the
  * owner saw and signed for before is what a later limit is held to: a different one is shown as a
- * change and needs the owner's explicit confirmation. Another browser starts without a pin.
+ * change and needs the owner's explicit confirmation. Another browser starts without a pin. Per
+ * chain: a wallet has the same address on Base and Arc, its spending key on each is its own.
  */
-const spenderKey = (wallet: string) => `cc-spender:${WALLET_CHAIN_ID}:${wallet.toLowerCase()}`;
+const spenderKey = (wallet: string, chainId: number) =>
+  `cc-spender:${chainId}:${wallet.toLowerCase()}`;
 
-export function readSpenderPin(wallet: string): `0x${string}` | null {
+export function readSpenderPin(
+  wallet: string,
+  chainId: number = WALLET_CHAIN_ID,
+): `0x${string}` | null {
   try {
-    const value = localStorage.getItem(spenderKey(wallet));
+    const value = localStorage.getItem(spenderKey(wallet, chainId));
     return value && isAddress(value) ? getAddress(value) : null;
   } catch {
     return null;
@@ -360,11 +377,11 @@ export class SpenderPinError extends Error {
  * right before the signature is sent (signLimit's beforeSend), so a lost answer can't lose it and
  * a browser that can't keep it sends nothing.
  */
-export function pinSpender(wallet: string, spender: string) {
+export function pinSpender(wallet: string, spender: string, chainId: number = WALLET_CHAIN_ID) {
   const value = getAddress(spender);
   try {
-    localStorage.setItem(spenderKey(wallet), value);
-    if (readSpenderPin(wallet) === value) return;
+    localStorage.setItem(spenderKey(wallet, chainId), value);
+    if (readSpenderPin(wallet, chainId) === value) return;
   } catch {
     // Blocked or full: refused below.
   }
@@ -408,6 +425,8 @@ export function checkRevoke(input: {
     RevokeRequest,
     'permissionId' | 'chainId' | 'entryPoint' | 'userOperation' | 'userOpHash'
   >;
+  /** The chain the agent is on, from its wallet view, as for checkLimit. */
+  agentChainId?: number;
   wallet: string;
   /**
    * The wallet's owner key and agent: `wallet` must be the one that key makes for this agent, and
@@ -420,13 +439,15 @@ export function checkRevoke(input: {
   sponsors?: SponsorAllowlist;
 }): Hex {
   const { request, limit } = input;
-  if (request.chainId !== WALLET_CHAIN_ID)
+  const chain = operationChain(request.chainId, input.agentChainId);
+  if (!chain)
     throw new LimitCheckError(
       pageOutOfDate(request.chainId) ? STALE_PAGE : 'This operation is for another network.',
     );
+  if (!chain.limit) throw new LimitCheckError(NOT_ON_ARC_YET);
   if (
     typeof request.entryPoint !== 'string' ||
-    getAddress(request.entryPoint) !== NETWORK.contracts.entryPointV06
+    getAddress(request.entryPoint) !== chain.owner.entryPoint
   )
     throw new LimitCheckError('This operation names another EntryPoint.');
   if (request.permissionId !== limit.permissionId)
@@ -440,11 +461,13 @@ export function checkRevoke(input: {
   const wallet = getAddress(input.wallet);
   if (op.sender !== wallet)
     throw new LimitCheckError('The operation isn’t from this agent’s wallet.');
-  if (!isOwnWallet(wallet, input.owner, input.agentId))
+  if (!isOwnWallet(wallet, input.owner, input.agentId, chain.chainId))
     throw new LimitCheckError('This isn’t the wallet your wallet key makes for this agent.');
   // Fees are covered: an allowed sponsor pays, never the wallet (shared/base/paymasters.ts, the same
   // rule as withdrawals). Anything else fails closed.
-  if (!sponsoredWithoutCharge(WALLET_CHAIN_ID, op.paymasterAndData, input.sponsors))
+  if (
+    !sponsoredWithoutCharge(chain.chainId, op.paymasterAndData, input.sponsors ?? WALLET_SPONSORS)
+  )
     throw new LimitCheckError(
       'The network fee isn’t covered by the approved sponsor; the wallet could be charged.',
     );
@@ -452,22 +475,22 @@ export function checkRevoke(input: {
   // withdrawals (withdraw.ts deploysOwnWallet).
   if (
     (op.initCode ?? '0x') !== '0x' &&
-    !deploysOwnWallet(op.initCode as Hex, input.owner, input.agentId)
+    !deploysOwnWallet(op.initCode as Hex, input.owner, input.agentId, chain.chainId)
   )
     throw new LimitCheckError('The operation would set up the wallet with other owners.');
   const permission = revokedPermission(op.callData);
   if (!permission)
     throw new LimitCheckError('The operation does something other than revoking this limit.');
   if (
-    spendPermissionHash(WALLET_CHAIN_ID, permission) !== limit.permissionHash.toLowerCase() ||
+    spendPermissionHash(chain.limit, permission) !== limit.permissionHash.toLowerCase() ||
     permission.account !== wallet ||
-    permission.token !== getAddress(USDC.address) ||
+    permission.token !== getAddress(chain.owner.usdc) ||
     permission.allowance !== BigInt(limit.allowanceRaw) ||
     permission.period !== limit.periodSeconds
   )
     throw new LimitCheckError('The operation revokes a different limit.');
   // The call data must be exactly the wallet executing that revoke: nothing riding along.
-  const call = revokeCall(WALLET_CHAIN_ID, permission);
+  const call = revokeCall(chain.limit, permission);
   const exact = encodeFunctionData({
     abi: walletAbi,
     functionName: 'execute',
@@ -477,7 +500,7 @@ export function checkRevoke(input: {
     throw new LimitCheckError('The operation does something other than revoking this limit.');
   let hash: Hex;
   try {
-    hash = checkRevokeOperation(WALLET_CHAIN_ID, request.userOperation, { wallet, permission });
+    hash = checkRevokeOperation(chain.limit, request.userOperation, { wallet, permission });
   } catch {
     throw new LimitCheckError('The operation does something other than revoking this limit.');
   }

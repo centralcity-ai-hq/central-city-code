@@ -21,6 +21,27 @@ Status: engineering control, live by default; `CITY_PROTOCOL_SCREENING=0` is its
 
 The provider adapter interface is `ScreeningProvider` (`ref`, `supports(chainId)`, `check({chainId, addresses, signal})`). The first adapter is `server/protocol/screening/sanctions-oracle.ts`. It makes read-only `isSanctioned` calls through the wallet network's chain runtime read client. Tests inject a fake provider and never use the network.
 
+## Trust assumptions
+
+Audit finding CCA-756 asked for these to be stated. They are accepted, not removed:
+
+- **Reused decisions.** A decision (allowed or blocked) is reused for up to 10 minutes
+  (`SCREENING_DECISION_TTL_MS`) for the identical binding above. An address added to the list in
+  that window is not seen for that payment until the decision expires.
+- **Cached oracle answers.** The oracle adapter reuses each address's answer for 60 seconds
+  (`ORACLE_CACHE_MS`), across payments. A listing made in that window is not seen until the answer
+  expires. Only answers are cached: a failed read is never cached and never treated as clear.
+- **The oracle is trusted, not verified.** The Chainalysis sanctions oracle on Base mainnet,
+  `0x3A91A31cB3dC49b4db9Ce721F50a9D076c8D739B`, has no verified source on any explorer. Central City
+  trusts that its `isSanctioned(address)` answers its maintainer's sanctions list. Its owner account
+  can add or remove listed addresses at any time; we do not control it and do not review its
+  changes.
+- **Failing closed stays.** When the oracle cannot be read (the read client fails, every read try
+  throws, the 5 s deadline passes, or the answer is not a boolean), the gate answers
+  `allowed: false` with outcome `unavailable` and stores nothing, so a new payment is refused, never
+  cleared. `tests/protocol-screening.test.ts` checks this with the real oracle adapter over a fake
+  client that throws.
+
 ## Where Feed pay asks
 
 | Point                                                                                               | Parties                                                                    | Intent                     | Not cleared                                                                                                                                                                                                                                                                                       |

@@ -174,7 +174,7 @@ test('the tool loop stops at 8 adapter steps with an honest message', async (t) 
   assert.equal(Number(usage.spent_units), Number(turn.cost_units));
 });
 
-test('revocation between tool steps: the next tool call is refused, nothing posted, refunded, next refused', async (t) => {
+test('revocation between tool steps: the next tool call is refused, nothing posted, the paid steps keep the allowance, next refused', async (t) => {
   const f = await elricFixture(t);
   const s = await f.scene();
   const trigger = await f.say(s.owner, s.room, '@Elric look around', s.person);
@@ -203,8 +203,11 @@ test('revocation between tool steps: the next tool call is refused, nothing post
   );
   assert.ok((await f.messages(s.room.id)).every((row) => row.sender_agent_id !== s.elricId));
   const usage = (await f.usage(s.owner.operatorId))!;
-  assert.equal(usage.short, 0, 'the allowance was refunded');
+  // Two model steps were paid for before the revoke: the allowance count stays used.
+  assert.equal(usage.short, 1, 'paid steps are never refunded');
   assert.equal(Number(usage.reserved_units), 0);
+  assert.equal(Number(usage.spent_units), Number(turn.cost_units));
+  assert.ok(Number(turn.cost_units) > 0);
   // Revoked: the next mention reaches nothing (no invocation, no adapter call).
   await f.say(s.owner, s.room, '@Elric are you there?', s.person);
   await f.elric.drain();
@@ -223,7 +226,7 @@ test('revocation between tool steps: the next tool call is refused, nothing post
   assert.equal(row.revoked_by, 'the owner');
 });
 
-test('pause while a model call is in flight: nothing posted, refunded, the next call refused', async (t) => {
+test('pause while a model call is in flight: nothing posted, the paid call keeps the allowance, the next call refused', async (t) => {
   const f = await elricFixture(t);
   const s = await f.scene();
   const trigger = await f.say(s.owner, s.room, '@Elric answer slowly', s.person);
@@ -242,8 +245,10 @@ test('pause while a model call is in flight: nothing posted, refunded, the next 
   assert.equal(result?.reason, 'paused');
   assert.ok((await f.messages(s.room.id)).every((row) => row.sender_agent_id !== s.elricId));
   const usage = (await f.usage(s.owner.operatorId))!;
-  assert.equal(usage.short, 0);
+  // The model call answered (and was paid for) before the post was refused.
+  assert.equal(usage.short, 1);
   assert.equal(Number(usage.reserved_units), 0);
+  assert.ok(Number(usage.spent_units) > 0);
   // Paused: the next mention is refused before any read or adapter call.
   await f.say(s.owner, s.room, '@Elric still there?', s.person);
   await f.elric.drain();
@@ -276,7 +281,7 @@ test('pause while a model call is in flight: nothing posted, refunded, the next 
   });
 });
 
-test('the host removes Elric mid-task: the post is refused under the room lock and refunded', async (t) => {
+test('the host removes Elric mid-task: the post is refused under the room lock, the reservation released', async (t) => {
   const f = await elricFixture(t);
   const s = await f.scene();
   const trigger = await f.say(s.owner, s.room, '@Elric write the summary of it all', s.person);
@@ -302,7 +307,8 @@ test('the host removes Elric mid-task: the post is refused under the room lock a
     (await f.messages(s.room.id)).every((row) => !f.textOf(row).includes('must not appear')),
   );
   const usage = (await f.usage(s.owner.operatorId))!;
-  assert.equal(usage.summary, 0);
+  // The answer was generated (and paid for): the allowance count stays used.
+  assert.equal(usage.summary, 1);
   assert.equal(Number(usage.reserved_units), 0);
   assert.deepEqual(await elricRoomAccess(f.db, s.elricId, s.room.id), {
     ok: false,
@@ -334,7 +340,8 @@ test('room_task_create rechecks inside the create transaction: revoked just befo
     turn.tool_calls.map((call) => [call.name, call.status]),
     [['room_task_create', 'cancelled']],
   );
-  assert.equal((await f.usage(s.owner.operatorId))!.tool, 0, 'refunded');
+  // The step that proposed the task was paid for: the allowance count stays used.
+  assert.equal((await f.usage(s.owner.operatorId))!.tool, 1, 'paid steps are never refunded');
 });
 
 test('a billed run whose reply is empty after checks keeps the allowance count (no refund)', async (t) => {

@@ -11,6 +11,7 @@ import {
   publicAgentCard,
 } from '../server/manifest/card-agent.js';
 import { PASSWORD } from './oauth-helpers.js';
+import { sessionPair } from './session-cookie-pair.js';
 
 // Approved 15 Oct 2026: a card lookup unpacks its workspace at most once a minute per instance. A new
 // agent or a new manifest revision still shows at once; a revoke within 60 s on other instances.
@@ -47,7 +48,7 @@ async function fixture(t: test.TestContext) {
     payload: JSON.stringify({ name: 'Index owner', password: PASSWORD }),
   });
   assert.equal(registered.statusCode, 201, registered.body);
-  const cookie = `cc_session=${registered.cookies.find((c) => c.name === 'cc_session')!.value}`;
+  const cookie = sessionPair(registered.cookies);
   const send = (method: 'POST' | 'PATCH' | 'DELETE', url: string, body?: object) =>
     app.inject({
       method,

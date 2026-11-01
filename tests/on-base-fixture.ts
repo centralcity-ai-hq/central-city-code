@@ -25,6 +25,8 @@ import {
 import { publicStatsMigration } from '../server/stats/schema.js';
 import { AGENT_ROWS_SQL } from '../server/agent-rows/schema.js';
 import { WORKSPACE_AGENT_PATH_SQL } from '../server/agent-rows/agent-lookup-schema.js';
+import { AGENT_PUBLIC_CARDS_SQL } from '../server/agent-rows/public-cards-schema.js';
+import { BASE_IDENTITY_MOVES_SQL } from '../server/base/identity/moves.js';
 import { BASE_NETWORKS } from '../shared/base/chains.js';
 import { AGENT_URI_ORIGIN } from '../shared/base/on-base.js';
 
@@ -81,6 +83,10 @@ export async function setup(t: { after: (fn: () => Promise<unknown>) => void }) 
     // workspace_agent() (245, then 254), which the public name reads the agent through.
     AGENT_ROWS_SQL,
     WORKSPACE_AGENT_PATH_SQL,
+    // The current public cards (280), which the public names are read from.
+    AGENT_PUBLIC_CARDS_SQL,
+    // The Base IDs moved away (282), which the passport and the registration file leave out.
+    BASE_IDENTITY_MOVES_SQL,
   ])
     await pg.exec(sql);
   const db: Database = {
@@ -241,6 +247,43 @@ export async function add(db: Database, f: Fixture) {
       NOW - 20 * MIN,
     ],
   );
+}
+
+/**
+ * `count` more registrations cloned from agent 1 (fixture `add`), each its own agent, wallet,
+ * short id and Base ID, all with agent 1's transactions: a hash that matches many registrations.
+ * (An agent wallet is unique per chain, base_wallets_chain_id_address_key; a transaction is not.)
+ */
+export async function fanOut(db: Database, count: number) {
+  const ids = `(SELECT g, '00000000-0000-4000-9000-' || lpad(g::text, 12, '0') AS aid,
+      'F' || lpad(g::text, 5, '0') AS short FROM generate_series(1, ${count}) g)`;
+  await db.query(
+    `INSERT INTO agent_manifests SELECT x.aid, m.revision, m.manifest_hash,
+      jsonb_set(m.manifest, '{metadata,displayName}', to_jsonb('Fleet ' || x.g)), 1, 'ws'
+    FROM ${ids} x, agent_manifests m WHERE m.agent_id = $1`,
+    [agentId(1)],
+  );
+  await db.query(`UPDATE workspaces SET data = jsonb_set(data, '{agents}', (data->'agents') ||
+      (SELECT jsonb_agg(jsonb_build_object('id', x.aid, 'revision', 1)) FROM ${ids} x))
+    WHERE operator_id = 'ws'`);
+  await db.query(
+    `INSERT INTO base_wallets (wallet_id, agent_id, operator_id, chain_id, address,
+      owner_address, spender_address, spender_key_ref, derivation, state, created_at, updated_at)
+    SELECT 'wf-' || x.g, x.aid, 'ws', w.chain_id, '0x9' || lpad(to_hex(x.g), 39, '0'), w.owner_address,
+      w.spender_address, w.spender_key_ref, w.derivation, w.state, 1, 1
+    FROM ${ids} x, base_wallets w WHERE w.agent_id = $1`,
+    [agentId(1)],
+  );
+  await db.query(`INSERT INTO base_short_ids SELECT x.short, x.aid, 1 FROM ${ids} x`);
+  await db.exec(
+    `CREATE TEMP TABLE fan_tpl AS SELECT * FROM base_identities WHERE agent_id = '${agentId(1)}'`,
+  );
+  await db.query(`INSERT INTO base_identities SELECT (jsonb_populate_record(NULL::base_identities,
+      to_jsonb(t) || jsonb_build_object('agent_id', x.aid,
+        'erc8004_agent_id', 10000 + x.g, 'provisional_agent_id', 10000 + x.g,
+        'handover_id', 10000 + x.g,
+        'agent_card_uri', split_part(t.agent_card_uri, '/a/', 1) || '/a/' || x.short))).*
+    FROM ${ids} x, fan_tpl t`);
 }
 
 /**

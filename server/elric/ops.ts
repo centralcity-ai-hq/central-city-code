@@ -16,7 +16,8 @@ import {
 
 /**
  * Operator controls for Elric (docs/ELRIC.md "Operator controls"). No admin UI and no person
- * account: the operator calls two routes with `Authorization: Bearer <CITY_OPS_SECRET>`.
+ * account: the operator calls two routes with `Authorization: Bearer <secret>`, the 'elric'
+ * capability's secret (CITY_OPS_ELRIC_SECRET, else CITY_OPS_SECRET; see opsAuthorizedFor below).
  *
  * - `POST /api/ops/elric/kill` `{ enabled }` writes the database kill switch (instant, no
  *   redeploy). CITY_ELRIC_KILL=1 stays the break-glass switch and wins over the database row.
@@ -41,6 +42,51 @@ export function opsAuthorized(header: string | undefined, secret: string | undef
   const a = Buffer.from(header.slice(7));
   const b = Buffer.from(secret);
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/**
+ * Capability-scoped operations secrets (CCA-717): each power has its own setting, so one leaked
+ * secret no longer opens unrelated routes. The legacy single CITY_OPS_SECRET stays the fallback for
+ * a capability whose own setting is unset (backward compatible); once a capability's setting is
+ * set, the legacy secret no longer opens it. Rotation: `<SETTING>_PREVIOUS` is accepted next to its
+ * current value (an overlap period), only while that current value is set; remove it to end the
+ * overlap. Values are never logged or returned; only these setting names are documented
+ * (docs/OPERATIONS.md "Operations secrets").
+ */
+export const OPS_SECRET_SETTING = 'CITY_OPS_SECRET';
+export const OPS_PREVIOUS_SUFFIX = '_PREVIOUS';
+export const OPS_CAPABILITY_SETTINGS = {
+  /** Key provisioning: paymaster keys, sponsor key, facilitator keys. */
+  keys: 'CITY_OPS_KEYS_SECRET',
+  /** Elric kill switch, usage and cost report. */
+  elric: 'CITY_OPS_ELRIC_SECRET',
+  /** Feed moderation queue and decisions. */
+  review: 'CITY_OPS_REVIEW_SECRET',
+  /** Read-only operator numbers: platform metrics, sponsored first purchase numbers. */
+  metrics: 'CITY_OPS_METRICS_SECRET',
+  /** Newsletter subscriber list (personal data). */
+  email: 'CITY_OPS_EMAIL_SECRET',
+} as const;
+export type OpsCapability = keyof typeof OPS_CAPABILITY_SETTINGS;
+
+/** The secrets that open a capability now: its own (current, previous) or the legacy pair. */
+function opsSecretsFor(env: Env, capability: OpsCapability): Array<string | undefined> {
+  const own = OPS_CAPABILITY_SETTINGS[capability];
+  const setting = env[own]?.trim() ? own : OPS_SECRET_SETTING;
+  const current = env[setting]?.trim();
+  return current ? [current, env[`${setting}${OPS_PREVIOUS_SUFFIX}`]?.trim()] : [];
+}
+
+/** The ops guard for one capability: true when the Bearer header matches one of its secrets. */
+export function opsAuthorizedFor(
+  header: string | undefined,
+  env: Env,
+  capability: OpsCapability,
+): boolean {
+  // Every candidate is compared (no early exit), each in constant time.
+  return opsSecretsFor(env, capability)
+    .map((secret) => opsAuthorized(header, secret))
+    .reduce((any, ok) => any || ok, false);
 }
 
 export interface OpsDayUsage {
@@ -114,7 +160,7 @@ export function registerElricOps(
   const notFound = () =>
     Object.assign(new Error('Not found.'), { statusCode: 404, errorCode: 'not_found' });
   const guard = (request: FastifyRequest) => {
-    if (!opsAuthorized(request.headers.authorization, env().CITY_OPS_SECRET)) throw notFound();
+    if (!opsAuthorizedFor(request.headers.authorization, env(), 'elric')) throw notFound();
   };
   const killState = async () => {
     const row = (

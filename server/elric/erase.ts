@@ -169,57 +169,104 @@ async function settleDeleted(tx: Pick<Tx, 'query'>, where: string, params: unkno
 /**
  * Deletes every Elric row of one owner in one transaction: turns (after folding their cost into
  * the anonymous totals), posts attribution, pending actions, invocations, per-owner usage, the
- * agent markers and the verified identity. Idempotent. Call it from the account-deletion path.
+ * agent markers and the verified identity. Idempotent. The account erasure runs it inside its own
+ * transaction (eraseElricOwnerIn, server/account/erase.ts).
  */
 export async function eraseElricOwner(
   db: Pick<Database, 'transaction'>,
   ownerId: string,
 ): Promise<ElricEraseResult> {
-  return db.transaction(async (tx) => {
+  return db.transaction((tx) => eraseElricOwnerIn(tx, ownerId));
+}
+
+/** eraseElricOwner in the caller's transaction. */
+export async function eraseElricOwnerIn(
+  tx: Pick<Tx, 'query'>,
+  ownerId: string,
+): Promise<ElricEraseResult> {
+  await tx.query("SELECT set_config('elric.erase_owner', $1, true)", [ownerId]);
+  await tx.query(
+    `INSERT INTO elric_cost_erased(day_index,tier,turns,cost_units)
+     SELECT floor(created_at / ${DAY_MS})::int, COALESCE(tier,-1), count(*)::int,
+            COALESCE(sum(cost_units),0)
+       FROM elric_turns WHERE owner_id=$1 GROUP BY 1,2
+     ON CONFLICT (day_index,tier) DO UPDATE SET
+       turns = elric_cost_erased.turns + EXCLUDED.turns,
+       cost_units = elric_cost_erased.cost_units + EXCLUDED.cost_units`,
+    [ownerId],
+  );
+  // The owner's private Elric chat rooms (migration 43): found before elric_agents goes.
+  const rooms = (
+    await tx.query<{ id: string }>(
+      `SELECT id FROM rooms WHERE elric_private AND (host_owner_id=$1
+         OR id IN (SELECT chat_room_id FROM elric_agents WHERE owner_id=$1))`,
+      [ownerId],
+    )
+  ).rows.map((row) => row.id);
+  const del = async (sql: string) => (await tx.query(`${sql} RETURNING 1`, [ownerId])).rows.length;
+  // Streamed drafts of this owner's Elrics (migration 46): transient, removed with them.
+  await tx.query(
+    'DELETE FROM elric_drafts WHERE agent_id IN (SELECT agent_id FROM elric_agents WHERE owner_id=$1)',
+    [ownerId],
+  );
+  // The owner's cached room catch-ups (migration 66): summaries for this owner only.
+  await tx.query('DELETE FROM elric_catch_ups WHERE owner_id=$1', [ownerId]);
+  // Before the invocations go: their reservations leave the global ceiling.
+  await settleDeleted(tx, 'owner_id=$1', [ownerId]);
+  const result: ElricEraseResult = {
+    turns: await del('DELETE FROM elric_turns WHERE owner_id=$1'),
+    posts: await del('DELETE FROM elric_posts WHERE owner_id=$1'),
+    pending_actions: await del('DELETE FROM elric_pending_actions WHERE owner_id=$1'),
+    invocations: await del('DELETE FROM elric_invocations WHERE owner_id=$1'),
+    usage_rows: await del('DELETE FROM elric_usage WHERE owner_id=$1'),
+    agents: await del('DELETE FROM elric_agents WHERE owner_id=$1'),
+    identities: await del('DELETE FROM elric_verified_identities WHERE operator_id=$1'),
+    private_rooms: rooms.length,
+  };
+  await purgeRooms(tx, rooms);
+  await tx.query("SELECT set_config('elric.erase_owner', '', true)");
+  return result;
+}
+
+/**
+ * Before rooms are purged in the caller's transaction (purgeRooms): the Elric turns of every owner
+ * in them go, their cost folded into the anonymous totals first, and the reservations of their
+ * invocations are released. Used when an account is erased, for the rooms it hosts, which may
+ * hold other owners' Elric turns.
+ */
+export async function eraseElricRoomRecords(
+  tx: Pick<Tx, 'query'>,
+  rooms: readonly string[],
+): Promise<void> {
+  if (rooms.length === 0) return;
+  const owners = (
+    await tx.query<{ owner_id: string }>(
+      'SELECT DISTINCT owner_id FROM elric_turns WHERE room_id = ANY($1) ORDER BY owner_id',
+      [[...rooms]],
+    )
+  ).rows.map((row) => row.owner_id);
+  for (const ownerId of owners) {
     await tx.query("SELECT set_config('elric.erase_owner', $1, true)", [ownerId]);
     await tx.query(
       `INSERT INTO elric_cost_erased(day_index,tier,turns,cost_units)
        SELECT floor(created_at / ${DAY_MS})::int, COALESCE(tier,-1), count(*)::int,
               COALESCE(sum(cost_units),0)
-         FROM elric_turns WHERE owner_id=$1 GROUP BY 1,2
+         FROM elric_turns WHERE owner_id=$1 AND room_id = ANY($2) GROUP BY 1,2
        ON CONFLICT (day_index,tier) DO UPDATE SET
          turns = elric_cost_erased.turns + EXCLUDED.turns,
          cost_units = elric_cost_erased.cost_units + EXCLUDED.cost_units`,
-      [ownerId],
+      [ownerId, [...rooms]],
     );
-    // The owner's private Elric chat rooms (migration 43): found before elric_agents goes.
-    const rooms = (
-      await tx.query<{ id: string }>(
-        `SELECT id FROM rooms WHERE elric_private AND (host_owner_id=$1
-           OR id IN (SELECT chat_room_id FROM elric_agents WHERE owner_id=$1))`,
-        [ownerId],
-      )
-    ).rows.map((row) => row.id);
-    const del = async (sql: string) =>
-      (await tx.query(`${sql} RETURNING 1`, [ownerId])).rows.length;
-    // Streamed drafts of this owner's Elrics (migration 46): transient, removed with them.
-    await tx.query(
-      'DELETE FROM elric_drafts WHERE agent_id IN (SELECT agent_id FROM elric_agents WHERE owner_id=$1)',
-      [ownerId],
-    );
-    // The owner's cached room catch-ups (migration 66): summaries for this owner only.
-    await tx.query('DELETE FROM elric_catch_ups WHERE owner_id=$1', [ownerId]);
-    // Before the invocations go: their reservations leave the global ceiling.
-    await settleDeleted(tx, 'owner_id=$1', [ownerId]);
-    const result: ElricEraseResult = {
-      turns: await del('DELETE FROM elric_turns WHERE owner_id=$1'),
-      posts: await del('DELETE FROM elric_posts WHERE owner_id=$1'),
-      pending_actions: await del('DELETE FROM elric_pending_actions WHERE owner_id=$1'),
-      invocations: await del('DELETE FROM elric_invocations WHERE owner_id=$1'),
-      usage_rows: await del('DELETE FROM elric_usage WHERE owner_id=$1'),
-      agents: await del('DELETE FROM elric_agents WHERE owner_id=$1'),
-      identities: await del('DELETE FROM elric_verified_identities WHERE operator_id=$1'),
-      private_rooms: rooms.length,
-    };
-    await purgeRooms(tx, rooms);
-    await tx.query("SELECT set_config('elric.erase_owner', '', true)");
-    return result;
-  });
+    await tx.query('DELETE FROM elric_turns WHERE owner_id=$1 AND room_id = ANY($2)', [
+      ownerId,
+      [...rooms],
+    ]);
+  }
+  await tx.query('UPDATE elric_agents SET chat_room_id=NULL WHERE chat_room_id = ANY($1)', [
+    [...rooms],
+  ]);
+  await settleDeleted(tx, 'room_id = ANY($1)', [[...rooms]]);
+  await tx.query("SELECT set_config('elric.erase_owner', '', true)");
 }
 
 /**

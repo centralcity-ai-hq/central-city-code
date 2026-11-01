@@ -253,9 +253,9 @@ export interface FeedSourceRef {
   url: string;
   /** Bazaar records have no id of their own: the resource URL exactly as Bazaar lists it. */
   recordId: string;
-  /** When we last read this record from the source. */
+  /** When we last read this record from the source (Central City's own: the UTC day only). */
   fetchedAt: number;
-  /** The source's own lastUpdated; null when absent. */
+  /** The source's own lastUpdated; null when absent (Central City's own: the UTC day only). */
   updatedAt: number | null;
 }
 
@@ -363,9 +363,12 @@ export interface FeedService {
   method: FeedHttpMethod | null;
   protocol: 'x402';
   x402Version: 1 | 2;
-  /** The one offer shown: Base mainnet, USDC, scheme exact or upto (the cheapest if several). */
-  network: FeedNetwork;
-  asset: FeedAsset;
+  /**
+   * The one offer shown: Base mainnet, USDC, scheme exact or upto (the cheapest if several). A
+   * Central City listing is paid on its seller's chain, so it may name an Arc network and its USDC.
+   */
+  network: FeedNetwork | `eip155:${number}`;
+  asset: { address: Address; symbol: 'USDC'; decimals: 6 };
   scheme: 'exact' | 'upto';
   /** null = unknown. An unknown price never passes max_price. */
   price: FeedPrice | null;
@@ -378,7 +381,7 @@ export interface FeedService {
   output: FeedSchemaSummary | null;
   source: FeedSourceRef;
   usage: FeedUsage;
-  /** The last complete sweep that listed it. */
+  /** The last complete sweep that listed it (Central City's own: the UTC day it was written). */
   lastSeenAt: number;
   status: FeedServiceStatus;
   /**
@@ -630,11 +633,54 @@ export interface FeedStatus extends FeedFreshness {
   openRequests: number;
 }
 
+/**
+ * The only query keys GET services takes: the filters, the cursor, and the browser's own two,
+ * free (the page's free-first-buy filter, applied in the browser) and fresh (a read past the edge
+ * cache, feedApi.ts freshParam). Any other key is refused, so a made-up one cannot skip the edge
+ * cache. fresh is a time rounded down to FEED_FRESH_STEP_MS, so it makes one new edge entry per
+ * step at most.
+ */
+export const FEED_SERVICE_QUERY_KEYS: ReadonlySet<string> = new Set([
+  'q',
+  'max_price',
+  'sort',
+  'host',
+  'cursor',
+  'free',
+  'fresh',
+]);
+export const FEED_FRESH_STEP_MS = 10_000;
+
 const CURSOR = /^[A-Za-z0-9_-]{1,200}$/;
 const HOST = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
 
 /**
- * Reads the services query string. Unreadable sort, host or cursor fall back to their defaults.
+ * Why GET services refuses a query before any work, or null: a key it does not take, a repeated
+ * key, or a free, sort, host or cursor readFeedServiceQuery would not read (the answer would be the
+ * same as without it, so a made-up value per request would skip the edge cache). An empty value is
+ * the same as none. q is a search and max_price is checked where it is read; fresh by the route.
+ */
+export function feedServiceQueryRefusal(params: Record<string, unknown>): string | null {
+  const keys = Object.keys(params);
+  if (keys.some((key) => !FEED_SERVICE_QUERY_KEYS.has(key)))
+    return 'Use only q, max_price, sort, host and cursor.';
+  if (keys.some((key) => typeof params[key] !== 'string')) return 'Give each key once.';
+  const given = (key: string) => (params[key] === undefined ? '' : (params[key] as string));
+  if (!['', '1'].includes(given('free'))) return 'free must be 1.';
+  const sort = given('sort');
+  if (sort && !FEED_SERVICE_SORTS.some((value) => value === sort))
+    return `sort must be one of ${FEED_SERVICE_SORTS.join(', ')}.`;
+  // The route sends a host in capitals or with spaces on to its plain form.
+  if (given('host') && !HOST.test(given('host').trim().toLowerCase()))
+    return 'host must be a host name, for example api.example.com.';
+  if (given('cursor') && !CURSOR.test(given('cursor')))
+    return 'cursor must be the next of an earlier page.';
+  return null;
+}
+
+/**
+ * Reads the services query string. Unreadable sort, host or cursor fall back to their defaults
+ * (the route refuses them first: feedServiceQueryRefusal).
  * A max_price that is present but unreadable answers null (→ 400 invalid_request): a price filter
  * is never loosened silently.
  */
@@ -661,6 +707,36 @@ export function readFeedServiceQuery(params: Record<string, unknown>): FeedServi
     host: HOST.test(host) ? host : null,
     cursor: typeof params.cursor === 'string' && CURSOR.test(params.cursor) ? params.cursor : null,
   };
+}
+
+/**
+ * The one query string ('?…', or '' for none) GET services answers a query under: the keys in
+ * the browser's order (offeredSearch, then fresh), each value as the server reads it (q trimmed
+ * and its spaces collapsed, max_price as rawToUsdc writes it, host in lower case, fresh rounded
+ * down to FEED_FRESH_STEP_MS), the default sort and empty values left out, written as
+ * URLSearchParams writes it. The route sends any other spelling of the same query on to this one,
+ * so each answer has one edge cache entry and a made-up spelling never reaches the database.
+ * Null when max_price is unreadable (the route answers 400). For a query that
+ * feedServiceQueryRefusal passed and whose fresh, if any, is digits.
+ */
+export function canonicalFeedServiceSearch(params: Record<string, unknown>): string | null {
+  const read = readFeedServiceQuery(params);
+  if (!read) return null;
+  const q = read.q.trim();
+  const search = new URLSearchParams();
+  if (q) search.set('q', q);
+  if (read.maxPrice !== null) search.set('max_price', rawToUsdc(read.maxPrice));
+  const sort = read.sort === 'relevance' && !q ? 'most_used' : read.sort;
+  if (sort !== (q ? 'relevance' : 'most_used')) search.set('sort', sort);
+  if (read.host) search.set('host', read.host);
+  if (params.free === '1') search.set('free', '1');
+  if (read.cursor) search.set('cursor', read.cursor);
+  if (typeof params.fresh === 'string' && /^[0-9]{1,15}$/.test(params.fresh)) {
+    const fresh = Number(params.fresh);
+    search.set('fresh', String(fresh - (fresh % FEED_FRESH_STEP_MS)));
+  }
+  const text = search.toString();
+  return text ? `?${text}` : '';
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -811,6 +887,8 @@ export const FEED_ERRORS = {
   /** The data changed under this cursor (a new sweep finished): load the first page again. */
   cursor_stale: 409,
   request_closed: 409,
+  /** A post reused an idempotencyKey for different content, or for a removed request. */
+  idempotency_conflict: 409,
   /**
    * Operators only (the review queue): a release of a request that is listed already (not held
    * or hidden), whose text another open request already carries, or (held) whose poster is at
@@ -1014,7 +1092,7 @@ export interface ServiceSearchToolService {
   method: FeedHttpMethod | null;
   /** The x402 protocol version the listing declares. */
   x402_version: 1 | 2;
-  network: FeedNetwork;
+  network: FeedService['network'];
   asset: { address: Address; symbol: 'USDC'; decimals: 6 };
   scheme: 'exact' | 'upto';
   price: { raw: string; decimals: 6; usdc: string; unit: FeedPriceUnit } | null;

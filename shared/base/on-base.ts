@@ -12,17 +12,120 @@
  */
 import type { CityScore } from './rating-score.js';
 
-export const ON_BASE_PATHS = {
-  /** The list, newest first: ?q= searches; ?before=<baseId> pages. */
-  list: '/api/public/base/agents',
-  /** Followed by `/<baseId>` (digits only; anything else is 404): one agent's passport. */
-  passport: '/api/public/base/agents',
-} as const;
+/**
+ * The chains the Agent Explorer lists, by the slug in their public paths and page URLs
+ * (/api/public/<slug>/..., /explorer/<slug>). Base is the default; Arc only where it is switched on.
+ */
+export type ExplorerChainSlug = 'base' | 'arc';
+
+/** The explorer's public paths for one chain (ON_BASE_PATHS is Base's). */
+export function onChainPaths(slug: ExplorerChainSlug) {
+  return {
+    /** The list, newest first: ?q= searches; ?before=<id> pages. */
+    list: `/api/public/${slug}/agents`,
+    /** Followed by `/<id>` (digits only; anything else is 404): one agent's passport. */
+    passport: `/api/public/${slug}/agents`,
+    /** The highest ids with a final Central City rating (up to ON_BASE_RATED_MAX), newest first. */
+    rated: `/api/public/${slug}/rated`,
+  } as const;
+}
+
+export const ON_BASE_PATHS = onChainPaths('base');
+
+/** How many rated Base IDs GET ON_BASE_PATHS.rated answers at most. */
+export const ON_BASE_RATED_MAX = 10;
 
 /** Rows per page of the list (fixed, so every page is one edge-cache entry). */
 export const ON_BASE_PAGE_SIZE = 50;
 /** The longest search text accepted (a 66-character transaction hash fits). */
 export const ON_BASE_QUERY_MAX = 80;
+
+/**
+ * A name search needs a run of this many letters or digits: the public name index (trigrams)
+ * cannot serve a shorter pattern, nor one of only punctuation or single letters ('%%', 'a b').
+ */
+export const ON_BASE_NAME_MIN = 3;
+
+/**
+ * Why a search text is read as less than it may look like:
+ *   name-min     no run of ON_BASE_NAME_MIN letters or digits, so it is not read as a name;
+ *   hex-partial  0x and hex, but neither a wallet (40 hex) nor a transaction (64 hex).
+ * A text with no other reading is refused (400, code ON_BASE_UNSUPPORTED_CODE, `reading`, the
+ * message below), never answered as an empty list. With one (a 2-digit Base ID), the list
+ * answers that reading and says `notice: 'name-min'`.
+ */
+export type OnBaseSearchNotice = 'name-min' | 'hex-partial';
+export const ON_BASE_UNSUPPORTED_CODE = 'unsupported_reading';
+export const ON_BASE_SEARCH_NOTICES: Record<OnBaseSearchNotice, string> = {
+  'name-min': `Type at least ${ON_BASE_NAME_MIN} characters to search names`,
+  'hex-partial':
+    'Type a whole wallet address (0x and 40 hex characters) or transaction hash (0x and 64)',
+};
+
+/**
+ * Whether the list searches by transaction hash. Not yet: none of the transaction columns is
+ * indexed (each such search read every registration), and their indexes (migration 291) are built
+ * before the change that turns this on. Until then a transaction hash (0x and 64 hex, which has
+ * no other reading) is answered at once with 503, code ON_BASE_TX_SEARCH_UNAVAILABLE_CODE and
+ * the message below; never an empty list. Transactions are searched in Service calls meanwhile.
+ */
+export const ON_BASE_TX_SEARCH_AVAILABLE = false;
+export const ON_BASE_TX_SEARCH_UNAVAILABLE_CODE = 'tx_search_unavailable';
+export const ON_BASE_TX_SEARCH_UNAVAILABLE_MESSAGE =
+  'Search by transaction hash is temporarily unavailable. Paid calls can be searched by transaction in Service calls.';
+
+/** Whether this text is a transaction hash the list cannot search now (ON_BASE_TX_SEARCH_AVAILABLE). */
+export function onBaseTxSearchUnavailable(raw: string): boolean {
+  return !ON_BASE_TX_SEARCH_AVAILABLE && onBaseSearchReadings(raw).txHash !== null;
+}
+
+/** What a search text can mean (server/base/explorer/store.ts parseQuery builds its SQL on it). */
+export interface OnBaseSearchReadings {
+  /** The text as searched: control characters as spaces, trimmed. */
+  text: string;
+  baseId: string | null;
+  /** A short id, alone or as a passport number (CC-<short id>); short ids are case-sensitive. */
+  shortId: string | null;
+  /** An agent wallet, lower case. */
+  address: string | null;
+  /** A transaction of the registration (its mint or its hand-over), lower case. */
+  txHash: string | null;
+  /** Whether the text is also read as a public name. */
+  name: boolean;
+  notice: OnBaseSearchNotice | null;
+}
+
+const NAME_RUN = new RegExp(`[\\p{L}\\p{N}]{${ON_BASE_NAME_MIN}}`, 'u');
+
+export function onBaseSearchReadings(raw: string): OnBaseSearchReadings {
+  // Control characters become spaces: Postgres refuses a NUL in the name pattern (a 500).
+  const text = raw.replace(/\p{Cc}/gu, ' ').trim();
+  const hex = /^0x[0-9a-f]*$/i.test(text);
+  const name = !hex && NAME_RUN.test(text);
+  return {
+    text,
+    baseId: /^#?(0|[1-9][0-9]{0,77})$/.exec(text)?.[1] ?? null,
+    shortId: /^(?:[Cc][Cc]-)?([0-9A-Za-z]{6})$/.exec(text)?.[1] ?? null,
+    address: /^0x[0-9a-fA-F]{40}$/.test(text) ? text.toLowerCase() : null,
+    txHash: /^0x[0-9a-fA-F]{64}$/.test(text) ? text.toLowerCase() : null,
+    name,
+    notice: hex
+      ? /^0x([0-9a-f]{40}|[0-9a-f]{64})$/i.test(text)
+        ? null
+        : 'hex-partial'
+      : !name && text.length > 0
+        ? 'name-min'
+        : null,
+  };
+}
+
+/** The reason the list refuses this search text (no reading it can answer), else null. */
+export function onBaseUnsupportedReading(raw: string): OnBaseSearchNotice | null {
+  const r = onBaseSearchReadings(raw);
+  return r.notice && !r.baseId && !r.shortId && !r.address && !r.txHash && !r.name
+    ? r.notice
+    : null;
+}
 /** The on-chain agent URI origin (shared/base/short-id.ts SHORT_URI_ORIGIN, kept equal by a test). */
 export const AGENT_URI_ORIGIN = 'https://centralcity.ai';
 
@@ -108,6 +211,17 @@ export interface OnBaseList {
   registry: string;
   /** Pass as ?before= for the next (older) page; null on the last page. */
   nextBefore: string | null;
+  /**
+   * Only on a search with a name reading while the public name index is still being built: names
+   * may be missing from the rows (a Base ID, passport number, address or transaction is always
+   * found). Absent when the answer is complete.
+   */
+  incomplete?: true;
+  /**
+   * Only on a search whose text was answered by its exact readings alone because it is too short
+   * to be a name ('12': the Base ID 12, not names containing 12). See OnBaseSearchNotice.
+   */
+  notice?: 'name-min';
 }
 
 export interface OnBasePassport extends OnBaseRow {
@@ -184,6 +298,24 @@ export interface OnBaseReputation {
    * these wallets' ratings from Base and recomputes the score; [] without a score.
    */
   scoredBy: string[];
+  /**
+   * true when the feedback was read from Base but Central City's own records (who the raters are,
+   * their names) could not be read in time: score is then null and entries carry no names. Not
+   * read, which is never the same as no score. Absent otherwise.
+   */
+  scoreUnread?: true;
+  /**
+   * true when not every feedback entry on Base was read (server/base/explorer/head.ts: past its
+   * read bound, an answer too large to read whole, or a client list that could not be read, when
+   * only the rater wallets in Central City's records are read). The score still reads every rater
+   * wallet on its own. Absent otherwise.
+   */
+  bounded?: true;
+  /**
+   * How many Central City rater wallets have feedback for the agent whose latest rating could not
+   * be read (head.ts RATER_ENTRIES_MAX), so the score leaves them out. Absent when none.
+   */
+  ratersSkipped?: number;
 }
 
 /** A feedback value with its decimals as an exact decimal string: (-15n, 1) -> "-1.5". */

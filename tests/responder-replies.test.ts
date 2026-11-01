@@ -6,6 +6,7 @@ import type { Workspace } from '../server/model.js';
 import { responderKeys } from '../server/responder/keys.js';
 import { createResponderDelivery, type PostReplyArgs } from '../server/responder/deliver.js';
 import type { ProviderPostRequest } from '../server/responder/providers.js';
+import { findModel } from '../server/responder/models.js';
 import { buildPrompt } from '../server/responder/prompt.js';
 import type { Claimed } from '../server/wake/webhooks.js';
 import { WAKE_LIMITS } from '../server/wake/contract.js';
@@ -382,6 +383,107 @@ test('off means off: turning it off during the provider call cancels the post (r
   const reply = (await s.reply())!;
   assert.equal(reply.status, 'cancelled');
   assert.equal(reply.reason, 'responder_off');
+});
+
+test('CCA-620: turning Auto-reply off during a drain stops the remaining due mentions before any call', async (t) => {
+  const s = await setup(t);
+  await s.say('@resp-desk first question');
+  await s.say('@resp-desk second question');
+  await s.say('@resp-desk third question');
+  s.setOnCall(async () => {
+    if (s.requests.length !== 1) return;
+    const res = await s.call(s.owner.cookie, 'PUT', `/api/agents/${s.responderAgent}/responder`, {
+      enabled: false,
+    });
+    assert.equal(res.statusCode, 200, res.body);
+  });
+  await s.handle();
+  assert.equal(s.requests.length, 1, 'only the call already in flight reaches the provider');
+  assert.equal(s.posts.length, 0, 'nothing posted');
+  const open = await s.db.query<{ n: string }>(
+    "SELECT count(*)::text AS n FROM responder_replies WHERE agent_id=$1 AND status IN ('pending','generated')",
+    [s.responderAgent],
+  );
+  assert.equal(open.rows[0]!.n, '0', 'no reply is left waiting for a provider call');
+});
+
+test('CCA-526: a provider result that was never stored is not asked for again; its reservation counts as spent', async (t) => {
+  const s = await setup(t);
+  await s.say('@resp-desk lost answer');
+  // The save after the call fails: another drain took the lease while the call ran.
+  s.setOnCall(async () => {
+    await s.db.query("UPDATE responder_replies SET lease_id='taken-meanwhile' WHERE agent_id=$1", [
+      s.responderAgent,
+    ]);
+  });
+  await s.handle();
+  s.setOnCall(undefined);
+  assert.equal(s.requests.length, 1);
+  assert.equal((await s.reply())!.status, 'pending', 'the result was not stored');
+  s.advance(60_000); // the lease expires; the mention is due again
+  await s.handle();
+  assert.equal(s.requests.length, 1, 'no second provider call for the same mention');
+  assert.equal(s.posts.length, 0);
+  const reply = (await s.reply())!;
+  assert.equal(reply.status, 'failed');
+  assert.equal(reply.reason, 'provider_result_lost');
+  const usage = (await s.usage())!;
+  assert.equal(usage.replies, 1, 'one reply counted');
+  assert.equal(Number(usage.reserved_microusd), 0, 'nothing left reserved');
+  assert.ok(Number(usage.spent_microusd) > 0, 'the possibly billed call counts as spent (N4)');
+});
+
+test('CCA-526: a reservation left by an attempt that stopped before its call is released, never counted twice', async (t) => {
+  const s = await setup(t);
+  await s.say('@resp-desk reserved earlier');
+  // An attempt without time for a call leaves a pending row (no reservation yet).
+  await s.handle(1_000);
+  const row = (await s.reply())!;
+  assert.equal(row.status, 'pending');
+  // That earlier attempt had reserved, then stopped before its call (a crash): row and usage hold it.
+  const day = new Date(Number(row.created_at)).toISOString().slice(0, 10);
+  await s.db.query(
+    'UPDATE responder_replies SET reserved_microusd=50000, usage_day=$2 WHERE agent_id=$1',
+    [s.responderAgent, day],
+  );
+  await s.db.query(
+    `INSERT INTO responder_usage(agent_id,day,owner_id,replies,reserved_microusd) VALUES($1,$2,$3,1,50000)
+     ON CONFLICT (agent_id,day) DO UPDATE SET replies=1, reserved_microusd=50000`,
+    [s.responderAgent, day, s.owner.operatorId],
+  );
+  s.advance(60_000);
+  await s.handle();
+  assert.equal(s.requests.length, 1);
+  assert.equal((await s.reply())!.status, 'posted');
+  const usage = (await s.usage())!;
+  assert.equal(usage.replies, 1, 'one reply, not two');
+  assert.equal(Number(usage.reserved_microusd), 0, 'the superseded reservation was released');
+  assert.equal(Number(usage.spent_microusd), 3200);
+});
+
+test('CCA-621: the spend reservation covers the prompt at one token per UTF-8 byte', async (t) => {
+  const s = await setup(t);
+  // Text that tokenizes densely: CJK and emoji are several bytes, and often a token or more, each.
+  await s.say(`@resp-desk ${'漢字テスト😀'.repeat(60)}`);
+  let reserved = 0;
+  s.setOnCall(async () => {
+    const row = (await s.usage())!;
+    reserved = Number(row.reserved_microusd);
+  });
+  await s.handle();
+  assert.equal(s.requests.length, 1);
+  const body = JSON.parse(s.requests[0]!.body) as {
+    model: string;
+    system: string;
+    messages: { content: string }[];
+  };
+  const model = findModel('anthropic', body.model)!;
+  const bytes = Buffer.byteLength(body.system) + Buffer.byteLength(body.messages[0]!.content);
+  const worst = Math.ceil(
+    (bytes * model.inputMicroUsdPerMTok + model.maxOutputTokens * model.outputMicroUsdPerMTok) /
+      1_000_000,
+  );
+  assert.ok(reserved >= worst, `reserved ${reserved} < worst case ${worst}`);
 });
 
 test('an invalid key pauses the responder, marks the key invalid and turns the target off', async (t) => {
@@ -781,4 +883,44 @@ test('an HTTPS webhook and a responder coexist per agent; one mention wakes both
     left.rows.map((row) => row.kind),
     ['responder'],
   );
+});
+
+test('CCA-641 (c): a missing root key pauses but keeps the key active, so restoring the root resumes', async (t) => {
+  const s = await setup(t);
+  // The stored key names a root this server does not have (PREVIOUS removed too early).
+  const { kek_id: kid } = (
+    await s.db.query<{ kek_id: string }>(
+      'SELECT kek_id FROM responder_credentials WHERE agent_id=$1',
+      [s.responderAgent],
+    )
+  ).rows[0]!;
+  await s.db.query("UPDATE responder_credentials SET kek_id='k_000000000000' WHERE agent_id=$1", [
+    s.responderAgent,
+  ]);
+  await s.say('@resp-desk hi');
+  assert.deepEqual(await s.handle(), { outcome: 'paused' });
+  assert.equal((await s.settings()).status, 'paused');
+  // Migration 303: its own stored reason, not 'invalid_key' (the provider rejected the key).
+  assert.equal((await s.settings()).pause_reason, 'root_key_unavailable');
+  const view = await s.call(s.owner.cookie, 'GET', `/api/agents/${s.responderAgent}/responder`);
+  assert.equal(view.json().pause_reason, 'root_key_unavailable');
+  const status = async () =>
+    (
+      await s.db.query<{ status: string }>(
+        'SELECT status FROM responder_credentials WHERE agent_id=$1',
+        [s.responderAgent],
+      )
+    ).rows[0]!.status;
+  assert.equal(await status(), 'active', 'the owner key is not marked invalid');
+  assert.equal(s.requests.length, 0, 'no provider call');
+  // The root key is back: turning Auto-reply on again is accepted and resumes it.
+  await s.db.query('UPDATE responder_credentials SET kek_id=$2 WHERE agent_id=$1', [
+    s.responderAgent,
+    kid,
+  ]);
+  const resumed = await s.call(s.owner.cookie, 'PUT', `/api/agents/${s.responderAgent}/responder`, {
+    enabled: true,
+  });
+  assert.equal(resumed.statusCode, 200, resumed.body);
+  assert.equal((await s.settings()).status, 'active');
 });

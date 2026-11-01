@@ -48,7 +48,7 @@ async function mockList(page: Page, body: (url: URL) => unknown, status = 200) {
     return route.fulfill({ status, json: body(url) });
   });
   await page.route('**/api/public/stats', (route) =>
-    route.fulfill({ json: { ai_agents_total: 805272 } }),
+    route.fulfill({ json: { ai_agents_total: 805272, updated_at: new Date().toISOString() } }),
   );
   // A server without the directory: the registry page as before (e2e/directory.spec.ts has it).
   await page.route('**/api/public/directory*', (route) =>
@@ -226,6 +226,90 @@ test('a search with no match says so; Clear search brings the list back', async 
   await expect(page.getByText('No registered agent matches “0x3333”')).toBeVisible();
   await page.getByRole('button', { name: 'Clear search' }).click();
   await expect(page.locator('.ob-item')).toHaveCount(2);
+});
+
+test('a 1-2 character name is not searched and says why; a short Base ID still is', async ({
+  page,
+}) => {
+  const asked: string[] = [];
+  await mockList(page, (url) => {
+    const q = url.searchParams.get('q');
+    if (q) asked.push(q);
+    return q === '12' ? { ...list({ rows: [list().rows[1]] }), notice: 'name-min' } : list();
+  });
+  await page.goto('/explorer/base');
+  await expect(page.locator('.ob-item')).toHaveCount(2);
+  await page.getByLabel('Search agents on Base').fill('ha');
+  await page.getByRole('button', { name: 'Find' }).click();
+  await expect(page.getByText('Type at least 3 characters to search names')).toBeVisible();
+  // Nothing was asked, and the list as it was stays: never "no match" for a search not made.
+  await expect(page.locator('.ob-item')).toHaveCount(2);
+  await expect(page.getByText(/No registered agent matches/)).toHaveCount(0);
+  expect(asked).toEqual([]);
+  // Digits are a Base ID of any length: searched, the count says names were not.
+  await page.getByLabel('Search agents on Base').fill('12');
+  await page.getByRole('button', { name: 'Find' }).click();
+  await expect(
+    page.getByText('1 found · Type at least 3 characters to search names'),
+  ).toBeVisible();
+  expect(asked).toEqual(['12']);
+});
+
+test('a transaction hash says its search is unavailable, without asking the server', async ({
+  page,
+}) => {
+  const asked: string[] = [];
+  await mockList(page, (url) => {
+    const q = url.searchParams.get('q');
+    if (q) asked.push(q);
+    return list();
+  });
+  await page.goto('/explorer/base');
+  await expect(page.locator('.ob-item')).toHaveCount(2);
+  await page.getByLabel('Search agents on Base').fill(`0x${'ab'.repeat(32)}`);
+  await page.getByRole('button', { name: 'Find' }).click();
+  await expect(
+    page.getByText('Search by transaction hash is temporarily unavailable', { exact: false }),
+  ).toBeVisible();
+  await expect(page.getByText(/No registered agent matches/)).toHaveCount(0);
+  expect(asked).toEqual([]);
+});
+
+test('while the name index is building, results and an empty search say names may be missing', async ({
+  page,
+}) => {
+  let incomplete = true;
+  await mockList(page, (url) => {
+    const q = url.searchParams.get('q');
+    const body = q === 'zzz' ? list({ rows: [] }) : list();
+    return q && incomplete ? { ...body, incomplete: true } : body;
+  });
+  await page.goto('/explorer/base');
+  // A match: the count line carries the note.
+  await page.getByLabel('Search agents on Base').fill('Pinako');
+  await page.getByRole('button', { name: 'Find' }).click();
+  await expect(
+    page.getByText('found · Name index still building; some names may be missing'),
+  ).toBeVisible();
+  // No match: the note, and a headline that does not claim the agent does not exist.
+  await page.getByLabel('Search agents on Base').fill('zzz');
+  await page.getByRole('button', { name: 'Find' }).click();
+  await expect(
+    page.getByText('0 found · Name index still building; some names may be missing'),
+  ).toBeVisible();
+  await expect(
+    page.getByText('No matches for “zzz” in the results available so far'),
+  ).toBeVisible();
+  await expect(page.getByText('No registered agent matches “zzz”')).toHaveCount(0);
+  // Once the index is ready the note goes and the plain headline returns.
+  incomplete = false;
+  await page.getByLabel('Search agents on Base').fill('zzz ');
+  await page.getByLabel('Search agents on Base').fill('zzz');
+  await page.getByRole('button', { name: 'Find' }).click();
+  await expect(page.getByText('No registered agent matches “zzz”')).toBeVisible();
+  await expect(page.getByText('Name index still building; some names may be missing')).toHaveCount(
+    0,
+  );
 });
 
 test('a healthy list stays live: no false outage after minutes, the block keeps moving', async ({

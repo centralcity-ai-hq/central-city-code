@@ -148,7 +148,13 @@ function fakeOperations() {
     prepared: [] as Array<Parameters<OwnerRevokePort['prepare']>[0]>,
     submitted: [] as Array<Parameters<OwnerRevokePort['submit']>[0]>,
     refreshed: [] as string[],
+    /** Prepared revokes given back unsigned (OwnerRevokePort.release). */
+    released: [] as string[],
     stored: new Map<string, StoredOperation>(),
+    /** The validUntil (seconds) the next prepared sponsorship carries; 0: unbounded (none). */
+    validUntil: 0,
+    /** The bundler's send margin before validUntil (OwnerRevokePort.sendMarginMs), in ms. */
+    marginMs: 0,
   };
   const hashOf = (operation: UserOperation<'0.6'>) =>
     getUserOperationHash({
@@ -180,11 +186,15 @@ function fakeOperations() {
         maxPriorityFeePerGas: 1_000n,
         // The pinned sponsor's layout (shared/base/paymasters.ts) with a synthetic paymaster, so the
         // browser's check can run on it with its own allowlist (keyed by the wallet network).
-        paymasterAndData: `0x${'7a'.repeat(20)}${'00'.repeat(109)}${'ab'.repeat(65)}`,
+        paymasterAndData: `0x${'7a'.repeat(20)}${ops.validUntil.toString(16).padStart(12, '0')}${'00'.repeat(103)}${'ab'.repeat(65)}`,
         signature: '0x',
       };
       return { operation, userOpHash: hashOf(operation), maxCostWei: 1n, deployed: true };
     },
+    async release(userOpHash) {
+      ops.released.push(userOpHash.toLowerCase());
+    },
+    sendMarginMs: () => ops.marginMs,
     async submit(input) {
       ops.submitted.push(input);
       if (ops.fail) throw ops.fail;
@@ -418,6 +428,43 @@ test('with the flag off every limit route is 404', async (t) => {
   }
 });
 
+test('every limit write is rate limited per person, each its own bucket (20 a minute)', async (t) => {
+  const calls: string[] = [];
+  const f = await setup(t, {
+    limit: async (key, max, windowMs) => {
+      calls.push(`${key}|${max}|${windowMs}`);
+    },
+  });
+  const id = '00000000-0000-4000-8000-000000000001';
+  for (const url of [
+    `${limitsUrl()}/prepare`,
+    limitsUrl(),
+    `${limitsUrl()}/${id}/revoke`,
+    `${limitsUrl()}/${id}/revoke/signature`,
+  ])
+    await f.app.inject({ method: 'POST', url, headers: as('person-1'), payload: '{}' });
+  assert.deepEqual(calls, [
+    'wallet-limits-prepare:person-1|20|60000',
+    'wallet-limits-store:person-1|20|60000',
+    'wallet-limits-revoke:person-1|20|60000',
+    'wallet-limits-revoke-signature:person-1|20|60000',
+  ]);
+  // Over the rate: refused before anything is read or prepared.
+  const refused = await setup(t, {
+    limit: async () => {
+      throw Object.assign(new Error('Too many requests. Try again later.'), { statusCode: 429 });
+    },
+  });
+  const res = await refused.app.inject({
+    method: 'POST',
+    url: `${limitsUrl()}/${id}/revoke`,
+    headers: as('person-1'),
+    payload: '{}',
+  });
+  assert.equal(res.statusCode, 429, res.body);
+  assert.equal(refused.ops.prepared.length, 0);
+});
+
 test('half model: prepare, sign in the browser, store; ERC-6492 while undeployed', async (t) => {
   const f = await setup(t);
   const res = await prepare(f);
@@ -590,7 +637,7 @@ test('wrong signer, tampered permission and a wrong cap are refused with 422', a
     { end: MIDNIGHT + 30 * 86_400 },
     { period: 3600 },
     { extraData: '0x01' as Hex },
-    { token: NETWORK.tokens.ETH.address },
+    { token: NETWORK.tokens.ETH!.address },
     { account: getAddress(`0x${'4'.repeat(40)}`) },
   ]) {
     const changed = { ...permission, ...change };
@@ -709,6 +756,83 @@ test('one active limit per token; a new one only after Base shows the old one re
   );
 });
 
+test("revoke with our own paymaster's 5-minute sponsorship: expires_at is validUntil less its bundler's send margin; at minute 3.5 refused up front, nothing submitted", async (t) => {
+  const f = await setup(t);
+  const { created } = await storedLimit(f);
+  const revokeUrl = `${limitsUrl()}/${created.permissionId}/revoke`;
+  f.ops.validUntil = Math.floor(f.clock.now / 1000) + 300;
+  f.ops.marginMs = 120_000;
+  const start = f.clock.now;
+  const res = await f.app.inject({
+    method: 'POST',
+    url: revokeUrl,
+    headers: as('person-1'),
+    payload: '{}',
+  });
+  assert.equal(res.statusCode, 200, res.body);
+  const request = res.json();
+  // Clamped to validUntil less the margin, not the 10-minute deadline.
+  assert.equal(request.expiresAt, start + 180_000);
+  const sign = async () =>
+    f.app.inject({
+      method: 'POST',
+      url: `${revokeUrl}/signature`,
+      headers: as('person-1'),
+      payload: JSON.stringify({ signature: await f.owner.sign({ hash: request.userOpHash }) }),
+    });
+  f.clock.now = start + 210_000;
+  const refused = await sign();
+  assert.equal(refused.statusCode, 410, refused.body);
+  assert.equal(refused.json().code, 'expired');
+  assert.equal(f.ops.submitted.length, 0);
+});
+
+test('revoke prepared before the margin was known (10-minute deadline): a signature in the last 2 minutes of its sponsorship is refused up front', async (t) => {
+  const f = await setup(t);
+  const { created } = await storedLimit(f);
+  const revokeUrl = `${limitsUrl()}/${created.permissionId}/revoke`;
+  f.ops.validUntil = Math.floor(f.clock.now / 1000) + 300;
+  const start = f.clock.now;
+  const request = (
+    await f.app.inject({ method: 'POST', url: revokeUrl, headers: as('person-1'), payload: '{}' })
+  ).json();
+  assert.equal(request.expiresAt, start + 10 * 60_000);
+  f.ops.marginMs = 120_000;
+  const sign = async () =>
+    f.app.inject({
+      method: 'POST',
+      url: `${revokeUrl}/signature`,
+      headers: as('person-1'),
+      payload: JSON.stringify({ signature: await f.owner.sign({ hash: request.userOpHash }) }),
+    });
+  f.clock.now = start + 210_000;
+  const refused = await sign();
+  assert.equal(refused.statusCode, 410, refused.body);
+  assert.equal(f.ops.submitted.length, 0);
+  // Asked again, a new revoke is prepared (the old one is not handed out again); at minute 2.5 of
+  // its own sponsorship it is submitted.
+  f.ops.validUntil = Math.floor(f.clock.now / 1000) + 300;
+  const again = await f.app.inject({
+    method: 'POST',
+    url: revokeUrl,
+    headers: as('person-1'),
+    payload: '{}',
+  });
+  assert.equal(again.statusCode, 200, again.body);
+  const fresh = again.json();
+  assert.notEqual(fresh.userOpHash, request.userOpHash);
+  assert.equal(fresh.expiresAt, f.clock.now + 180_000);
+  f.clock.now += 150_000;
+  const ok = await f.app.inject({
+    method: 'POST',
+    url: `${revokeUrl}/signature`,
+    headers: as('person-1'),
+    payload: JSON.stringify({ signature: await f.owner.sign({ hash: fresh.userOpHash }) }),
+  });
+  assert.equal(ok.statusCode, 202, ok.body);
+  assert.equal(f.ops.submitted.length, 1);
+});
+
 test('revoke: two-phase, the owner signs the raw userOpHash, revoked only from a Base read', async (t) => {
   const f = await setup(t);
   const { prepared, created } = await storedLimit(f);
@@ -743,6 +867,8 @@ test('revoke: two-phase, the owner signs the raw userOpHash, revoked only from a
   );
   assert.equal(f.ops.prepared[0].wallet, f.wallets[AGENT]);
   assert.equal(f.ops.prepared[0].calls[0].target, SPM);
+  // Sponsored for the wallet's owner account: its sponsorship budget is the one it counts against.
+  assert.equal(f.ops.prepared[0].accountId, 'person-1');
 
   // Asking again while unsigned hands back the same operation.
   const same = await f.app.inject({
@@ -951,6 +1077,7 @@ test('revoke: an unsigned operation expires; a failed or outdated one is prepare
   f.ops.fail = null;
 
   const first = (await post(revokeUrl)).json();
+  assert.deepEqual(f.ops.released, []);
   f.clock.now += 11 * 60_000;
   const late = await post(`${revokeUrl}/signature`, {
     signature: await f.owner.sign({ hash: first.userOpHash }),
@@ -962,6 +1089,8 @@ test('revoke: an unsigned operation expires; a failed or outdated one is prepare
   // A fresh one after expiry; the wallet moved on before it was sent: prepare again.
   const second = (await post(revokeUrl)).json();
   assert.notEqual(second.userOpHash, first.userOpHash);
+  // The unsigned one it replaces gives its sponsorship back; the new one keeps its own.
+  assert.deepEqual(f.ops.released, [first.userOpHash.toLowerCase()]);
   f.ops.fail = new OwnerRevokeError('OUTDATED', 'moved');
   const outdated = await post(`${revokeUrl}/signature`, {
     signature: await f.owner.sign({ hash: second.userOpHash }),
@@ -972,6 +1101,10 @@ test('revoke: an unsigned operation expires; a failed or outdated one is prepare
 
   const third = (await post(revokeUrl)).json();
   assert.notEqual(third.userOpHash, second.userOpHash);
+  assert.deepEqual(
+    f.ops.released,
+    [first.userOpHash, second.userOpHash].map((h) => h.toLowerCase()),
+  );
   const sent = await post(`${revokeUrl}/signature`, {
     signature: await f.owner.sign({ hash: third.userOpHash }),
   });
@@ -985,6 +1118,8 @@ test('revoke: an unsigned operation expires; a failed or outdated one is prepare
   const retry = await post(revokeUrl);
   assert.equal(retry.statusCode, 200, retry.body);
   assert.equal(retry.json().revokeState, 'awaiting_signature');
+  // The signed one it follows was sent: nothing of it is given back.
+  assert.equal(f.ops.released.length, 2);
   // Nothing to sign for a limit that was never revoked; a body is refused.
   assert.equal((await post(revokeUrl, { force: true })).statusCode, 400);
 });

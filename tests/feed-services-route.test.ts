@@ -23,6 +23,7 @@ import { FEED_OFFERS_SQL } from '../server/feed/offers/schema.js';
 import { createFeedStore } from '../server/feed/store.js';
 import { BAZAAR_SOURCE, type FeedServiceRow } from '../server/feed/types.js';
 import {
+  FEED_FRESH_STEP_MS,
   FEED_LIMITS,
   FEED_PATHS,
   FEED_SOURCE,
@@ -190,8 +191,16 @@ function routes(
 
 type App = ReturnType<typeof routes>;
 
+/**
+ * One list read, as a browser reads it: another spelling of the query (an encoded space, a
+ * default sort, 0.050 for 0.05) is sent on once to its canonical URL, which then answers.
+ */
 async function list(app: App, query = '') {
-  const response = await app.inject({ url: `${FEED_PATHS.services}${query}` });
+  let response = await app.inject({ url: `${FEED_PATHS.services}${query}` });
+  if (response.statusCode === 307) {
+    response = await app.inject({ url: String(response.headers.location) });
+    assert.notEqual(response.statusCode, 307, 'sent on once only');
+  }
   assert.equal(response.statusCode, 200, response.body);
   assert.equal(response.headers['cache-control'], FEED_CACHE);
   return response.json() as FeedServicePage;
@@ -498,8 +507,12 @@ test('max_price: base units compared exactly, an unknown price never passes, unr
     '9'.repeat(400),
   ])
     await refused(app, `${FEED_PATHS.services}?max_price=${value}`, 400, invalid);
-  // An unknown parameter is still ignored, as before.
-  assert.deepEqual(ids(await list(app, '?max_price=0.05&colour=blue')), [id(1), id(2)]);
+  // An unknown parameter is refused: a made-up one would skip the edge cache.
+  await refused(app, `${FEED_PATHS.services}?max_price=0.05&colour=blue`, 400, {
+    error: 'Use only q, max_price, sort, host and cursor.',
+    code: 'invalid_request',
+    retryable: false,
+  });
 });
 
 test('sorts: most used (unknown last), cheapest (unknown last), newest; ties by id', async (t) => {
@@ -520,8 +533,9 @@ test('sorts: most used (unknown last), cheapest (unknown last), newest; ties by 
     ids(await searchFeedServices(db, query({ sort: 'relevance' }), { limit: 10, now: NOW })),
     mostUsed,
   );
-  // An unreadable sort falls back to the default.
-  assert.deepEqual(ids(await list(app, '?sort=loudest')), mostUsed);
+  // A sort it does not know is refused, never read as the default (it would skip the edge cache).
+  const loudest = await app.inject({ url: `${FEED_PATHS.services}?sort=loudest` });
+  assert.equal(loudest.statusCode, 400, loudest.body);
   assert.deepEqual(ids(await list(app, '?sort=cheapest')), [id(5), id(3), id(4), id(1), id(2)]);
   assert.deepEqual(ids(await list(app, '?sort=newest')), [id(2), id(3), id(4), id(1), id(5)]);
 });
@@ -611,9 +625,13 @@ test('per host at most two listings; moreFromHost counts the rest; host= lifts t
     page.services.map((service) => service.moreFromHost),
     [0, 0, 0, 0],
   );
-  // Exact host only (no suffix match), case-insensitive input.
-  assert.deepEqual(ids(await list(app, '?host=BUSY.EXAMPLE')), [id(1), id(2), id(3), id(4)]);
-  assert.deepEqual(ids(await list(app, '?host=example')), [id(1), id(2), id(7)]);
+  // Exact host only (no suffix match); one in capitals is sent on to its lowercase form, and one
+  // that is not a host name is refused (never read as no filter).
+  const capitals = await app.inject({ url: `${FEED_PATHS.services}?host=BUSY.EXAMPLE` });
+  assert.equal(capitals.statusCode, 307, capitals.body);
+  assert.equal(capitals.headers.location, `${FEED_PATHS.services}?host=busy.example`);
+  const notHost = await app.inject({ url: `${FEED_PATHS.services}?host=example` });
+  assert.equal(notHost.statusCode, 400, notHost.body);
   assert.deepEqual(ids(await list(app, '?host=usy.example')), []);
   // A host's own list shows all of the host, page by page: none is left over on any page.
   const first = await searchFeedServices(db, query({ host }), { limit: 3, now: NOW });
@@ -797,11 +815,11 @@ test('cursor: next pages continue the order; a cursor of another snapshot answer
   assert.deepEqual(ids(again), ids(first));
   assert.notEqual(again.next, first.next);
   // The client reads page 1 again past the edge with a throwaway parameter (feedApi.ts
-  // freshParam): the route ignores it and answers the same page.
-  const fresh = await list(app, `?fresh=${NOW}`);
+  // freshParam, a time rounded to its step): the route ignores it and answers the same page.
+  const fresh = await list(app, `?fresh=${NOW - (NOW % FEED_FRESH_STEP_MS)}`);
   assert.deepEqual(ids(fresh), ids(again));
   assert.equal(fresh.next, again.next);
-  const freshSorted = await list(app, `?sort=cheapest&fresh=1`);
+  const freshSorted = await list(app, `?sort=cheapest&fresh=${FEED_FRESH_STEP_MS}`);
   assert.deepEqual(ids(freshSorted), ids(await list(app, '?sort=cheapest')));
 });
 

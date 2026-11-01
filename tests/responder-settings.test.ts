@@ -455,10 +455,63 @@ test('without a valid root key every operation answers 503 responder_unavailable
     buffer.every((byte) => byte === 0),
     'zeroized on refusal too',
   );
-  assert.deepEqual(await code(responder.get(owner.operatorId, owner.agent.id)), [
-    503,
-    'responder_unavailable',
-  ]);
+  // Reading the settings needs no root key (CCA-622).
+  assert.equal((await responder.get(owner.operatorId, owner.agent.id)).enabled, false);
+});
+
+test('CCA-622: with the keyring unavailable an owner can still turn Auto-reply off and delete the key', async (t) => {
+  const { db, responder, owner } = await setup(t);
+  const { operatorId, agent } = owner;
+  await responder.setKey(
+    operatorId,
+    'the owner',
+    agent.id,
+    { provider: 'openai', key: key(FAKE_OPENAI) },
+    'addr',
+  );
+  await responder.update(operatorId, 'the owner', agent.id, { enabled: true });
+  // The same database served by an instance whose root key does not decode.
+  const broken = createResponder({
+    db,
+    clock: () => 1_900_000_000_000,
+    async limit() {},
+    mutate: (id, action) =>
+      db.transaction(async (tx) => {
+        const workspace = (
+          await tx.query<{ data: Workspace }>(
+            'SELECT data FROM workspaces WHERE operator_id=$1 FOR UPDATE',
+            [id],
+          )
+        ).rows[0]!.data;
+        const result = await action(workspace, tx, 1_900_000_000_000);
+        await tx.query('UPDATE workspaces SET data=$2::jsonb WHERE operator_id=$1', [
+          id,
+          JSON.stringify(workspace),
+        ]);
+        return result;
+      }),
+    keys: responderKeys({ CITY_RESPONDER_KEK: 'not-32-bytes' }, { hosted: true }),
+    transport: async () => ({ status: 200 }),
+  });
+  assert.equal(broken.available, false);
+  assert.equal((await broken.get(operatorId, agent.id)).enabled, true);
+  // Other setting changes still need the root key.
+  assert.deepEqual(
+    await code(broken.update(operatorId, 'the owner', agent.id, { instructions: 'x' })),
+    [503, 'responder_unavailable'],
+  );
+  const off = await broken.update(operatorId, 'the owner', agent.id, { enabled: false });
+  assert.equal(off.enabled, false);
+  const removed = await broken.removeKey(operatorId, 'the owner', agent.id);
+  assert.equal(removed.removed, true);
+  const row = (
+    await db.query<{ status: string; ciphertext: Uint8Array | null }>(
+      'SELECT status, ciphertext FROM responder_credentials WHERE agent_id=$1',
+      [agent.id],
+    )
+  ).rows[0]!;
+  assert.equal(row.status, 'revoked');
+  assert.equal(row.ciphertext, null);
 });
 
 test('stored keys are revoked when agents change owner or an AI workspace is claimed', async (t) => {
@@ -608,9 +661,9 @@ test('decryption selects the root key by the stored kek_id; rotation re-wraps an
   // Selected by kid: the new-only keyring refuses instead of trying every key.
   assert.throws(() => openStoredKey(onlyNew, before), UnknownRootKeyError);
   const dry = await rewrapResponderKeys(db, rotated);
-  assert.deepEqual(dry, { pending: 1, rewrapped: 0, unknownRoot: 0, dryRun: true });
+  assert.deepEqual(dry, { pending: 1, rewrapped: 0, unknownRoot: 0, failed: 0, dryRun: true });
   const done = await rewrapResponderKeys(db, rotated, { confirm: true });
-  assert.deepEqual(done, { pending: 1, rewrapped: 1, unknownRoot: 0, dryRun: false });
+  assert.deepEqual(done, { pending: 1, rewrapped: 1, unknownRoot: 0, failed: 0, dryRun: false });
   const after = await stored();
   assert.equal(after.kek_id, onlyNew.available ? onlyNew.current.kid : '');
   assert.deepEqual(
@@ -624,6 +677,7 @@ test('decryption selects the root key by the stored kek_id; rotation re-wraps an
     pending: 0,
     rewrapped: 0,
     unknownRoot: 0,
+    failed: 0,
     dryRun: true,
   });
 });

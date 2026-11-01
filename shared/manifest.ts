@@ -523,10 +523,35 @@ export function jsonByteLength(value: unknown): number | null {
   }
 }
 
+/** A lone UTF-16 surrogate: not valid Unicode, so the manifest cannot be canonicalized. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+/** The path of the first key or string value that is not well-formed Unicode, if any. */
+function illFormedPath(value: unknown, path: PropertyKey[] = []): PropertyKey[] | null {
+  if (typeof value === 'string') return LONE_SURROGATE.test(value) ? path : null;
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index++) {
+      const found = illFormedPath(value[index], [...path, index]);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (value && typeof value === 'object')
+    for (const [key, item] of Object.entries(value)) {
+      if (LONE_SURROGATE.test(key)) return [...path, key];
+      const found = illFormedPath(item, [...path, key]);
+      if (found) return found;
+    }
+  return null;
+}
+
 function sizeIssue(input: unknown): ManifestIssue | null {
   const bytes = jsonByteLength(input);
   if (bytes === null)
     return manifestIssue('MANIFEST_NOT_JSON', '', 'Manifest is not JSON-serializable.');
+  // CCA-633: refused here with a 400 naming the field, not later by canonicalization (a 500).
+  const illFormed = illFormedPath(input);
+  if (illFormed)
+    return manifestIssue('INVALID_VALUE', illFormed, 'Text must be well-formed Unicode.');
   if (bytes > MANIFEST_LIMITS.manifestBytes)
     return manifestIssue(
       'MANIFEST_TOO_LARGE',

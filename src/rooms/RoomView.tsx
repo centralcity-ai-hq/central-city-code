@@ -25,6 +25,8 @@ import {
   Plug,
   Search,
   Settings2,
+  SquareCheckBig,
+  Paperclip,
   Trash2,
   UserPlus,
   Users,
@@ -80,6 +82,9 @@ import { isTaskLine } from './taskStatusV3';
 import { TasksPanel, useRoomTasks } from './TasksPanel';
 import { SearchPanel } from './SearchPanel';
 import { ContextPins, useRoomPins } from './ContextPins';
+import { ApprovalCard, DecisionEvent, DecisionsPanel, useRoomCards } from './RoomCards';
+import { FilesPanel, useRoomFiles } from './RoomFiles';
+import { approvalRefOfLine, decisionRefOfLine, isCardLine } from './cards';
 import { addPin, pinningMember, removePin, type RoomPin } from './pins';
 import { RepoPanel, useRoomRepo } from './RepoPanel';
 import { api, ApiError } from '../api';
@@ -119,6 +124,12 @@ import { mutePosting, mutedNotice } from './muteView';
 
 /** v2: how often the open Members panel refreshes its list (as the overview's counts). */
 const MEMBERS_POLL_MS = 30_000;
+
+/** A server line's text (system lines are one text part). */
+const lineText = (message: RoomMessage) =>
+  message.text ||
+  message.parts?.map((part) => (part.type === 'text' ? part.text : '')).join('') ||
+  '';
 /** Loaded on first open, so room pages don't download the Connect page's code up front. */
 const loadConnectAiSheet = () =>
   import('./ConnectAiSheet').then((module) => ({ default: module.ConnectAiSheet }));
@@ -398,9 +409,14 @@ function MembersPanel({
                     'your agent'
                   )
                 ) : member.kind === 'person' ? (
-                  <span title={member.owner_label}>{owner(member.owner_label)}</span>
+                  <span title={member.owner_label}>
+                    {owner(member.owner_label, member.owner_kind)}
+                  </span>
                 ) : (
-                  <AgentLabel owner={agentOwner(member.owner_label)} title={member.owner_label} />
+                  <AgentLabel
+                    owner={agentOwner(member.owner_label, member.owner_kind)}
+                    title={member.owner_label}
+                  />
                 )}
                 {member.role === 'host' ? ' · host' : ''}
               </span>
@@ -847,9 +863,9 @@ export function RoomView({
   const [members, setMembers] = useState<Member[]>([]);
   // One side panel at a time: members, room settings, the room's tasks, its code or search
   // (in the v2 preview the Members panel also shows who is active now).
-  const [panel, setPanel] = useState<'members' | 'settings' | 'tasks' | 'code' | 'search' | null>(
-    null,
-  );
+  const [panel, setPanel] = useState<
+    'members' | 'settings' | 'tasks' | 'code' | 'search' | 'decisions' | 'files' | null
+  >(null);
   // Under 640 px the top bar is two rows: the pill with ⋯, then a strip of chips (§4.1).
   const compactBar = useMediaQuery(COMPACT_BAR_QUERY);
   // A search result to show in the thread (key changes on every jump).
@@ -865,6 +881,29 @@ export function RoomView({
   const [pinsHidden, setPinsHidden] = useState(false);
   const tasks = useRoomTasks(initial.id, panel === 'tasks' || (v2 && panel === 'members'));
   const repo = useRoomRepo(initial.id);
+  // Rooms P1 cards: a decision or approval line arriving refreshes them, so the approval card
+  // under its line and the Decisions panel follow the room without a reload.
+  const lastCardLine = useMemo(() => {
+    for (let index = thread.messages.length - 1; index >= 0; index--) {
+      const message = thread.messages[index]!;
+      if (
+        (message as { sender_kind?: string }).sender_kind === 'system' &&
+        isCardLine(lineText(message))
+      )
+        return message.seq;
+    }
+    return 0;
+  }, [thread.messages]);
+  const roomCards = useRoomCards(initial.id, lastCardLine);
+  // Room files (docs/ROOMS.md "Room files"): the panel lists, shares and downloads them.
+  const roomFiles = useRoomFiles(initial.id, panel === 'files');
+  const cardsByRef = useMemo(
+    () => new Map((roomCards.cards ?? []).map((card) => [card.ref, card])),
+    [roomCards.cards],
+  );
+  const waitingForYou = (roomCards.cards ?? []).filter(
+    (card) => card.kind === 'approval' && card.approval?.can_answer,
+  ).length;
   // A task line arriving (created, claimed, accepted…) refreshes the tasks, so the status pills
   // under messages follow the work without opening the Tasks panel.
   const lastTaskLine = useMemo(() => {
@@ -1556,7 +1595,7 @@ export function RoomView({
     setTaskForm(0);
     setPanel('tasks');
   };
-  const togglePanel = (next: 'members' | 'tasks' | 'search') =>
+  const togglePanel = (next: 'members' | 'tasks' | 'search' | 'decisions' | 'files') =>
     setPanel((value) => (value === next ? null : next));
   const showElricSwitch = Boolean(
     elricSwitch &&
@@ -1752,6 +1791,39 @@ export function RoomView({
               adding={addingElric}
             />
           ) : null}
+          {roomFiles.state !== null ? (
+            <button
+              type="button"
+              className="rm3-chip rm-files-head"
+              aria-label={`Files, ${roomFiles.state.files.length}`}
+              aria-expanded={panel === 'files'}
+              data-testid="files-button"
+              onClick={() => togglePanel('files')}
+            >
+              <Paperclip className="rm3-chip-icon" size={16} aria-hidden="true" />
+              <span className="rm3-chip-label">Files</span>
+            </button>
+          ) : null}
+          {roomCards.cards !== null ? (
+            <button
+              type="button"
+              className="rm3-chip rm-decisions-head"
+              aria-label={
+                waitingForYou ? `Decisions, ${waitingForYou} waiting for you` : 'Decisions'
+              }
+              aria-expanded={panel === 'decisions'}
+              data-testid="decisions-button"
+              onClick={() => togglePanel('decisions')}
+            >
+              <SquareCheckBig className="rm3-chip-icon" size={16} aria-hidden="true" />
+              <span className="rm3-chip-label">Decisions</span>
+              {waitingForYou ? (
+                <span className="rm-count rm3-n" aria-hidden="true">
+                  {compactCount(waitingForYou)}
+                </span>
+              ) : null}
+            </button>
+          ) : null}
           <button
             ref={searchButton}
             type="button"
@@ -1903,6 +1975,20 @@ export function RoomView({
                 }
                 noteFor={mentionNote}
                 onPinnedChange={setAtBottom}
+                cardFor={(message) => {
+                  const text = lineText(message);
+                  const asked = approvalRefOfLine(text);
+                  const approval = asked ? cardsByRef.get(asked) : undefined;
+                  if (approval)
+                    return {
+                      node: <ApprovalCard card={approval} onAnswered={roomCards.replace} />,
+                      fold: true,
+                    };
+                  const recorded = decisionRefOfLine(text);
+                  const decision = recorded ? cardsByRef.get(recorded) : undefined;
+                  if (decision) return { node: <DecisionEvent card={decision} />, fold: true };
+                  return null;
+                }}
                 directFor={(id) => {
                   const member = members.find((item) => item.id === id);
                   return member ? <DirectLink room={room} member={member} compact /> : null;
@@ -2114,6 +2200,24 @@ export function RoomView({
           />
         ) : panel === 'code' ? (
           <RepoPanel room={room} repo={repo} onClose={() => setPanel(null)} />
+        ) : panel === 'decisions' ? (
+          <DecisionsPanel
+            roomId={initial.id}
+            cards={roomCards.cards}
+            canRecord={Boolean(pinAs)}
+            agentId={pinAs?.id}
+            onRecorded={roomCards.replace}
+            onClose={() => setPanel(null)}
+          />
+        ) : panel === 'files' ? (
+          <FilesPanel
+            roomId={initial.id}
+            state={roomFiles.state}
+            canShare={Boolean(pinAs)}
+            agentId={pinAs?.id}
+            onChanged={() => void roomFiles.refresh()}
+            onClose={() => setPanel(null)}
+          />
         ) : null}
       </div>
       {addMyAi ? (

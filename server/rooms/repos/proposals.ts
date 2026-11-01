@@ -436,6 +436,7 @@ export function createRoomProposals(d: RepoDependencies): RoomProposals {
     );
     const keyHash = sha256(`room-proposal:${input.idempotency_key}`);
     const pre = await d.db.transaction(async (tx) => {
+      if (p.guard) await p.guard(tx, d.clock());
       const { room, members } = await access.membership(tx, input.room_id, p.operatorId);
       const prior = (
         await tx.query<ProposalRow>(
@@ -497,6 +498,7 @@ export function createRoomProposals(d: RepoDependencies): RoomProposals {
     const time = d.clock();
     const { additions, deletions } = counts(files);
     return d.db.transaction(async (tx) => {
+      if (p.guard) await p.guard(tx, d.clock());
       const { members, agents, workspace } = await access.recheck(
         tx,
         room.id,
@@ -666,6 +668,7 @@ export function createRoomProposals(d: RepoDependencies): RoomProposals {
     const input = proposalsListInput.parse(body);
     const limit = input.limit ?? 20;
     return d.db.transaction(async (tx) => {
+      if (p.guard) await p.guard(tx, d.clock());
       const { room } = await access.membership(tx, input.room_id, p.operatorId);
       const rows = (
         await tx.query<ProposalRow>(
@@ -691,6 +694,7 @@ export function createRoomProposals(d: RepoDependencies): RoomProposals {
   async function get(p: RoomPrincipal, body: unknown) {
     const input = proposalGetInput.parse(body);
     return d.db.transaction(async (tx) => {
+      if (p.guard) await p.guard(tx, d.clock());
       const { room } = await access.membership(tx, input.room_id, p.operatorId);
       const row = await findProposal(tx, room.id, input.proposal);
       const reviews = (await reviewsOf(tx, [row.id])).get(row.id) ?? [];
@@ -707,6 +711,7 @@ export function createRoomProposals(d: RepoDependencies): RoomProposals {
         'Reviews cannot contain Central City credentials. Never share credentials in a room.',
       );
     const probe = await d.db.transaction(async (tx) => {
+      if (p.guard) await p.guard(tx, d.clock());
       const { room, members } = await access.membership(tx, input.room_id, p.operatorId);
       return { room, member: access.actingAgent(members, input.agent_id) };
     });
@@ -717,6 +722,7 @@ export function createRoomProposals(d: RepoDependencies): RoomProposals {
     );
     const time = d.clock();
     return d.db.transaction(async (tx) => {
+      if (p.guard) await p.guard(tx, d.clock());
       const { room, members, agents, workspace } = await access.membership(
         tx,
         probe.room.id,
@@ -766,7 +772,9 @@ export function createRoomProposals(d: RepoDependencies): RoomProposals {
               : null;
       const note = (input.body ?? '').trim();
       const text = [
-        `**${label} P${row.number}** · revision ${row.revision} · ${row.summary}`,
+        // CCA-614: the proposal by number only. Its summary is the proposer's text, and this line
+        // is posted under the reviewer's agent, where its Markdown and @mentions would be live.
+        `**${label} P${row.number}** · revision ${row.revision}`,
         ...(uncounted ? ['', uncounted] : []),
         ...(note ? ['', ...note.split('\n').map((line) => `> ${line}`)] : []),
       ].join('\n');

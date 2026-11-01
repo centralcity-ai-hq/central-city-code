@@ -122,10 +122,44 @@ export const detachedCompact = (signature: JwsSignature) =>
 
 export type VerifyResult = { valid: true; kid: string } | { valid: false; reason: string };
 
+/** Clock skew tolerated for `iat` in the future, in seconds (CCA-617). */
+export const SIGNATURE_CLOCK_SKEW_SECONDS = 300;
+
+export interface VerifyOptions {
+  /** Current time in milliseconds (default Date.now()). */
+  now?: number;
+  /** Refuse a signature without `iat` and `exp` in its protected header (Agent Cards, CCA-617). */
+  requireTimes?: boolean;
+}
+
+const numericDate = (value: unknown) =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+
+/**
+ * The protected header's `iat`/`exp` (RFC 7519 NumericDate, seconds) against `now`: an expired
+ * signature, one issued in the future beyond the skew, or one whose window is empty never verifies.
+ * A header without them is accepted unless `requireTimes`.
+ */
+function timesProblem(header: Record<string, unknown>, options: VerifyOptions): string | null {
+  const hasIat = 'iat' in header;
+  const hasExp = 'exp' in header;
+  if (!hasIat && !hasExp) return options.requireTimes ? 'missing-exp' : null;
+  if (!hasIat || !hasExp || !numericDate(header.iat) || !numericDate(header.exp))
+    return 'malformed-times';
+  const iat = header.iat as number;
+  const exp = header.exp as number;
+  if (exp <= iat) return 'malformed-times';
+  const nowSeconds = Math.floor((options.now ?? Date.now()) / 1000);
+  if (iat > nowSeconds + SIGNATURE_CLOCK_SKEW_SECONDS) return 'not-yet-valid';
+  if (exp <= nowSeconds) return 'expired';
+  return null;
+}
+
 export function verifyDetached(
   payload: unknown,
   signature: JwsSignature,
   jwks: Jwks,
+  options: VerifyOptions = {},
 ): VerifyResult {
   if (
     typeof signature?.protected !== 'string' ||
@@ -146,6 +180,8 @@ export function verifyDetached(
   if (header.alg !== 'EdDSA') return { valid: false, reason: 'unsupported-alg' };
   if ('crit' in header || 'b64' in header) return { valid: false, reason: 'unsupported-header' };
   if (typeof header.kid !== 'string') return { valid: false, reason: 'missing-kid' };
+  const times = timesProblem(header, options);
+  if (times) return { valid: false, reason: times };
   const jwk = jwks.keys.find((candidate) => candidate.kid === header.kid);
   if (!jwk || jwk.kty !== 'OKP' || jwk.crv !== 'Ed25519')
     return { valid: false, reason: 'unknown-kid' };

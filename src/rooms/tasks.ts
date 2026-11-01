@@ -16,7 +16,8 @@ export type RoomTask = {
   status: TaskStatus;
   created_by_agent_id: string;
   claim: { agent_id: string; expires_at: string } | null;
-  result: { kind: string; ref: string; revision: string } | null;
+  /** Evidence fields and/or the member's own summary (untrusted text). */
+  result: { kind?: string; ref?: string; revision?: string; summary?: string } | null;
   /**
    * The member agent that handed the work in, kept through review and done (absent from older
    * servers; null before a hand-in and while that member is removed from the room).
@@ -24,6 +25,11 @@ export type RoomTask = {
   submitted_by?: string | null;
   /** The latest peer review (advisory); absent from older servers. */
   peer_review?: PeerReview | null;
+  /**
+   * The host's latest send back while the task waits for a new hand-in, with the optional reason
+   * (untrusted text); absent otherwise and on older servers.
+   */
+  sent_back?: { reason: string | null; at: string };
   /** The built-in template the task started from (absent on older servers). */
   template?: { id: string; version: string } | null;
   /** One of the room's optional stages, or null (docs/ROOM_TASKS.md "Stages"). */
@@ -65,6 +71,21 @@ const base = (roomId: string) => `/api/rooms/${encodeURIComponent(roomId)}/tasks
 
 /** At most this many pages of 100 are read, so a huge room cannot loop the panel forever. */
 export const TASK_LIST_MAX_PAGES = 50;
+/**
+ * Of those, the pages kept for the active tasks of a room too big to read whole (R1-7): when the
+ * read in number order reaches TASK_LIST_MAX_PAGES - TASK_LIST_ACTIVE_PAGES pages with more to
+ * come, the rest of the budget reads only the open, claimed and in-review tasks after it, so the
+ * newest work is never cut off for old finished tasks.
+ */
+export const TASK_LIST_ACTIVE_PAGES = 10;
+/** The statuses read in the active pass, in this order. */
+export const TASK_ACTIVE_STATUSES = ['open', 'claimed', 'in_review'] as const;
+
+/**
+ * Which tasks the panel could not load: 'none' (every task), 'finished' (every active task, but
+ * not every done or cancelled one after the first pages) or 'some' (not even every active task).
+ */
+export type TaskListCut = 'none' | 'finished' | 'some';
 
 /** How often an open Tasks panel re-reads a room whose tasks fit on one page. */
 export const TASK_REFRESH_MS = 10_000;
@@ -83,39 +104,60 @@ export function taskRefreshDelay(pages: number): number {
 
 /**
  * Every task in the room (read page by page) with the room's stage list (empty when it uses
- * none) and the number of pages read, or null when this server has no room tasks (404).
+ * none), the number of pages read and what could not be loaded (`cut`), or null when this server
+ * has no room tasks (404). A room past the page budget shows its active tasks first (R1-7).
  */
 export async function listTasks(
   roomId: string,
-): Promise<{ tasks: RoomTask[]; stages: string[]; pages: number } | null> {
+): Promise<{ tasks: RoomTask[]; stages: string[]; pages: number; cut: TaskListCut } | null> {
   const tasks: RoomTask[] = [];
   let stages: string[] = [];
-  let after: number | null = null;
   let pages = 0;
-  for (let page = 0; page < TASK_LIST_MAX_PAGES; page++) {
+  type Page = {
+    tasks: RoomTask[];
+    stages?: string[];
+    next_after?: number | null;
+    has_more?: boolean;
+  };
+  const read = async (query: string): Promise<Page | null> => {
     pages++;
-    const cursor = after === null ? '' : `&after_number=${after}`;
     // The workspace the person acts in, as api() sends it: without it the server reads the
     // person's own account, which is not a member of a co-owned AI workspace's room.
     const workspace = selectedWorkspaceId();
-    const response = await fetch(`${base(roomId)}?limit=100${cursor}`, {
+    const response = await fetch(`${base(roomId)}?limit=100${query}`, {
       credentials: 'same-origin',
       headers: workspace ? { 'X-City-Workspace': workspace } : {},
     });
     if (response.status === 404) return null;
     if (!response.ok) throw new Error("Tasks couldn't be loaded. Try again.");
-    const value = (await response.json()) as {
-      tasks: RoomTask[];
-      stages?: string[];
-      next_after?: number | null;
-      has_more?: boolean;
-    };
+    return (await response.json()) as Page;
+  };
+  const more = (value: Page) => value.has_more === true && typeof value.next_after === 'number';
+  // In number order, keeping TASK_LIST_ACTIVE_PAGES for the active pass.
+  let after: number | null = null;
+  let cutAt: number | null = null;
+  while (pages < TASK_LIST_MAX_PAGES - TASK_LIST_ACTIVE_PAGES) {
+    const value = await read(after === null ? '' : `&after_number=${after}`);
+    if (!value) return null;
     tasks.push(...value.tasks);
     stages = value.stages ?? [];
-    if (value.has_more !== true || typeof value.next_after !== 'number') break;
-    after = value.next_after;
+    if (!more(value)) return { tasks, stages, pages, cut: 'none' };
+    after = value.next_after!;
+    cutAt = after;
   }
-  return { tasks, stages, pages };
+  // The room has more: every open, claimed and in-review task after the cut, newest included.
+  for (const status of TASK_ACTIVE_STATUSES) {
+    let cursor = cutAt!;
+    for (;;) {
+      if (pages >= TASK_LIST_MAX_PAGES) return { tasks, stages, pages, cut: 'some' };
+      const value = await read(`&status=${status}&after_number=${cursor}`);
+      if (!value) return null;
+      tasks.push(...value.tasks);
+      if (!more(value)) break;
+      cursor = value.next_after!;
+    }
+  }
+  return { tasks, stages, pages, cut: 'finished' };
 }
 
 /** Move a task to one of the room's stages (null clears it): the host or the claim holder. */
@@ -166,15 +208,20 @@ export async function createTask(input: {
   return task;
 }
 
-/** Host review: approve (done), reject (back to open for another try) or cancel. */
+/** Host review: approve (done), reject (back to open for another try, with an optional reason) or cancel. */
+export const SEND_BACK_REASON_MAX = 500;
+
 export async function decideTask(
   roomId: string,
   taskId: string,
   decision: TaskDecision,
+  reason?: string,
 ): Promise<RoomTask> {
+  // The optional send-back reason goes with reject only (trimmed; the server caps it at 500).
+  const why = decision === 'reject' ? reason?.trim() : undefined;
   const { task } = await api<{ task: RoomTask }>(
     `${base(roomId)}/${encodeURIComponent(taskId)}/update`,
-    { decision },
+    { decision, ...(why ? { reason: why } : {}) },
   );
   return task;
 }

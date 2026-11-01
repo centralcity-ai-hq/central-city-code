@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { Database, Transaction as Tx } from '../database.js';
 import type { Workspace } from '../model.js';
 import { BASE_MAINNET, BASE_NETWORKS, type BaseChainId } from '../../shared/base/chains.js';
+import { ARC_NETWORKS, type ArcChainId } from '../../shared/chains.js';
 import { AGENT_URI_ORIGIN } from '../../shared/base/on-base.js';
 import {
   DIRECTORY_LIMITS,
@@ -96,6 +97,8 @@ export interface RoomInvitationDependencies {
   rooms: Pick<Rooms, 'invitationRoom' | 'acceptInvitation' | 'limits'>;
   /** The network whose Base IDs are invited: Base mainnet (the explorer's) unless a test says otherwise. */
   chainId?: BaseChainId;
+  /** The Arc network that is on, if any: its listed agents can be invited too. */
+  alsoOnArc?: ArcChainId | null;
   /** The agent URI origin (tests); defaults to https://centralcity.ai. */
   uriOrigin?: string;
   /**
@@ -257,6 +260,19 @@ export function createRoomInvitations(d: RoomInvitationDependencies) {
     BASE_NETWORKS[chainId].contracts.identityRegistry ?? '',
     d.uriOrigin ?? AGENT_URI_ORIGIN,
   ];
+  /** Where an agent can be listed: the Base network first, then the Arc network that is on. */
+  const listedOn = [
+    listedParams,
+    ...(d.alsoOnArc
+      ? [
+          [
+            d.alsoOnArc,
+            ARC_NETWORKS[d.alsoOnArc].contracts.identityRegistry,
+            d.uriOrigin ?? AGENT_URI_ORIGIN,
+          ],
+        ]
+      : []),
+  ];
 
   /** The room as its host writes to it; another member hears 403 not_room_host. */
   async function hostRoom(q: Pick<Tx, 'query'>, p: RoomPrincipal, roomRef: string, lock = false) {
@@ -295,14 +311,15 @@ export function createRoomInvitations(d: RoomInvitationDependencies) {
   ) {
     const [where, value] =
       'short' in match ? ['s.short_id = $4', match.short] : ['i.agent_id = $4', match.agentId];
-    const { rows } = await q.query<{
-      agent_id: string;
-      base_id: string;
-      short_id: string;
-      name: string | null;
-      owner_id: string;
-    }>(
-      `SELECT l.agent_id, l.base_id, l.short_id, p.name, l.owner_id FROM (
+    for (const params of listedOn) {
+      const { rows } = await q.query<{
+        agent_id: string;
+        base_id: string;
+        short_id: string;
+        name: string | null;
+        owner_id: string;
+      }>(
+        `SELECT l.agent_id, l.base_id, l.short_id, p.name, l.owner_id FROM (
          SELECT i.agent_id, ${BASE_ID}::text AS base_id, s.short_id, i.operator_id AS owner_id
          ${FROM}
          WHERE ${LISTED} AND ${where}
@@ -316,9 +333,11 @@ export function createRoomInvitations(d: RoomInvitationDependencies) {
              AND a->>'pausedAt' IS NULL)
          AND NOT EXISTS (SELECT 1 FROM room_invitation_blocks b
            WHERE b.blocker_owner_id = l.owner_id AND b.blocked_owner_id = $5)`,
-      [...listedParams, value, inviter],
-    );
-    return rows[0] ?? null;
+        [...params, value, inviter],
+      );
+      if (rows[0]) return rows[0];
+    }
+    return null;
   }
 
   /**
@@ -341,12 +360,15 @@ export function createRoomInvitations(d: RoomInvitationDependencies) {
 
   /** The inviting agent's own Base ID and passport, when it has them (else null). */
   async function baseOf(q: Pick<Tx, 'query'>, agentId: string) {
-    const { rows } = await q.query<{ base_id: string; short_id: string }>(
-      `SELECT ${BASE_ID}::text AS base_id, s.short_id ${FROM}
-        WHERE ${LISTED} AND i.agent_id = $4 LIMIT 1`,
-      [...listedParams, agentId],
-    );
-    return rows[0] ?? null;
+    for (const params of listedOn) {
+      const { rows } = await q.query<{ base_id: string; short_id: string }>(
+        `SELECT ${BASE_ID}::text AS base_id, s.short_id ${FROM}
+          WHERE ${LISTED} AND i.agent_id = $4 LIMIT 1`,
+        [...params, agentId],
+      );
+      if (rows[0]) return rows[0];
+    }
+    return null;
   }
 
   /**
@@ -726,6 +748,8 @@ export function createRoomInvitations(d: RoomInvitationDependencies) {
                 `${lineName(agentName)} joined.`,
                 decidedAt,
                 d.rooms.limits.messagesPerRoom,
+                // The joining agent's owner (by_you on its reads, migration 334).
+                p.operatorId,
               );
           },
         },

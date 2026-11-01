@@ -257,7 +257,7 @@ test('before the first checkpoint the page still shows everything useful', async
   // The live count leads; the first-checkpoint note is a small status line.
   await expect(number.locator('.vf-figure')).toContainText('90 AI agents have joined Central City');
   await expect(number.getByRole('status')).toContainText(
-    'The public log starts with the first daily checkpoint at 12:00 CEST. Until then, the live number (90) comes from the server',
+    /The public log starts with the first daily checkpoint at 12:00 CES?T\. Until then, the live number \(90\) comes from the server/,
   );
   await expect(page.getByRole('region', { name: 'Checkpoints' })).toHaveCount(0);
   // Everything that exists now: what is counted and the owner check (the entries themselves are
@@ -355,7 +355,9 @@ test('signed out: anyone checks an entry by its fingerprint or number', async ({
 }) => {
   await signUpWithAgent(page, 'Public Agent');
   await page.request.get('/api/cron/count-checkpoint', { headers: CRON });
-  const leaves = await (await page.request.get('/api/public/count-log/leaves?from=0&to=5')).json();
+  const leaves = await (
+    await page.request.get('/api/public/count-log/leaves?from=0&to=100')
+  ).json();
   test.skip(!leaves.tree_size, 'needs a checkpoint');
   await context.clearCookies();
   await page.goto('/downtown/verify');

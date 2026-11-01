@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { createApp } from '../server/app.js';
 import type { Agent } from '../shared/types.js';
 import type { AgentMessage, ConversationSummary } from '../server/messaging/contract.js';
-import { CONVERSATION_SEND_SCAN, pairKey } from '../server/messaging/service.js';
+import { pairKey } from '../server/messaging/service.js';
 import { legacyPairContextId } from '../scripts/remediate-pair-contexts.js';
 
 /**
@@ -474,11 +474,14 @@ test('agent_id narrows the list to that agent, so newer threads of other agents 
   assert.deepEqual(await list(`agent_id=${randomUUID()}`), [], 'an unknown id matches nothing');
 });
 
+/** Rows added to the busy thread: more than the former 2,000-row sent window. */
+const BUSY_ROWS = 2_500;
+
 test('the thread list never aggregates the whole history: a busy thread does not hide older ones', async (t) => {
   const { app, cookie, a, b, c, send, conversations } = await setup(t);
   const older = await send(a, { to_agent_id: c.id, text: 'Older, with C' });
   const busy = await send(a, { to_agent_id: b.id, text: 'Busy, A and B' });
-  // More traffic in the busy thread than the sent-row scan covers.
+  // More traffic in the busy thread than the former 2,000-row sent window covered (R1-6).
   await app.city.db.query(
     `INSERT INTO messages(recipient_id,seq,id,sender_id,sender_owner_id,recipient_owner_id,
        context_id,reply_to,kind,parts,created_at,origin,sender_owner_label,room_id)
@@ -486,7 +489,7 @@ test('the thread list never aggregates the whole history: a busy thread does not
        recipient_owner_id, context_id, reply_to, kind, parts, created_at + g, origin,
        sender_owner_label, room_id
        FROM messages, generate_series(1, $2::int) AS g WHERE id=$1`,
-    [busy.id, CONVERSATION_SEND_SCAN + 500],
+    [busy.id, BUSY_ROWS],
   );
   const statements: string[] = [];
   const db = app.city.db as { transaction: (fn: (tx: unknown) => Promise<unknown>) => unknown };
@@ -512,12 +515,19 @@ test('the thread list never aggregates the whole history: a busy thread does not
     list.map((item) => item.context_id),
     [busy.context_id, older.context_id],
   );
-  assert.equal(list[0]!.message_count, CONVERSATION_SEND_SCAN + 501);
+  assert.equal(list[0]!.message_count, BUSY_ROWS + 1);
   assert.equal(list[1]!.message_count, 1);
-  // The per-thread aggregate (counts, participants) reads only the threads of the page.
+  // R8-2 (migration 302): the page's counts, participants and newest message come from its
+  // summary rows, and the page from conversation_summaries_recent. No statement counts or groups
+  // messages, and none walks every thread the owner received in, however busy a thread is.
+  // (The unread count stays: a LATERAL range scan bounded per inbox by UNREAD_CAP + 1.)
   const aggregates = statements.filter(
-    (sql) => sql.includes('jsonb_agg') && sql.includes('FROM messages'),
+    (sql) =>
+      /FROM messages/.test(sql) &&
+      /count\(\*\)|jsonb_agg|GROUP BY|DISTINCT ON/.test(sql) &&
+      !/ORDER BY m\.seq LIMIT \$4\) x/.test(sql),
   );
-  assert.ok(aggregates.length > 0, 'the list aggregated nothing');
-  for (const sql of aggregates) assert.match(sql, /context_id = ANY\(\$2::text\[\]\)/);
+  assert.deepEqual(aggregates, []);
+  assert.ok(!statements.some((sql) => sql.includes('WITH RECURSIVE')), 'no skip scan');
+  assert.ok(statements.some((sql) => sql.includes('FROM conversation_summaries')));
 });

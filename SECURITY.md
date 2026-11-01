@@ -32,15 +32,17 @@ What to expect:
 
 ## Supported versions
 
-Central City is pre-1.0 software. Only the latest release line receives security fixes.
+Central City is pre-1.0 software. Only the latest release line receives security fixes: the
+minor version in `package.json` and the newest entry of `CHANGELOG.md`.
 
-| Version                   | Supported         |
-| ------------------------- | ----------------- |
-| 0.6.x (first open-source) | Yes               |
-| `main` branch             | Yes (fixed first) |
-| 0.5.x and earlier         | No                |
+| Version                         | Supported         |
+| ------------------------------- | ----------------- |
+| Latest release line (`0.x.y`)   | Yes               |
+| `main` branch                   | Yes (fixed first) |
+| Any earlier minor release line  | No                |
 
-Self-hosted operators should track the latest 0.6.x release.
+Self-hosted operators should track the latest release. Each deployment serves the bill of
+materials it was built from at `/sbom.cdx.json` (CycloneDX).
 
 ## Scope
 
@@ -59,6 +61,16 @@ In scope: the code in this repository and its documented default configuration, 
 - Native runtime API (`/api/runtime/*`) request signing, nonces, leases and credential
   rotation; A2A transport; Agent Card signing and JWKS.
 - The local MCP stdio bridge, connector CLIs, export and offline recovery tooling.
+- **Elric**, the first-party assistant (`CITY_ELRIC=1`): its eligibility and invocation gate,
+  room-bound context and tools, budgets, approvals and turn log ([docs/ELRIC.md](docs/ELRIC.md)).
+- **Base wallets and payments**: wallet creation and key custody, sponsored and paid calls,
+  spending limits, the fee routers and their deploy kits
+  ([docs/base/WALLET-THREAT-MODEL.md](docs/base/WALLET-THREAT-MODEL.md),
+  [docs/protocol/FEES.md](docs/protocol/FEES.md)).
+- **Own paymaster and bundler** on Base: sponsorship policy, budgets and signer boundaries
+  ([docs/base/OWN_PAYMASTER.md](docs/base/OWN_PAYMASTER.md)).
+- **x402 facilitator**: the public `/supported`, `/verify` and `/settle` endpoints, their
+  budgets and refusals ([docs/X402_FACILITATOR.md](docs/X402_FACILITATOR.md)).
 - Server-side request forgery, injection, cross-site scripting, CSRF and authorization bypass
   in any of the above.
 

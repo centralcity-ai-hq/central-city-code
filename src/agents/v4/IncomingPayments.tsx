@@ -6,6 +6,7 @@ import {
   type PayIncomingRow,
   type ReceivedStatus,
 } from '../../base/wallet/pay';
+import { chainWords } from '../../../shared/base/wallet-chains';
 import { shortHex } from './WithdrawalStatus';
 
 /*
@@ -43,7 +44,17 @@ function line(payment: PayIncomingRow, status: ReceivedStatus, name: string) {
   }
 }
 
-export function IncomingPayments({ agentId, name }: { agentId: string; name: string }) {
+export function IncomingPayments({
+  agentId,
+  name,
+  chainId,
+}: {
+  agentId: string;
+  name: string;
+  /** The agent's chain, from its wallet view: how the rows name its IDs and explorer. */
+  chainId?: number;
+}) {
+  const words = chainWords(chainId);
   const [payments, setPayments] = useState<PayIncomingRow[]>([]);
   useEffect(() => {
     // One feed for this agent's screen: it keeps its cursor and every payment's latest state.
@@ -107,9 +118,11 @@ export function IncomingPayments({ agentId, name }: { agentId: string; name: str
                 {line(payment, status, name)}
                 {status.headline ? <span className="w4-row-state">{status.headline}</span> : null}
                 {/* The money arrived; final is minutes away. No countdown: Base decides when. */}
-                {status.note ? <span className="w4-row-sub">{status.note}</span> : null}
+                {status.note ? <span className="w4-row-sub">{words.say(status.note)}</span> : null}
                 <span className="w4-row-sub">
-                  {payment.from.baseId ? `Base ID ${payment.from.baseId}` : 'Base ID not final yet'}
+                  {payment.from.baseId
+                    ? `${words.id} ${payment.from.baseId}`
+                    : `${words.id} not final yet`}
                   {status.onItsWay ? ' · on its way, not paid until final' : ''}
                   {/* A note shows once the payment is final: never from one that didn't land. */}
                   {payment.note && payment.state === 'final' ? ` · “${payment.note}”` : ''}
@@ -122,7 +135,7 @@ export function IncomingPayments({ agentId, name }: { agentId: string; name: str
                     <>
                       {' · '}
                       <a href={payment.explorerUrl} target="_blank" rel="noreferrer">
-                        Basescan
+                        {words.explorer}
                       </a>
                     </>
                   ) : null}

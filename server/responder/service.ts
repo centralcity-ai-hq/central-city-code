@@ -3,6 +3,7 @@ import type { Database, Transaction as Tx } from '../database.js';
 import { event, presenceTtl, type Workspace } from '../model.js';
 import { encryptApiKey } from './crypto.js';
 import { setResponderTarget } from './targets.js';
+import { ELRIC_MANAGED, elricAgentIds } from '../elric/access.js';
 import type { ResponderKeyring } from './keys.js';
 import {
   DEFAULT_MODEL,
@@ -47,7 +48,11 @@ export const RESPONDER_LIMITS = {
 } as const;
 const HOUR = 3_600_000;
 /** Pause reasons that a new, validated key resolves. */
-const KEY_REASONS = ['invalid_key', 'forbidden', 'key_removed'];
+/**
+ * Pauses a new key clears. A new key is sealed under the current root key, so it also ends a pause
+ * because the old key's root key was unavailable (migration 303).
+ */
+const KEY_REASONS = ['invalid_key', 'forbidden', 'key_removed', 'root_key_unavailable'];
 
 export interface ResponderDependencies {
   db: Pick<Database, 'query'>;
@@ -185,6 +190,14 @@ export function createResponder(d: ResponderDependencies): Responder {
     if (agent!.revokedAt) refuse(403, 'agent_revoked', `${agent!.name} is revoked.`);
     return agent!;
   }
+  /**
+   * Elric answers through Central City's own model, never a stored key: auto-reply cannot be set
+   * up or switched on for it (reading the settings and removing a key stay open).
+   */
+  async function refuseElric(q: Pick<Tx, 'query'>, agentId: string) {
+    if ((await elricAgentIds(q, [agentId])).size)
+      refuse(409, ELRIC_MANAGED.code, ELRIC_MANAGED.message);
+  }
   async function readWorkspace(q: Pick<Tx, 'query'>, operatorId: string): Promise<Workspace> {
     const row = (
       await q.query<{ data: Workspace }>('SELECT data FROM workspaces WHERE operator_id=$1', [
@@ -303,14 +316,19 @@ export function createResponder(d: ResponderDependencies): Responder {
       };
     },
 
+    // CCA-622: reading the settings, turning Auto-reply off and deleting the stored key need no
+    // root key, so an owner keeps those controls while the keyring is unavailable. Only saving a
+    // key, changing other settings and delivery need it.
     async get(operatorId, agentId) {
-      if (!d.keys.available) unavailable();
       liveAgent(await readWorkspace(d.db, operatorId), agentId);
       return view(d.db, operatorId, agentId);
     },
 
     async update(operatorId, actor, agentId, body) {
-      if (!d.keys.available) unavailable();
+      const turnOffOnly =
+        body.enabled === false &&
+        Object.entries(body).every(([field, value]) => field === 'enabled' || value === undefined);
+      if (!d.keys.available && !turnOffOnly) unavailable();
       await d.limit(
         `responder-settings:${operatorId}`,
         RESPONDER_LIMITS.settingsWritesPerOwnerPerHour,
@@ -318,6 +336,7 @@ export function createResponder(d: ResponderDependencies): Responder {
       );
       return d.mutate(operatorId, async (workspace, tx, time) => {
         const agent = liveAgent(workspace, agentId);
+        await refuseElric(tx, agentId);
         const current = (
           await tx.query<SettingsRow>(
             'SELECT * FROM responder_settings WHERE agent_id=$1 AND owner_id=$2 FOR UPDATE',
@@ -397,6 +416,7 @@ export function createResponder(d: ResponderDependencies): Responder {
           HOUR,
         );
         liveAgent(await readWorkspace(d.db, operatorId), agentId);
+        await refuseElric(d.db, agentId);
         const format = checkKeyFormat(body.provider, body.key);
         if (format === 'unsupported_key')
           refuse(400, 'unsupported_key', 'Use a standard API key, not an admin key.');
@@ -450,6 +470,7 @@ export function createResponder(d: ResponderDependencies): Responder {
 
         return await d.mutate(operatorId, async (workspace, tx, time) => {
           const agent = liveAgent(workspace, agentId);
+          await refuseElric(tx, agentId);
           const id = `rsk_${randomUUID()}`;
           const sealed = encryptApiKey(
             keys.current.key,
@@ -506,7 +527,6 @@ export function createResponder(d: ResponderDependencies): Responder {
     },
 
     async removeKey(operatorId, actor, agentId) {
-      if (!d.keys.available) unavailable();
       return d.mutate(operatorId, async (workspace, tx, time) => {
         const agent = liveAgent(workspace, agentId);
         const revoked = await tx.query(

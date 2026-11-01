@@ -9,6 +9,7 @@
  * Only reads. The contract covers its maintainer's sanctions list; it is not a KYT service and not
  * a legal determination (SCREENING.md, "Coverage and responsibility").
  */
+import { chainFamily, sanctionsOracleChainId } from '../../../shared/chains.js';
 import { getAddress, isAddress, parseAbi, type Hex, type PublicClient } from 'viem';
 import { protocolDeployment } from '../../../shared/protocol.js';
 import { reportIgnoredSetting, type ProtocolLog } from '../mainnet.js';
@@ -121,7 +122,10 @@ export function sanctionsOracleProvider(input: {
 
 /**
  * The sanctions oracle for `chainId`: on Base mainnet the one fixed in code, elsewhere the one
- * CITY_PROTOCOL_SCREENING_ORACLE names, or null when that is missing or not an address.
+ * CITY_PROTOCOL_SCREENING_ORACLE names, or null when that is missing or not an address. Arc has no
+ * oracle of its own (shared/chains.ts): a payment on Arc is screened by the one on Base mainnet, so
+ * `client` must read the chain sanctionsOracleChainId(chainId) names, never Arc. If it can't answer
+ * the payment is refused, as for any chain.
  */
 export function sanctionsOracleFor(
   env: Record<string, string | undefined>,
@@ -129,6 +133,10 @@ export function sanctionsOracleFor(
   client: () => Promise<OracleReader>,
   options: { log?: ProtocolLog } = {},
 ): ScreeningProvider | null {
+  if (chainFamily(chainId) === 'arc') {
+    const base = protocolDeployment(sanctionsOracleChainId(chainId));
+    return base ? sanctionsOracleProvider({ chainId, oracle: base.sanctionsOracle, client }) : null;
+  }
   const deployment = protocolDeployment(chainId);
   if (deployment) {
     reportIgnoredSetting(

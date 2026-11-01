@@ -266,7 +266,40 @@ export type DirectoryErrorCode = keyof typeof DIRECTORY_ERRORS;
 
 const CURSOR = /^[A-Za-z0-9_-]{1,200}$/;
 
-/** Reads the search's query string; anything unreadable falls back to the default, never throws. */
+/** The only query keys the search takes (any other is refused, so it cannot skip the edge cache). */
+export const DIRECTORY_QUERY_KEYS: ReadonlySet<string> = new Set([
+  'q',
+  'min_rating',
+  'sort',
+  'before',
+]);
+
+/**
+ * Why the search refuses a query before any work, or null: a key it does not take, a repeated key,
+ * or a min_rating, sort or before readDirectoryQuery would not read (the answer would be the same
+ * as without it, so a made-up value per request would skip the edge cache). An empty value is the
+ * same as none. q is a search. The route also checks that before is a cursor it wrote.
+ */
+export function directoryQueryRefusal(params: Record<string, unknown>): string | null {
+  const keys = Object.keys(params);
+  if (keys.some((key) => !DIRECTORY_QUERY_KEYS.has(key)))
+    return 'Use only q, min_rating, sort and before.';
+  if (keys.some((key) => typeof params[key] !== 'string')) return 'Give each key once.';
+  const given = (key: string) => (params[key] === undefined ? '' : (params[key] as string));
+  if (given('min_rating') && !/^[1-5]$/.test(given('min_rating')))
+    return 'min_rating must be a whole number from 1 to 5.';
+  const sort = given('sort');
+  if (sort && !DIRECTORY_SORTS.some((value) => value === sort))
+    return `sort must be one of ${DIRECTORY_SORTS.join(', ')}.`;
+  if (given('before') && !CURSOR.test(given('before')))
+    return 'before must be the next of an earlier page.';
+  return null;
+}
+
+/**
+ * Reads the search's query string; never throws. The route refuses what it would not read first
+ * (directoryQueryRefusal).
+ */
 export function readDirectoryQuery(params: Record<string, unknown>): DirectoryQuery {
   // Control characters become spaces: Postgres refuses a NUL in a text parameter (a 500).
   const text =
@@ -286,6 +319,25 @@ export function readDirectoryQuery(params: Record<string, unknown>): DirectoryQu
     sort,
     before,
   };
+}
+
+/**
+ * The one query string ('?…', or '' for none) the search answers a query under: the keys in the
+ * browser's order (directoryUrl), each value as readDirectoryQuery reads it (q trimmed and its
+ * spaces collapsed), the default sort, a min_rating of 0 and empty values left out, written as
+ * URLSearchParams writes it. The route sends any other spelling on to this one (307), so each
+ * answer has one edge cache entry. For a query directoryQueryRefusal passed.
+ */
+export function canonicalDirectorySearch(params: Record<string, unknown>): string {
+  const read = readDirectoryQuery(params);
+  const search = new URLSearchParams();
+  const q = read.q.trim();
+  if (q) search.set('q', q);
+  if (read.minRating) search.set('min_rating', String(read.minRating));
+  if (read.sort !== 'best_rated') search.set('sort', read.sort);
+  if (read.before) search.set('before', read.before);
+  const text = search.toString();
+  return text ? `?${text}` : '';
 }
 
 /**

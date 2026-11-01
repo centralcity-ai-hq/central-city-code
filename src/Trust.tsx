@@ -4,6 +4,7 @@ import { PublicHeader } from './shell/PublicHeader';
 import { usePageTitle } from './shell/usePageTitle';
 import { About } from './trust/About';
 import { AcceptableUse } from './trust/AcceptableUse';
+import { Audit } from './trust/Audit';
 import { Contact } from './trust/Contact';
 import { Dpa } from './trust/Dpa';
 import { Imprint } from './trust/Imprint';
@@ -40,6 +41,7 @@ export type TrustPageId =
   | 'dpa'
   | 'imprint'
   | 'security'
+  | 'audit'
   | 'support'
   | 'status'
   | 'about'
@@ -67,6 +69,14 @@ const PAGES: Record<TrustPageId, PageInfo> = {
     dated: true,
     toc: true,
     body: Security,
+  },
+  // The report carries its own date and status line (docs/AUDIT.md).
+  audit: {
+    title: 'Central City Security Audit',
+    eyebrow: 'Internal security review',
+    group: 'help',
+    toc: true,
+    body: Audit,
   },
   privacy: {
     title: 'Privacy Policy',
@@ -148,7 +158,8 @@ export function TrustPage({ page }: { page: TrustPageId }) {
     if (scrolled.current === page || (toc && !sections.length)) return;
     scrolled.current = page;
     const target = window.location.hash.slice(1);
-    if (/^[a-z-]+$/.test(target)) document.getElementById(target)?.scrollIntoView();
+    // Report headings carry digits too (/audit#cca-704-…).
+    if (/^[a-z0-9-]+$/.test(target)) document.getElementById(target)?.scrollIntoView();
   }, [page, toc, sections]);
   const related = [
     ...TRUST_PAGE_IDS.filter((id) => PAGES[id].group === group),

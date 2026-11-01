@@ -142,9 +142,9 @@ async function insertPrivateRoom(
   // The owner's person hosts; the agent is a normal member. Both see the whole (private) history.
   await tx.query(
     `INSERT INTO room_members(room_id,agent_id,owner_id,role,owner_label,visible_from_seq,joined_at,
-       joined_by,last_read_seq,kind,display_name)
-     VALUES($1,$2,$3,'host',$4,0,$5,'the owner',0,'person',$6),
-           ($1,$7,$3,'member',$4,0,$5,'the owner',0,'agent',NULL)`,
+       joined_by,last_read_seq,kind,display_name,owner_kind)
+     VALUES($1,$2,$3,'host',$4,0,$5,'the owner',0,'person',$6,'person'),
+           ($1,$7,$3,'member',$4,0,$5,'the owner',0,'agent',NULL,'person')`,
     [roomId, personId, input.ownerId, label, input.time, owner.name, input.agentId],
   );
   return { room_id: roomId, slug, person_member_id: personId };

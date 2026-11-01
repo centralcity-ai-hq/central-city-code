@@ -15,6 +15,7 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { Database } from '../server/database.js';
 import {
   BATCH_KEY_PREFIX,
+  BroadcastDeferred,
   CLAIM_TTL_MS,
   createRouter3Facilitator,
   decodeSettle,
@@ -26,6 +27,7 @@ import {
   type FacilitatorBatchConfig,
   type FacilitatorCaps,
   type Router3Settlement,
+  usdcPerEthFromEnv,
 } from '../server/protocol/x402/facilitator.js';
 import {
   X402_FACILITATOR_BATCH_SQL,
@@ -40,6 +42,9 @@ import {
   settlement,
   setup,
 } from './helpers/x402-fake-base.js';
+import { createKeystore, parseKeks } from '../server/base/chain/keystore.js';
+import { pgSpenderKeyStore } from '../server/base/chain/stores.js';
+import { BASE_MIGRATION_SQL, BASE_PAYMENTS_MIGRATION_SQL } from '../server/base/schema.js';
 const ok = async () => {};
 
 test('stores the settlement before it is broadcast, then sends one signed EIP-1559 tx', async (t) => {
@@ -132,6 +137,74 @@ test('beforeBroadcast refusing ends the row failed REFUSED_BEFORE_BROADCAST, nev
     beforeBroadcast: ok,
   });
   assert.equal(again.errorCode, 'REFUSED_BEFORE_BROADCAST');
+  assert.equal(base.sends.length, 0);
+});
+
+test('beforeBroadcast putting it off: queued, unsigned, unclaimed; the same key sends once later', async (t) => {
+  const { base, facilitator, row } = await setup(t);
+  const later = () => {
+    throw new BroadcastDeferred('paused');
+  };
+  await assert.rejects(
+    facilitator.submit({
+      key: 'k1',
+      intentHash: INTENT,
+      settlement: settlement(),
+      beforeBroadcast: async () => later(),
+    }),
+    (error: unknown) => error instanceof FacilitatorError && error.code === 'DEFERRED',
+  );
+  const held = await row('k1');
+  assert.equal(held.status, 'queued');
+  assert.equal(held.raw_tx, null);
+  assert.equal(held.nonce, null);
+  assert.equal(held.claim_id, null);
+  assert.equal(held.never_sent, false);
+  assert.equal(base.sends.length, 0);
+  assert.equal((await facilitator.status('k1'))?.status, 'queued');
+  // Asked again, at once and with no claim to wait out.
+  const op = await facilitator.submit({
+    key: 'k1',
+    intentHash: INTENT,
+    settlement: settlement(),
+    beforeBroadcast: ok,
+  });
+  assert.equal(op.status, 'submitted');
+  assert.equal(base.sends.length, 1);
+  // Sent: never asked again, never sent again.
+  await facilitator.submit({
+    key: 'k1',
+    intentHash: INTENT,
+    settlement: settlement(),
+    beforeBroadcast: async () => assert.fail('not asked after the first send'),
+  });
+  assert.equal(base.sends.length, 1);
+  assert.equal(await facilitator.endUnsent('k1', INTENT), false, 'a sent key is never fenced');
+});
+
+test('a settlement put off can be fenced at once, and then never goes out', async (t) => {
+  const { base, facilitator, row } = await setup(t);
+  await assert.rejects(
+    facilitator.submit({
+      key: 'k1',
+      intentHash: INTENT,
+      settlement: settlement(),
+      beforeBroadcast: async () => {
+        throw new BroadcastDeferred('paused');
+      },
+    }),
+    { code: 'DEFERRED' },
+  );
+  assert.equal(await facilitator.endUnsent('k1', INTENT), true);
+  const fenced = await facilitator.submit({
+    key: 'k1',
+    intentHash: INTENT,
+    settlement: settlement(),
+    beforeBroadcast: async () => assert.fail('a fenced key is not asked'),
+  });
+  assert.equal(fenced.neverSent, true);
+  assert.equal(fenced.errorCode, 'ABANDONED_BEFORE_BROADCAST');
+  assert.equal((await row('k1')).raw_tx, null);
   assert.equal(base.sends.length, 0);
 });
 
@@ -1350,6 +1423,62 @@ test('a member older than maxMemberAgeMs is refused, never sent on an old grant 
   assert.equal(batchOf(base.sends[0]!).data, encodeSettleBatch([member(2)]));
 });
 
+test('a refusal that lands while its batch is being broadcast leaves the member in that batch, never never-sent', async (t) => {
+  const { base, facilitator, row } = await setup(t, { batch: { maxItems: 50, windowMs: 60_000 } });
+  const join = await facilitator.submit({
+    key: 'm1',
+    intentHash: intentOf(1),
+    settlement: member(1),
+    beforeBroadcast: ok,
+    batch: { authorize: allowAll, grant: null },
+  });
+  assert.equal(join.status, 'queued');
+
+  // The batch's broadcast reaches the node, but its RPC answer is held until the refusal is written.
+  let inBroadcast!: () => void;
+  const broadcasting = new Promise<void>((r) => (inBroadcast = r));
+  let release!: () => void;
+  const released = new Promise<void>((r) => (release = r));
+  const realSend = base.client.sendRawTransaction.bind(base.client);
+  (base.client as { sendRawTransaction: typeof realSend }).sendRawTransaction = async (args) => {
+    const hash = await realSend(args);
+    inBroadcast();
+    await released;
+    return hash;
+  };
+
+  let flush: Promise<void> | null = null;
+  const refused = await facilitator.submit({
+    key: 'm1',
+    intentHash: intentOf(1),
+    settlement: member(1),
+    // Read the row before the batch was claimed; a slow check refuses while the batch goes out.
+    beforeBroadcast: async () => {
+      flush = facilitator.flushBatches(allowAll, true);
+      await broadcasting;
+      throw new Error('refused');
+    },
+    batch: { authorize: allowAll, grant: null },
+  });
+  release();
+  await flush;
+
+  assert.equal(base.sends.length, 1);
+  assert.equal(batchOf(base.sends[0]!).data, encodeSettleBatch([member(1)]));
+  assert.notEqual(refused.neverSent, true);
+  const r = await row('m1');
+  assert.equal(r.never_sent, false);
+  assert.ok(String(r.batch_key).startsWith(BATCH_KEY_PREFIX));
+  assert.notEqual(r.error_code, 'REFUSED_BEFORE_BROADCAST');
+
+  // Mined and final: the member follows its batch.
+  base.mine(keccak256(base.sends[0]!), 60n);
+  base.finalized = 70n;
+  const after = await facilitator.status('m1', { authorize: allowAll });
+  assert.equal(after?.status, 'final');
+  assert.notEqual(after?.neverSent, true);
+});
+
 test('a stale worker that lost its batch claim changes nothing; the new owner sends it once (room #223)', async (t) => {
   const {
     db,
@@ -1413,6 +1542,44 @@ test('a stale worker that lost its batch claim changes nothing; the new owner se
     assert.equal(r.tx_hash, keccak256(base.sends[0]!));
   }
   assert.equal(base.sends.length, 1, 'sent once, by the new owner');
+});
+
+test('a batch whose claim expired before signing is never signed: released, sent once by a later flush', async (t) => {
+  const { base, clock, facilitator, row } = await setup(t, {
+    batch: { maxItems: 2, windowMs: 30_000, maxMemberAgeMs: 600_000 },
+  });
+  // The worker's last authority check (right before signing) stalls past CLAIM_TTL_MS.
+  let calls = 0;
+  const stalling = async () => {
+    if (++calls === 2) clock.now += CLAIM_TTL_MS + 1;
+    return new Set<string>();
+  };
+  for (const i of [1, 2])
+    await facilitator.submit({
+      key: `e${i}`,
+      intentHash: intentOf(i),
+      settlement: member(i),
+      beforeBroadcast: ok,
+      batch: { authorize: stalling, grant: null },
+    });
+  assert.equal(calls, 2, 'the batch was claimed and judged right before signing');
+  assert.equal(base.sends.length, 0, 'nothing signed under an expired claim');
+  const batchKey = String((await row('e1')).batch_key);
+  const held = await row(batchKey);
+  assert.equal(held.status, 'queued');
+  assert.equal(held.raw_tx, null);
+  assert.equal(held.nonce, null);
+  assert.equal(held.claim_id, null, 'its claim released');
+  for (const key of ['e1', 'e2']) {
+    const r = await row(key);
+    assert.equal(r.status, 'queued');
+    assert.equal(r.batch_key, batchKey, 'members stay in their (unsigned) batch');
+  }
+  // The next flush takes the released batch over and sends it once, with every member.
+  await facilitator.flushBatches(allowAll);
+  assert.equal(base.sends.length, 1);
+  assert.equal(batchOf(base.sends[0]!).data, encodeSettleBatch([member(1), member(2)]));
+  for (const key of ['e1', 'e2']) assert.equal((await row(key)).tx_hash, keccak256(base.sends[0]!));
 });
 
 test('a flush past its deadline simulates, signs and sends nothing; a stalled simulation is cut at the deadline (room #229/#230)', async (t) => {
@@ -1825,4 +1992,254 @@ test('fail closed: a group flush or a batch request without an authorize never b
     batch: { authorize: undefined as never, grant: null },
   });
   assert.equal((await row('sfp:w2')).batch_lane, false, 'not on the batch lane');
+});
+
+// ------------------------------------------------------------------ monitoring (CCA-744, CCA-754)
+
+test('CCA-744: reverted batches are logged; the third in a row is an ALERT, a batch that goes through resets the run', async (t) => {
+  const { base, facilitator, lines } = await setup(t, { batch: { maxItems: 2, windowMs: 1_500 } });
+  let i = 0;
+  let block = 60n;
+  const batchOnce = async (status: 'success' | 'reverted') => {
+    const keys: string[] = [];
+    for (let n = 0; n < 2; n++) {
+      i++;
+      keys.push(`r${i}`);
+      await facilitator.submit({
+        key: `r${i}`,
+        intentHash: intentOf(i),
+        settlement: member(i),
+        beforeBroadcast: ok,
+        batch: { authorize: allowAll, grant: null },
+      });
+    }
+    base.mine(keccak256(base.sends.at(-1)!), block++, status);
+    await facilitator.status(keys[0]!, { authorize: allowAll });
+  };
+  const alerts = () => lines.filter((l) => l.includes('ALERT') && l.includes('batches reverted'));
+  await batchOnce('reverted');
+  await batchOnce('reverted');
+  assert.equal(lines.filter((l) => l.endsWith('batch reverted')).length, 2);
+  assert.equal(alerts().length, 0, 'two in a row: logged, no alert yet');
+  await batchOnce('reverted');
+  assert.equal(alerts().length, 1, JSON.stringify(lines));
+  assert.match(alerts()[0]!, /the last 3 batches reverted/);
+  await batchOnce('success');
+  await batchOnce('reverted');
+  assert.equal(alerts().length, 1, 'a batch that went through ends the run');
+});
+
+test('CCA-754: a small router-3 settlement whose gas is above half its fee is an ALERT; a larger one is only logged', async (t) => {
+  // 2,500 USDC per ETH; 165,000 gas at 0.01 gwei = 0.00000165 ETH = 0.004125 USDC.
+  const { base, facilitator, lines } = await setup(t, { usdcPerEth: 2_500_000_000n });
+  const gas = { gasUsed: 165_000n, effectiveGasPrice: 10_000_000n };
+  for (const [key, gross, intent] of [
+    ['small', 50_000n, INTENT],
+    ['large', 1_000_000n, OTHER_INTENT],
+  ] as const) {
+    const op = await facilitator.submit({
+      key,
+      intentHash: intent,
+      settlement: {
+        ...settlement(gross),
+        ref: keccak256(`0x${key.length.toString(16).padStart(2, '0')}`),
+      },
+      beforeBroadcast: ok,
+    });
+    base.mine(op.txHash!, key === 'small' ? 60n : 61n, 'success', gas);
+    await facilitator.status(key);
+  }
+  assert.ok(
+    lines.includes('x402 facilitator: economics small items 1 gas_wei 1650000000000 fee_raw 5000'),
+    JSON.stringify(lines),
+  );
+  assert.ok(
+    lines.includes(
+      'x402 facilitator: economics large items 1 gas_wei 1650000000000 fee_raw 100000',
+    ),
+  );
+  const alerts = lines.filter((l) => l.includes('ALERT') && l.includes('of fee'));
+  assert.deepEqual(alerts, [
+    'x402 facilitator: ALERT small gas 4125 above 50% of fee 5000 (USDC units)',
+  ]);
+});
+
+test('CCA-754: CITY_X402_FACILITATOR_ETH_USD is validated; anything invalid turns the comparison off and never throws', () => {
+  const of = (value: string | undefined) =>
+    usdcPerEthFromEnv({ CITY_X402_FACILITATOR_ETH_USD: value });
+  assert.equal(of('2500'), 2_500_000_000n);
+  assert.equal(of(' 3120.55 '), 3_120_550_000n);
+  for (const bad of [
+    '1e308',
+    '-2500',
+    '0',
+    'NaN',
+    'abc',
+    'Infinity',
+    '0x10',
+    '2500000',
+    '0.5',
+    '',
+    undefined,
+  ])
+    assert.equal(of(bad), undefined, String(bad));
+});
+
+test('a receipt check that fails is itself an ALERT, with the receipt outcome (never lost silently)', async (t) => {
+  const { base, db, facilitator, lines } = await setup(t, {
+    batch: { maxItems: 2, windowMs: 1_500 },
+  });
+  for (const i of [1, 2])
+    await facilitator.submit({
+      key: `f${i}`,
+      intentHash: intentOf(i),
+      settlement: member(i),
+      beforeBroadcast: ok,
+      batch: { authorize: allowAll, grant: null },
+    });
+  const query = db.query;
+  db.query = ((sql: string, params?: unknown[]) =>
+    sql.includes("LIKE 'batch:%'")
+      ? Promise.reject(new Error('database unavailable'))
+      : query(sql, params)) as typeof db.query;
+  t.after(() => void (db.query = query));
+  base.mine(keccak256(base.sends.at(-1)!), 60n, 'reverted');
+  await facilitator.status('f1', { authorize: allowAll });
+  const batchKey = lines.find((l) => l.includes('claimed'))!.split(' ')[2]!;
+  assert.deepEqual(
+    lines.filter((l) => l.includes('ALERT')),
+    [`x402 facilitator: ALERT ${batchKey} receipt monitoring failed (reverted), check it on Base`],
+  );
+});
+
+test('without a log dep the facilitator ALERTs reach the console (the Fastify logger is off)', async (t) => {
+  const seen: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => void seen.push(args.map(String).join(' '));
+  t.after(() => {
+    console.error = original;
+  });
+  const { base, facilitator, lines } = await setup(t, {
+    batch: { maxItems: 1, windowMs: 1_500 },
+    noLog: true,
+  });
+  for (const i of [1, 2, 3]) {
+    await facilitator.submit({
+      key: `c${i}`,
+      intentHash: intentOf(i),
+      settlement: member(i),
+      beforeBroadcast: ok,
+      batch: { authorize: allowAll, grant: null },
+    });
+    base.mine(keccak256(base.sends.at(-1)!), 60n + BigInt(i), 'reverted');
+    await facilitator.status(`c${i}`, { authorize: allowAll });
+  }
+  assert.equal(lines.length, 0);
+  assert.equal(
+    seen.filter((l) => l.includes('ALERT') && l.includes('the last 3 batches reverted')).length,
+    1,
+    JSON.stringify(seen),
+  );
+});
+
+/** A facilitator with the real key store on the setup's one PGlite connection. */
+async function withRealKeystore(db: Database, base: FakeBase, clock: { now: number }) {
+  await db.exec(`CREATE TABLE IF NOT EXISTS operators (id text PRIMARY KEY);`);
+  await db.exec(BASE_MIGRATION_SQL);
+  await db.exec(BASE_PAYMENTS_MIGRATION_SQL);
+  const keystore = createKeystore({
+    keks: parseKeks(`v1:${Buffer.alloc(32, 7).toString('base64')}`),
+    store: pgSpenderKeyStore(db),
+  });
+  const created = await keystore.createSpenderKey();
+  const open = () =>
+    createRouter3Facilitator({
+      db,
+      client: base.client,
+      keystore,
+      keyRef: created.keyRef,
+      router: ROUTER,
+      chainId: CHAIN_ID,
+      now: () => clock.now,
+      log: () => undefined,
+      l1FeeWei: async () => 0n,
+    });
+  return { open, signer: created.signer };
+}
+
+test(
+  'the real key store on one connection: a settle and its replacement complete under the lane lock',
+  { timeout: 15_000 },
+  async (t) => {
+    // The key store reads on its own connection. PGlite has one, so a read while the lane lock is
+    // held would wait forever: this test then hits its timeout.
+    const { db, base, clock, row } = await setup(t);
+    const { open, signer } = await withRealKeystore(db, base, clock);
+    const facilitator = open();
+    const op = await facilitator.submit({
+      key: 'k1',
+      intentHash: INTENT,
+      settlement: settlement(),
+      beforeBroadcast: ok,
+    });
+    assert.equal(op.status, 'submitted');
+    assert.equal(base.sends.length, 1);
+    const first = base.sends[0] as Hex;
+    assert.equal(
+      await recoverTransactionAddress({ serializedTransaction: first as never }),
+      signer,
+    );
+    assert.equal(parseTransaction(first).nonce, 0);
+
+    // A fresh instance, its address not read yet (a restart): the replacement completes too.
+    clock.now += STUCK_MS + 1;
+    const replaced = await open().status('k1');
+    assert.notEqual(replaced?.txHash, op.txHash);
+    assert.equal(base.sends.length, 2);
+    const second = base.sends[1] as Hex;
+    assert.equal(parseTransaction(second).nonce, 0);
+    assert.equal(
+      await recoverTransactionAddress({ serializedTransaction: second as never }),
+      signer,
+    );
+    assert.equal(((await row('k1')).tx_hashes as string[]).length, 2);
+  },
+);
+
+test('a key that cannot be opened signs nothing and holds no lane lock', async (t) => {
+  const { db, base, clock, row } = await setup(t);
+  const facilitator = createRouter3Facilitator({
+    db,
+    client: base.client,
+    keystore: {
+      withSigner: async () => {
+        throw new Error('Spender key not found.');
+      },
+      addressOf: async () => `0x${'7'.repeat(40)}`,
+    },
+    keyRef: 'v1:missing',
+    router: ROUTER,
+    chainId: CHAIN_ID,
+    now: () => clock.now,
+    log: () => undefined,
+    l1FeeWei: async () => 0n,
+  });
+  await assert.rejects(
+    facilitator.submit({
+      key: 'k1',
+      intentHash: INTENT,
+      settlement: settlement(),
+      beforeBroadcast: ok,
+    }),
+    /Spender key not found/,
+  );
+  assert.equal(base.sends.length, 0);
+  const stored = await row('k1');
+  assert.equal(stored.raw_tx, null);
+  assert.equal(stored.nonce, null);
+  // The lane gave out no nonce; another connection could take the row lock right away.
+  const lanes = await db.query<{ next_nonce: string }>(
+    'SELECT next_nonce::text AS next_nonce FROM x402_facilitator_lanes',
+  );
+  assert.ok(lanes.rows.every((lane) => lane.next_nonce === '0'));
 });

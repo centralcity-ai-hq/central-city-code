@@ -46,6 +46,12 @@ export type ElricAccess =
       room: ElricRoom;
       /** Elric's own history start: it sees only seq > visibleFromSeq. */
       visibleFromSeq: number;
+      /**
+       * The history start of everyone who reads Elric's reply: the latest start among the room's
+       * active members, never before Elric's own. With history 'from_join' a later member must
+       * not learn from Elric what was said before they joined, so Elric's context starts here.
+       */
+      audienceFromSeq: number;
     }
   | { ok: false; code: ElricAccessCode };
 
@@ -127,6 +133,13 @@ export async function elricRoomAccess(
     );
     if (muted.rows.length) return { ok: false, code: 'muted' };
   }
+  const audience = (
+    await q.query<{ seq: string | number | null }>(
+      'SELECT max(visible_from_seq) AS seq FROM room_members WHERE room_id=$1 AND removed_at IS NULL',
+      [room.id],
+    )
+  ).rows[0]?.seq;
+  const visibleFromSeq = Number(member.visible_from_seq);
   return {
     ok: true,
     elric,
@@ -140,7 +153,8 @@ export async function elricRoomAccess(
       next_seq: Number(room.next_seq),
       elric_private: room.elric_private === true,
     },
-    visibleFromSeq: Number(member.visible_from_seq),
+    visibleFromSeq,
+    audienceFromSeq: Math.max(visibleFromSeq, Number(audience ?? 0)),
   };
 }
 

@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 
 /*
  * Shared pieces of the public trust and company pages (src/Trust.tsx). Facts about the company
@@ -63,6 +63,36 @@ export function External({
     <a href={href} className={className} target="_blank" rel="noopener noreferrer">
       {children}
     </a>
+  );
+}
+
+/** A small "Copy" button for one value (/contact: a mailbox; /audit: the PDF's SHA-256). */
+export function CopyText({ text, label }: { text: string; label: string }) {
+  const [result, setResult] = useState<'copied' | 'failed' | null>(null);
+  const show = (next: 'copied' | 'failed') => {
+    setResult(next);
+    window.setTimeout(() => setResult(null), 1600);
+  };
+  return (
+    <>
+      <button
+        type="button"
+        className="contact-copy"
+        aria-label={`Copy ${label}`}
+        onClick={() => {
+          if (!navigator.clipboard) return show('failed');
+          void navigator.clipboard.writeText(text).then(
+            () => show('copied'),
+            () => show('failed'),
+          );
+        }}
+      >
+        {result === 'copied' ? 'Copied' : result === 'failed' ? 'Copy failed' : 'Copy'}
+      </button>
+      <span className="visually-hidden" role="status">
+        {result === 'copied' ? `${label} copied` : result === 'failed' ? 'Copy failed' : ''}
+      </span>
+    </>
   );
 }
 
