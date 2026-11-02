@@ -20,6 +20,7 @@ import {
   registerBaseRegistrationRoutes,
 } from '../server/base/identity/routes.js';
 import { BASE_MAINNET } from '../shared/base/chains.js';
+import { ARC_MAINNET } from '../shared/chains.js';
 
 /*
  * The finalize cron's claim order. A large backlog of rows not yet registered on chain (yesterday's
@@ -71,7 +72,11 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }) {
     log: () => {},
   } as never);
   let n = 0;
-  const insert = async (kind: 'unregistered' | 'in_flight' | 'minted', sweptAt: number | null) => {
+  const insert = async (
+    kind: 'unregistered' | 'in_flight' | 'minted',
+    sweptAt: number | null,
+    chain: number = BASE_MAINNET,
+  ) => {
     const agent = `00000000-0000-4000-8000-${(++n).toString().padStart(12, '0')}`;
     await pg.query(
       `INSERT INTO base_identities (agent_id, chain_id, operator_id, registry_address,
@@ -81,11 +86,11 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }) {
          $3, $4, $5, $6, $7)`,
       [
         agent,
-        BASE_MAINNET,
-        `identity:register:${BASE_MAINNET}:${agent}`,
+        chain,
+        `identity:register:${chain}:${agent}`,
         NOW - FINALIZE_FRESH_MS - 1,
         sweptAt,
-        kind === 'unregistered' ? null : `identity:register:${BASE_MAINNET}:${agent}`,
+        kind === 'unregistered' ? null : `identity:register:${chain}:${agent}`,
         kind === 'minted' ? n : null,
       ],
     );
@@ -137,6 +142,46 @@ test('with more started rows than a batch, minted ones come first and new regist
   for (const agent of minted) assert.ok(taken.has(agent), 'minted rows are never starved');
   assert.equal(inFlight.filter((agent) => taken.has(agent)).length, FINALIZE_BATCH - minted.length);
   assert.equal(backlog.filter((agent) => taken.has(agent)).length, FINALIZE_REGISTER_PER_RUN);
+});
+
+test('an older Base backlog cannot starve another chain, and each chain fills what the other leaves', async (t) => {
+  const { insert, cron, swept } = await setup(t);
+  // Base rows swept long ago, so by age alone they would fill the batch before any Arc row.
+  const baseBacklog: string[] = [];
+  for (let i = 0; i < FINALIZE_BATCH; i++) baseBacklog.push(await insert('in_flight', 1));
+  const baseFresh: string[] = [];
+  for (let i = 0; i < FINALIZE_REGISTER_PER_RUN; i++)
+    baseFresh.push(await insert('unregistered', 1));
+  const arc: string[] = [];
+  for (let i = 0; i < 5; i++) arc.push(await insert('in_flight', 2, ARC_MAINNET));
+  const arcFresh: string[] = [];
+  for (let i = 0; i < 3; i++) arcFresh.push(await insert('unregistered', 2, ARC_MAINNET));
+
+  await cron();
+  const taken = await swept();
+  for (const agent of [...arc, ...arcFresh])
+    assert.ok(taken.has(agent), 'Arc rows get their share');
+  // Arc used less than its half: Base takes all the rest, and the run claims no more than before.
+  assert.equal(baseBacklog.filter((a) => taken.has(a)).length, FINALIZE_BATCH - arc.length);
+  assert.equal(baseFresh.filter((a) => taken.has(a)).length, FINALIZE_REGISTER_PER_RUN - 3);
+});
+
+test('a chain with more rows than its half takes half while Base has rows, and the whole batch alone', async (t) => {
+  const both = await setup(t);
+  const base: string[] = [];
+  for (let i = 0; i < FINALIZE_BATCH; i++) base.push(await both.insert('in_flight', 2));
+  const arc: string[] = [];
+  for (let i = 0; i < FINALIZE_BATCH; i++) arc.push(await both.insert('in_flight', 1, ARC_MAINNET));
+  await both.cron();
+  const taken = await both.swept();
+  const half = Math.floor(FINALIZE_BATCH / 2);
+  assert.ok(arc.filter((a) => taken.has(a)).length >= half, 'Arc has at least its half');
+  assert.equal(taken.size, FINALIZE_BATCH);
+
+  const alone = await setup(t);
+  for (let i = 0; i < FINALIZE_BATCH + 5; i++) await alone.insert('in_flight', 1, ARC_MAINNET);
+  await alone.cron();
+  assert.equal((await alone.swept()).size, FINALIZE_BATCH);
 });
 
 test('the workers advance minted rows first, then in-flight ones, then new registrations', async (t) => {

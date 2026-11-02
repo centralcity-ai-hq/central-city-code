@@ -752,31 +752,43 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
              AND (register_retry_at IS NULL OR register_retry_at <= $1::bigint)`;
       const unregistered =
         'mint_op_id IS NULL AND erc8004_agent_id IS NULL AND provisional_agent_id IS NULL';
-      const { rows: claimed } = await deps.db.query<{
-        agent_id: string;
-        chain_id: number;
-        tier: number;
-      }>(
-        `WITH started AS (
-           SELECT agent_id, chain_id FROM base_identities
-           WHERE ${due} AND NOT (${unregistered})
-           ORDER BY (erc8004_agent_id IS NULL AND provisional_agent_id IS NULL),
-                    swept_at NULLS FIRST, updated_at
-           LIMIT ${FINALIZE_BATCH} FOR UPDATE SKIP LOCKED),
-         fresh AS (
-           SELECT agent_id, chain_id FROM base_identities
-           WHERE ${due} AND ${unregistered}
-           ORDER BY swept_at NULLS FIRST, updated_at
-           LIMIT ${FINALIZE_REGISTER_PER_RUN} FOR UPDATE SKIP LOCKED)
-         UPDATE base_identities SET swept_at = $1::bigint
-         WHERE (agent_id, chain_id) IN (SELECT * FROM started UNION ALL SELECT * FROM fresh)
-         RETURNING agent_id, chain_id,
-           CASE WHEN erc8004_agent_id IS NOT NULL OR provisional_agent_id IS NOT NULL THEN 0
-                WHEN mint_op_id IS NOT NULL THEN 1 ELSE 2 END AS tier`,
-        [started, started - FINALIZE_RECLAIM_MS, started - FINALIZE_FRESH_MS],
+      const claim = async (onChains: string, startedLimit: number, freshLimit: number) =>
+        (
+          await deps.db.query<{ agent_id: string; chain_id: number; tier: number }>(
+            `WITH started AS (
+               SELECT agent_id, chain_id FROM base_identities
+               WHERE ${due} AND ${onChains} AND NOT (${unregistered})
+               ORDER BY (erc8004_agent_id IS NULL AND provisional_agent_id IS NULL),
+                        swept_at NULLS FIRST, updated_at
+               LIMIT ${startedLimit} FOR UPDATE SKIP LOCKED),
+             fresh AS (
+               SELECT agent_id, chain_id FROM base_identities
+               WHERE ${due} AND ${onChains} AND ${unregistered}
+               ORDER BY swept_at NULLS FIRST, updated_at
+               LIMIT ${freshLimit} FOR UPDATE SKIP LOCKED)
+             UPDATE base_identities SET swept_at = $1::bigint
+             WHERE (agent_id, chain_id) IN (SELECT * FROM started UNION ALL SELECT * FROM fresh)
+             RETURNING agent_id, chain_id,
+               CASE WHEN erc8004_agent_id IS NOT NULL OR provisional_agent_id IS NOT NULL THEN 0
+                    WHEN mint_op_id IS NOT NULL THEN 1 ELSE 2 END AS tier`,
+            [started, started - FINALIZE_RECLAIM_MS, started - FINALIZE_FRESH_MS],
+          )
+        ).rows;
+      // Other chains first, up to half of each limit, so an old Base backlog cannot starve them.
+      // The second claim fills what is left from every chain: rows just claimed are no longer due.
+      const others = await claim(
+        `chain_id <> ${BASE_MAINNET}`,
+        Math.floor(FINALIZE_BATCH / 2),
+        Math.floor(FINALIZE_REGISTER_PER_RUN / 2),
+      );
+      const othersFresh = others.filter((row) => Number(row.tier) === 2).length;
+      const rest = await claim(
+        'TRUE',
+        FINALIZE_BATCH - (others.length - othersFresh),
+        FINALIZE_REGISTER_PER_RUN - othersFresh,
       );
       // RETURNING has no order: the workers take minted rows first, then in flight, then new ones.
-      const rows = [...claimed].sort((a, b) => Number(a.tier) - Number(b.tier));
+      const rows = [...others, ...rest].sort((a, b) => Number(a.tier) - Number(b.tier));
       const services = new Map<number, Promise<ReturnType<typeof createIdentityService>>>();
       const serviceFor = (chainId: number) => {
         let service = services.get(chainId);

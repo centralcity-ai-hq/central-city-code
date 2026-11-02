@@ -24,20 +24,28 @@ export function ExplorerSwitch({
   return (
     <nav className="ob-switch" aria-label="Explorer views">
       <a href="/explorer" aria-current={current === 'all' ? 'page' : undefined}>
-        <span className="ob-l-long">All agents</span><span className="ob-l-short">All</span>{count(all)}
+        <span className="ob-l-long">All agents</span>
+        <span className="ob-l-short">All</span>
+        {count(all)}
       </a>
       <a href="/explorer/base" aria-current={current === 'base' ? 'page' : undefined}>
         <span className="ob-chain ob-chain-base" aria-hidden="true" />
-        <span className="ob-l-long">On Base</span><span className="ob-l-short">Base</span>{count(onBase)}
+        <span className="ob-l-long">On Base</span>
+        <span className="ob-l-short">Base</span>
+        {count(onBase)}
       </a>
       {arc.on ? (
         <a href="/explorer/arc" aria-current={current === 'arc' ? 'page' : undefined}>
           <span className="ob-chain ob-chain-arc" aria-hidden="true" />
-          <span className="ob-l-long">On Arc</span><span className="ob-l-short">Arc</span>{count(arc.count)}
+          <span className="ob-l-long">On Arc</span>
+          <span className="ob-l-short">Arc</span>
+          {count(arc.count)}
         </a>
       ) : null}
       <a href="/explorer/calls" aria-current={current === 'calls' ? 'page' : undefined}>
-        <span className="ob-l-long">Service calls</span><span className="ob-l-short">Calls</span>{count(calls)}
+        <span className="ob-l-long">Service calls</span>
+        <span className="ob-l-short">Calls</span>
+        {count(calls)}
       </a>
     </nav>
   );
