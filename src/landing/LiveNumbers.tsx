@@ -169,7 +169,8 @@ export function LiveNumbers() {
     let ticked = false;
     const tick = (now: number) => {
       ticked = true;
-      const t = now - start;
+      // A frame's timestamp is when the frame began, which can be before `start`: never count back.
+      const t = Math.max(0, now - start);
       const step = (key: keyof Values) => {
         const to = target[key];
         if (to === null) return null;

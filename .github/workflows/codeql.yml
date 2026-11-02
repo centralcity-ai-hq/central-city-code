@@ -16,7 +16,7 @@ jobs:
     name: Analyze (javascript-typescript)
     # Code scanning needs a public repository (or GitHub Advanced Security): run only in the public
     # snapshot repository, never in the private workshop or in forks.
-    if: github.repository == 'centralcity-ai/central-city-code'
+    if: github.repository == 'centralcity-ai-hq/central-city-code'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -24,7 +24,7 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
@@ -34,3 +34,29 @@ jobs:
       - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           category: /language:javascript-typescript
+  # The review repository is private and has no code-scanning upload, so its pull requests merged
+  # without any static analysis (CCA-408). The same analysis runs here with `upload: never`, and
+  # scripts/ci/sast-gate.mjs fails the check on any error-level result, listing every result in
+  # the job summary.
+  review:
+    name: Review gate (javascript-typescript)
+    if: github.repository == 'centralcity-ai-hq/central-city' && github.event.pull_request.draft != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: javascript-typescript
+          build-mode: none
+      - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: /language:javascript-typescript
+          upload: never
+          output: sarif-results
+      - name: Fail on error-level results
+        run: node scripts/ci/sast-gate.mjs sarif-results

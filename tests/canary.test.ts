@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runCanary } from '../scripts/canary/index.mjs';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+// The public copy of this repository ships no canary workflow (it probes the live site with its
+// own secrets): the two workflow checks run only where the file is.
+const CANARY_WORKFLOW = new URL('../.github/workflows/canary.yml', import.meta.url);
+const noWorkflow = existsSync(CANARY_WORKFLOW) ? false : 'no canary workflow in this copy';
+
 const config = {
   origin: 'https://centralcity.ai',
   cookie: 'cc_session=secret',
@@ -268,43 +273,51 @@ test('password mode refuses another origin before requesting a session', async (
   assert.equal(calls, 0);
 });
 
-test('the canary workflow runs only from main, with its secrets in the canary environment (CCA-405)', () => {
-  const workflow = readFileSync(
-    new URL('../.github/workflows/canary.yml', import.meta.url),
-    'utf8',
-  ).replaceAll('\r\n', '\n');
-  const triggers = workflow.split('\non:\n')[1]!.split('\npermissions:')[0]!;
-  // deployment_status runs take the workflow file from the deployed commit, any branch included.
-  assert.doesNotMatch(triggers, /deployment_status|pull_request|push:/);
-  assert.match(triggers, /^ {2}schedule:$/m);
-  assert.match(triggers, /^ {2}workflow_dispatch:$/m);
-  const jobs = workflow.split('\njobs:\n')[1]!;
-  assert.deepEqual(
-    [...jobs.matchAll(/^ {2}([a-z-]+):$/gm)].map((match) => match[1]),
-    ['probe'],
-  );
-  assert.match(jobs, /^ {4}environment: canary$/m);
-  assert.match(
-    jobs,
-    /^ {4}if: vars\.CANARY_ENABLED == 'true' && github\.ref == 'refs\/heads\/main'$/m,
-  );
-  assert.match(jobs, /^ {10}ref: main$/m);
-  for (const secret of workflow.matchAll(/secrets\.([A-Z_]+)/g))
-    assert.ok(['CANARY_PASSWORD', 'CANARY_ALERT_TOKEN'].includes(secret[1]!), secret[1]);
-});
+test(
+  'the canary workflow runs only from main, with its secrets in the canary environment (CCA-405)',
+  { skip: noWorkflow },
+  () => {
+    const workflow = readFileSync(
+      new URL('../.github/workflows/canary.yml', import.meta.url),
+      'utf8',
+    ).replaceAll('\r\n', '\n');
+    const triggers = workflow.split('\non:\n')[1]!.split('\npermissions:')[0]!;
+    // deployment_status runs take the workflow file from the deployed commit, any branch included.
+    assert.doesNotMatch(triggers, /deployment_status|pull_request|push:/);
+    assert.match(triggers, /^ {2}schedule:$/m);
+    assert.match(triggers, /^ {2}workflow_dispatch:$/m);
+    const jobs = workflow.split('\njobs:\n')[1]!;
+    assert.deepEqual(
+      [...jobs.matchAll(/^ {2}([a-z-]+):$/gm)].map((match) => match[1]),
+      ['probe'],
+    );
+    assert.match(jobs, /^ {4}environment: canary$/m);
+    assert.match(
+      jobs,
+      /^ {4}if: vars\.CANARY_ENABLED == 'true' && github\.ref == 'refs\/heads\/main'$/m,
+    );
+    assert.match(jobs, /^ {10}ref: main$/m);
+    for (const secret of workflow.matchAll(/secrets\.([A-Z_]+)/g))
+      assert.ok(['CANARY_PASSWORD', 'CANARY_ALERT_TOKEN'].includes(secret[1]!), secret[1]);
+  },
+);
 
-test('docs/CANARY.md states the real schedule and run status (CCA-530)', () => {
-  const doc = readFileSync(new URL('../docs/CANARY.md', import.meta.url), 'utf8');
-  const workflow = readFileSync(
-    new URL('../.github/workflows/canary.yml', import.meta.url),
-    'utf8',
-  );
-  const cron = /cron: '([^']+)'/.exec(workflow)![1]!;
-  assert.equal(cron, '0 */2 * * *');
-  assert.ok(doc.includes(`\`cron: '${cron}'\``), 'the doc quotes the workflow schedule');
-  assert.match(doc, /every two hours/);
-  assert.doesNotMatch(doc, /every 30 minutes|not yet been enabled|Production deployment events/);
-  assert.match(doc, /^## Status$/m);
-  assert.match(doc, /Enabled \(CANARY_ENABLED=true\) since 2026-10-08/);
-  assert.match(doc, /independent uptime check/);
-});
+test(
+  'docs/CANARY.md states the real schedule and run status (CCA-530)',
+  { skip: noWorkflow },
+  () => {
+    const doc = readFileSync(new URL('../docs/CANARY.md', import.meta.url), 'utf8');
+    const workflow = readFileSync(
+      new URL('../.github/workflows/canary.yml', import.meta.url),
+      'utf8',
+    );
+    const cron = /cron: '([^']+)'/.exec(workflow)![1]!;
+    assert.equal(cron, '0 */2 * * *');
+    assert.ok(doc.includes(`\`cron: '${cron}'\``), 'the doc quotes the workflow schedule');
+    assert.match(doc, /every two hours/);
+    assert.doesNotMatch(doc, /every 30 minutes|not yet been enabled|Production deployment events/);
+    assert.match(doc, /^## Status$/m);
+    assert.match(doc, /Enabled \(CANARY_ENABLED=true\) since 2026-10-08/);
+    assert.match(doc, /independent uptime check/);
+  },
+);

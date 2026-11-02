@@ -1136,14 +1136,16 @@ export function createIdentityService(deps: IdentityServiceDeps) {
         try {
           // Asked by the newest attempt the row asked for (a register retry moves it on), so the
           // port's look-back covers every signed sibling; mint_op_id stays the key that landed.
-          obs = answered(
-            await deps.chain.mintEvidence!({
-              operationKey: S.register_op_id ?? S.mint_op_id,
-              chainId,
-              uri: S.agent_card_uri,
-            }),
-            'kind',
-          );
+          const asked = S.register_op_id ?? S.mint_op_id;
+          const evidence = async (operationKey: string) =>
+            answered(
+              await deps.chain.mintEvidence!({ operationKey, chainId, uri: S.agent_card_uri }),
+              'kind',
+            );
+          obs = await evidence(asked);
+          // A retry that the chain answered with an earlier attempt's mint never stored its own
+          // key: nothing is known under it, so the key that landed answers (1 Nov: 3,708 rows).
+          if (obs.kind === 'none' && S.mint_op_id !== asked) obs = await evidence(S.mint_op_id);
         } catch (error) {
           // Nothing is concluded from an unavailable read.
           emit('identity.evidence_unavailable', { code: errorCode(error) });

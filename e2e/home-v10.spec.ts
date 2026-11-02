@@ -66,14 +66,16 @@ function statsBody(answer: Answer, asOf: string) {
 
 /**
  * Serves /api/public/stats from a queue of answers (the last one repeats) and counts the
- * requests; `gate` holds the first answer until it resolves.
+ * requests; `gate` holds every answer until it resolves.
  */
 async function mockStats(page: Page, answers: Answer[], gate?: Promise<void>) {
   const state = { calls: 0 };
   await page.route('**/api/public/stats', async (route) => {
     const answer = answers[Math.min(state.calls, answers.length - 1)]!;
     state.calls++;
-    if (state.calls === 1 && gate) await gate;
+    // Every answer waits for the gate: a second request made before it opens (a poll, a remount)
+    // must not answer early either.
+    if (gate) await gate;
     if (answer.status)
       return route.fulfill({ status: answer.status, contentType: 'application/json', body: '{}' });
     const asOf = new Date(BASE_TIME + state.calls * 15_000).toISOString();

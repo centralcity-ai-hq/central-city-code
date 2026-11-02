@@ -363,6 +363,48 @@ test('a mint orphaned before any hand-over is rechecked, never terminal, then co
   assert.deepEqual(chain.signedKeys(), { [R(0)]: 1, [H(X)]: 1 });
 });
 
+test('a retry whose own key was never stored finds the mint under the key that landed', async (t) => {
+  const ctx = await setup(t);
+  const { chain } = ctx;
+  await ctx.advance();
+  chain.include(R(0), mintOf());
+  // As production has it: the retry asked for attempt 1, the chain reported attempt 0's mint.
+  await ctx.db.query(
+    `UPDATE base_identities SET op_id = $1, register_op_id = $1, mint_op_id = $2,
+       mint_lost_at = 1 WHERE agent_id = 'a1'`,
+    [R(1), R(0)],
+  );
+  // The real port knows nothing under a key it never stored (the fake would look back instead).
+  chain.evidenceQueue.push(() => ({ kind: 'none' }));
+  chain.calls.evidence.length = 0;
+
+  const view = await ctx.advance();
+  assert.deepEqual(chain.calls.evidence, [R(1), R(0)]);
+  assert.equal(view.provisionalAgentId, '99029');
+  const r = await ctx.row();
+  assert.equal(r.mint_lost_at, null);
+  assert.equal(r.mint_op_id, R(0));
+  assert.equal(r.transfer_op_id, H(X));
+  assert.deepEqual(chain.signedKeys(), { [R(0)]: 1, [H(X)]: 1 }, 'nothing registered again');
+});
+
+test('a mint whose own key knows nothing is asked once, and stays lost', async (t) => {
+  const ctx = await setup(t);
+  const { chain } = ctx;
+  await ctx.advance();
+  chain.include(R(0), mintOf());
+  chain.transferError = Object.assign(new Error('not held'), { code: 'IDENTITY_NOT_HELD' });
+  await ctx.advance();
+  chain.transferError = null;
+  chain.evidenceQueue.push(() => ({ kind: 'none' }));
+  chain.calls.evidence.length = 0;
+
+  const view = await ctx.advance();
+  assert.deepEqual(chain.calls.evidence, [R(0)]);
+  assert.equal(view.stage, 'rechecking');
+  assert.notEqual((await ctx.row()).mint_lost_at, null);
+});
+
 test('an orphaned transfer keeps its key and ends confirmed', async (t) => {
   const ctx = await setup(t);
   const { chain } = ctx;
