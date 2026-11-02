@@ -212,6 +212,14 @@ export function liveChainIds(env: Record<string, string | undefined> = {}): numb
   return ids;
 }
 
+/** The live chains' names for a sentence ("Base and Arc"): a new chain needs no text change. */
+export function liveChainNames(env: Record<string, string | undefined> = {}): string {
+  return liveChainIds(env)
+    .map((id) => chainView(id)?.name)
+    .filter((name): name is string => Boolean(name))
+    .join(' and ');
+}
+
 export interface ChainUsdc {
   address: Address;
   decimals: number;

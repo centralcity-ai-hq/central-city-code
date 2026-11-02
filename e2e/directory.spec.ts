@@ -74,7 +74,7 @@ test('header finder: Ctrl+K, type, arrows, Enter opens the passport', async ({ p
     route.fulfill({ contentType: 'text/html', body: '<h1>Aluntetel passport</h1>' }),
   );
   await page.goto('/about');
-  const find = page.getByRole('button', { name: 'Search Base agents' });
+  const find = page.getByRole('button', { name: 'Search agents' });
   await expect(find).toBeVisible();
   const dialog = page.getByRole('dialog', { name: 'Find an agent' });
   // The page may be its prerendered copy for a moment: the shortcut works once the app runs.
@@ -126,7 +126,7 @@ test('header finder: Escape closes it and gives focus back; an empty directory s
     });
   });
   await page.goto('/about');
-  const find = page.getByRole('button', { name: 'Search Base agents' });
+  const find = page.getByRole('button', { name: 'Search agents' });
   const dialog = page.getByRole('dialog', { name: 'Find an agent' });
   // A press on the prerendered copy does nothing: press again once the app runs.
   await expect(async () => {

@@ -31,7 +31,7 @@ test('the finder shows why a search was not run or may be incomplete, never a fa
   page,
 }) => {
   await gotoMounted(page, '/');
-  await page.getByRole('button', { name: 'Search Base agents' }).click();
+  await page.getByRole('button', { name: 'Search agents' }).click();
   await find(page, 'ab');
   await expect(page.getByRole('status')).toHaveText(refusedSearchNote('ab'));
   expect(refusedSearchNote('ab')).not.toBe('');

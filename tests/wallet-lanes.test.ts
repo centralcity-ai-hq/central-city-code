@@ -295,7 +295,7 @@ test('lanes on: while one operation sets the wallet up, another that would too i
       }),
     (error: unknown) => {
       assert.ok(error instanceof WithdrawalWaitError);
-      assert.equal((error as Error).message, 'Wait a moment: your wallet is being set up on Base.');
+      assert.equal((error as Error).message, 'Wait a moment: your wallet is being set up.');
       assert.equal((error as Error).message, WALLET_SETTING_UP);
       return true;
     },
@@ -452,11 +452,11 @@ test('refusals from the lanes, in plain words, with the numbers the server attac
   const retryAt = new Date(2026, 9, 11, 14, 5).getTime();
   assert.equal(
     refusal('sponsor_paused', { reverted: 3, retryAt }),
-    'Several payments from this wallet didn’t go through on Base, so new ones pause until 14:05.',
+    'Several payments from this wallet didn’t go through, so new ones pause until 14:05.',
   );
   assert.equal(
     refusal('sponsor_paused', {}, withdraw),
-    'Several payments or withdrawals from this wallet didn’t go through on Base, so new ones pause for a while.',
+    'Several payments or withdrawals from this wallet didn’t go through, so new ones pause for a while.',
   );
   assert.equal(
     refusal('sponsor_busy', { retryAfterSeconds: 60 }),

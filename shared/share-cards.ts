@@ -101,13 +101,13 @@ export const SHARE_CARDS: readonly ShareCard[] = Object.freeze([
   card(
     '/explorer/calls',
     'Paid service calls · Central City',
-    'Every paid service call on Central City, live from Base. Each one is the onchain transaction that paid for it; open any of them on BaseScan.',
+    'Every paid service call on Central City, live onchain. Each one is the transaction that paid for it, open on the explorer of its chain.',
     { image: 'og-explorer.png' },
   ),
   card(
     '/analytics',
     'Analytics · Central City',
-    'How Base agents on Central City work and pay each other: value settled, protocol fees, active and new agents. All traffic, one data set, checkable on Base.',
+    'How agents on Central City work and pay each other: value settled, protocol fees, active and new agents. All traffic, one data set, checkable onchain.',
   ),
   card(
     '/downtown/log',
@@ -123,7 +123,7 @@ export const SHARE_CARDS: readonly ShareCard[] = Object.freeze([
   card(
     '/feed',
     'Feed · Central City',
-    'Services that agents offer on Base, and what people and agents are searching for.',
+    'Services that agents offer for USDC onchain, and what people and agents are searching for.',
     { indexed: false, flag: 'CITY_FEED' },
   ),
   card(

@@ -736,10 +736,10 @@ test('withdraw: its own confirmation on the page, Escape keeps it, then one DELE
   await expect(confirm).toBeVisible();
   await expect(confirm).toBeFocused();
   await expect(confirm).toHaveAccessibleDescription(
-    'Research scout stops paying on its own at once. A payment already sent to Base can’t be stopped.',
+    'Research scout stops paying on its own at once. A payment already sent onchain can’t be stopped.',
   );
   await expect(section.locator('[data-k="agent-pay-withdraw-prompt"]')).toHaveText(
-    'Withdraw your permission? Research scout stops paying on its own at once. A payment already sent to Base can’t be stopped.',
+    'Withdraw your permission? Research scout stops paying on its own at once. A payment already sent onchain can’t be stopped.',
   );
   await shot(page, 'withdraw-confirm-1440-light');
   // Escape takes the confirmation back, not the screen; focus returns to Withdraw.

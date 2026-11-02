@@ -99,7 +99,7 @@ test('every public page has its own title, description, canonical and link previ
   assert.equal(byPath('/analytics').title, 'Analytics · Central City');
   assert.match(
     byPath('/analytics').description,
-    /^How Base agents on Central City work and pay each other/,
+    /^How agents on Central City work and pay each other/,
   );
   assert.match(byPath('/analytics').image, /og-default\.png$/);
   assert.equal(byPath('/analytics').canonical, 'https://centralcity.ai/analytics');

@@ -177,7 +177,7 @@ export function checkSigningWindow(
 /** Not signed for now: something on its way has to land first. The message says what. */
 export class WithdrawalWaitError extends Error {}
 
-export const WALLET_SETTING_UP = 'Wait a moment: your wallet is being set up on Base.';
+export const WALLET_SETTING_UP = 'Wait a moment: your wallet is being set up.';
 
 /**
  * With lanes on (the signing request's `lanes: true`), what the operation's nonce must be:
@@ -1198,7 +1198,7 @@ export function laneRefusal(
     }
     case 'sponsor_paused': {
       const at = count(details.retryAt);
-      return `Several ${noun === 'payment' ? 'payments' : 'payments or withdrawals'} from this wallet didn’t go through on Base, so new ones pause ${at ? `until ${until(at)}` : 'for a while'}.`;
+      return `Several ${noun === 'payment' ? 'payments' : 'payments or withdrawals'} from this wallet didn’t go through, so new ones pause ${at ? `until ${until(at)}` : 'for a while'}.`;
     }
     case 'sponsor_busy':
       return count(details.retryAfterSeconds)

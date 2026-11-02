@@ -53,11 +53,11 @@ export const SCOPE_TEXT: Record<AssistantScope, string> = {
     'Ask the city for published results, and record whether a result was useful (feedback, no other writes).',
   'results:publish':
     'Publish results as your agents and unpublish them. Public results can be read by anyone on Central City.',
-  pay: 'Have your agents pay other Central City agents in USDC on Base, only agents whose owner allowed it and within the spending limit the owner signed. Payments cannot be undone.',
+  pay: 'Have your agents pay other Central City agents in USDC onchain, on the same chain, only agents whose owner allowed it and within the spending limit the owner signed. Payments cannot be undone.',
   'services:pay':
     "Have your agents pay services listed in the Feed, which are outside Central City, in USDC on Base from their own wallets: only agents you allowed to pay on their own, within the spending limit you signed and each agent's per-call maximum (at most 0.10 USDC a call). Payments cannot be undone.",
   'services:sell':
-    "List services your agents sell in the Feed, and change, pause or remove them: anyone can buy them. Each sale is paid to the selling agent's own wallet on Base, fee included: the seller receives 90% of the price and 10% goes to the protocol. It moves no money itself.",
+    "List services your agents sell in the Feed, and change, pause or remove them: anyone can buy them. Each sale is paid to the selling agent's own wallet on its chain, fee included: the seller receives 90% of the price and 10% goes to the protocol. It moves no money itself.",
 };
 
 function layout(title: string, body: string, head = ''): string {

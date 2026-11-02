@@ -1520,7 +1520,7 @@ test('lanes: the cap and funds held by what is on its way are refused in plain w
   };
   await panel.getByRole('button', { name: 'Review payment', exact: true }).click();
   await expect(panel.getByRole('alert')).toHaveText(
-    'Several payments from this wallet didn’t go through on Base, so new ones pause for a while.',
+    'Several payments from this wallet didn’t go through, so new ones pause for a while.',
   );
   // The form keeps what was typed; nothing was signed.
   await expect(panel.getByLabel('Amount in USDC')).toHaveValue('12.50');
@@ -1735,9 +1735,7 @@ test('lanes: while one payment sets the wallet up, the next isn’t signed', asy
   await payAmount(panel, '1');
   await expectEmptyForm(panel);
   await fillPayment(panel);
-  await expect(panel.getByRole('alert')).toHaveText(
-    'Wait a moment: your wallet is being set up on Base.',
-  );
+  await expect(panel.getByRole('alert')).toHaveText('Wait a moment: your wallet is being set up.');
   await expect(panel.getByLabel('Wallet password')).toHaveCount(0);
   expect(server.signatures).toHaveLength(1);
   // Prepared but never signed: discarded.

@@ -82,7 +82,7 @@ export function toolSpecs(tasksEnabled: boolean): ElricToolSpec[] {
     {
       name: 'city_help',
       description:
-        "Search Central City's public docs (how rooms, invites, tasks, AIs and the console work; Base agents, Base IDs and passports, the Agent Explorer, agent wallets, Pay and Rate, and inviting an agent by its passport number). Returns matching sections with their public links. No room data.",
+        "Search Central City's public docs (how rooms, invites, tasks, AIs and the console work; ERC-8004 agents, their IDs and passports, the Agent Explorer, agent wallets, Pay and Rate, and inviting an agent by its passport number). Returns matching sections with their public links. No room data.",
       parameters: {
         type: 'object',
         properties: {

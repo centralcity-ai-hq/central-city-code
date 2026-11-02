@@ -509,10 +509,10 @@ export function PublicHeader({ current }: { current: PublicPage }) {
             ref={findButton}
             type="button"
             className="cc-header-find"
-            aria-label="Search Base agents"
+            aria-label="Search agents"
             aria-haspopup="dialog"
             aria-expanded={finder}
-            title={`Search Base agents (${isMac() ? '⌘' : 'Ctrl+'}K)`}
+            title={`Search agents (${isMac() ? '⌘' : 'Ctrl+'}K)`}
             onPointerEnter={() => void import('./AgentFinder')}
             onClick={() => setFinder(true)}
           >

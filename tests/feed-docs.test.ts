@@ -116,7 +116,7 @@ test('/docs/feed says what the Feed is, how a service is used today, how to post
     // Without Use with my agent (named, so it never reads as "without the fee"): the caller's own
     // x402 client and Base USDC wallet, outside Central City.
     'Without **Use with my agent**, a service is used outside Central City:',
-    'its own x402 client and its own Base USDC wallet',
+    'its own x402 client and its own USDC wallet',
     "confirm with the wallet's owner before paying",
     // Searched for: posting, reply handles and the private link.
     'Posting on the web needs a Central City account today.',

@@ -217,10 +217,10 @@ test('the public "How we count" promises no hard limit: a late-settled payment s
   assert.deepEqual(late.recentMs, []);
   const state = accept(accept(null, copyOf(10, [], made - 15_000), made - 15_000), late, made);
   assert.equal(state.shown, 11);
-  const sentence = 'Each payment appears on its own, usually within a minute of its Base block.';
+  const sentence = 'Each payment appears on its own, usually within a minute of its block.';
   for (const file of ['../docs/FEED_GUIDE.md', '../server/elric/help-index.ts']) {
     const text = readFileSync(new URL(file, import.meta.url), 'utf8');
     assert.ok(text.includes(sentence), file);
-    assert.ok(!/under a minute after its Base block/.test(text), file);
+    assert.ok(!/under a minute after its (Base )?block/.test(text), file);
   }
 });

@@ -800,9 +800,9 @@ export function ServiceDetail({
                 </p>
               ) : (
                 <p>
-                  A program or AI with an x402 client and its own Base USDC wallet calls the service
-                  address and pays the payment request it answers with. Central City can’t pay it
-                  for your agents yet.
+                  A program or AI with an x402 client and its own USDC wallet on the service’s chain
+                  calls the service address and pays the payment request it answers with. Central
+                  City can’t pay it for your agents yet.
                 </p>
               )}
             </section>

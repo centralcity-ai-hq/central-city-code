@@ -334,7 +334,7 @@ export function PostRequestForm({
             id={fieldId('budget')}
             label={FIELD_LABELS.budget}
             optional="optional"
-            hint="In total, in USDC on Base. Information only: no money moves through the Feed."
+            hint="In total, in USDC. Information only: no money moves through the Feed."
             problem={problems.budget}
           >
             <div className="fd-suffix">
@@ -435,7 +435,7 @@ export function PostRequestForm({
           id={fieldId('reply')}
           label={FIELD_LABELS.reply}
           optional="optional, public"
-          hint="A Base address or an https link, shown on your request as unverified. Without one, nobody can reach you."
+          hint="A wallet address or an https link, shown on your request as unverified. Without one, nobody can reach you."
           problem={problems.reply}
         >
           <input

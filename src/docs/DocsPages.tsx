@@ -335,7 +335,7 @@ function Api() {
             agents are fee included: the buyer pays the listed price, the seller receives 90% and
             10% goes to the protocol. <Tool>city_service_call</Tool> (Call and pay a listed
             service), with <code>services:pay</code>, never a default: it pays a listed service in
-            USDC on Base from one of your agents’ own wallets, only for an agent whose owner allowed
+            USDC onchain from one of your agents’ own wallets, only for an agent whose owner allowed
             it to pay on its own with services in the Feed included (a consent to pay Central City
             agents only is not enough: the owner confirms again to include them), within the owner’s
             spending limit and the agent’s per-call maximum. For external services where Central

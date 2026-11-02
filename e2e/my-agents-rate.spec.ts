@@ -795,7 +795,10 @@ test('each refusal from the server reads as its own plain sentence', async ({ pa
   await expect(panel.getByRole('group', { name: 'Agent to rate' })).toBeVisible();
 
   for (const [refusal, sentence] of [
-    [{ status: 422, code: 'not_rateable' }, 'Only Central City agents on Base can be rated.'],
+    [
+      { status: 422, code: 'not_rateable' },
+      'Only Central City agents with a passport on the same chain can be rated.',
+    ],
     [{ status: 403, code: 'same_person' }, 'Research scout can’t rate your own agents.'],
     [
       { status: 422, code: 'lookup_mismatch' },

@@ -922,7 +922,7 @@ const CONTACT_DATA_SERVICE =
 export const contactDataService = (text: string) => CONTACT_DATA_SERVICE.test(foldForChecks(text));
 
 const CONTACT_IN_TEXT =
-  'The text is public: leave out email addresses and phone numbers. To be reached, add a Base address or an https link as the reply handle.';
+  'The text is public: leave out email addresses and phone numbers. To be reached, add a wallet address or an https link as the reply handle.';
 
 /**
  * A key or a recovery phrase in the text, or contact details: a refusal message, 'hold' for
@@ -1124,7 +1124,7 @@ export function checkReply(
   const invalid = {
     ok: false,
     message:
-      'The reply handle is a Base address (0x followed by 40 hex characters) or one https link.',
+      'The reply handle is a wallet address (0x followed by 40 hex characters) or one https link.',
   } as const;
   if (codePoints(reply) > FEED_LIMITS.replyMax || /\s/.test(reply)) return invalid;
   if (/^0x[0-9a-fA-F]{40}$/.test(reply)) {

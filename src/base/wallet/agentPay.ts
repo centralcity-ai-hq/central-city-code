@@ -430,7 +430,7 @@ export const boundsText = (name: string, limit: string) =>
 
 /** The line under the withdraw confirmation. */
 export const withdrawPrompt = (name: string) =>
-  `${name} stops paying on its own at once. A payment already sent to Base can’t be stopped.`;
+  `${name} stops paying on its own at once. A payment already sent onchain can’t be stopped.`;
 
 /**
  * Why the confirm didn't go through, in words that match what is on screen now. `addingFeed`: it

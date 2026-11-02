@@ -182,7 +182,7 @@ export const cityPayInput = z
       .min(1)
       .max(200)
       .describe(
-        'The Central City agent to pay: its Base ID, passport link (centralcity.ai/a/<short>), passport number (CC-<short>) or its agent wallet address. Read as text only; a link is never opened.',
+        'The Central City agent to pay: its ERC-8004 ID, passport link (centralcity.ai/a/<short>), passport number (CC-<short>) or its agent wallet address. Read as text only; a link is never opened.',
       ),
     amount: z
       .string()

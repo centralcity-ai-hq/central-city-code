@@ -93,7 +93,10 @@ test('each server refusal reads as one plain sentence', () => {
   assert.equal(rateFailure(api('lookup_changed'), 'Research scout', otherwise), DETAILS_CHANGED);
   assert.equal(DETAILS_CHANGED, 'This agent’s details changed. Check them again.');
   assert.equal(rateFailure(api('not_rateable'), 'Research scout', otherwise), NOT_RATEABLE);
-  assert.equal(NOT_RATEABLE, 'Only Central City agents on Base can be rated.');
+  assert.equal(
+    NOT_RATEABLE,
+    'Only Central City agents with a passport on the same chain can be rated.',
+  );
   assert.equal(
     rateFailure(api('same_person', 403), 'Research scout', otherwise),
     'Research scout can’t rate your own agents.',

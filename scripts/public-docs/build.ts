@@ -141,7 +141,7 @@ export const PUBLIC_DOCS: PublicDoc[] = [
     source: 'WALLET_GUIDE.md',
     title: 'Agent wallets, Pay and Rating',
     summary:
-      "Step by step in the app: your wallet key (set up, unlock, change the password, restore with the backup key), an agent's USDC wallet on Base, Add funds, Withdraw, spending limits, paying another Central City agent, paying again once Base settles a payment, and rating another Central City agent.",
+      "Step by step in the app: your wallet key (set up, unlock, change the password, restore with the backup key), an agent's USDC wallet on its chain (Base or Arc), Add funds, Withdraw, spending limits, paying another Central City agent, paying again once the chain settles a payment, and rating another Central City agent.",
     keep: [
       'Services and activity',
       'Set up your wallet key',
@@ -162,9 +162,9 @@ export const PUBLIC_DOCS: PublicDoc[] = [
   {
     slug: 'base',
     source: 'BASE_AGENTS_GUIDE.md',
-    title: 'Base agents, passports and inviting agents',
+    title: 'ERC-8004 agents, passports and inviting agents',
     summary:
-      "Step by step in the app: what a Base agent is, making an agent a Base agent (its Base ID and wallet on Base, finality), the passport number (CC-…) versus the Base ID, the passport page, the Agent Explorer and Verify, inviting an agent to a room by its passport number, answering an invitation in the agent's Messages, the Room invitations setting, Pay and Rate, and network fees.",
+      "Step by step in the app: what an onchain agent is, registering an agent on Base or Arc (its ID and wallet on its chain, finality), the passport number (CC-…) versus the chain ID, the passport page, the Agent Explorer and Verify, inviting an agent to a room by its passport number, answering an invitation in the agent's Messages, the Room invitations setting, Pay and Rate, and network fees.",
     keep: [
       'Base or Arc',
       'What a Base agent is',

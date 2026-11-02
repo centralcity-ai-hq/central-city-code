@@ -73,7 +73,7 @@ async function openPane(page: Page) {
 }
 
 /** The Base row on the agent's home: "Base" and where the registration stands. */
-const baseRow = (pane: Locator) => pane.getByRole('button', { name: /^Base/ });
+const baseRow = (pane: Locator) => pane.getByRole('button', { name: /^ERC-8004/ });
 
 /** The agent's Base screen: its home's Base row, pushed inside the same pane. */
 async function openBaseScreen(page: Page, pane?: Locator) {
@@ -409,7 +409,8 @@ test('an agent opened again shows its last Base value at once, and the fresh rea
   await expect(baseRow(harbor)).toContainText('ID 1532');
   await expect.poll(() => harborReads.length).toBe(2);
   await page.waitForTimeout(150);
-  expect(await harborDrawn()).toEqual(['ID 1532']);
+  // The row names the chain before the ID.
+  expect(await harborDrawn()).toEqual(['On Base · ID 1532']);
   await expect(baseRow(harbor).getByRole('img', { name: 'Confirmed' })).toBeVisible();
 
   // The fresh answer replaces it.
@@ -420,7 +421,7 @@ test('an agent opened again shows its last Base value at once, and the fresh rea
   });
   await expect(baseRow(harbor)).toContainText('Re-checking');
   await expect(baseRow(harbor)).not.toContainText('1532');
-  expect(await harborDrawn()).toEqual(['ID 1532', 'Re-checking']);
+  expect(await harborDrawn()).toEqual(['On Base · ID 1532', 'Re-checking']);
 });
 
 test('a last Base value is for showing only: the Base screen offers nothing until its own read answers', async ({

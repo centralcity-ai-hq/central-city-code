@@ -905,10 +905,10 @@ export function draftProblems(
       !(BASE_ADDRESS.test(reply) || HTTPS_LINK.test(reply)))
   )
     problems.reply =
-      'Use a Base address (0x and 40 characters) or a link that starts with https://.';
+      'Use a wallet address (0x and 40 characters) or a link that starts with https://.';
   else if (reply && centralCityLink(reply, siteHost))
     problems.reply =
-      'Only Central City result and agent links can be a reply handle. Use a Base address or another https page.';
+      'Only Central City result and agent links can be a reply handle. Use a wallet address or another https page.';
   return problems;
 }
 

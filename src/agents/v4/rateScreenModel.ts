@@ -57,7 +57,8 @@ export const starLabel = (stars: number) => `${stars} ${stars === 1 ? 'star' : '
 
 export const MISMATCH = `${NOT_SAME_AGENT} Check both on the agent’s passport.`;
 export const DETAILS_CHANGED = 'This agent’s details changed. Check them again.';
-export const NOT_RATEABLE = 'Only Central City agents on Base can be rated.';
+export const NOT_RATEABLE =
+  'Only Central City agents with a passport on the same chain can be rated.';
 /** The daily cap reached: with the server's own max when it sent one (CITY_BASE_RATE_DAILY_MAX). */
 export const ratingLimit = (max?: number | null) =>
   typeof max === 'number' && Number.isSafeInteger(max) && max > 0

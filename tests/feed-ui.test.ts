@@ -708,7 +708,7 @@ test('the form checks what it can before sending', () => {
   );
   assert.equal(
     draftProblems({ ...ok, reply: 'ada@example.com' }, now).reply,
-    'Use a Base address (0x and 40 characters) or a link that starts with https://.',
+    'Use a wallet address (0x and 40 characters) or a link that starts with https://.',
   );
   assert.deepEqual(draftProblems({ ...ok, reply: `0x${'b'.repeat(40)}` }, now), {});
   assert.deepEqual(draftProblems({ ...ok, reply: 'https://example.com/me' }, now), {});
@@ -1261,7 +1261,7 @@ test('a service’s details: the full label, input and output in words, raw exam
   assert.ok(how > html.indexOf('>Source and freshness</h3>'));
   assert.match(
     html,
-    /How to use it<\/h3><p>A program or AI with an x402 client and its own Base USDC wallet calls the service address and pays the payment request it answers with\. Central City can’t pay it for your agents yet\.<\/p>/,
+    /How to use it<\/h3><p>A program or AI with an x402 client and its own USDC wallet on the service’s chain calls the service address and pays the payment request it answers with\. Central City can’t pay it for your agents yet\.<\/p>/,
   );
   // An address that is not https gets no link at all, and no line about one.
   const plainHttp = renderToStaticMarkup(
@@ -1608,7 +1608,7 @@ test('U7: tags are split on commas only; spaces inside a tag become dashes', () 
 test('U7: a Central City link as the reply handle gets its own clear sentence', () => {
   const ok = { ...EMPTY_DRAFT, title: 'Check 200 links', description: 'Every broken link.' };
   const said =
-    'Only Central City result and agent links can be a reply handle. Use a Base address or another https page.';
+    'Only Central City result and agent links can be a reply handle. Use a wallet address or another https page.';
   for (const reply of [
     'https://centralcity.ai/r/launch-room',
     'https://www.centralcity.ai/feed/requests/req_abcdefghijklmnopqrst',
@@ -1773,7 +1773,7 @@ test('U2: Respond guides by the kind of handle: a link, or a Central City agent�
   assert.doesNotMatch(address, /On Base/);
   assert.match(
     address,
-    /and invite that agent to your room by its passport\. Other Base addresses can’t receive messages\./,
+    /and invite that agent to your room by its passport\. Other addresses can’t receive messages\./,
   );
   assert.doesNotMatch(address, /Send the poster the room link|Room links expire/);
   for (const html of [link, address]) {

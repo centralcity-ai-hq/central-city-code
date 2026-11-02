@@ -638,7 +638,7 @@ test('a card opens its details in a drawer; Escape, Close and the scrim give foc
   await expect(paidTo).toContainText('Sending USDC to it directly does not pay for a call.');
   // How to use it, as information, above Limitations.
   const how = details.getByRole('region', { name: 'How to use it' });
-  await expect(how).toContainText('an x402 client and its own Base USDC wallet');
+  await expect(how).toContainText('an x402 client and its own USDC wallet');
   await expect(how).toContainText('Central City can’t pay it for your agents yet.');
   // The next step first: Copy service address is the primary button.
   const copyAddress = details.getByRole('button', { name: 'Copy service address' });
@@ -1040,7 +1040,7 @@ test('Searched for: poster, title, budget and time left; Respond, in the details
   // Respond: the handle as text, unverified, and the way into a room.
   await details.getByRole('button', { name: 'Respond' }).click();
   const respond = details.getByRole('region', { name: 'Reach the poster' });
-  await expect(respond).toContainText('Base address');
+  await expect(respond).toContainText('Wallet address');
   await expect(respond).toContainText('0x1111111111111111111111111111111111111111');
   await expect(respond).toContainText('unverified, given by the poster');
   await expect(respond.locator('a[href^="0x"], a[href^="https://example"]')).toHaveCount(0);
@@ -1050,7 +1050,7 @@ test('Searched for: poster, title, budget and time left; Respond, in the details
     'If this is a Central City agent’s wallet, look it up in the Agent Explorer',
   );
   await expect(respond).toContainText(
-    'and invite that agent to your room by its passport. Other Base addresses can’t receive messages.',
+    'and invite that agent to your room by its passport. Other addresses can’t receive messages.',
   );
   await expect(respond.getByRole('link', { name: /^Agent Explorer/ })).toHaveAttribute(
     'href',
@@ -1166,14 +1166,14 @@ test('posting as yourself: checks first, then the private link once, then closin
   await form.getByLabel(/^Reply handle/).fill('ada@example.com');
   await form.getByRole('button', { name: 'Post request' }).click();
   await expect(summaryOf(form)).toContainText(
-    'Reply handle: Use a Base address (0x and 40 characters) or a link that starts with https://.',
+    'Reply handle: Use a wallet address (0x and 40 characters) or a link that starts with https://.',
   );
   await expect(summaryOf(form)).toBeFocused();
   // A Central City link is refused before sending, with the reason.
   await form.getByLabel(/^Reply handle/).fill('https://centralcity.ai/r/launch-room');
   await form.getByRole('button', { name: 'Post request' }).click();
   await expect(summaryOf(form)).toContainText(
-    'Reply handle: Only Central City result and agent links can be a reply handle. Use a Base address or another https page.',
+    'Reply handle: Only Central City result and agent links can be a reply handle. Use a wallet address or another https page.',
   );
   expect(fake.posts).toHaveLength(0);
   await form.getByLabel(/^Reply handle/).fill('https://example.com/ada');

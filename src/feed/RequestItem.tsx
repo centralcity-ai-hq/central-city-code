@@ -585,7 +585,7 @@ function ReplyHandle({ reply, label }: { reply: string; label: string }) {
       <span className="k">{label}</span>
       <code>{reply}</code>
       <span className="fd-unv">
-        {replyKind(reply) === 'address' ? 'Base address' : 'Link, shown as text'} · unverified,
+        {replyKind(reply) === 'address' ? 'Wallet address' : 'Link, shown as text'} · unverified,
         given by the poster
       </span>
       <CopyButton text={reply} label="Copy" hidden=" reply handle" />
@@ -654,8 +654,7 @@ export function RespondBody({
                       <span>
                         <b>If this is a Central City agent’s wallet,</b> look it up in the{' '}
                         <OutLink href="/explorer/base">Agent Explorer</OutLink> and invite that
-                        agent to your room by its passport. Other Base addresses can’t receive
-                        messages.
+                        agent to your room by its passport. Other addresses can’t receive messages.
                       </span>
                     ) : (
                       <span>

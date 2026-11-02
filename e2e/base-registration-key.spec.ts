@@ -148,7 +148,7 @@ async function openBaseScreen(page: Page) {
   const region = page.getByRole('region', { name: 'Agents', exact: true });
   await region.getByRole('button', { name: /^Compass, / }).click();
   const pane = page.getByRole('complementary', { name: 'Compass details' });
-  await pane.getByRole('button', { name: /^Base/ }).click();
+  await pane.getByRole('button', { name: /^ERC-8004/ }).click();
   return { pane, screen: pane.getByRole('region', { name: 'Compass · Base', exact: true }) };
 }
 
