@@ -377,6 +377,10 @@
       "destination": "/share/contact.html"
     },
     {
+      "source": "/news",
+      "destination": "/share/news.html"
+    },
+    {
       "source": "/downtown/verify",
       "destination": "/share/downtown/verify.html"
     },

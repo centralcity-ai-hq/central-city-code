@@ -40,6 +40,7 @@ import {
   saveAnchor,
   saveLaneRecord,
   signatureRefused,
+  unsignedPending,
   WALLET_SETTING_UP,
   walletAccountIndex,
   WithdrawalAnchorError,
@@ -600,6 +601,41 @@ test('signatureRefused: only the refusals the server makes before it takes a sig
     undefined,
   ])
     assert.equal(signatureRefused(error), false, String(error));
+});
+
+test('unsignedPending: only a named withdrawal still awaiting its signature may be dropped', async () => {
+  const pending = (details: unknown) =>
+    new ApiError('in progress', 409, 'operation_pending', details);
+  const reads: string[] = [];
+  const answer =
+    (state: WithdrawalView['state'] | Error, id?: string) =>
+    async (_agent: string, asked: string) => {
+      reads.push(asked);
+      if (state instanceof Error) throw state;
+      return { withdrawalId: id ?? asked, state } as WithdrawalView;
+    };
+  const named = pending({ withdrawalId: 'w-9' });
+  assert.equal(await unsignedPending(AGENT, named, answer('awaiting_signature')), 'w-9');
+  for (const state of ['submitted', 'included', 'final', 'expired', 'cancel_pending'] as const)
+    assert.equal(await unsignedPending(AGENT, named, answer(state)), null, state);
+  // Not read, another withdrawal answered, or nothing named: kept, never dropped.
+  assert.equal(await unsignedPending(AGENT, named, answer(new Error('down'))), null);
+  assert.equal(await unsignedPending(AGENT, named, answer('awaiting_signature', 'w-1')), null);
+  const before = reads.length;
+  assert.equal(
+    await unsignedPending(AGENT, pending(undefined), answer('awaiting_signature')),
+    null,
+  );
+  assert.equal(await unsignedPending(AGENT, pending({}), answer('awaiting_signature')), null);
+  assert.equal(
+    await unsignedPending(
+      AGENT,
+      new ApiError('other', 409, 'insufficient_funds', { withdrawalId: 'w-9' }),
+      answer('awaiting_signature'),
+    ),
+    null,
+  );
+  assert.equal(reads.length, before, 'nothing is read for a refusal that names nothing');
 });
 
 test('reconcileSignature: the same operation read once, never a new one', async () => {

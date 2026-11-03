@@ -45,6 +45,7 @@ import {
 import { ensureShortId } from './short-links.js';
 import type { OwnerOperationsPort } from '../chain/owner-ops.js';
 import type { PaymentChainDeps, PaymentChainPort } from '../chain/payment-chain.js';
+import { agentsArraySql } from '../../agent-rows/sql.js';
 
 export interface ChainRuntime {
   walletPort: WalletChainPort;
@@ -165,6 +166,8 @@ export const FINALIZE_BATCH = 100;
  * backlog of unregistered rows never starves the hand-overs of identities already minted.
  */
 export const FINALIZE_REGISTER_PER_RUN = 20;
+/** Of a batch, how many started rows with no id yet are claimed ahead of rows that have one. */
+export const FINALIZE_NO_ID_PER_RUN = 30;
 export const FINALIZE_CONCURRENCY = 20;
 export const FINALIZE_DEADLINE_MS = 45_000;
 /** A row claimed by a run is not claimed again for this long. */
@@ -354,7 +357,7 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
       const { rows } = await tx.query<{ visibility: string | null }>(
         `SELECT m.manifest->'spec'->>'visibility' AS visibility
          FROM workspaces w
-         CROSS JOIN LATERAL jsonb_array_elements(w.data->'agents') a
+         CROSS JOIN LATERAL jsonb_array_elements(${agentsArraySql('w.operator_id', 'w.data')}) a
          JOIN agent_manifests m ON m.agent_id = a->>'id' AND m.revision = (a->>'revision')::int
          WHERE w.operator_id = $1 AND a->>'id' = $2 AND a->>'revokedAt' IS NULL`,
         [workspaceId, agentId],
@@ -782,13 +785,20 @@ export function registerBaseRegistrationRoutes(app: FastifyInstance, deps: Regis
         Math.floor(FINALIZE_REGISTER_PER_RUN / 2),
       );
       const othersFresh = others.filter((row) => Number(row.tier) === 2).length;
+      // Rows with an id go first below and are rechecked until final: without this share, about a
+      // batch of them waiting for finality holds back every row with no id yet (2 Nov: 3,708 rows).
+      const noId = await claim(
+        'erc8004_agent_id IS NULL AND provisional_agent_id IS NULL',
+        FINALIZE_NO_ID_PER_RUN,
+        0,
+      );
       const rest = await claim(
         'TRUE',
-        FINALIZE_BATCH - (others.length - othersFresh),
+        Math.max(0, FINALIZE_BATCH - (others.length - othersFresh) - noId.length),
         FINALIZE_REGISTER_PER_RUN - othersFresh,
       );
       // RETURNING has no order: the workers take minted rows first, then in flight, then new ones.
-      const rows = [...others, ...rest].sort((a, b) => Number(a.tier) - Number(b.tier));
+      const rows = [...others, ...noId, ...rest].sort((a, b) => Number(a.tier) - Number(b.tier));
       const services = new Map<number, Promise<ReturnType<typeof createIdentityService>>>();
       const serviceFor = (chainId: number) => {
         let service = services.get(chainId);

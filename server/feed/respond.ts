@@ -62,6 +62,7 @@ import { blocks, INVITATION_RATES, ownerLock } from '../rooms/invitations.js';
 import { RoomError, type RoomPrincipal, type Rooms } from '../rooms/service.js';
 import { lineName, postSystemLine } from '../rooms/system-lines.js';
 import { checkRequestText, cleanText, codePoints } from './policy.js';
+import { WORKSPACE_DATA_BY_ID_SQL } from '../agent-rows/read-sql.js';
 
 const HOUR = 3_600_000;
 
@@ -246,11 +247,8 @@ function cutUnits(text: string, max: number): string {
 
 /** The workspace's live (not revoked) agents, id → name. */
 async function liveAgents(q: Pick<Tx, 'query'>, operatorId: string) {
-  const workspace = (
-    await q.query<{ data: Workspace }>('SELECT data FROM workspaces WHERE operator_id=$1', [
-      operatorId,
-    ])
-  ).rows[0]?.data;
+  const workspace = (await q.query<{ data: Workspace }>(WORKSPACE_DATA_BY_ID_SQL, [operatorId]))
+    .rows[0]?.data;
   return new Map(
     (workspace?.agents ?? []).filter((a) => !a.revokedAt).map((a) => [a.id, a.name] as const),
   );

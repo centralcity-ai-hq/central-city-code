@@ -16,6 +16,7 @@ import {
   type ChainRuntime,
 } from '../server/base/identity/routes.js';
 import { registerKey, transferKey } from '../server/base/identity/service.js';
+import { AGENT_ROWS_SQL } from '../server/agent-rows/schema.js';
 
 // The owner's path through the route, the way the Base tab drives it: a registration that stays
 // stuck is retried by the owner after 10 minutes, and exactly one attempt mints.
@@ -27,6 +28,7 @@ test('stuck registration: owner retry after 10 minutes registers exactly once', 
   t.after(() => pg.close());
   await pg.exec(`CREATE TABLE operators (id text PRIMARY KEY); INSERT INTO operators VALUES ('ws-1');
     CREATE TABLE workspaces (operator_id text PRIMARY KEY, data jsonb NOT NULL);
+    ${AGENT_ROWS_SQL}
     CREATE TABLE agent_manifests (agent_id text, operator_id text, revision integer, manifest jsonb);
     INSERT INTO workspaces VALUES ('ws-1', '{"agents":[{"id":"${AGENT}","revision":1}]}');
     INSERT INTO agent_manifests VALUES ('${AGENT}', 'ws-1', 1, '{"spec":{"visibility":"public"}}');`);

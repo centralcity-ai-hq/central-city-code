@@ -19,6 +19,7 @@ import {
 import { createWalletService } from '../server/base/wallet/service.js';
 import { createIdentityService } from '../server/base/identity/service.js';
 import type { Address } from '../shared/base/chains.js';
+import { AGENT_ROWS_SQL } from '../server/agent-rows/schema.js';
 
 /*
  * One wallet for a new Base agent: with wallets on (CITY_BASE_WALLET=1) its Base ID goes to the
@@ -44,6 +45,7 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }, opts: S
   await pg.exec(`CREATE TABLE operators (id text PRIMARY KEY, kind text NOT NULL);
     INSERT INTO operators VALUES ('p-1', 'owner'), ('p-2', 'owner'), ('ai-1', 'ai');
     CREATE TABLE workspaces (operator_id text PRIMARY KEY, data jsonb NOT NULL);
+    ${AGENT_ROWS_SQL}
     CREATE TABLE agent_manifests (agent_id text, operator_id text, revision integer, manifest jsonb);
     INSERT INTO workspaces VALUES ('p-1', '{"agents":[{"id":"${AGENT}","revision":1}]}');
     INSERT INTO agent_manifests VALUES ('${AGENT}', 'p-1', 1, '{"spec":{"visibility":"public"}}');`);

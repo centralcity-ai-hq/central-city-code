@@ -3,6 +3,7 @@ import { subscribeStats } from '../agentCount';
 import { number } from './countLogClient';
 import { loadOnBase } from './onBaseData';
 import { arcEnabled } from '../explorer/chain';
+import { stripCount, type StripKey } from './stripCount';
 import './on-base.css';
 
 /** The Agent Explorer's three views, under its title; each has its own address to share. */
@@ -19,33 +20,34 @@ export function ExplorerSwitch({
   calls?: number | null;
 }) {
   const arc = useOnArc();
-  const count = (value: number | null) =>
-    value === null ? null : <small>{number.format(value)}</small>;
+  // Every chip holds the never-go-down rule, whichever view's list or poll gave its number.
+  const count = (key: StripKey, value: number | null) =>
+    value === null ? null : <small>{number.format(stripCount(key, value))}</small>;
   return (
     <nav className="ob-switch" aria-label="Explorer views">
       <a href="/explorer" aria-current={current === 'all' ? 'page' : undefined}>
         <span className="ob-l-long">All agents</span>
         <span className="ob-l-short">All</span>
-        {count(all)}
+        {count('all', all)}
       </a>
       <a href="/explorer/base" aria-current={current === 'base' ? 'page' : undefined}>
         <span className="ob-chain ob-chain-base" aria-hidden="true" />
         <span className="ob-l-long">On Base</span>
         <span className="ob-l-short">Base</span>
-        {count(onBase)}
+        {count('base', onBase)}
       </a>
       {arc.on ? (
         <a href="/explorer/arc" aria-current={current === 'arc' ? 'page' : undefined}>
           <span className="ob-chain ob-chain-arc" aria-hidden="true" />
           <span className="ob-l-long">On Arc</span>
           <span className="ob-l-short">Arc</span>
-          {count(arc.count)}
+          {count('arc', arc.count)}
         </a>
       ) : null}
       <a href="/explorer/calls" aria-current={current === 'calls' ? 'page' : undefined}>
         <span className="ob-l-long">Service calls</span>
         <span className="ob-l-short">Calls</span>
-        {count(calls)}
+        {count('calls', calls)}
       </a>
     </nav>
   );
@@ -69,7 +71,7 @@ export function useOnBaseCount(enabled = true) {
       if (!live || !stats) return;
       const total = stats.base?.total;
       if (typeof total === 'number') {
-        setCount(total);
+        setCount(stripCount('base', total));
         return;
       }
       // Older deployments may omit the optional field: the directory's own total, read once.
@@ -78,7 +80,7 @@ export function useOnBaseCount(enabled = true) {
       fallback = true;
       loadOnBase()
         .then((data) => {
-          if (live) setCount((known) => known ?? data.totals.onBase);
+          if (live) setCount((known) => known ?? stripCount('base', data.totals.onBase));
         })
         .catch(() => undefined);
     });
@@ -105,8 +107,14 @@ export function useStatsCounts() {
     const stop = subscribeStats((stats) => {
       if (!live || !stats) return;
       setCounts((known) => ({
-        all: stats.agents?.total ?? known.all,
-        calls: stats.paid?.total ?? known.calls,
+        all:
+          typeof stats.agents?.total === 'number'
+            ? stripCount('all', stats.agents.total)
+            : known.all,
+        calls:
+          typeof stats.paid?.total === 'number'
+            ? stripCount('calls', stats.paid.total)
+            : known.calls,
       }));
     });
     return () => {
@@ -133,7 +141,8 @@ export function useOnArc() {
     const stop = subscribeStats((stats) => {
       if (!live || !stats) return;
       const total = stats.arc?.total;
-      if (typeof total === 'number') setArc((known) => ({ ...known, count: total }));
+      if (typeof total === 'number')
+        setArc((known) => ({ ...known, count: stripCount('arc', total) }));
     });
     return () => {
       live = false;

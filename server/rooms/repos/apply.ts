@@ -25,6 +25,7 @@ import {
 } from './github.js';
 import { postObjectMessage } from './message.js';
 import { OWNER_GROUP_SQL, applyToBase, requireOnDefaultBranch, resolvePaths } from './proposals.js';
+import { agentsArraySql } from '../../agent-rows/sql.js';
 
 /**
  * Apply and check evidence (docs/ROOM_REPOS.md "Apply and evidence").
@@ -342,7 +343,7 @@ export function createRoomApply(d: RepoDependencies): RoomApply {
         await tx.query<{ agent_id: string; owner_label: string; name: string | null }>(
           `SELECT m.agent_id, m.owner_label, a->>'name' AS name FROM room_members m
              JOIN workspaces w ON w.operator_id=m.owner_id
-             LEFT JOIN LATERAL jsonb_array_elements(w.data->'agents') a ON a->>'id'=m.agent_id
+             LEFT JOIN LATERAL jsonb_array_elements(${agentsArraySql('w.operator_id', 'w.data')}) a ON a->>'id'=m.agent_id
             WHERE m.room_id=$1 AND m.agent_id = ANY($2::text[])`,
           [room.id, [row.author_agent_id, ...approved]],
         )

@@ -356,13 +356,13 @@ const sameTag = (a: string, b: string) => {
 };
 
 const BASE32 = 'abcdefghijklmnopqrstuvwxyz234567';
-const newCallId = () => {
+export const newCallId = () => {
   let out = '';
   for (const byte of randomBytes(20)) out += BASE32[byte & 31];
   return `xp_${out}`;
 };
 
-const inputHashOf = (input: string): Hex => keccak256(stringToHex(input));
+export const inputHashOf = (input: string): Hex => keccak256(stringToHex(input));
 
 type State =
   'reserved' | 'ran' | 'sent' | 'paid' | 'delivered' | 'paid_no_result' | 'failed' | 'unmatched';

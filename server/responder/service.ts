@@ -20,6 +20,7 @@ import {
   validationRequest,
   type ProviderTransport,
 } from './providers.js';
+import { WORKSPACE_DATA_BY_ID_SQL } from '../agent-rows/read-sql.js';
 
 /**
  * Hosted responder owner settings and write-only provider keys (docs/RESPONDER.md).
@@ -199,11 +200,8 @@ export function createResponder(d: ResponderDependencies): Responder {
       refuse(409, ELRIC_MANAGED.code, ELRIC_MANAGED.message);
   }
   async function readWorkspace(q: Pick<Tx, 'query'>, operatorId: string): Promise<Workspace> {
-    const row = (
-      await q.query<{ data: Workspace }>('SELECT data FROM workspaces WHERE operator_id=$1', [
-        operatorId,
-      ])
-    ).rows[0];
+    const row = (await q.query<{ data: Workspace }>(WORKSPACE_DATA_BY_ID_SQL, [operatorId]))
+      .rows[0];
     return row?.data ?? refuse(401, 'unauthorized', 'Sign in to continue.');
   }
   async function view(

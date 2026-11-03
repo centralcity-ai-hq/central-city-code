@@ -19,6 +19,7 @@ import {
   toPublicCheckpoint,
   V2_GENESIS_PREV_HASH,
 } from '../../shared/count-log/index.js';
+import { agentsArraySql } from '../agent-rows/sql.js';
 
 /*
  * The verifiable agent count. Once a
@@ -107,7 +108,7 @@ const COUNTED_SQL = `SELECT DISTINCT ON (a.value->>'id')
     (a.value->>'revokedAt') IS NOT NULL AS revoked
   FROM workspaces w
   JOIN operators o ON o.id = w.operator_id
-  CROSS JOIN LATERAL jsonb_array_elements(COALESCE(w.data->'agents','[]'::jsonb)) AS a(value)
+  CROSS JOIN LATERAL jsonb_array_elements(COALESCE(${agentsArraySql('w.operator_id', 'w.data')},'[]'::jsonb)) AS a(value)
   WHERE a.value->>'demoKey' IS NULL
     AND NOT (w.operator_id = ANY($1::text[]))
   ORDER BY a.value->>'id'`;
@@ -729,7 +730,7 @@ export function createCountLog(deps: {
       return (
         await deps.db.query<{ id: string; name: string }>(
           `SELECT a.value->>'id' AS id, a.value->>'name' AS name FROM workspaces w
-            CROSS JOIN LATERAL jsonb_array_elements(COALESCE(w.data->'agents','[]'::jsonb))
+            CROSS JOIN LATERAL jsonb_array_elements(COALESCE(${agentsArraySql('w.operator_id', 'w.data')},'[]'::jsonb))
               WITH ORDINALITY AS a(value, ordinality)
             WHERE w.operator_id=$1 ORDER BY a.ordinality`,
           [operatorId],
@@ -742,7 +743,7 @@ export function createCountLog(deps: {
       const owned = (
         await deps.db.query<{ demo: boolean }>(
           `SELECT (a.value->>'demoKey') IS NOT NULL AS demo FROM workspaces w
-            CROSS JOIN LATERAL jsonb_array_elements(COALESCE(w.data->'agents','[]'::jsonb)) AS a(value)
+            CROSS JOIN LATERAL jsonb_array_elements(COALESCE(${agentsArraySql('w.operator_id', 'w.data')},'[]'::jsonb)) AS a(value)
             WHERE w.operator_id=$1 AND a.value->>'id'=$2 LIMIT 1`,
           [operatorId, agentId],
         )

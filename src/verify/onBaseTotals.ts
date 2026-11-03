@@ -52,11 +52,16 @@ export function mergeTotals(
   const keepKnown =
     known?.read != null &&
     (searched || !count(fresh.readAtBlock) || fresh.readAtBlock < known.read.block);
+  // An older list answer (an edge copy from before the last one) says nothing new: no count goes back.
+  if (known?.read && !searched && count(fresh.readAtBlock) && fresh.readAtBlock < known.read.block)
+    return known;
   const read: KnownRead | null =
     !keepKnown && count(fresh.readAtBlock) && typeof fresh.readAt === 'number'
       ? {
           block: fresh.readAtBlock,
-          lagMs: Math.max(0, fresh.servedAt - fresh.readAt),
+          // To the arrival, not servedAt: servedAt is cached with the answer, so an edge copy
+          // minutes old would still read as "0 s ago".
+          lagMs: Math.max(0, fetchedAt - fresh.readAt),
           fetchedAt,
         }
       : (known?.read ?? null);

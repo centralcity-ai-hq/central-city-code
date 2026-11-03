@@ -23,7 +23,11 @@ import { PROTOCOL_BASE_MAINNET } from '../shared/protocol.js';
 import { AGENT_URI_ORIGIN } from '../shared/base/on-base.js';
 import { MIN, NOW, add, agentId, setup as baseSetup, shortOf } from './on-base-fixture.js';
 import { setup as appSetup } from './helpers/feed-pay-app.js';
-import { FEED_PAY_SPONSORED_SQL } from '../server/feed/pay/sponsored.js';
+import { FEED_PAY_SPONSORED_SQL as SPONSORED_250_SQL } from '../server/feed/pay/sponsored.js';
+import { FEED_PAY_SPONSORED_CHAIN_COLUMN_SQL } from '../server/feed/pay/sponsored-count-schema.js';
+
+/** The sponsored calls table as migrations 250 and 359 leave it. */
+const FEED_PAY_SPONSORED_SQL = `${SPONSORED_250_SQL}\n${FEED_PAY_SPONSORED_CHAIN_COLUMN_SQL}`;
 
 /*
  * The passport's "Paid for services": the totals of the agent's paid service calls (Feed pay), by

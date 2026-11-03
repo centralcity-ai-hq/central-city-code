@@ -4,6 +4,7 @@ import { WAKE_LIMITS } from './contract.js';
 import { excerptAt, findMentions, mentionKeys, nameKeyOf, slugOf, textOf } from './mentions.js';
 import { emit, type WakeSignal } from './signals.js';
 import { elricOnRoomPosted } from '../elric/hook.js';
+import { agentsArraySql, agentsListSql } from '../agent-rows/sql.js';
 
 /**
  * In-transaction wake hooks (docs/WAKE.md), called by the messaging and rooms services
@@ -206,8 +207,7 @@ export async function fillMemberNameKeys(tx: Pick<Tx, 'query'>, roomId: string):
     await tx.query<{ agent_id: string; name: string | null; name_rev: number }>(
       `SELECT m.agent_id, m.name_rev,
           CASE WHEN m.kind='person' THEN m.display_name ELSE (
-            SELECT a->>'name' FROM workspaces w CROSS JOIN LATERAL jsonb_array_elements(
-              CASE WHEN jsonb_typeof(w.data->'agents')='array' THEN w.data->'agents' ELSE '[]'::jsonb END) a
+            SELECT a->>'name' FROM workspaces w CROSS JOIN LATERAL jsonb_array_elements(${agentsListSql('w.operator_id', 'w.data')}) a
             WHERE w.operator_id=m.owner_id AND a->>'id'=m.agent_id LIMIT 1) END AS name
         FROM room_members m WHERE m.room_id=$1 AND m.name_key IS NULL AND m.removed_at IS NULL`,
       [roomId],
@@ -298,7 +298,7 @@ export async function roomPosted(
             EXISTS (SELECT 1 FROM room_members x WHERE x.owner_id=m.owner_id
               AND x.room_id=m.room_id AND ((x.muted_at IS NOT NULL AND (x.removed_at IS NULL OR x.removed_by='left')) OR x.notifications_muted)) AS muted FROM room_members m
           JOIN workspaces w ON w.operator_id=m.owner_id
-          CROSS JOIN LATERAL jsonb_array_elements(w.data->'agents') a
+          CROSS JOIN LATERAL jsonb_array_elements(${agentsArraySql('w.operator_id', 'w.data')}) a
           WHERE m.room_id=$1 AND m.removed_at IS NULL AND m.visible_from_seq < $2
             AND m.agent_id IN (SELECT agent_id FROM c)
             AND m.kind='agent' AND a->>'id'=m.agent_id AND (a->>'revokedAt') IS NULL

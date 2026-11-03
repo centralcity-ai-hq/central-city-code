@@ -294,7 +294,7 @@ const sponsoredColumns = (payer: string, titles: boolean) => `s.tx_hash,
   (s.gross_raw - s.fee_raw)::text AS amount_raw, s.fee_raw::text AS fee_raw,
   'charged'::text AS fee_state, NULL::text AS fee_tx_hash, NULL::text AS fee_block,
   'included'::text AS pay_kind, s.call_id, md5(s.call_id) AS row_key, true AS sponsored,
-  s.updated_at AS sort_at, NULL::integer AS side_chain`;
+  s.updated_at AS sort_at, NULLIF(s.chain_id, ${WALLET_CHAIN_ID})::integer AS side_chain`;
 
 /**
  * A public call Base shows paid (server/feed/offers/public-pay.ts): the predicate of migration 354's

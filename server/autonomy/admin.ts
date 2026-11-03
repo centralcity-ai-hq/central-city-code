@@ -7,6 +7,7 @@ import {
   unclaimedScopeId,
   type UnclaimedHold,
 } from './index.js';
+import { agentCountSql, agentsArraySql } from '../agent-rows/sql.js';
 
 /**
  * Operator abuse response for unclaimed partitions (scripts/unclaimed-admin.ts). Purging deletes
@@ -81,7 +82,7 @@ export async function listTop(db: Pick<Database, 'query'>, by: TopBy, limit = 20
         created_at: string | null;
         last_used_at: string | null;
       }>(
-        `SELECT o.id AS partition, jsonb_array_length(w.data->'agents') AS agents,
+        `SELECT o.id AS partition, ${agentCountSql('w.operator_id', 'w.data')} AS agents,
           b.created_at, b.last_used_at
           FROM operators o JOIN workspaces w ON w.operator_id=o.id
           LEFT JOIN unclaimed_buckets b ON b.operator_id=o.id
@@ -119,7 +120,7 @@ export function resolvePrefix(prefix: string, secret: string): { scope: string; 
 async function purgePartition(tx: Tx, id: string): Promise<number | null> {
   const row = (
     await tx.query<{ agents: StoredAgentIds[] }>(
-      `SELECT w.data->'agents' AS agents FROM workspaces w JOIN operators o ON o.id=w.operator_id
+      `SELECT ${agentsArraySql('w.operator_id', 'w.data')} AS agents FROM workspaces w JOIN operators o ON o.id=w.operator_id
         WHERE w.operator_id=$1 AND o.kind='unclaimed' FOR UPDATE OF w`,
       [id],
     )
@@ -255,7 +256,7 @@ export async function reconcile(
       await tx.query<{ agent_id: string; operator_id: string; created_at: string }>(
         `SELECT a.value->>'id' AS agent_id,w.operator_id,a.value->>'createdAt' AS created_at
        FROM workspaces w JOIN operators o ON o.id=w.operator_id AND o.kind='unclaimed'
-       CROSS JOIN LATERAL jsonb_array_elements(w.data->'agents') a(value)
+       CROSS JOIN LATERAL jsonb_array_elements(${agentsArraySql('w.operator_id', 'w.data')}) a(value)
        WHERE NOT EXISTS (SELECT 1 FROM unclaimed_agent_expiry e WHERE e.agent_id=a.value->>'id')
        ORDER BY w.operator_id,a.value->>'id' LIMIT 100 ${options.confirm ? 'FOR UPDATE OF w SKIP LOCKED' : ''}`,
       )
@@ -281,7 +282,7 @@ export async function reconcile(
     const rows = (
       await tx.query<{ source: string; scope_key: string; agents: string; buckets: string }>(
         `WITH parts AS (
-           SELECT COALESCE(jsonb_array_length(w.data->'agents'),0) AS n,
+           SELECT COALESCE(${agentCountSql('w.operator_id', 'w.data')},0) AS n,
              b.operator_id IS NOT NULL AS tracked, b.site_key, b.network_key, b.region_key
            FROM operators o JOIN workspaces w ON w.operator_id=o.id
            LEFT JOIN unclaimed_buckets b ON b.operator_id=o.id

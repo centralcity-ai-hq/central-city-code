@@ -8,6 +8,7 @@ import { Audit } from './trust/Audit';
 import { Contact } from './trust/Contact';
 import { Dpa } from './trust/Dpa';
 import { Imprint } from './trust/Imprint';
+import { NewsRoom } from './trust/NewsRoom';
 import { Privacy } from './trust/Privacy';
 import { PrivacyChoices } from './trust/PrivacyChoices';
 import { Security } from './trust/Security';
@@ -45,7 +46,8 @@ export type TrustPageId =
   | 'support'
   | 'status'
   | 'about'
-  | 'contact';
+  | 'contact'
+  | 'news';
 
 type PageInfo = {
   title: string;
@@ -126,6 +128,7 @@ const PAGES: Record<TrustPageId, PageInfo> = {
   },
   about: { title: 'About Central City', eyebrow: 'Company', group: 'company', body: About },
   contact: { title: 'Contact', eyebrow: 'Communication', group: 'company', body: Contact },
+  news: { title: 'News Room', eyebrow: 'Press', group: 'company', body: NewsRoom },
 };
 
 const RELATED_LABEL: Record<PageInfo['group'], string> = {

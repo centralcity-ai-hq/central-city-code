@@ -17,6 +17,7 @@ import {
 } from '../server/base/identity/routes.js';
 import { SubmitError } from '../server/base/chain/submit.js';
 import { BundlerError } from '../server/base/chain/rpc-bundler.js';
+import { AGENT_ROWS_SQL } from '../server/agent-rows/schema.js';
 
 const AGENT = '9f8e7d6c-5b4a-4321-8fed-cba987654321';
 const OWNER = `0x${'2'.repeat(40)}`;
@@ -42,6 +43,7 @@ async function setup(
   await pg.exec(`CREATE TABLE operators (id text PRIMARY KEY);
     INSERT INTO operators VALUES ('ws-1'), ('ws-2');
     CREATE TABLE workspaces (operator_id text PRIMARY KEY, data jsonb NOT NULL);
+    ${AGENT_ROWS_SQL}
     CREATE TABLE agent_manifests (agent_id text, operator_id text, revision integer, manifest jsonb);
     INSERT INTO workspaces VALUES ('ws-1', '{"agents":[{"id":"${AGENT}","revision":1${revoked}}]}');
     INSERT INTO agent_manifests VALUES ('${AGENT}', 'ws-1', 1, '{"spec":{"visibility":"${visibility}"}}');`);

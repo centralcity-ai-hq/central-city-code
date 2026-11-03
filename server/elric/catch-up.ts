@@ -32,6 +32,7 @@ import {
   plainToolWords,
 } from './service.js';
 import { anthropicUnits, anthropicWorstUnits, estimateTokens } from './token-cost.js';
+import { WORKSPACE_DATA_BY_ID_SQL } from '../agent-rows/read-sql.js';
 
 /**
  * Elric's "While you were away" catch-up (docs/ELRIC.md "Catch-up"; Smart Rooms v2 slice Z5):
@@ -344,11 +345,8 @@ export function createCatchUp(d: CatchUpDependencies) {
       )
     ).rows;
     if (!rows.some((row) => row.kind !== 'person')) return rows;
-    const workspace = (
-      await q.query<{ data: Workspace }>('SELECT data FROM workspaces WHERE operator_id=$1', [
-        ownerId,
-      ])
-    ).rows[0]?.data;
+    const workspace = (await q.query<{ data: Workspace }>(WORKSPACE_DATA_BY_ID_SQL, [ownerId]))
+      .rows[0]?.data;
     const live = new Set(
       (workspace?.agents ?? []).filter((agent) => !agent.revokedAt).map((agent) => agent.id),
     );

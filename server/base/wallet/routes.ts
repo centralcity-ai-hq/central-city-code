@@ -937,7 +937,6 @@ export function registerBaseWalletRoutes(app: FastifyInstance, deps: WalletRoute
           ownPaymasterAddress(scoped),
           protocolArcRouter3Address(deps.env, chainId, deps.protocolDeploymentFor),
           scoped.CITY_PROTOCOL_FEE_ROUTER3,
-          scoped.CITY_PROTOCOL_TREASURY,
         ]
           .map((address) => address?.trim())
           .filter((address) => address && /^0x[0-9a-fA-F]{40}$/.test(address)),

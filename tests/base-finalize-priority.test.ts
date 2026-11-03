@@ -14,6 +14,7 @@ import {
 } from '../server/base/schema.js';
 import {
   FINALIZE_BATCH,
+  FINALIZE_NO_ID_PER_RUN,
   FINALIZE_FRESH_MS,
   FINALIZE_REGISTER_PER_RUN,
   IDENTITY_FINALIZE_PATH,
@@ -21,6 +22,7 @@ import {
 } from '../server/base/identity/routes.js';
 import { BASE_MAINNET } from '../shared/base/chains.js';
 import { ARC_MAINNET } from '../shared/chains.js';
+import { AGENT_ROWS_SQL } from '../server/agent-rows/schema.js';
 
 /*
  * The finalize cron's claim order. A large backlog of rows not yet registered on chain (yesterday's
@@ -38,6 +40,7 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }) {
   await pg.exec(`CREATE TABLE operators (id text PRIMARY KEY, kind text NOT NULL);
     INSERT INTO operators VALUES ('p-1', 'owner');
     CREATE TABLE workspaces (operator_id text PRIMARY KEY, data jsonb NOT NULL);
+    ${AGENT_ROWS_SQL}
     CREATE TABLE agent_manifests (agent_id text, operator_id text, revision integer, manifest jsonb);`);
   for (const sql of [
     BASE_MIGRATION_SQL,
@@ -142,6 +145,19 @@ test('with more started rows than a batch, minted ones come first and new regist
   for (const agent of minted) assert.ok(taken.has(agent), 'minted rows are never starved');
   assert.equal(inFlight.filter((agent) => taken.has(agent)).length, FINALIZE_BATCH - minted.length);
   assert.equal(backlog.filter((agent) => taken.has(agent)).length, FINALIZE_REGISTER_PER_RUN);
+});
+
+test('a full batch of rows with an id still leaves room for rows with none, and the total holds', async (t) => {
+  const { insert, cron, swept } = await setup(t);
+  const minted: string[] = [];
+  for (let i = 0; i < FINALIZE_BATCH + 10; i++) minted.push(await insert('minted', 2));
+  const inFlight: string[] = [];
+  for (let i = 0; i < FINALIZE_NO_ID_PER_RUN + 10; i++) inFlight.push(await insert('in_flight', 1));
+
+  await cron();
+  const taken = await swept();
+  assert.equal(inFlight.filter((a) => taken.has(a)).length, FINALIZE_NO_ID_PER_RUN);
+  assert.equal(minted.filter((a) => taken.has(a)).length, FINALIZE_BATCH - FINALIZE_NO_ID_PER_RUN);
 });
 
 test('an older Base backlog cannot starve another chain, and each chain fills what the other leaves', async (t) => {

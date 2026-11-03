@@ -18,6 +18,7 @@ const TRUST = [
   '/acceptable-use',
   '/dpa',
   '/imprint',
+  '/news',
 ];
 
 test('sign in: product statement beside the card; the tabs switch between sign in and sign up', async ({

@@ -41,7 +41,7 @@
   },
   "/docs/feed": {
     "date": "2026-11-02",
-    "hash": "640d121e5db2a88a"
+    "hash": "6f389b828ec693aa"
   },
   "/docs/microsoft-copilot": {
     "date": "2026-10-06",
@@ -80,8 +80,8 @@
     "hash": "2289e7b12b10a2d9"
   },
   "/explorer/base": {
-    "date": "2026-11-01",
-    "hash": "4e66799658a9d160"
+    "date": "2026-11-02",
+    "hash": "84b0d781d81dc068"
   },
   "/explorer/calls": {
     "date": "2026-11-01",
@@ -94,6 +94,10 @@
   "/invite": {
     "date": "2026-10-04",
     "hash": "d8174ca96bbf7854"
+  },
+  "/news": {
+    "date": "2026-11-02",
+    "hash": "a114421fa8005468"
   },
   "/privacy": {
     "date": "2026-10-16",

@@ -2,6 +2,8 @@ import type { Transaction as Tx } from '../database.js';
 import { registerMigration, type Migration } from '../migrations.js';
 import { hasPermission, type StoredAgent, type Workspace } from '../model.js';
 import { storedOwnerKind, type OwnerKind } from '../rooms/owner-labels.js';
+import { agentsListSql } from '../agent-rows/sql.js';
+import { WORKSPACE_DATA_BY_ID_SQL } from '../agent-rows/read-sql.js';
 
 /**
  * Private messages between room members (docs/MESSAGING.md "Private messages from a room").
@@ -207,9 +209,7 @@ export async function authorizeRoomPair(
   // own AI may answer its person).
   if (sameOwner && from.kind !== 'person' && to!.kind !== 'person') {
     const workspace = (
-      await tx.query<{ data: Workspace }>('SELECT data FROM workspaces WHERE operator_id=$1', [
-        input.operatorId,
-      ])
+      await tx.query<{ data: Workspace }>(WORKSPACE_DATA_BY_ID_SQL, [input.operatorId])
     ).rows[0]?.data;
     if (
       !workspace ||
@@ -259,11 +259,8 @@ async function party(tx: Tx, row: MemberRow, callerId: string): Promise<RoomPart
       ownerLabel: row.owner_label,
       ownerKind: 'person',
     };
-  const workspace = (
-    await tx.query<{ data: Workspace }>('SELECT data FROM workspaces WHERE operator_id=$1', [
-      row.owner_id,
-    ])
-  ).rows[0]?.data;
+  const workspace = (await tx.query<{ data: Workspace }>(WORKSPACE_DATA_BY_ID_SQL, [row.owner_id]))
+    .rows[0]?.data;
   const agent: StoredAgent | undefined = workspace?.agents.find((a) => a.id === row.agent_id);
   const mine = row.owner_id === callerId;
   if (!workspace || !agent || agent.revokedAt)
@@ -305,8 +302,7 @@ export async function roomMemberNames(
     await tx.query<{ agent_id: string; kind: string | null; name: string | null }>(
       `SELECT DISTINCT ON (m.agent_id) m.agent_id, m.kind,
           CASE WHEN m.kind='person' THEN m.display_name ELSE (
-            SELECT a->>'name' FROM workspaces w CROSS JOIN LATERAL jsonb_array_elements(
-              CASE WHEN jsonb_typeof(w.data->'agents')='array' THEN w.data->'agents' ELSE '[]'::jsonb END) a
+            SELECT a->>'name' FROM workspaces w CROSS JOIN LATERAL jsonb_array_elements(${agentsListSql('w.operator_id', 'w.data')}) a
             WHERE w.operator_id=m.owner_id AND a->>'id'=m.agent_id LIMIT 1) END AS name
         FROM room_members m WHERE m.agent_id = ANY($1::text[])
         ORDER BY m.agent_id, m.joined_at DESC`,

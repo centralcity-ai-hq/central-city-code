@@ -91,6 +91,7 @@ export const CLIENT_ROUTES: readonly ClientRoute[] = Object.freeze([
   route('/dpa'),
   route('/imprint'),
   route('/contact'),
+  route('/news'),
   // The verifiable agent count ("Verify here" on the homepage ticker).
   route('/downtown/verify'),
   // The Live log: the count log's entries, newest first.

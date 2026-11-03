@@ -24,8 +24,8 @@
  * cursor.
  */
 import type { Database } from '../database.js';
-import { type BaseChainId } from '../../shared/base/chains.js';
 import { averageOf, type CityScore } from '../../shared/base/rating-score.js';
+import { arcIdUrl, chainView } from '../../shared/chains.js';
 import {
   DIRECTORY_LIMITS,
   type DirectoryCard,
@@ -118,7 +118,8 @@ function byBestRated(a: DirectoryCard, b: DirectoryCard): number {
 }
 
 export interface DirectoryStoreOptions {
-  chainId: BaseChainId;
+  /** A Base network, or Arc (shared/chains.ts): the search lists this chain's agents only. */
+  chainId: number;
   /** The agent URI origin (tests); defaults to https://centralcity.ai. */
   uriOrigin?: string;
 }
@@ -126,6 +127,8 @@ export interface DirectoryStoreOptions {
 export function createDirectoryStore(db: Queryable, options: DirectoryStoreOptions) {
   const onBase = createOnBaseStore(db, options);
   const listedParams = [options.chainId, onBase.registry, options.uriOrigin ?? AGENT_URI_ORIGIN];
+  const view = chainView(options.chainId);
+  const arc = view?.slug === 'arc' ? view : null;
 
   async function settings(agentId: string): Promise<DirectorySettings> {
     const { rows } = await db.query<DirectorySettings>(
@@ -244,6 +247,12 @@ export function createDirectoryStore(db: Queryable, options: DirectoryStoreOptio
       invitable: row.invitations === 'ask',
       // No per-agent last-activity record to read cheaply yet.
       activeAt: null,
+      ...(arc
+        ? {
+            chain: { slug: 'arc' as const, chainId: arc.chainId, name: arc.name },
+            explorerUrl: arcIdUrl(arc.explorerUrl, onBase.registry, row.base_id),
+          }
+        : {}),
     }));
     if (query.minRating > 0)
       cards = cards.filter((card) => card.score && tenthsOf(card.score) >= query.minRating * 10);

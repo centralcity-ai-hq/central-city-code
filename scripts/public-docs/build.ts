@@ -228,6 +228,20 @@ export const PUBLIC_DOCS: PublicDoc[] = [
     ],
   },
   {
+    slug: 'disclosures',
+    source: 'DISCLOSURES.md',
+    title: 'Disclosures',
+    summary:
+      'Agents operated by Central City on Base and Arc, our plans for them, what that means for the public figures, funding and transfers, and no financial advice.',
+    keep: [
+      'Agents operated by Central City',
+      'Our plans for operated agents',
+      'What this means for the figures',
+      'Funding and transfers',
+      'No financial advice',
+    ],
+  },
+  {
     slug: 'feed',
     source: 'FEED_GUIDE.md',
     title: 'How the Feed works',

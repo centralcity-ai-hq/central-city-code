@@ -51,6 +51,7 @@ export const PAGE_SOURCES: Readonly<Record<string, readonly string[]>> = Object.
   '/connect': ['src/Connect.tsx', 'src/shell/roomInvite.ts'],
   '/invite': ['src/Invite.tsx'],
   '/workflows': ['src/WorkflowsPage.tsx'],
+  '/news': ['src/trust/NewsRoom.tsx', 'src/news/coverage.ts'],
   '/docs': ['src/docs/DocsPages.tsx'],
   '/docs/rooms': ['src/docs/DocsPages.tsx'],
   '/docs/room-management': ['docs/ROOM_MANAGEMENT.md'],

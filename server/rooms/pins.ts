@@ -46,6 +46,7 @@ import {
   pinRemoveInput,
   ROOM_PIN_TOOLS,
 } from './pin-schemas.js';
+import { WORKSPACE_DATA_BY_ID_SQL } from '../agent-rows/read-sql.js';
 
 const MINUTE = 60_000;
 
@@ -522,11 +523,8 @@ export function createRoomPins(d: PinDependencies): RoomPins {
       if (former.rows.length || room.host_owner_id === operatorId) roomDeleted();
       roomNotFound();
     }
-    const data = (
-      await q.query<{ data: Workspace }>('SELECT data FROM workspaces WHERE operator_id=$1', [
-        operatorId,
-      ])
-    ).rows[0]?.data;
+    const data = (await q.query<{ data: Workspace }>(WORKSPACE_DATA_BY_ID_SQL, [operatorId]))
+      .rows[0]?.data;
     if (!data) refuse(401, 'unauthorized', 'Sign in to continue.');
     const agents = new Set(data!.agents.filter((a) => !a.revokedAt).map((a) => a.id));
     const members = (

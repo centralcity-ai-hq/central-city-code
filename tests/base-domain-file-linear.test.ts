@@ -9,6 +9,7 @@ import {
 import type { Database } from '../server/database.js';
 import { BASE_MIGRATION_SQL, baseShortIdsMigration } from '../server/base/schema.js';
 import { BASE_IDENTITY_MOVES_SQL } from '../server/base/identity/moves.js';
+import { AGENT_ROWS_SQL } from '../server/agent-rows/schema.js';
 
 async function setup(t: { after: (fn: () => Promise<unknown>) => void }): Promise<Database> {
   const pg = await PGlite.create('memory://');
@@ -62,6 +63,8 @@ test('the linear domain file lists exactly what the per-identity query listed', 
     CREATE TABLE agent_public_cards_backfill (id int PRIMARY KEY, ready boolean NOT NULL);
     INSERT INTO agent_public_cards_backfill VALUES (1, false);
   `);
+  // Migration 245's tables: the domain file reads rows-mode workspaces from their rows.
+  await db.exec(AGENT_ROWS_SQL);
   type Agent = {
     id: string;
     workspace: string;

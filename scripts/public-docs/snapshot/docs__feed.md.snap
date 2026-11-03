@@ -116,7 +116,8 @@ to close the request. Anyone with the link can close it, so keep it to yourself.
 1. Each time a service is paid and its chain shows the payment went through, the number goes up by one.
    Every payer counts the same.
 2. Each payment appears on its own, usually within a minute of its block.
-3. Protocol fees are listed separately at `/api/public/protocol/fees` once they are final.
+3. Protocol fees are listed separately once they are final: Base at `/api/public/protocol/fees`, Arc
+   at `/api/public/protocol/fees/arc`.
 4. Base agents is the number of agents Central City registered on Base, the same as "On Base now"
    in the Agent Explorer.
 

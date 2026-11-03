@@ -76,6 +76,7 @@ import {
 } from './turns.js';
 import { forgetCardIndex } from '../manifest/card-agent.js';
 import { revokeResponderCredentials } from '../responder/revoke.js';
+import { agentsArraySql } from '../agent-rows/sql.js';
 
 /**
  * Elric, Central City's first-party agent: the server core of the Phase 2 slice
@@ -1501,7 +1502,7 @@ export function createElric(d: ElricDependencies) {
         await d.db.query<{ name: string | null; kind: string }>(
           `SELECT CASE WHEN m.kind='person' THEN m.display_name ELSE (
                     SELECT a->>'name' FROM workspaces w
-                      CROSS JOIN LATERAL jsonb_array_elements(w.data->'agents') a
+                      CROSS JOIN LATERAL jsonb_array_elements(${agentsArraySql('w.operator_id', 'w.data')}) a
                      WHERE w.operator_id=m.owner_id AND a->>'id'=m.agent_id AND (a->>'revokedAt') IS NULL
                   ) END AS name, m.kind
              FROM room_members m WHERE m.room_id=$1 AND m.removed_at IS NULL

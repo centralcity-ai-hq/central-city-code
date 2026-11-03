@@ -152,3 +152,20 @@ export function CodeBox({
     </section>
   );
 }
+
+/** Where the public Disclosures page lives (docs/DISCLOSURES.md, scripts/public-docs/build.ts). */
+export const DISCLOSURES_PATH = '/docs/disclosures.md';
+
+/**
+ * The disclosure line under the Explorer's counters (Base home, On Base and On Arc): the figures
+ * include agents Central City operates, all on chain, with a link to the Disclosures page.
+ */
+export function DisclosureLine() {
+  return (
+    <p className="xp-disclosure">
+      Network figures include agents operated by Central City for testing, service provision and
+      sponsored first purchases. All activity is recorded on chain.{' '}
+      <a href={DISCLOSURES_PATH}>See Disclosures</a>.
+    </p>
+  );
+}

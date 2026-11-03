@@ -12,7 +12,7 @@ import { liveUnlessOff } from './protocol.js';
  */
 export const PAID_CALLS_FLAG = 'CITY_PAID_CALLS_TICKER';
 
-/** Only Base mainnet is ever shown; other chains keep their own counts. */
+/** The first chain of the count; the public total adds every other live chain's own row. */
 export const PAID_CALLS_CHAIN_ID = BASE_MAINNET;
 
 /** Payments whose block is at most this old are listed one by one (`recent_ms`). */

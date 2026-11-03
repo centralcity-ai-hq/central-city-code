@@ -41,6 +41,8 @@ import {
   type TaskView,
 } from './tasks-contract.js';
 import { scopedByPrincipal, visibleRoom, withoutElricAgents } from './private.js';
+import { agentsArraySql } from '../agent-rows/sql.js';
+import { WORKSPACE_DATA_BY_ID_SQL } from '../agent-rows/read-sql.js';
 
 export type { RoomPrincipal };
 /**
@@ -615,11 +617,8 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
     q: Pick<Tx, 'query'>,
     operatorId: string,
   ): Promise<Map<string, StoredAgent>> {
-    const data = (
-      await q.query<{ data: Workspace }>('SELECT data FROM workspaces WHERE operator_id=$1', [
-        operatorId,
-      ])
-    ).rows[0]?.data;
+    const data = (await q.query<{ data: Workspace }>(WORKSPACE_DATA_BY_ID_SQL, [operatorId]))
+      .rows[0]?.data;
     if (!data) refuse(401, 'unauthorized', 'Sign in to continue.');
     return new Map(
       data!.agents.filter((agent) => !agent.revokedAt).map((agent) => [agent.id, agent]),
@@ -2439,7 +2438,7 @@ export function createRoomTasks(d: TaskDependencies): RoomTasks {
         name: string | null;
       }>(
         `SELECT m.agent_id, m.kind, m.display_name,
-            (SELECT a->>'name' FROM workspaces w CROSS JOIN LATERAL jsonb_array_elements(w.data->'agents') a
+            (SELECT a->>'name' FROM workspaces w CROSS JOIN LATERAL jsonb_array_elements(${agentsArraySql('w.operator_id', 'w.data')}) a
               WHERE w.operator_id=m.owner_id AND a->>'id'=m.agent_id LIMIT 1) AS name
           FROM room_members m WHERE m.room_id=$1 AND m.agent_id = ANY($2::text[])`,
         [roomId, [...new Set(agentIds)]],

@@ -3,6 +3,7 @@ import type { Database, Transaction as Tx } from '../database.js';
 import { eraseElricOwnerIn, eraseElricRoomRecords, purgeRooms } from '../elric/erase.js';
 import { removeAgentOffers } from '../feed/offers/store.js';
 import { emptyWorkspace } from '../model.js';
+import { writeWorkspaceData } from '../agent-rows/writer.js';
 
 /**
  * Erasing a person's account (Privacy Policy §7: after an account is deleted its data is removed
@@ -542,10 +543,8 @@ async function eraseAccountIn(tx: Tx, id: string, now: number): Promise<AccountE
   const keep = Object.keys(retained).some((table) => bound.has(table));
   if (keep) {
     // An empty workspace keeps every invariant of an owner row; nothing can sign in to it.
-    await tx.query('UPDATE workspaces SET data=$2 WHERE operator_id=$1', [
-      id,
-      JSON.stringify(emptyWorkspace()),
-    ]);
+    // In rows mode its agent rows go too (writeWorkspaceData, migration 360).
+    await writeWorkspaceData(tx, id, JSON.stringify(emptyWorkspace()));
     await tx.query(
       "UPDATE operators SET name='Deleted account', name_key=$2, password_hash='!', salt='!' WHERE id=$1",
       [id, `erased:${accountHash(id)}`],

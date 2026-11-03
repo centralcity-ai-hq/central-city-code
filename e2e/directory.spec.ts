@@ -149,3 +149,118 @@ test('header finder: Escape closes it and gives focus back; an empty directory s
   await expect(dialog).toBeHidden();
   await expect(find).toBeFocused();
 });
+
+async function openFinder(page: Page) {
+  await page.goto('/about');
+  const dialog = page.getByRole('dialog', { name: 'Find an agent' });
+  await expect(async () => {
+    await page.keyboard.press('ControlOrMeta+k');
+    await expect(dialog).toBeVisible({ timeout: 1000 });
+  }).toPass();
+  return dialog;
+}
+
+test('header finder: no Base / Arc switch while the server has Arc off', async ({ page }) => {
+  await mock(page, cards);
+  await page.route('**/api/public/arc/rated', (route) =>
+    route.fulfill({ status: 404, json: { code: 'not_found' } }),
+  );
+  const dialog = await openFinder(page);
+  await expect(dialog.getByRole('option')).toHaveCount(2);
+  await expect(dialog.getByRole('group', { name: 'Chain' })).toHaveCount(0);
+});
+
+test('header finder: the Base / Arc switch lists Arc, names it and links the ID to its explorer', async ({
+  page,
+}) => {
+  const registry = '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432';
+  const seen: URL[] = [];
+  await mock(page, cards, seen);
+  await page.route('**/api/public/arc/rated', (route) =>
+    route.fulfill({ json: { baseIds: [], asOf: now } }),
+  );
+  const arcCard = {
+    ...cards[0],
+    baseId: '7001',
+    name: 'Quay',
+    description: '',
+    skills: [],
+    short: 'Quay01',
+    chain: { slug: 'arc', chainId: 5042, name: 'Arc' },
+    explorerUrl: `https://explorer.arc.io/token/${registry}/instance/7001`,
+  };
+  await page.route('**/api/public/directory*', (route) => {
+    const url = new URL(route.request().url());
+    seen.push(url);
+    return route.fulfill({
+      json: { agents: url.searchParams.get('chain') === 'arc' ? [arcCard] : cards, next: null },
+    });
+  });
+  const dialog = await openFinder(page);
+  const chains = dialog.getByRole('group', { name: 'Chain' });
+  await expect(chains.getByRole('button', { name: 'Base' })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  );
+  await expect(dialog.getByRole('option')).toHaveCount(2);
+  // Base's search never carries a chain.
+  expect(seen.every((url) => !url.searchParams.has('chain'))).toBe(true);
+
+  await chains.getByRole('button', { name: 'Arc' }).click();
+  await expect(chains.getByRole('button', { name: 'Arc' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(dialog.getByRole('option')).toHaveCount(1);
+  await expect(dialog.getByRole('option').first()).toContainText('Quay');
+  await expect(dialog.getByRole('link', { name: 'Arc ID 7001', exact: true })).toHaveAttribute(
+    'href',
+    arcCard.explorerUrl,
+  );
+  await expect(dialog.getByRole('link', { name: /All Arc Agents/ })).toHaveAttribute(
+    'href',
+    '/explorer/arc',
+  );
+  await expect(dialog.getByRole('combobox')).toBeFocused();
+  expect(seen.at(-1)?.searchParams.get('chain')).toBe('arc');
+});
+
+test('header finder: an empty Arc directory searches every agent on Arc, never Base', async ({
+  page,
+}) => {
+  await mock(page, []);
+  await page.route('**/api/public/arc/rated', (route) =>
+    route.fulfill({ json: { baseIds: [], asOf: now } }),
+  );
+  const registry = '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432';
+  await page.route('**/api/public/arc/agents*', (route) =>
+    route.fulfill({
+      json: {
+        rows: [
+          {
+            baseId: '2916',
+            name: 'Pier',
+            owner: '0x' + '1'.repeat(40),
+            short: 'Pier01',
+            status: 'final',
+          },
+        ],
+        totals: {
+          onBase: 1,
+          new24h: 0,
+          finalizingNow: 0,
+          readAtBlock: 1,
+          readAt: now,
+          servedAt: now,
+        },
+        registry,
+        nextBefore: null,
+      },
+    }),
+  );
+  const dialog = await openFinder(page);
+  await dialog.getByRole('group', { name: 'Chain' }).getByRole('button', { name: 'Arc' }).click();
+  await expect(dialog.getByText('All agents on Arc')).toBeVisible();
+  await expect(dialog.getByRole('option')).toHaveCount(1);
+  await expect(dialog.getByRole('link', { name: 'Arc ID 2916', exact: true })).toHaveAttribute(
+    'href',
+    `https://explorer.arc.io/token/${registry}/instance/2916`,
+  );
+});

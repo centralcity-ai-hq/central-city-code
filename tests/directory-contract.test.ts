@@ -1,11 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  canonicalDirectorySearch,
   cleanNote,
   DIRECTORY_ERRORS,
   DIRECTORY_LIMITS,
+  DIRECTORY_PATHS,
+  directoryQueryRefusal,
+  readDirectoryChain,
   readDirectoryQuery,
 } from '../shared/directory.js';
+import { directoryUrl } from '../src/verify/directoryData.js';
 
 test('directory query: defaults, trimming, bounds and a safe cursor', () => {
   assert.deepEqual(readDirectoryQuery({}), {
@@ -56,4 +61,19 @@ test('invitation note: control characters removed, trimmed, bounded', () => {
 test('every "can not invite" case shares one 404 code', () => {
   assert.equal(DIRECTORY_ERRORS.agent_not_found, 404);
   assert.equal(DIRECTORY_ERRORS.daily_limit, 429);
+});
+
+test('directory chain: base unless it says arc; the query itself is unchanged by it', () => {
+  assert.equal(readDirectoryChain({}), 'base');
+  assert.equal(readDirectoryChain({ chain: 'base' }), 'base');
+  assert.equal(readDirectoryChain({ chain: 'arc' }), 'arc');
+  assert.equal(directoryQueryRefusal({ chain: 'arc' }), null);
+  assert.equal(directoryQueryRefusal({ chain: '' }), null);
+  assert.equal(directoryQueryRefusal({ chain: 'solana' }), 'chain must be one of base, arc.');
+  assert.equal(canonicalDirectorySearch({ chain: 'base' }), '');
+  assert.equal(canonicalDirectorySearch({ chain: 'arc', q: 'a' }), '?q=a&chain=arc');
+  assert.deepEqual(readDirectoryQuery({ chain: 'arc' }), readDirectoryQuery({}));
+  assert.equal(directoryUrl({ q: 'a' }), `${DIRECTORY_PATHS.search}?q=a`);
+  assert.equal(directoryUrl({ chain: 'base' }), DIRECTORY_PATHS.search);
+  assert.equal(directoryUrl({ q: 'a', chain: 'arc' }), `${DIRECTORY_PATHS.search}?q=a&chain=arc`);
 });

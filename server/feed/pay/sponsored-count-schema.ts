@@ -117,7 +117,33 @@ export const paidCallCountSponsoredMigration: Migration = {
   sql: PAID_CALL_COUNT_SPONSORED_SQL,
 };
 
+/**
+ * Migration 359 `feed_pay_sponsored_chain`: sponsored first purchases on Arc too (2 Nov 2026), each
+ * chain its own engine. The rows name their chain; every row stored before is Base's, which the
+ * constant default says (no rewrite, no scan, no index: added under a 2 s lock wait). 252's
+ * function, the same in every other line, now counts a row into its own chain's row of
+ * paid_call_count; its triggers are unchanged. Nothing is backfilled: no Arc row exists yet.
+ */
+export const FEED_PAY_SPONSORED_CHAIN_COLUMN_SQL = `ALTER TABLE feed_pay_sponsored_calls ADD COLUMN IF NOT EXISTS chain_id integer NOT NULL DEFAULT ${WALLET_CHAIN_ID};`;
+export const FEED_PAY_SPONSORED_CHAIN_SQL = `
+SET LOCAL lock_timeout = '2s';
+${FEED_PAY_SPONSORED_CHAIN_COLUMN_SQL}
+${PAID_CALL_COUNT_SPONSORED_SQL.slice(
+  0,
+  PAID_CALL_COUNT_SPONSORED_SQL.indexOf('DROP TRIGGER'),
+).replace(
+  `VALUES (${PAID_CALL_COUNT_SPONSORED_CHAIN_ID}, 1, ARRAY[t], n, v)`,
+  'VALUES (NEW.chain_id, 1, ARRAY[t], n, v)',
+)}`;
+
+export const feedPaySponsoredChainMigration: Migration = {
+  version: 359,
+  name: 'feed_pay_sponsored_chain',
+  sql: FEED_PAY_SPONSORED_CHAIN_SQL,
+};
+
 /** Idempotent; call before runMigrations (after 243, whose column it fills, and 250/251). */
 export function registerPaidCallCountSponsoredMigration(): void {
   registerMigration(paidCallCountSponsoredMigration);
+  registerMigration(feedPaySponsoredChainMigration);
 }

@@ -1084,3 +1084,16 @@
   word-break: break-all;
   user-select: all;
 }
+
+/* The disclosure line under the counters (DisclosureLine in proofParts.tsx). */
+.xp-disclosure {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--v8-muted, #4b5565);
+}
+.xp-disclosure a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}

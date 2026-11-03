@@ -2051,3 +2051,23 @@ test('Feed pill menus are select-only comboboxes: arrows move the announced opti
   await expect(price).toHaveAttribute('aria-expanded', 'false');
   await expect(price).not.toHaveAttribute('aria-activedescendant', /./);
 });
+
+for (const width of [375, 390])
+  test(`the paid service calls chip is never cut off at ${width} px with seven-digit numbers`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 812 });
+    await mockFeed(page, { paidCalls: 1_421_457, baseAgents: 1_037_241 });
+    await page.goto('/feed');
+    const chip = paidChip(page);
+    await expect(chip.locator('.fd-paid-n')).toHaveText('1,421,457');
+    const box = (await chip.boundingBox())!;
+    const lede = (await page.locator('.fd-lede').boundingBox())!;
+    // Inside the column, right edge included; nothing inside the chip spills past it.
+    expect(box.x + box.width).toBeLessThanOrEqual(lede.x + lede.width + 0.5);
+    expect(
+      await chip.evaluate(
+        (el) => el.scrollWidth <= el.clientWidth && el.scrollHeight <= el.clientHeight,
+      ),
+    ).toBe(true);
+  });

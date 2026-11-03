@@ -72,7 +72,9 @@ async function fixture(t: test.TestContext) {
     get(target, key, receiver) {
       if (key === 'query')
         return (sql: string, params?: unknown[]) => {
-          if (/jsonb_array_elements\(w\.data->'agents'\)/.test(sql)) unpacks += 1;
+          // agentsArraySql (server/agent-rows/sql.ts) over w: the document branch unpacks.
+          if (/jsonb_array_elements\(\(CASE WHEN [^;]*?ELSE w\.data->'agents' END\)\)/.test(sql))
+            unpacks += 1;
           return target.query(sql, params as never);
         };
       const value = Reflect.get(target, key, receiver);

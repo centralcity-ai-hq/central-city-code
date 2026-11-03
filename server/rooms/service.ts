@@ -174,6 +174,8 @@ import {
   uniqueDisplayName,
 } from './person.js';
 import { errorFacts, errorLine } from '../error-log.js';
+import { agentsArraySql } from '../agent-rows/sql.js';
+import { WORKSPACE_DATA_BY_ID_SQL } from '../agent-rows/read-sql.js';
 
 /**
  * Rooms (docs/ROOMS.md; threat model ROOMS-SEC-001;
@@ -1075,11 +1077,8 @@ export function createRooms(d: RoomDependencies): Rooms {
   }
 
   async function workspaceOf(q: Pick<Tx, 'query'>, operatorId: string): Promise<Workspace> {
-    const row = (
-      await q.query<{ data: Workspace }>('SELECT data FROM workspaces WHERE operator_id=$1', [
-        operatorId,
-      ])
-    ).rows[0];
+    const row = (await q.query<{ data: Workspace }>(WORKSPACE_DATA_BY_ID_SQL, [operatorId]))
+      .rows[0];
     if (!row) refuse(401, 'unauthorized', 'Sign in to continue.');
     return row!.data;
   }
@@ -1143,7 +1142,7 @@ export function createRooms(d: RoomDependencies): Rooms {
       await q.query<{ name: string }>(
         `SELECT a->>'name' AS name FROM room_members m
           JOIN workspaces w ON w.operator_id=m.owner_id
-          CROSS JOIN LATERAL jsonb_array_elements(w.data->'agents') a
+          CROSS JOIN LATERAL jsonb_array_elements(${agentsArraySql('w.operator_id', 'w.data')}) a
           WHERE m.room_id=$1 AND m.removed_at IS NULL AND m.kind='agent' AND a->>'id'=m.agent_id`,
         [roomId],
       )
@@ -1449,7 +1448,7 @@ export function createRooms(d: RoomDependencies): Rooms {
     const names = new Map<string, string>();
     for (const row of (
       await q.query<{ agents: Array<{ id: string; name: string; revokedAt?: string | null }> }>(
-        "SELECT data->'agents' AS agents FROM workspaces WHERE operator_id = ANY($1::text[])",
+        `SELECT ${agentsArraySql('w.operator_id', 'w.data')} AS agents FROM workspaces w WHERE w.operator_id = ANY($1::text[])`,
         [[...new Set(rows.map((row) => row.owner_id))]],
       )
     ).rows)
@@ -1939,7 +1938,7 @@ export function createRooms(d: RoomDependencies): Rooms {
             AND (NOT r.elric_private OR $2::boolean) AND (r.host_owner_id=$1 OR EXISTS (
             SELECT 1 FROM room_members m WHERE m.room_id=r.id AND m.owner_id=$1 AND m.removed_at IS NULL
               AND (m.kind='person' OR EXISTS (
-                SELECT 1 FROM workspaces w CROSS JOIN LATERAL jsonb_array_elements(w.data->'agents') a
+                SELECT 1 FROM workspaces w CROSS JOIN LATERAL jsonb_array_elements(${agentsArraySql('w.operator_id', 'w.data')}) a
                  WHERE w.operator_id=m.owner_id AND a->>'id'=m.agent_id
                    AND COALESCE(a->>'revokedAt', '') = ''))))
             ORDER BY r.created_at DESC, r.id LIMIT 100`,
@@ -1981,11 +1980,8 @@ export function createRooms(d: RoomDependencies): Rooms {
     ]);
     if (!host.rows.length) return inviteInvalid();
     // The new guest's own rows, checked before the room is locked (they need no lock).
-    const own = (
-      await tx.query<{ data: Workspace }>('SELECT data FROM workspaces WHERE operator_id=$1', [
-        p.operatorId,
-      ])
-    ).rows[0]?.data;
+    const own = (await tx.query<{ data: Workspace }>(WORKSPACE_DATA_BY_ID_SQL, [p.operatorId]))
+      .rows[0]?.data;
     if (!own) return inviteInvalid();
     const agent = own.agents.find((item) => item.id === input.agentId);
     if (own.paused || own.agents.length !== 1 || !agent || agent.revokedAt || agent.pausedAt)
@@ -3857,7 +3853,7 @@ export function createRooms(d: RoomDependencies): Rooms {
           await tx.query<{
             agents: Array<{ id: string; name: string; revokedAt?: string | null }>;
           }>(
-            "SELECT data->'agents' AS agents FROM workspaces WHERE operator_id = ANY($1::text[])",
+            `SELECT ${agentsArraySql('w.operator_id', 'w.data')} AS agents FROM workspaces w WHERE w.operator_id = ANY($1::text[])`,
             [owners],
           )
         ).rows)
@@ -4227,7 +4223,7 @@ export function createRooms(d: RoomDependencies): Rooms {
       if (owners.length)
         for (const row of (
           await tx.query<{ agents: Array<{ id: string; name: string }> }>(
-            "SELECT data->'agents' AS agents FROM workspaces WHERE operator_id = ANY($1::text[])",
+            `SELECT ${agentsArraySql('w.operator_id', 'w.data')} AS agents FROM workspaces w WHERE w.operator_id = ANY($1::text[])`,
             [owners],
           )
         ).rows)
@@ -4273,7 +4269,7 @@ export function createRooms(d: RoomDependencies): Rooms {
       if (owners.length)
         for (const row of (
           await tx.query<{ agents: Array<{ id: string; name: string }> }>(
-            "SELECT data->'agents' AS agents FROM workspaces WHERE operator_id = ANY($1::text[])",
+            `SELECT ${agentsArraySql('w.operator_id', 'w.data')} AS agents FROM workspaces w WHERE w.operator_id = ANY($1::text[])`,
             [owners],
           )
         ).rows)

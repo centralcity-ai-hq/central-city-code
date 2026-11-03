@@ -63,6 +63,7 @@ test('cacheable public reads refuse unknown query keys', async (t) => {
     `${DIRECTORY_PATHS.search}?before=!`,
     `${DIRECTORY_PATHS.search}?before=abc`,
     `${DIRECTORY_PATHS.search}?q=a&q=b`,
+    `${DIRECTORY_PATHS.search}?chain=solana`,
   ]) {
     const response = await app.inject({ url });
     assert.equal(response.statusCode, 400, `${url}: ${response.body}`);

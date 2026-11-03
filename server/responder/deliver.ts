@@ -16,6 +16,8 @@ import {
 } from './providers.js';
 import { openStoredKey, UnknownRootKeyError, type StoredCredential } from './rotation.js';
 import { setResponderTarget } from './targets.js';
+import { agentsArraySql } from '../agent-rows/sql.js';
+import { WORKSPACE_DATA_BY_ID_SQL } from '../agent-rows/read-sql.js';
 
 /**
  * Hosted responder delivery (docs/RESPONDER.md).
@@ -335,11 +337,8 @@ export function createResponderDelivery(d: DeliveryDependencies) {
       )
     ).rows[0];
     if (!Number(member?.n)) return 'not_member';
-    const workspace = (
-      await q.query<{ data: Workspace }>('SELECT data FROM workspaces WHERE operator_id=$1', [
-        s.owner_id,
-      ])
-    ).rows[0]?.data;
+    const workspace = (await q.query<{ data: Workspace }>(WORKSPACE_DATA_BY_ID_SQL, [s.owner_id]))
+      .rows[0]?.data;
     const agent = workspace?.agents.find((item) => item.id === reply.agent_id);
     if (!workspace || !agent || agent.revokedAt) return 'agent_revoked';
     if (agent.pausedAt || workspace.paused) return 'agent_paused';
@@ -501,9 +500,7 @@ export function createResponderDelivery(d: DeliveryDependencies) {
       )
     ).rows.reverse();
     const agentName = (
-      await d.db.query<{ data: Workspace }>('SELECT data FROM workspaces WHERE operator_id=$1', [
-        s.owner_id,
-      ])
+      await d.db.query<{ data: Workspace }>(WORKSPACE_DATA_BY_ID_SQL, [s.owner_id])
     ).rows[0]!.data.agents.find((agent) => agent.id === reply.agent_id)!.name;
     const messages: PromptMessage[] = rows.map((row) => ({
       seq: Number(row.seq),
@@ -897,7 +894,7 @@ export function createResponderDelivery(d: DeliveryDependencies) {
     const agent = (
       await d.db.query<{ mode: string | null }>(
         `SELECT a->>'mode' AS mode
-           FROM workspaces w, jsonb_array_elements(w.data->'agents') a
+           FROM workspaces w, jsonb_array_elements(${agentsArraySql('w.operator_id', 'w.data')}) a
           WHERE w.operator_id=$1 AND a->>'id'=$2 LIMIT 1`,
         [ownerId, agentId],
       )

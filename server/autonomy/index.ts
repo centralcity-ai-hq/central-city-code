@@ -23,6 +23,7 @@ import {
   type Actor,
   type AutonomyService,
 } from './service.js';
+import { agentCountSql, agentsArraySql } from '../agent-rows/sql.js';
 
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
 const MANIFEST_MODE_KEYS = [
@@ -320,7 +321,7 @@ export async function registerAutonomy(
         `SELECT w.operator_id FROM workspaces w
           JOIN operators o ON o.id=w.operator_id AND o.kind='unclaimed'
           LEFT JOIN unclaimed_buckets b ON b.operator_id=w.operator_id
-          WHERE jsonb_array_length(w.data->'agents')=0
+          WHERE ${agentCountSql('w.operator_id', 'w.data')}=0
           AND COALESCE(b.last_used_at,b.created_at,0)<=$1
           ORDER BY COALESCE(b.last_used_at,b.created_at,0), w.operator_id LIMIT $2
           FOR UPDATE OF w SKIP LOCKED`,
@@ -331,7 +332,7 @@ export async function registerAutonomy(
     for (const { operator_id: id } of candidates) {
       const current = (
         await tx.query<{ n: number | string; used: number | string | null }>(
-          `SELECT jsonb_array_length(w.data->'agents') AS n, COALESCE(b.last_used_at,b.created_at,0) AS used
+          `SELECT ${agentCountSql('w.operator_id', 'w.data')} AS n, COALESCE(b.last_used_at,b.created_at,0) AS used
             FROM workspaces w LEFT JOIN unclaimed_buckets b ON b.operator_id=w.operator_id
             WHERE w.operator_id=$1`,
           [id],
@@ -917,7 +918,7 @@ export async function registerAutonomy(
           count(a.value) FILTER (WHERE a.value ? 'claimedAt')::text AS claimed,
           count(DISTINCT w.operator_id)::text AS partitions
         FROM workspaces w JOIN operators o ON o.id=w.operator_id
-        LEFT JOIN LATERAL jsonb_array_elements(w.data->'agents') a ON true
+        LEFT JOIN LATERAL jsonb_array_elements(${agentsArraySql('w.operator_id', 'w.data')}) a ON true
         GROUP BY o.kind`,
       )
     ).rows;

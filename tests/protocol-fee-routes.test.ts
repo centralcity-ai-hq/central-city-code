@@ -3,6 +3,7 @@ import test from 'node:test';
 import Fastify from 'fastify';
 import { PGlite } from '@electric-sql/pglite';
 import type { Database } from '../server/database.js';
+import { arcChainIdsMigrations } from '../server/base/arc-chain-ids-schema.js';
 import { PROTOCOL_FEE_LEDGER_SQL } from '../server/protocol/fees/ledger.js';
 import { registerProtocolFeeRoutes } from '../server/protocol/fees/routes.js';
 import {
@@ -17,10 +18,14 @@ async function setup(
   t: test.TestContext,
   enabled = true,
   treasury?: (chainId: number) => string | null,
+  arcChainId?: () => number | null,
 ) {
   const pg = await PGlite.create('memory://');
   t.after(() => pg.close());
   await pg.exec(PROTOCOL_FEE_LEDGER_SQL);
+  // Arc's chain ids on the ledger's tables (the Arc migrations).
+  for (const m of arcChainIdsMigrations)
+    if (/protocol_fee_(events|scan_state)\b/.test(String(m.sql))) await pg.exec(String(m.sql));
   const db: Database = {
     query: (sql, params) => pg.query(sql, params) as never,
     exec: (sql) => pg.exec(sql),
@@ -68,6 +73,7 @@ async function setup(
       limited.push(key);
     },
     ...(treasury ? { treasury } : {}),
+    ...(arcChainId ? { arcChainId } : {}),
   });
   t.after(() => app.close());
   return { app, insert, limited };
@@ -78,6 +84,38 @@ test('flag off: 404 and nothing read', async (t) => {
   const res = await app.inject('/api/public/protocol/fees');
   assert.equal(res.statusCode, 404);
   assert.equal(limited.length, 0);
+});
+
+test("Arc's own path answers from Arc's rows; the plain path stays the fee chain's", async (t) => {
+  const { app, insert } = await setup(t, true, undefined, () => 5042);
+  await insert(day(15, 1), 40_000_000, 4_000_000, true, 5042);
+  await insert(day(15, 2), 40_000_000, 4_000_000, true, 5042);
+  await insert(day(15, 3), 50_000, 5_000, false, 5042); // not finalized: excluded
+  await insert(day(15, 4), 100_000, 10_000); // the fee chain's (84532)
+  const arc = await app.inject('/api/public/protocol/fees/arc?days=1');
+  assert.equal(arc.statusCode, 200);
+  const body = arc.json();
+  assert.equal(body.chain_id, 5042);
+  assert.deepEqual(body.totals, {
+    payments: 2,
+    fee_count: 2,
+    volume_usdc: '80.000000',
+    fees_usdc: '8.000000',
+    revenue_usdc: '8.000000',
+  });
+  assert.match(String(arc.headers['vercel-cdn-cache-control']), /s-maxage=300/);
+  const plain = (await app.inject('/api/public/protocol/fees?days=1')).json();
+  assert.equal(plain.chain_id, 84532);
+  assert.equal(plain.totals.fees_usdc, '0.010000');
+  // The same query rules: one spelling per window.
+  assert.equal((await app.inject('/api/public/protocol/fees/arc?days=01')).statusCode, 400);
+});
+
+test("Arc's path is not there without an Arc chain, and 404s while Arc is off", async (t) => {
+  const none = await setup(t);
+  assert.equal((await none.app.inject('/api/public/protocol/fees/arc')).statusCode, 404);
+  const off = await setup(t, true, undefined, () => null);
+  assert.equal((await off.app.inject('/api/public/protocol/fees/arc')).statusCode, 404);
 });
 
 test('daily volume, fees and revenue from finalized rows only, as USDC strings', async (t) => {

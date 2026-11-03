@@ -200,6 +200,19 @@ export interface SponsoredDeps {
   log?: (line: string) => void;
 }
 
+/**
+ * The pace guard: most sponsored buys of one chain handed over and not paid yet (state 'sent').
+ * CITY_SFP_MAX_SENT, a whole number within 10 to 1,000; default (also when malformed or out of
+ * bounds) 120, about a minute of the 2 Nov test's peak, well inside the legs' window.
+ */
+export const SFP_MAX_SENT_SETTING = 'CITY_SFP_MAX_SENT';
+export const SFP_MAX_SENT_DEFAULT = 120;
+export function sponsoredMaxSent(env: Record<string, string | undefined>): number {
+  const raw = env[SFP_MAX_SENT_SETTING]?.trim();
+  const n = raw && /^[0-9]{2,4}$/.test(raw) ? Number(raw) : NaN;
+  return n >= 10 && n <= 1_000 ? n : SFP_MAX_SENT_DEFAULT;
+}
+
 /** The op key prefix of every sponsored settlement (and its batch group on a shared facilitator). */
 export const SPONSORED_KEY_PREFIX = 'sfp:';
 /** '1': sponsored settlements are sent by the router-3 facilitator (see the module header). */
@@ -299,11 +312,13 @@ const requestHashOf = (input: unknown) => keccak256(stringToHex(JSON.stringify(i
 
 export function createSponsoredCalls(deps: SponsoredDeps) {
   const log = deps.log ?? (() => {});
+  /** This engine's chain: its rows only (migration 359), each chain has its own engine. */
+  const chainId = deps.chainId;
   const load = async (callId: string) =>
     (
       await deps.db.query<Row>(
-        `SELECT ${COLUMNS} FROM feed_pay_sponsored_calls WHERE call_id = $1`,
-        [callId],
+        `SELECT ${COLUMNS} FROM feed_pay_sponsored_calls WHERE call_id = $1 AND chain_id = $2`,
+        [callId, chainId],
       )
     ).rows[0] ?? null;
 
@@ -403,14 +418,26 @@ export function createSponsoredCalls(deps: SponsoredDeps) {
     const { rows } = await tx.query<{ held: string }>(
       `SELECT (
          (SELECT COALESCE(SUM(gross_raw), 0) FROM feed_pay_sponsored_calls
-          WHERE state IN ('reserved','sent'))
+          WHERE state IN ('reserved','sent') AND chain_id = $2)
          + (SELECT COALESCE(SUM(gross_raw), 0) FROM feed_pay_sponsored_calls
-            WHERE updated_at >= $1 AND state IN ('paid','delivered','paid_no_result'))
+            WHERE updated_at >= $1 AND state IN ('paid','delivered','paid_no_result') AND chain_id = $2)
        )::text AS held`,
-      [read.at],
+      [read.at, chainId],
     );
     if (read.raw - BigInt(rows[0]!.held) < gross) {
       log(JSON.stringify({ event: 'sfp.paused', why: 'usdc' }));
+      return false;
+    }
+    // The pace guard (2 Nov 2026: 246 buys sent at once sat in a lane past their legs' window):
+    // at most this many of this chain's buys handed over and not paid yet; past it new ones pause
+    // (retryable) and the lane catches up first.
+    const { rows: open } = await tx.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM feed_pay_sponsored_calls
+       WHERE state = 'sent' AND chain_id = $1`,
+      [chainId],
+    );
+    if (Number(open[0]!.n) >= sponsoredMaxSent(deps.env)) {
+      log(JSON.stringify({ event: 'sfp.paused', why: 'in_flight' }));
       return false;
     }
     return true;
@@ -426,8 +453,8 @@ export function createSponsoredCalls(deps: SponsoredDeps) {
     if (!keys.length) return new Set();
     const { rows } = await deps.db.query<{ op_key: string }>(
       `SELECT op_key FROM feed_pay_sponsored_calls WHERE op_key = ANY($1::text[])
-         AND state IN ('reserved','sent')`,
-      [keys],
+         AND state IN ('reserved','sent') AND chain_id = $2`,
+      [keys, chainId],
     );
     const live = new Set(rows.map((r) => r.op_key));
     return new Set(keys.filter((k) => !live.has(k)));
@@ -491,8 +518,8 @@ export function createSponsoredCalls(deps: SponsoredDeps) {
     );
     const agent = agents[0];
     if (!agent) throw new SponsoredRefusal('agent_not_found');
-    // Credits and sponsored rows are one chain's (the table names none): an agent that lives on
-    // another chain has no first purchase here, also with an old wallet row on this one.
+    // Credits and sponsored rows are one chain's (each chain has its own engine): an agent that
+    // lives on another chain has no first purchase here, also with an old wallet row on this one.
     if (deps.agentChain && (await deps.agentChain(input.agentId)) !== deps.chainId)
       throw new SponsoredRefusal('other_chain');
     // The hosted offer as call() would sell it (its own refusals: not found, not payable, input).
@@ -546,8 +573,9 @@ export function createSponsoredCalls(deps: SponsoredDeps) {
       const { rows } = await tx.query(
         `INSERT INTO feed_pay_sponsored_calls (call_id, owner_account_id, idempotency_key,
              request_hash, operator_id, agent_id, service_id, offer_id, offer_kind, offer_version,
-             pay_to, gross_raw, fee_raw, input, state, op_key, created_at, updated_at, fleet)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'reserved',$15,$16,$16,$17)
+             pay_to, gross_raw, fee_raw, input, state, op_key, created_at, updated_at, fleet,
+             chain_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'reserved',$15,$16,$16,$17,$18)
            ON CONFLICT (owner_account_id, idempotency_key) DO NOTHING RETURNING call_id`,
         [
           callId,
@@ -567,6 +595,7 @@ export function createSponsoredCalls(deps: SponsoredDeps) {
           `${SPONSORED_KEY_PREFIX}${callId}`,
           at,
           kind.fleet,
+          chainId,
         ],
       );
       if (!rows.length) {
@@ -765,8 +794,9 @@ export function createSponsoredCalls(deps: SponsoredDeps) {
     const { rows } = await deps.db.query<Row>(
       `UPDATE feed_pay_sponsored_calls SET lease_until = $2
        WHERE call_id = $1 AND lease_until < $3 AND state IN ('reserved','sent','paid')
+         AND chain_id = $4
        RETURNING ${COLUMNS}`,
-      [callId, at + LEASE_MS, at],
+      [callId, at + LEASE_MS, at, chainId],
     );
     const row = rows[0];
     if (!row) return false;
@@ -835,9 +865,9 @@ export function createSponsoredCalls(deps: SponsoredDeps) {
     const started = deps.now();
     const { rows } = await deps.db.query<{ call_id: string }>(
       `SELECT call_id FROM feed_pay_sponsored_calls
-       WHERE state IN ('reserved','sent','paid') AND lease_until < $1
+       WHERE state IN ('reserved','sent','paid') AND lease_until < $1 AND chain_id = $3
        ORDER BY updated_at LIMIT $2`,
-      [started, limits.maxCalls],
+      [started, limits.maxCalls, chainId],
     );
     let moved = 0;
     let next = 0;
@@ -877,8 +907,9 @@ export function createSponsoredCalls(deps: SponsoredDeps) {
         `SELECT s.call_id FROM feed_pay_sponsored_calls s
          JOIN feed_pay_sponsor_credits c ON c.call_id = s.call_id
          WHERE s.updated_at >= $1 AND s.state = 'failed' AND c.state = 'reserved'
+           AND s.chain_id = $3
          ORDER BY s.updated_at LIMIT $2`,
-        [at - SWEEP_WINDOW_MS, SWEEP_MAX],
+        [at - SWEEP_WINDOW_MS, SWEEP_MAX, chainId],
       )
       .catch(() => ({ rows: [] as { call_id: string }[] }));
     let released = 0;
@@ -949,3 +980,53 @@ export interface SponsoredCreditView {
 }
 
 export type SponsoredCalls = ReturnType<typeof createSponsoredCalls>;
+
+/**
+ * The sponsored first purchase on every chain that has an engine (Base's first; Arc's beside it
+ * since 2 Nov 2026), behind the one engine's own interface, so the routes are the same: a new
+ * call goes to its agent's chain, a call or step is looked up on each chain (a call id is one
+ * table's primary key, so exactly one engine holds it), the cron steps every chain (one failing
+ * leaves the others' passes as they are), and the credit view lists each chain's agents.
+ */
+export function sponsoredOnChains(input: {
+  /** Base's engine. */
+  base: SponsoredCalls;
+  /** Engines of other chains, by chain id. */
+  others: ReadonlyMap<number, SponsoredCalls>;
+  /** The chain an agent lives on (agentChainOf). */
+  agentChain: (agentId: string) => Promise<number>;
+}): SponsoredCalls {
+  const { base, others } = input;
+  if (!others.size) return base;
+  const all = [base, ...others.values()];
+  return {
+    async start(accountId, call) {
+      const chain = await input.agentChain(call.agentId);
+      return (others.get(chain) ?? base).start(accountId, call);
+    },
+    async step(callId) {
+      for (const engine of all) if (await engine.step(callId)) return true;
+      return false;
+    },
+    async work(limits) {
+      const moved = await Promise.all(all.map((engine) => engine.work(limits).catch(() => 0)));
+      return moved.reduce((sum, n) => sum + n, 0);
+    },
+    async callFor(accountId, callId) {
+      for (const engine of all) {
+        const view = await engine.callFor(accountId, callId);
+        if (view) return view;
+      }
+      return null;
+    },
+    authorize: base.authorize,
+    async credit(accountId) {
+      const views = await Promise.all(all.map((engine) => engine.credit(accountId)));
+      return {
+        agents: views.flatMap((view) => view.agents),
+        serviceIds: [...new Set(views.flatMap((view) => view.serviceIds))],
+        maxPriceRaw: views[0]!.maxPriceRaw,
+      };
+    },
+  };
+}

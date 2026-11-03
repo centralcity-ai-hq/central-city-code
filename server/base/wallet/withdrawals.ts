@@ -100,7 +100,11 @@ import {
   sponsoredValidUntil,
   sponsorshipEnding,
 } from '../../../shared/base/paymasters.js';
-import { reservedPayees } from '../../../shared/protocol.js';
+import {
+  PROTOCOL_BASE_MAINNET,
+  reservedPayees,
+  SFP_SPONSOR_BASE_MAINNET,
+} from '../../../shared/protocol.js';
 import {
   decodeOwnerCall,
   noopCall,
@@ -723,7 +727,14 @@ function refusedDestinations(
       network.contracts.entryPointV06,
       network.contracts.entryPointV07,
       network.tokens.USDC.address,
-      ...reservedPayees(),
+      // The treasury is a reserved payee (never a service's payTo) but a valid withdrawal destination:
+      // an owner may move an agent's earnings to the treasury or back to the first-buy sponsor
+      // (owner's decisions, 2 Nov 2026).
+      ...[...reservedPayees()].filter(
+        (a) =>
+          a.toLowerCase() !== PROTOCOL_BASE_MAINNET.treasury.toLowerCase() &&
+          a.toLowerCase() !== SFP_SPONSOR_BASE_MAINNET.toLowerCase(),
+      ),
       ...Object.values(SPONSOR_PAYMASTERS).flat(),
       MULTICALL3,
       network.contracts.reputationRegistry,
@@ -2590,7 +2601,8 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
     new WithdrawalError(
       'operation_pending',
       'This wallet already has a withdrawal in progress; finish or cancel it first.',
-      { withdrawalId },
+      // Also under details, where the page's ApiError keeps it: an unsigned one can be dropped there.
+      { withdrawalId, details: { withdrawalId } },
     );
 
   /** The wallet's unfinished owner operations, laned or not (unsigned ones past their time aside). */
@@ -2732,14 +2744,20 @@ export function createWithdrawalService(deps: WithdrawalDeps) {
           'destination_not_allowed',
           'Funds sent to that address would be lost or come straight back.',
         );
-      if (deps.chain?.ownKeyAddresses) {
+      const toSponsor = body.to.toLowerCase() === SFP_SPONSOR_BASE_MAINNET.toLowerCase();
+      if (deps.chain?.ownKeyAddresses && !toSponsor) {
         const own = await deps.chain.ownKeyAddresses().catch(() => {
           throw new WithdrawalError(
             'chain_unavailable',
             `${chain.place} cannot be read right now.`,
           );
         });
-        if (own.some((address) => address.toLowerCase() === body.to.toLowerCase()))
+        // The first-buy sponsor is one of this deployment's keys on Arc too, but an owner may send
+        // an agent's earnings back to it (owner's decision, 2 Nov 2026), as on Base.
+        if (
+          body.to.toLowerCase() !== SFP_SPONSOR_BASE_MAINNET.toLowerCase() &&
+          own.some((address) => address.toLowerCase() === body.to.toLowerCase())
+        )
           throw new WithdrawalError(
             'destination_not_allowed',
             'Funds sent to that address would be lost or come straight back.',

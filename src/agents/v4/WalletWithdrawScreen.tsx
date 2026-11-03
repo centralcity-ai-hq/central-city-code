@@ -19,6 +19,7 @@ import {
   lanesRemembered,
   newRequestKey,
   readAnchor,
+  unsignedPending,
   readLaneRecords,
   reconcileSignature,
   releasedAtOpen,
@@ -324,8 +325,15 @@ export function WalletWithdrawScreen({ agent, onBack, backLabel }: AgentScreenPr
       if (held) setError(chainWords(wallet.chainId).say(held));
       else if (err instanceof ApiError && err.code === 'operation_pending') {
         const anchor = readAnchor(agent.id);
+        const unsigned = anchor ? null : await unsignedPending(agent.id, err);
         if (anchor) setPhase(statusOf(anchor));
-        else
+        else if (unsigned) {
+          // Prepared and never signed: nothing of it can move, so it is dropped here.
+          await discardUnsigned(agent.id, unsigned);
+          setError(
+            'An earlier withdrawal was prepared but never signed. It is dropped now: press Withdraw again.',
+          );
+        } else
           setError(
             'One withdrawal is still on its way. Wait for it, or cancel it in the browser that signed it.',
           );

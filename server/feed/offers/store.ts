@@ -96,6 +96,7 @@ import {
   OfferKindInputError,
   type OfferKind,
 } from './kinds.js';
+import { agentsListSql } from '../../agent-rows/sql.js';
 
 type Queryable = Pick<Transaction, 'query'>;
 
@@ -675,9 +676,7 @@ export function createOfferStore(db: Database, options: OfferStoreOptions) {
       revoked_at: string | null;
     }>(
       `SELECT a->>'id' AS id, a->>'pausedAt' AS paused_at, a->>'revokedAt' AS revoked_at
-       FROM workspaces ws CROSS JOIN LATERAL jsonb_array_elements(
-         CASE WHEN jsonb_typeof(ws.data->'agents') = 'array' THEN ws.data->'agents'
-         ELSE '[]'::jsonb END) a
+       FROM workspaces ws CROSS JOIN LATERAL jsonb_array_elements(${agentsListSql('ws.operator_id', 'ws.data')}) a
        WHERE ws.operator_id = $1 AND a->>'id' = ANY($2::text[])`,
       [operatorId, agentIds],
     );

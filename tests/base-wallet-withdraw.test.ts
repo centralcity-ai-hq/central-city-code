@@ -85,7 +85,11 @@ import {
   NATIVE_ETH,
   type Address,
 } from '../shared/base/chains.js';
-import { PROTOCOL_BASE_MAINNET, reservedPayees } from '../shared/protocol.js';
+import {
+  PROTOCOL_BASE_MAINNET,
+  reservedPayees,
+  SFP_SPONSOR_BASE_MAINNET,
+} from '../shared/protocol.js';
 import {
   SPONSOR_DATA_BYTES,
   SPONSOR_PAYMASTERS,
@@ -1139,7 +1143,11 @@ test('an empty wallet has nothing to withdraw', async (t) => {
 test('destinations: the protocol reserved payees, the sponsoring paymasters, Multicall3 and the ERC-8004 registries are refused (CCA-142)', async (t) => {
   const f = await setup(t);
   const refused = [
-    ...reservedPayees(),
+    ...[...reservedPayees()].filter(
+      (a) =>
+        getAddress(a) !== getAddress(PROTOCOL_BASE_MAINNET.treasury) &&
+        getAddress(a) !== getAddress(SFP_SPONSOR_BASE_MAINNET),
+    ),
     ...(SPONSOR_PAYMASTERS[BASE_MAINNET] ?? []),
     MULTICALL3,
     NETWORK.contracts.reputationRegistry,
@@ -1261,6 +1269,8 @@ test('one unfinished owner operation per wallet; concurrent creates: exactly one
   const loser = a.statusCode === 201 ? b.json() : a.json();
   assert.equal(loser.code, 'operation_pending');
   assert.equal(loser.withdrawalId, winner.withdrawalId);
+  // Also under details, where the page's ApiError keeps it (an unsigned one is dropped there).
+  assert.deepEqual(loser.details, { withdrawalId: winner.withdrawalId });
   // Signed and not final, it still blocks; final, the wallet is free again.
   await post(f, `${winner.withdrawalId}/signature`, {
     signature: await rawSign(f.owner, winner.userOpHash),
@@ -4459,4 +4469,16 @@ test('a create refused after its sponsored prepare gives that sponsorship back; 
   const kept = prepared.slice(before).find((h) => stored.has(h))!;
   assert.ok(released.includes(orphan), 'the never handed out sponsorship is given back');
   assert.ok(!released.includes(kept), 'the stored one is not');
+});
+
+test('destinations: the treasury is allowed as a withdrawal destination (owner decision 2 Nov 2026)', async (t) => {
+  const f = await setup(t);
+  const res = await create(f, usdc(90, { to: getAddress(PROTOCOL_BASE_MAINNET.treasury) }));
+  assert.notEqual(res.json().code, 'destination_not_allowed');
+});
+
+test('destinations: the first-buy sponsor is allowed as a withdrawal destination (owner decision 2 Nov 2026)', async (t) => {
+  const f = await setup(t);
+  const res = await create(f, usdc(91, { to: getAddress(SFP_SPONSOR_BASE_MAINNET) }));
+  assert.notEqual(res.json().code, 'destination_not_allowed');
 });

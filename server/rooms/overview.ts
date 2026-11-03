@@ -4,6 +4,7 @@ import { registerMigration, type Migration } from '../migrations.js';
 import { MEMBER_LOCK_ORDER, MEMBER_STATUS, activeNowSince } from './member-status.js';
 import { pendingSummary } from '../elric/activity.js';
 import { excerptTruncation, mentionFullLength } from '../wake/contract.js';
+import { agentsArraySql } from '../agent-rows/sql.js';
 
 /**
  * Room overview, member activity and the "Needs you" queue (docs/ROOMS.md "Room overview").
@@ -344,7 +345,7 @@ export async function roomOverview(
               AND NOT EXISTS (SELECT 1 FROM room_invite_credentials c
                                WHERE c.room_id=m.room_id AND c.agent_id=m.agent_id
                                  AND (c.revoked_at IS NOT NULL OR c.expires_at <= $6))
-              AND EXISTS (SELECT 1 FROM workspaces w, jsonb_array_elements(w.data->'agents') a
+              AND EXISTS (SELECT 1 FROM workspaces w, jsonb_array_elements(${agentsArraySql('w.operator_id', 'w.data')}) a
                            WHERE w.operator_id=m.owner_id AND a->>'id'=m.agent_id
                              AND COALESCE(a->>'revokedAt', '') = '')) act`,
       [

@@ -211,6 +211,33 @@ export const paidCallCountPublicMigration: Migration = {
   sql: PAID_CALL_COUNT_PUBLIC_SQL,
 };
 
+/** The scheme of a call paid through the offer's exact lane (server/feed/offers/public-exact.ts). */
+export const PUBLIC_EXACT_SCHEME = 'exact';
+
+/**
+ * 358 `feed_pay_public_calls_exact`: calls paid with the standard x402 `exact` scheme are stored here
+ * too, already paid, so migration 356's insert trigger, the daily check and the Explorer count them
+ * like every other public call. Such a call pays the seller the full price with no protocol fee, so
+ * the fee check allows 0 for that scheme only. A new column with a constant default and two CHECKs
+ * added NOT VALID: no table rewrite and no scan, under a 2 s lock wait (the table is small).
+ */
+export const FEED_PAY_PUBLIC_CALLS_EXACT_SQL = `
+SET LOCAL lock_timeout = '2s';
+ALTER TABLE feed_pay_public_calls ADD COLUMN IF NOT EXISTS scheme text NOT NULL DEFAULT 'cc-router3-split-v1';
+ALTER TABLE feed_pay_public_calls DROP CONSTRAINT IF EXISTS feed_pay_public_calls_scheme_check;
+ALTER TABLE feed_pay_public_calls ADD CONSTRAINT feed_pay_public_calls_scheme_check CHECK (scheme IN ('cc-router3-split-v1', '${PUBLIC_EXACT_SCHEME}')) NOT VALID;
+ALTER TABLE feed_pay_public_calls DROP CONSTRAINT IF EXISTS feed_pay_public_calls_fee_check;
+ALTER TABLE feed_pay_public_calls ADD CONSTRAINT feed_pay_public_calls_fee_check CHECK (
+  (scheme = '${PUBLIC_EXACT_SCHEME}' AND fee_raw = 0)
+  OR (scheme <> '${PUBLIC_EXACT_SCHEME}' AND fee_raw > 0 AND fee_raw < gross_raw)) NOT VALID;
+`;
+
+export const feedPayPublicCallsExactMigration: Migration = {
+  version: 358,
+  name: 'feed_pay_public_calls_exact',
+  sql: FEED_PAY_PUBLIC_CALLS_EXACT_SQL,
+};
+
 /** Idempotent; call before runMigrations (after 243, 252 and 352, and in this order). */
 export function registerFeedPayPublicMigrations(): void {
   registerMigration(feedPayPublicCallsMigration);
@@ -218,4 +245,5 @@ export function registerFeedPayPublicMigrations(): void {
   registerMigration(x402FacilitatorKeyPublicOfferMigration);
   registerMigration(paidCallCountPublicMigration);
   registerMigration(x402PayerCooldownsMigration);
+  registerMigration(feedPayPublicCallsExactMigration);
 }

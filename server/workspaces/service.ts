@@ -16,6 +16,7 @@ import { emptyWorkspace, event, iso, type Workspace } from '../model.js';
 import { highEntropyKey, unclaimedScopeId } from '../autonomy/index.js';
 import { revokeResponderCredentials } from '../responder/revoke.js';
 import { RESERVED_OWNER_NAME_MESSAGE, reservedOwnerName } from './owner-names.js';
+import { agentCountSql } from '../agent-rows/sql.js';
 
 /**
  * AI-owned workspaces ("AI parity", docs/AI_WORKSPACES.md): an AI client without any
@@ -175,7 +176,7 @@ export function aiWorkspaceScopes(row: {
  */
 export async function reclaimIdleAiWorkspaces(tx: Tx, now: number, limit: number): Promise<number> {
   const cutoff = now - AI_WORKSPACE_IDLE_MS;
-  const idle = `jsonb_array_length(w.data->'agents')=0 AND a.created_at<=$1
+  const idle = `${agentCountSql('w.operator_id', 'w.data')}=0 AND a.created_at<=$1
     AND NOT EXISTS (SELECT 1 FROM workspace_keys k WHERE k.operator_id=a.operator_id AND COALESCE(k.last_used_at,k.created_at)>$1)
     AND NOT EXISTS (SELECT 1 FROM operator_links l WHERE l.ai_operator_id=a.operator_id)
     AND NOT EXISTS (SELECT 1 FROM assistant_grants g WHERE g.operator_id=a.operator_id)
@@ -737,7 +738,7 @@ export function registerAiWorkspaces(
     if (!WORKSPACE_CLAIM_TOKEN.test(token)) invalid();
     const row = (
       await d.db.query<{ operator_id: string; name: string; agents: number | string }>(
-        `SELECT a.operator_id, o.name, jsonb_array_length(w.data->'agents') AS agents
+        `SELECT a.operator_id, o.name, ${agentCountSql('w.operator_id', 'w.data')} AS agents
           FROM ai_workspaces a JOIN operators o ON o.id=a.operator_id
           JOIN workspaces w ON w.operator_id=a.operator_id
           WHERE a.claim_token_hash=$1 AND a.created_at>$2`,

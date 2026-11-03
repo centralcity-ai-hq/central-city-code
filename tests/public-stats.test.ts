@@ -27,6 +27,7 @@ import {
   publicStatsMigration,
 } from '../server/stats/schema.js';
 import {
+  combinedPaidCallsReader,
   createPaidCallsReader,
   PAID_CALLS_CACHE_MS,
   PAID_CALLS_COLD_READ_BUDGET_MS,
@@ -56,6 +57,7 @@ import {
   createBaseAgentsReader,
 } from '../server/stats/base-agents.js';
 import { ARC_NETWORKS, ARC_TESTNET } from '../shared/chains.js';
+import { AGENT_ROWS_SQL } from '../server/agent-rows/schema.js';
 import { ercAgentsTotal, parseArcAgents, parseStatsRates } from '../src/agentCount.js';
 import { createOnBaseStore } from '../server/base/explorer/store.js';
 import { add, NOW, SEPOLIA_REGISTRY, setup } from './on-base-fixture.js';
@@ -81,6 +83,8 @@ async function table(t: { after: (fn: () => Promise<unknown>) => void }) {
   await db.exec(COUNTED_AGENT_IDS_SQL);
   // The trigger function as migration 111 replaced it.
   await db.exec(COUNTED_AGENT_IDS_SYNC_SQL);
+  // Migration 245's tables: the scan reads rows-mode workspaces from their rows.
+  await db.exec(AGENT_ROWS_SQL);
   const put = (operatorId: string, agents: unknown[] | undefined) =>
     db.query('INSERT INTO workspaces(operator_id,data) VALUES($1,$2::jsonb)', [
       operatorId,
@@ -218,6 +222,7 @@ test('migration 59 backfills existing workspaces: 30,000 agents, the scan total,
   const db = await PGlite.create();
   t.after(() => db.close());
   await db.exec('CREATE TABLE workspaces (operator_id text PRIMARY KEY, data jsonb NOT NULL)');
+  await db.exec(AGENT_ROWS_SQL);
   // Data from before the migration: 30,000 one-agent partitions with padded documents (like
   // real ones), an owner with a demo seed, and an excluded canary.
   await db.query(
@@ -646,6 +651,41 @@ test('paid_calls: the field rides on the stats response, with the cache headers 
     'recent_ms',
     'total',
   ]);
+});
+
+test('paid_calls adds every live chain: total, value and block times; a failed chain keeps its last good row', async (t) => {
+  const base: PaidCallsSnapshot = { ...snapshot(100, [AT - 3_000]), valueRaw: '1000' };
+  const arc: PaidCallsSnapshot = { ...snapshot(7, [AT - 1_000]), valueRaw: '20' };
+  let arcFails = false;
+  const arcReader: PaidCallsReader = {
+    read: async () => {
+      if (arcFails) throw new Error('down');
+      return arc;
+    },
+    lastGood: () => arc,
+  };
+  const paidCalls = combinedPaidCallsReader({ read: async () => base }, [arcReader]);
+  const { get } = await statsRoute(t, { paidCalls });
+  const first = (await get()).json().paid_calls;
+  assert.equal(first.total, 107);
+  assert.equal(first.value_settled_raw, '1020');
+  assert.deepEqual(first.recent_ms, [1_000, 3_000]);
+  arcFails = true;
+  assert.equal((await paidCalls.read())?.total, 107);
+});
+
+test('paid_calls with no other chain is the one row; no row on the first chain is no field', async () => {
+  const one: PaidCallsReader = { read: async () => snapshot(3) };
+  assert.equal(combinedPaidCallsReader(one, []), one);
+  const none = combinedPaidCallsReader({ read: async () => null }, [one]);
+  assert.equal(await none.read(), null);
+});
+
+test('paid_calls never reads lower when another chain fails with no last good row', async () => {
+  const combined = combinedPaidCallsReader({ read: async () => snapshot(3) }, [
+    { read: async () => Promise.reject(new Error('down')) },
+  ]);
+  await assert.rejects(combined.read());
 });
 
 test('paid_calls is left out while switched off, before the row exists, or when its read fails; the agent count is still served', async (t) => {

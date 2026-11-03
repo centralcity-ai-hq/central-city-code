@@ -35,6 +35,7 @@ import {
 } from '../../../shared/base/registration.js';
 import { publicAgentCard } from '../../manifest/card-agent.js';
 import { NOT_MOVED } from './moves.js';
+import { agentsArraySql } from '../../agent-rows/sql.js';
 
 /**
  * The domain file's agents: confirmed ERC-8004 identities whose agent URI is this origin's
@@ -60,7 +61,7 @@ const DOMAIN_IDENTITIES = `SELECT i.agent_id, i.chain_id, i.registry_address,
   ORDER BY i.erc8004_agent_id, i.chain_id`;
 const PUBLIC_IN_WORKSPACES = `SELECT w.operator_id, a->>'id' AS agent_id
   FROM workspaces w
-  CROSS JOIN LATERAL jsonb_array_elements(w.data->'agents') a
+  CROSS JOIN LATERAL jsonb_array_elements(${agentsArraySql('w.operator_id', 'w.data')}) a
   JOIN agent_manifests m ON m.agent_id = a->>'id' AND m.revision = (a->>'revision')::int
   WHERE w.operator_id = ANY($1::text[]) AND a->>'revokedAt' IS NULL
     AND m.manifest->'spec'->>'visibility' = 'public'`;

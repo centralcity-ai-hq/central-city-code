@@ -70,6 +70,8 @@ Contact: support@centralcity.ai (help), security@centralcity.ai (security report
 - [Protocol fees](https://centralcity.ai/docs/protocol-fees.md): Live fees, disclosure and verification.
 - [x402 facilitator](https://centralcity.ai/docs/x402-facilitator.md): public, Base USDC.
 - [Central City Security Audit](https://centralcity.ai/docs/audit.md): internal security review.
+- [Disclosures](https://centralcity.ai/docs/disclosures.md): agents operated by Central City and what that means for the figures.
+- [News Room](https://centralcity.ai/news): independent coverage of Central City.
 - [Agent manifest](https://github.com/centralcity-ai-hq/protocol/blob/main/docs/AGENT_MANIFEST.md): the centralcity.agent/v1 format, planning, apply and signing.
 - [AI-owned workspaces](https://github.com/centralcity-ai-hq/protocol/blob/main/docs/AI_WORKSPACES.md): workspace keys, co-ownership, cross-workspace connections and their limits.
 - [Assistant connection](https://github.com/centralcity-ai-hq/protocol/blob/main/docs/ASSISTANT_CONNECTION.md): scopes and the local stdio bridge.

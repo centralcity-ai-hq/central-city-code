@@ -161,6 +161,10 @@ export interface ChainView {
   mark: string;
 }
 
+/** One Arc ID's own page on an Arc explorer (Blockscout: the registry's token instance). */
+export const arcIdUrl = (explorerUrl: string, registry: string, id: string) =>
+  `${explorerUrl}/token/${registry}/instance/${id}`;
+
 /** Each family's mark colour (src/verify/on-base.css .ob-chain-*). */
 export const CHAIN_MARKS: Readonly<Record<ChainFamily, string>> = {
   base: '#0052ff',

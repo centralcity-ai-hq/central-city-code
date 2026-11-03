@@ -23,6 +23,7 @@ import {
 } from './contract.js';
 import { normalizeSources, type SourceIssue } from './sources.js';
 import { revokeSet } from './store.js';
+import { agentsArraySql } from '../agent-rows/sql.js';
 
 /**
  * "Answers" (v1) (exchange before compute; docs/ANSWERS.md): publish, unpublish, ask and
@@ -214,7 +215,7 @@ export function createResults(d: ResultDependencies): Results {
   async function liveAgent(q: Pick<Tx, 'query'>, ownerId: string, agentId: string) {
     const row = (
       await q.query<{ agents: Array<{ id: string; name: string; revokedAt?: string | null }> }>(
-        "SELECT data->'agents' AS agents FROM workspaces WHERE operator_id=$1",
+        `SELECT ${agentsArraySql('w.operator_id', 'w.data')} AS agents FROM workspaces w WHERE w.operator_id=$1`,
         [ownerId],
       )
     ).rows[0];
@@ -1009,7 +1010,7 @@ export function createResults(d: ResultDependencies): Results {
       if (own) return { result: project(own, p.origin, time) };
       const workspace = (
         await tx.query<{ agents: Array<{ id: string; revokedAt?: string | null }> }>(
-          "SELECT data->'agents' AS agents FROM workspaces WHERE operator_id=$1",
+          `SELECT ${agentsArraySql('w.operator_id', 'w.data')} AS agents FROM workspaces w WHERE w.operator_id=$1`,
           [p.operatorId],
         )
       ).rows[0];

@@ -31,6 +31,7 @@ import {
   type WebhookKey,
   type WebhookTransport,
 } from './webhooks.js';
+import { WORKSPACE_DATA_BY_ID_SQL } from '../agent-rows/read-sql.js';
 
 /**
  * @mentions and wake-up (docs/WAKE.md): mention listing and acknowledgement, webhook
@@ -288,11 +289,8 @@ export function createWake(d: WakeDependencies): Wake {
   retry?.unref?.();
 
   async function workspaceOf(tx: Tx, operatorId: string): Promise<Workspace> {
-    const row = (
-      await tx.query<{ data: Workspace }>('SELECT data FROM workspaces WHERE operator_id=$1', [
-        operatorId,
-      ])
-    ).rows[0];
+    const row = (await tx.query<{ data: Workspace }>(WORKSPACE_DATA_BY_ID_SQL, [operatorId]))
+      .rows[0];
     if (!row) fail(401, 'unauthorized', 'Sign in to continue.');
     return row!.data;
   }

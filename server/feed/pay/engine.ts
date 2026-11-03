@@ -221,6 +221,7 @@ import {
 } from '../../protocol/fees/cron.js';
 import { isReservedPayee, PROTOCOL_CHAIN_ID } from '../../../shared/protocol.js';
 import { markServiceVerified } from '../../protocol/fees/ledger.js';
+import { agentByIdSql } from '../../agent-rows/sql.js';
 import {
   screeningEnabled,
   type ScreeningDecision,
@@ -736,11 +737,18 @@ interface PayerRow {
   paused: boolean | null;
 }
 
-/** The wallet and only its own agent's record (never the workspace's whole agent list). */
+/**
+ * The wallet and only its own agent's record (never the workspace's whole agent list): its row in
+ * rows mode, the first match in the document in document mode (as before).
+ */
 const PAYER_SELECT = `SELECT w.agent_id, w.wallet_id, w.operator_id, w.owner_account_id, w.state,
   w.address, w.spender_address, w.spender_key_ref,
-  (SELECT a FROM jsonb_array_elements(CASE WHEN jsonb_typeof(ws.data->'agents') = 'array'
-     THEN ws.data->'agents' ELSE '[]'::jsonb END) a WHERE a->>'id' = w.agent_id LIMIT 1) AS agent,
+  ${agentByIdSql(
+    'ws.operator_id',
+    'w.agent_id',
+    `SELECT a FROM jsonb_array_elements(CASE WHEN jsonb_typeof(ws.data->'agents') = 'array'
+     THEN ws.data->'agents' ELSE '[]'::jsonb END) a WHERE a->>'id' = w.agent_id LIMIT 1`,
+  )} AS agent,
   (ws.data->>'paused')::boolean AS paused
   FROM base_wallets w JOIN workspaces ws ON ws.operator_id = w.operator_id`;
 
@@ -5731,8 +5739,8 @@ export const ARC_RECOVER_BUDGET_MS = 15_000;
  * engine and nothing else: no query, no read. With Arc on (CITY_ARC=1) a paying agent's chain is its
  * wallet's (agentChainOf), and no payment crosses chains: the seller's chain is its offer's wallet's,
  * and a different one is refused (other_chain) before anything is signed. An agent on an Arc network
- * that isn't complete yet is refused too, never moved to Base. The sponsored first purchase and the
- * offers' public address stay on Base (hostedForSponsor, router3PreSign: Base's engine).
+ * that isn't complete yet is refused too, never moved to Base. The offers' public address stays on
+ * Base; the sponsored first purchase takes its chain's helpers (sponsorOn).
  */
 export function createFeedPayEngine(deps: FeedPayEngineDeps) {
   const { db, env } = deps;
@@ -5790,6 +5798,22 @@ export function createFeedPayEngine(deps: FeedPayEngineDeps) {
 
   return {
     ...base,
+
+    /**
+     * The sponsored first purchase's engine helpers on one chain (sponsored.ts): Base's, or the
+     * Arc engine's while that Arc network is on and complete; null otherwise (nothing is sold).
+     */
+    sponsorOn(chainId: number) {
+      const of = (engine: ChainEngine) => ({
+        forSponsor: engine.hostedForSponsor,
+        run: engine.runHostedOffer,
+        preSign: engine.router3PreSign,
+      });
+      if (chainId === WALLET_CHAIN_ID) return of(base);
+      const arcId = arcIdNow();
+      const engine = arcId === null || chainId !== arcId ? null : arcEngine(arcId);
+      return engine ? of(engine) : null;
+    },
 
     /** With an agent, on its chain; without one, on the chain of the listing's seller. */
     async quote(accountId: string, serviceId: string, body: unknown) {

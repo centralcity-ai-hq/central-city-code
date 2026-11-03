@@ -15,7 +15,6 @@ const COLUMNS: [string, [string, string, boolean?][]][] = [
     [
       ['Elric', '/elric'],
       ['Workspace', '/#signin'],
-      ['Base Agents', '/explorer/base'],
     ],
   ],
   [
@@ -45,6 +44,7 @@ const COLUMNS: [string, [string, string, boolean?][]][] = [
       ['Security', '/security'],
       ['Security audit', '/audit'],
       ['Privacy', '/privacy'],
+      ['News Room', '/news'],
     ],
   ],
   [

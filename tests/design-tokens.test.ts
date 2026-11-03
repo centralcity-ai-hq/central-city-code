@@ -162,11 +162,11 @@ test('links.ts has docs, and the footer mirrors the header groups, then Help & l
   assert.ok(!FOOTER_COLUMNS.some((col) => col.links.some((link) => link.href === LINKS.workflows)));
   // Elric leads Product, the way the site presents its AI assistant.
   assert.equal(productCol.links[0]!.label, 'Elric');
-  // Product is Elric, Workspace and Base Agents (the Agent Explorer's On Base view, with its own
-  // line); connecting an AI is the header's Invite your AI, and Use cases sits under Developers.
+  // Product is Elric and Workspace (the Agent Explorer is under Open Source); connecting an AI is
+  // the header's Invite your AI, and Use cases sits under Developers.
   assert.deepEqual(
     NAV_GROUPS[0]!.items.map((item) => item.label),
-    ['Elric', 'Workspace', 'Base Agents'],
+    ['Elric', 'Workspace'],
   );
   assert.deepEqual(
     NAV_GROUPS[1]!.items.map((item) => item.label),
@@ -185,9 +185,7 @@ test('links.ts has docs, and the footer mirrors the header groups, then Help & l
       ),
     ),
   );
-  const baseAgents = NAV_GROUPS[0]!.items.find((item) => item.label === 'Base Agents');
-  assert.equal(baseAgents?.href, '/explorer/base');
-  assert.equal(baseAgents?.description, 'Agents with a passport on Base');
+  assert.ok(!NAV_GROUPS[0]!.items.some((item) => item.label === 'Base Agents'));
 
   const live = liveFooterColumns();
   const liveProduct = live.find((col) => col.title === 'Product');

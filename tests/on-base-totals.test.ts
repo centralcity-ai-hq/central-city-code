@@ -57,8 +57,21 @@ test('a first answer gives every number, with the read lag and when it arrived',
     new24h: 37,
     finalizingNow: 1,
     ratedAgents: 412,
-    read: { block: 52_431_170, lagMs: 2_000, fetchedAt: NOW + 300 },
+    read: { block: 52_431_170, lagMs: 2_300, fetchedAt: NOW + 300 },
   });
+});
+
+test('an edge copy minutes old shows its real age, and an older one moves no number back', () => {
+  const minutes = 6 * 60_000;
+  const copy = totals({ readAt: NOW - minutes, servedAt: NOW - minutes });
+  assert.equal(mergeTotals(null, copy, NOW).read?.lagMs, minutes);
+  const known = mergeTotals(null, totals({ onBase: 1_300 }), NOW);
+  const older = totals({ onBase: 1_200, readAtBlock: 52_431_000 });
+  assert.equal(mergeTotals(known, older, NOW + 1_000), known);
+  // A search answer still gives its counts, without its older block.
+  const searched = mergeTotals(known, older, NOW + 1_000, true);
+  assert.equal(searched.onBase, 1_200);
+  assert.deepEqual(searched.read, known.read);
 });
 
 test('a fresh answer replaces the counts; one it could not give keeps the last known', () => {

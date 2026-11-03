@@ -21,7 +21,10 @@
 import type { FeedRequestInvitation } from './feed.js';
 
 export const DIRECTORY_PATHS = {
-  /** GET ?q=&min_rating=&sort=&before= → DirectoryPage. Public (signed out too), rate limited. */
+  /**
+   * GET ?q=&min_rating=&sort=&before=&chain= → DirectoryPage. Public (signed out too), rate limited.
+   * chain is base (the default) or arc; arc answers 404 chain_not_live while Arc is off here.
+   */
   search: '/api/public/directory',
   /**
    * GET → DirectorySettings; PATCH Partial<DirectorySettings> → DirectorySettings. The agent's
@@ -105,6 +108,10 @@ export const DIRECTORY_LIMITS = {
 export const DIRECTORY_SORTS = ['best_rated', 'newest', 'most_paid'] as const;
 export type DirectorySort = (typeof DIRECTORY_SORTS)[number];
 
+/** The chains the search can list. Read apart from DirectoryQuery: readDirectoryChain. */
+export const DIRECTORY_CHAINS = ['base', 'arc'] as const;
+export type DirectoryChain = (typeof DIRECTORY_CHAINS)[number];
+
 export interface DirectoryQuery {
   q: string;
   /** 0 = any; else the minimum Central City score (1–5). */
@@ -130,6 +137,10 @@ export interface DirectoryCard {
   invitable: boolean;
   /** Last activity, ms since epoch, rounded to the hour; null when unknown. */
   activeAt: number | null;
+  /** The chain the ID is on. Only on Arc's cards: a Base answer has no such field. */
+  chain?: { slug: 'arc'; chainId: number; name: string };
+  /** The ID's own page on its chain's explorer. Only on Arc's cards, with `chain`. */
+  explorerUrl?: string;
 }
 
 export interface DirectoryPage {
@@ -261,6 +272,7 @@ export const DIRECTORY_ERRORS = {
   room_closed: 409,
   room_full: 409,
   invitation_closed: 409,
+  chain_not_live: 404,
 } as const;
 export type DirectoryErrorCode = keyof typeof DIRECTORY_ERRORS;
 
@@ -272,18 +284,19 @@ export const DIRECTORY_QUERY_KEYS: ReadonlySet<string> = new Set([
   'min_rating',
   'sort',
   'before',
+  'chain',
 ]);
 
 /**
  * Why the search refuses a query before any work, or null: a key it does not take, a repeated key,
- * or a min_rating, sort or before readDirectoryQuery would not read (the answer would be the same
+ * or a min_rating, sort, before or chain the search would not read (the answer would be the same
  * as without it, so a made-up value per request would skip the edge cache). An empty value is the
  * same as none. q is a search. The route also checks that before is a cursor it wrote.
  */
 export function directoryQueryRefusal(params: Record<string, unknown>): string | null {
   const keys = Object.keys(params);
   if (keys.some((key) => !DIRECTORY_QUERY_KEYS.has(key)))
-    return 'Use only q, min_rating, sort and before.';
+    return 'Use only q, min_rating, sort, before and chain.';
   if (keys.some((key) => typeof params[key] !== 'string')) return 'Give each key once.';
   const given = (key: string) => (params[key] === undefined ? '' : (params[key] as string));
   if (given('min_rating') && !/^[1-5]$/.test(given('min_rating')))
@@ -293,7 +306,15 @@ export function directoryQueryRefusal(params: Record<string, unknown>): string |
     return `sort must be one of ${DIRECTORY_SORTS.join(', ')}.`;
   if (given('before') && !CURSOR.test(given('before')))
     return 'before must be the next of an earlier page.';
+  const chain = given('chain');
+  if (chain && !DIRECTORY_CHAINS.some((value) => value === chain))
+    return `chain must be one of ${DIRECTORY_CHAINS.join(', ')}.`;
   return null;
+}
+
+/** The chain a search asks for: Base unless it says arc. */
+export function readDirectoryChain(params: Record<string, unknown>): DirectoryChain {
+  return params.chain === 'arc' ? 'arc' : 'base';
 }
 
 /**
@@ -324,7 +345,7 @@ export function readDirectoryQuery(params: Record<string, unknown>): DirectoryQu
 /**
  * The one query string ('?…', or '' for none) the search answers a query under: the keys in the
  * browser's order (directoryUrl), each value as readDirectoryQuery reads it (q trimmed and its
- * spaces collapsed), the default sort, a min_rating of 0 and empty values left out, written as
+ * spaces collapsed), the default sort and chain, a min_rating of 0 and empty values left out, written as
  * URLSearchParams writes it. The route sends any other spelling on to this one (307), so each
  * answer has one edge cache entry. For a query directoryQueryRefusal passed.
  */
@@ -336,6 +357,7 @@ export function canonicalDirectorySearch(params: Record<string, unknown>): strin
   if (read.minRating) search.set('min_rating', String(read.minRating));
   if (read.sort !== 'best_rated') search.set('sort', read.sort);
   if (read.before) search.set('before', read.before);
+  if (readDirectoryChain(params) !== 'base') search.set('chain', readDirectoryChain(params));
   const text = search.toString();
   return text ? `?${text}` : '';
 }

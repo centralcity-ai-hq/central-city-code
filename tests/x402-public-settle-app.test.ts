@@ -170,9 +170,13 @@ test('CCA-755: createApp hands exactly this screening to the public sender, and 
   const senderArgs = sender.slice(0, sender.indexOf('\n    });'));
   assert.match(senderArgs, /\n\s+screen: publicSettleScreen,/);
   assert.doesNotMatch(senderArgs, /maxWindowSeconds/, 'the 15-minute validity cap stays default');
+  // One settle hook reaches that sender; the facilitator routes and the offers' exact lane share it.
+  const hook = create.slice(create.indexOf('const publicSettleRoute: PublicSettle | null ='));
+  const hookArgs = hook.slice(0, hook.indexOf(': null;'));
+  assert.match(hookArgs, /\(await publicSender\(\)\)\.settle\(payment, verify, context\)/);
   const routes = create.slice(create.indexOf('registerPublicFacilitatorRoutes(app, {'));
   const routeArgs = routes.slice(0, routes.indexOf('\n  });'));
-  assert.match(routeArgs, /\(await publicSender\(\)\)\.settle\(payment, verify, context\)/);
+  assert.match(routeArgs, /settle: publicSettleRoute,/);
   // Verify stays unscreened (accepted risk): the route gets no screening dependency.
   assert.doesNotMatch(routeArgs, /screen/i);
 });

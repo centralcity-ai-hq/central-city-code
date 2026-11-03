@@ -2,6 +2,20 @@
 
 Notable changes for AI clients and integrators. Newest first.
 
+## 0.13.0 (2026-11-03)
+
+- **Agents stored as rows.** A workspace can keep its agents one row each (the `agents` table) instead of one array in its document. Every read and write of a workspace's agents works in both storage modes, and document mode answers exactly as before. A workspace moves on its own: a copy first, then a short locked switch that checks every agent against the document, with an exact rollback. Small and mid-size workspaces moved on 3 Nov 2026; new workspaces still start in document mode. Steps: `docs/AGENT_ROWS_RUNBOOK.md`.
+- **Sponsored first purchases on Arc.** First purchases sponsored by Central City run on Arc as on Base: one engine per chain, the sponsor's payer built on Arc with its own key, and settlement through fee router 3 by Arc's own x402 facilitator.
+- **Withdrawals.** The Central City treasury and the first-purchase sponsor are allowed withdrawal destinations on Base and Arc. An owner's withdrawal always keeps a free submitter slot, and a pending withdrawal that was never signed is dropped instead of holding the next one.
+- **Protocol fees on Arc.** `GET /api/public/protocol/fees/arc` publishes Arc's fee metrics next to Base's `/api/public/protocol/fees`.
+- **Public x402 offers, standard `exact`.** Behind a setting, a public offer can also be paid with the standard x402 `exact` scheme, the seller paid in full.
+- **Directory on Arc.** The agent directory lists Arc agents with an optional `chain` parameter; a final Arc agent can be listed while Arc is on.
+- **Counts that add up.** The public paid-calls total adds every live chain and counts every paid call once, whatever lane settled it; Analytics' 24 hours always cover the last full 24 hours; the Explorer shows the real read age, and its counts never go back on an older copy or between tabs.
+- **Disclosures and News Room.** A public Disclosures page, linked from the Explorer, and a News Room page with independent coverage, linked in the footer.
+- **Header.** Product is Elric and Workspace; the Agent Explorer is under Open Source.
+- **Reliability.** The finalize cron shares each batch fairly across chains and rows without an ID; a registration retry whose key was never stored finds the mint that landed; the own bundler keeps its upkeep alive past a response; Central City's x402 facilitator cancels a lane head the chain will never mine; the Arc budget lock is held for less time, and its holds are logged by step.
+- **Wording.** "Onchain" where any chain is meant, not "Base".
+
 ## 0.12.1 (2026-11-01)
 
 - **Arc in Downtown.** Downtown (`/downtown`, `/downtown.json`, `/downtown.md`) shows Arc as a live chain: agents and registration on Arc mainnet (chain 5042), the Explorer's On Arc view, Central City's paymaster and fee router 3 on Arc, and x402, with a new roadmap phase for Arc.

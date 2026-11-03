@@ -5,6 +5,7 @@ import { assertConversationCaps, registerElricConversations } from './conversati
 import type { Database } from '../database.js';
 import { AGENT_CHAT_KEY_PREFIX, closePrivateRoom, createPrivateRoom } from '../rooms/private.js';
 import { RoomError } from '../rooms/service.js';
+import { agentsArraySql } from '../agent-rows/sql.js';
 
 /**
  * The dashboard chat with Elric (docs/ELRIC.md "Dashboard chat"). A chat is a private room
@@ -58,7 +59,7 @@ async function closeEndedChats(db: Q, ownerId: string, time: number) {
       `SELECT e.chat_room_id FROM elric_agents e JOIN rooms r ON r.id=e.chat_room_id
         WHERE e.owner_id=$1 AND e.chat_room_id IS NOT NULL AND r.closed_at IS NULL
           AND (e.status='revoked' OR NOT EXISTS (
-            SELECT 1 FROM workspaces w, jsonb_array_elements(w.data->'agents') a
+            SELECT 1 FROM workspaces w, jsonb_array_elements(${agentsArraySql('w.operator_id', 'w.data')}) a
              WHERE w.operator_id=e.owner_id AND a->>'id'=e.agent_id AND (a->>'revokedAt') IS NULL))`,
       [ownerId],
     )

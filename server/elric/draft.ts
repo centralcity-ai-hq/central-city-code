@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Database } from '../database.js';
 import { registerMigration, type Migration } from '../migrations.js';
+import { agentsArraySql } from '../agent-rows/sql.js';
 
 /**
  * Streamed Elric replies (docs/ELRIC.md). While a run answers, the text of the current model step
@@ -127,7 +128,7 @@ export async function roomDrafts(
       `SELECT min(m.visible_from_seq) AS from_seq FROM room_members m JOIN rooms r ON r.id=m.room_id
         WHERE m.room_id=$1 AND m.owner_id=$2 AND m.removed_at IS NULL AND r.deleted_at IS NULL
           AND (m.kind='person' OR EXISTS (
-            SELECT 1 FROM workspaces w CROSS JOIN LATERAL jsonb_array_elements(w.data->'agents') a
+            SELECT 1 FROM workspaces w CROSS JOIN LATERAL jsonb_array_elements(${agentsArraySql('w.operator_id', 'w.data')}) a
              WHERE w.operator_id=m.owner_id AND a->>'id'=m.agent_id
                AND COALESCE(a->>'revokedAt', '') = ''))`,
       [roomId, operatorId],

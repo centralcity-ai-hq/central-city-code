@@ -144,6 +144,55 @@ export function createPaidCallsReader(deps: {
   };
 }
 
+/** Rows of several chains as one: totals and value added, block times merged newest first. */
+function combineSnapshots(rows: readonly PaidCallsSnapshot[]): PaidCallsSnapshot {
+  const values = rows.map((row) => row.valueRaw);
+  return {
+    total: rows.reduce((sum, row) => sum + row.total, 0),
+    recent: rows.flatMap((row) => row.recent).sort((a, b) => b - a),
+    // Unknown on any chain: left out, never a value that reads lower than it is.
+    valueRaw: values.every((value) => value)
+      ? values.reduce((sum, value) => sum + BigInt(value!), 0n).toString()
+      : null,
+    dbNowMs: rows[0]!.dbNowMs,
+    readAt: rows[0]!.readAt,
+  };
+}
+
+/**
+ * The public count over every live chain: `primary`'s row plus the others' (a chain with no row
+ * yet adds nothing). A chain whose read fails falls back to its last good row; with none the read
+ * rejects, so the stats route serves its own last good answer rather than a lower number.
+ */
+export function combinedPaidCallsReader(
+  primary: PaidCallsReader,
+  others: readonly PaidCallsReader[],
+): PaidCallsReader {
+  if (others.length === 0) return primary;
+  const known = (rows: ReadonlyArray<PaidCallsSnapshot | null>) => {
+    const present = rows.filter((row): row is PaidCallsSnapshot => row !== null);
+    return rows[0] ? combineSnapshots(present) : null;
+  };
+  return {
+    async read() {
+      const main = await primary.read();
+      const rest = await Promise.all(
+        others.map(async (reader) => {
+          try {
+            return await reader.read();
+          } catch (error) {
+            const last = reader.lastGood?.() ?? null;
+            if (!last) throw error;
+            return last;
+          }
+        }),
+      );
+      return known([main, ...rest]);
+    },
+    lastGood: () => known([primary, ...others].map((reader) => reader.lastGood?.() ?? null)),
+  };
+}
+
 /**
  * The public field, worked out when the response is built (`now`, this server's clock), so the
  * time the row spent in this server's memory is part of every age:
@@ -200,7 +249,8 @@ export const PAID_CALLS_CHECK_WITH_SPONSORED_SQL = `SELECT
           FROM feed_pay_calls WHERE chain_id = $1 AND payment_state = 'settled') s,
        (SELECT count(*) AS scan, COALESCE(sum(gross_raw), 0) AS scan_value
           FROM feed_pay_sponsored_calls
-         WHERE state IN ('paid','delivered','paid_no_result') AND tx_hash IS NOT NULL) p`;
+         WHERE state IN ('paid','delivered','paid_no_result') AND tx_hash IS NOT NULL
+           AND chain_id = $1) p`;
 
 /**
  * The same with the counted public calls too (migration 356, server/feed/pay/public-calls-schema.ts:
@@ -224,7 +274,8 @@ export const PAID_CALLS_CHECK_WITH_SPONSORED_AND_PUBLIC_SQL = `SELECT
           FROM feed_pay_calls WHERE chain_id = $1 AND payment_state = 'settled') s,
        (SELECT count(*) AS scan, COALESCE(sum(gross_raw), 0) AS scan_value
           FROM feed_pay_sponsored_calls
-         WHERE state IN ('paid','delivered','paid_no_result') AND tx_hash IS NOT NULL) p,
+         WHERE state IN ('paid','delivered','paid_no_result') AND tx_hash IS NOT NULL
+           AND chain_id = $1) p,
        ${publicCallsScan}`;
 
 /**
@@ -311,14 +362,15 @@ export async function checkPaidCalls(
         )
       ).rows[0];
       if (!present?.ok) return null;
-      // Sponsored first purchases and public calls count in their chain's row (252, 356).
+      // Sponsored first purchases count in their own chain's row (252, 359); public calls in Base's
+      // (356).
       const here = chainId === PAID_CALLS_SPONSORED_CHAIN_ID;
       const checkSql =
         present.sponsored && present.public && here
           ? PAID_CALLS_CHECK_WITH_SPONSORED_AND_PUBLIC_SQL
           : present.public && here
             ? PAID_CALLS_CHECK_WITH_PUBLIC_SQL
-            : present.sponsored && here
+            : present.sponsored
               ? PAID_CALLS_CHECK_WITH_SPONSORED_SQL
               : PAID_CALLS_CHECK_SQL;
       const locked = (await bounded<{ ok: boolean }>(tx, PAID_CALLS_CHECK_LOCK_SQL, [chainId]))

@@ -95,6 +95,53 @@
   display: none;
 }
 
+.af-chains {
+  display: flex;
+  gap: 6px;
+  padding: 10px 20px 0;
+}
+.af-chain {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.af-chain[aria-pressed='true'] {
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+}
+.af-chain .ob-chain {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.af-chain .ob-chain-base {
+  background: #0052ff;
+}
+.af-chain .ob-chain-arc {
+  background: #0b0b0f;
+  box-shadow: 0 0 0 1px var(--border);
+}
+.af-chain-id {
+  display: inline-block;
+  margin: -6px 0 4px 12px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.af-chain-id:hover {
+  color: var(--text-primary);
+}
+
 .af-caption {
   margin: 0;
   padding: 12px 20px 0;

@@ -119,6 +119,9 @@ export const FAIL_CLOSED_PREFIXES: readonly string[] = [
   'x402-offer',
   // Its gas budget and simulations (server/feed/offers/public-pay.ts): an outage refuses new payments.
   'x402-offer-pay',
+  // The exact lane's claim on each signed authorization and the per-payer admission
+  // (server/feed/offers/public-exact.ts): an outage refuses exact payments, never runs a kind twice.
+  'x402-offer-exact',
   // The Agent Explorer's Service calls searches, one bucket for every client together
   // (server/base/explorer/calls.ts): searches scan the payment table, so they share one budget.
   'explorer-calls-search',

@@ -63,7 +63,7 @@ CREATE TABLE feed_pay_calls (call_id text PRIMARY KEY, chain_id integer NOT NULL
 CREATE TABLE feed_services (id text PRIMARY KEY, title text NOT NULL);
 CREATE TABLE feed_pay_sponsored_calls (call_id text PRIMARY KEY, agent_id text NOT NULL, service_id text NOT NULL,
   pay_to text NOT NULL, gross_raw numeric(78,0) NOT NULL, fee_raw numeric(78,0) NOT NULL, state text NOT NULL,
-  tx_hash text, updated_at bigint NOT NULL);
+  tx_hash text, updated_at bigint NOT NULL, chain_id integer NOT NULL DEFAULT 8453);
 CREATE TABLE protocol_fee_events (chain_id integer NOT NULL, tx_hash text NOT NULL, log_index integer NOT NULL,
   emitter text NOT NULL, source text NOT NULL, block_time bigint NOT NULL, payer text NOT NULL, payee text NOT NULL,
   fee numeric(78,0) NOT NULL, gross numeric(78,0) NOT NULL, service_verified boolean NOT NULL,
@@ -234,7 +234,9 @@ test('range parsing: the six ranges, a default, nothing else', () => {
   assert.equal(rangeStep('12m'), 'week');
   for (const bad of ['', '1y', '24H', ['7d'], 7, 'all ', null])
     assert.equal(parseDashboardRange(bad), null);
-  assert.equal(rangeStart('24h', NOW), Date.UTC(2026, 9, 29, 15));
+  assert.equal(rangeStart('24h', NOW), Date.UTC(2026, 9, 29, 14));
+  // Never less than the last 24 hours, whatever the minute.
+  assert.ok(NOW - rangeStart('24h', NOW) >= 24 * 3_600_000);
   assert.equal(rangeStart('7d', NOW), Date.UTC(2026, 9, 24));
   assert.equal(rangeStart('all', NOW), 0);
   assert.equal(priceBucket(10_000n), 'p001');
@@ -314,7 +316,7 @@ test('rollup math: live, backfill and snapshots agree with the seeded sources', 
     ],
   );
   const day24 = await snap(db, '24h', NOW, true);
-  assert.equal(day24.series.length, 24);
+  assert.equal(day24.series.length, 25);
   assert.equal(day24.kpis.calls, 5);
   assert.equal(day24.hour_of_day[14], 3);
   const all = await snap(db, 'all', NOW, true);

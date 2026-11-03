@@ -15,7 +15,8 @@ import { LEGACY, PERMANENT } from './agents-array-readers.baseline.js';
  * - a new direct reader fails (use the read functions instead);
  * - a reader moved to the functions fails until its baseline count is lowered, so the count only
  *   goes down;
- * - only server/agent-rows/schema.ts writes the agent rows tables.
+ * - only server/agent-rows/schema.ts, the rows-mode writer (writer-schema.ts) and the mover
+ *   (mover.ts) write the agent rows tables.
  *
  * PERMANENT entries are migrations and the backup (they read documents on purpose); LEGACY entries
  * are the readers still to move.
@@ -34,8 +35,12 @@ export const RULES = {
 } as const;
 export type Rule = keyof typeof RULES;
 
-/** The only file that writes the agent rows tables. */
-const STORAGE_WRITER = 'server/agent-rows/schema.ts';
+/** The only files that write the agent rows tables. */
+const STORAGE_WRITERS = [
+  'server/agent-rows/schema.ts',
+  'server/agent-rows/writer-schema.ts',
+  'server/agent-rows/mover.ts',
+];
 const SKIPPED_DIRS = new Set(['node_modules', 'dist', 'tests']);
 
 function walk(dir: string, accept: (path: string) => boolean, out: string[]) {
@@ -103,12 +108,12 @@ test('the baselines name existing files, known rules and positive counts, once e
 
 test('only the agent rows schema writes the agent rows tables', () => {
   const writes = scan().filter(
-    (hit) => hit.rule === 'storageWrites' && hit.file !== STORAGE_WRITER,
+    (hit) => hit.rule === 'storageWrites' && !STORAGE_WRITERS.includes(hit.file),
   );
   assert.deepEqual(
     writes.map((hit) => `${hit.file}:${hit.line}  ${hit.snippet}`),
     [],
-    `Only ${STORAGE_WRITER} writes agents, workspace_storage, agent_rows_precopy and agent_rows_control.`,
+    `Only ${STORAGE_WRITERS.join(' and ')} write agents, workspace_storage, agent_rows_precopy and agent_rows_control.`,
   );
 });
 

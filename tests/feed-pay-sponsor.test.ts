@@ -8,7 +8,11 @@ import {
   FEED_PAY_SPONSOR_FLEET_CEILING_40_SQL,
 } from '../server/feed/pay/sponsor-ceiling-schema.js';
 import { FEED_PAY_SPONSOR_SQL } from '../server/feed/pay/sponsor-schema.js';
-import { FEED_PAY_SPONSORED_SQL } from '../server/feed/pay/sponsored.js';
+import { FEED_PAY_SPONSORED_SQL as SPONSORED_250_SQL } from '../server/feed/pay/sponsored.js';
+import { FEED_PAY_SPONSORED_CHAIN_COLUMN_SQL } from '../server/feed/pay/sponsored-count-schema.js';
+
+/** The sponsored calls table as migrations 250 and 359 leave it. */
+const FEED_PAY_SPONSORED_SQL = `${SPONSORED_250_SQL}\n${FEED_PAY_SPONSORED_CHAIN_COLUMN_SQL}`;
 import {
   createSponsorCredits,
   sponsorConfig,

@@ -1,7 +1,8 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import { ArrowRight, LoaderCircle, Search, Star } from 'lucide-react';
-import type { DirectoryCard } from '../../shared/directory';
+import type { DirectoryCard, DirectoryChain } from '../../shared/directory';
 import { ON_BASE_QUERY_MAX } from '../../shared/base/on-base';
+import { arcEnabled, explorerChainOf } from '../explorer/chain';
 import { findAgents, standing } from '../verify/directoryData';
 import { initial, passportPath } from '../verify/onBaseData';
 import { finderEnterHref } from './agentFinderEnter';
@@ -12,7 +13,8 @@ import './agent-finder.css';
  * The header's finder (Operation Directory D1, docs/design/directory.html): the search icon or
  * Cmd/Ctrl+K opens it on any public page. It searches the Base Agents directory by name, skill or
  * Base ID; Enter (or a press) opens the agent's passport. While the directory has no match (it is
- * opt-in and starts empty) it searches every Central City agent on Base instead.
+ * opt-in and starts empty) it searches every Central City agent on Base instead. While the server
+ * has Arc on (arcEnabled, the Arc pages' probe), a Base / Arc switch does the same on Arc.
  */
 
 /** Rows shown at most; the page has the rest. */
@@ -35,6 +37,8 @@ export default function AgentFinder({ onClose }: { onClose: () => void }) {
   const [text, setText] = useState('');
   const [state, setState] = useState<State>({ phase: 'loading' });
   const [active, setActive] = useState(0);
+  const [chain, setChain] = useState<DirectoryChain>('base');
+  const [arcLive, setArcLive] = useState(false);
   const input = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLUListElement>(null);
   const listId = useId();
@@ -58,10 +62,20 @@ export default function AgentFinder({ onClose }: { onClose: () => void }) {
   }, [onClose]);
 
   useEffect(() => {
+    let live = true;
+    arcEnabled().then((on) => {
+      if (live) setArcLive(on);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  useEffect(() => {
     const controller = new AbortController();
     const timer = window.setTimeout(
       () => {
-        findAgents(text, controller.signal).then(
+        findAgents(text, controller.signal, chain).then(
           (found) => {
             setActive(0);
             setState({
@@ -81,10 +95,19 @@ export default function AgentFinder({ onClose }: { onClose: () => void }) {
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [text]);
+  }, [text, chain]);
 
   const agents = state.phase === 'ready' ? state.agents : [];
-  const pageHref = '/explorer/base';
+  const { name: chainName, home: pageHref } = explorerChainOf(chain);
+
+  /** Another chain's list: the old one leaves at once, and typing goes on where it was. */
+  function choose(next: DirectoryChain) {
+    if (next !== chain) {
+      setChain(next);
+      setState({ phase: 'loading' });
+    }
+    input.current?.focus();
+  }
 
   function keys(event: KeyboardEvent<HTMLInputElement>) {
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -117,8 +140,8 @@ export default function AgentFinder({ onClose }: { onClose: () => void }) {
             aria-expanded={agents.length > 0}
             aria-controls={listId}
             aria-activedescendant={agents[active] ? `${listId}-${active}` : undefined}
-            aria-label="Find an agent by name, skill or Base ID"
-            placeholder="Name, skill or Base ID"
+            aria-label={`Find an agent by name, skill or ${chainName} ID`}
+            placeholder={`Name, skill or ${chainName} ID`}
             maxLength={ON_BASE_QUERY_MAX}
             value={text}
             onChange={(event) => {
@@ -139,8 +162,28 @@ export default function AgentFinder({ onClose }: { onClose: () => void }) {
           </button>
         </div>
 
+        {arcLive ? (
+          <div className="af-chains" role="group" aria-label="Chain">
+            {(['base', 'arc'] as const).map((slug) => (
+              <button
+                key={slug}
+                type="button"
+                className="af-chain"
+                aria-pressed={chain === slug}
+                onClick={() => choose(slug)}
+              >
+                <span className={`ob-chain ob-chain-${slug}`} aria-hidden="true" />
+                {explorerChainOf(slug).name}
+              </button>
+            ))}
+          </div>
+        ) : null}
+
         {agents.length > 0 && state.phase === 'ready' && state.source === 'registry' ? (
-          <p className="af-caption">All agents on Base{state.note ? ` · ${state.note}` : ''}</p>
+          <p className="af-caption">
+            All agents on {chainName}
+            {state.note ? ` · ${state.note}` : ''}
+          </p>
         ) : null}
         {agents.length > 0 ? (
           <ul ref={list} id={listId} className="af-list" role="listbox" aria-label="Agents">
@@ -169,7 +212,9 @@ export default function AgentFinder({ onClose }: { onClose: () => void }) {
                     <span className="af-text">
                       <b>{card.name}</b>
                       <span>
-                        {card.description || card.skills.join(', ') || `Base ID ${card.baseId}`}
+                        {card.description ||
+                          card.skills.join(', ') ||
+                          `${chainName} ID ${card.baseId}`}
                       </span>
                     </span>
                     <span className="af-standing">
@@ -183,6 +228,17 @@ export default function AgentFinder({ onClose }: { onClose: () => void }) {
                       {!stars && !paid ? <span>New</span> : null}
                     </span>
                   </a>
+                  {card.chain && card.explorerUrl ? (
+                    <a
+                      href={card.explorerUrl}
+                      className="af-chain-id"
+                      target="_blank"
+                      rel="noreferrer"
+                      tabIndex={-1}
+                    >
+                      {chainName} ID {card.baseId}
+                    </a>
+                  ) : null}
                 </li>
               );
             })}
@@ -194,8 +250,8 @@ export default function AgentFinder({ onClose }: { onClose: () => void }) {
               : state.note
                 ? state.note
                 : text.trim()
-                  ? `No agent on Base matches “${text.trim()}”.`
-                  : 'No agents on Base yet.'}
+                  ? `No agent on ${chainName} matches “${text.trim()}”.`
+                  : `No agents on ${chainName} yet.`}
           </p>
         )}
 
@@ -205,7 +261,7 @@ export default function AgentFinder({ onClose }: { onClose: () => void }) {
             <kbd>↓</kbd> choose <kbd>↵</kbd> open passport
           </span>
           <a href={pageHref} className="af-all">
-            All Base Agents <ArrowRight size={13} aria-hidden="true" />
+            All {chainName} Agents <ArrowRight size={13} aria-hidden="true" />
           </a>
         </div>
       </div>

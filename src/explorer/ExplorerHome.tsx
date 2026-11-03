@@ -51,6 +51,7 @@ import {
   type RatingEvents,
   type X3,
 } from './x3Client';
+import { DisclosureLine } from './proofParts';
 import '../verify/on-base.css';
 import './explorer.css';
 
@@ -599,6 +600,7 @@ export function ExplorerHome() {
             />
           ))}
         </section>
+        <DisclosureLine />
 
         <section aria-label="Proof" className="xp-proofline">
           <div className="xp-proofbar">

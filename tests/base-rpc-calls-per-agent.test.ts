@@ -32,6 +32,7 @@ import {
   tally,
   type CallRecord,
 } from './base-fake-rpc-node.js';
+import { AGENT_ROWS_SQL } from '../server/agent-rows/schema.js';
 
 /*
  * What one agent's Base registration costs on the shared CDP endpoint, end to end: the real
@@ -106,6 +107,7 @@ async function simulate(t: TestContext, scenario: Scenario = {}): Promise<Run> {
   await pg.exec(`CREATE TABLE operators (id text PRIMARY KEY, kind text NOT NULL);
     INSERT INTO operators VALUES ('p-1', 'owner');
     CREATE TABLE workspaces (operator_id text PRIMARY KEY, data jsonb NOT NULL);
+    ${AGENT_ROWS_SQL}
     CREATE TABLE agent_manifests (agent_id text, operator_id text, revision integer, manifest jsonb);
     INSERT INTO workspaces VALUES ('p-1', '{"agents":[{"id":"${AGENT}","revision":1}]}');
     INSERT INTO agent_manifests VALUES ('${AGENT}', 'p-1', 1, '{"spec":{"visibility":"public"}}');`);

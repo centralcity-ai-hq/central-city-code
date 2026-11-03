@@ -14,6 +14,7 @@ import {
   type StoredAgent,
   type Workspace,
 } from '../model.js';
+import { agentsArraySql } from '../agent-rows/sql.js';
 
 /**
  * Cross-owner connections (docs/AI_WORKSPACES.md). An agent of one owner may message an agent of another owner, and request
@@ -240,7 +241,7 @@ const INBOUND_FROM_SQL = `FROM cross_connections c
         JOIN workspaces w ON w.operator_id=c.from_owner_id
         WHERE c.to_owner_id=$1 AND c.status='approved'
         AND (w.data->>'paused')::boolean IS NOT TRUE
-        AND EXISTS (SELECT 1 FROM jsonb_array_elements(w.data->'agents') a
+        AND EXISTS (SELECT 1 FROM jsonb_array_elements(${agentsArraySql('w.operator_id', 'w.data')}) a
           WHERE a->>'id'=c.from_agent_id AND a->>'revokedAt' IS NULL AND a->>'pausedAt' IS NULL)`;
 /** loadInbound's rows as one JSON array, for reading them in the same statement as the document. */
 export const INBOUND_JSON_SQL = `(SELECT COALESCE(json_agg(json_build_object('from_agent_id',
@@ -282,7 +283,7 @@ export function createConnections(d: ConnectionDependencies): Connections {
     const rows = (
       await tx.query<{ id: string; name: string; kind: string; agents: Record<string, string> }>(
         `SELECT o.id, o.name, o.kind,
-          COALESCE((SELECT jsonb_object_agg(a->>'id', a->>'name') FROM jsonb_array_elements(w.data->'agents') a), '{}'::jsonb) AS agents
+          COALESCE((SELECT jsonb_object_agg(a->>'id', a->>'name') FROM jsonb_array_elements(${agentsArraySql('w.operator_id', 'w.data')}) a), '{}'::jsonb) AS agents
           FROM operators o JOIN workspaces w ON w.operator_id=o.id WHERE o.id = ANY($1::text[])`,
         [ids],
       )
@@ -447,7 +448,7 @@ export function createConnections(d: ConnectionDependencies): Connections {
         `SELECT w.operator_id, o.kind, a AS agent, m.manifest->'spec'->>'visibility' AS visibility
           FROM agent_manifests m JOIN workspaces w ON w.operator_id=m.operator_id
           JOIN operators o ON o.id=w.operator_id
-          CROSS JOIN LATERAL jsonb_array_elements(w.data->'agents') a
+          CROSS JOIN LATERAL jsonb_array_elements(${agentsArraySql('w.operator_id', 'w.data')}) a
           WHERE m.agent_id=$1 AND a->>'id'=$1 AND (a->>'revision')::integer=m.revision`,
         [agentId],
       )

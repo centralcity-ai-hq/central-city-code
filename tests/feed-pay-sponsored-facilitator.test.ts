@@ -9,7 +9,14 @@ import { feeRef } from '../server/protocol/fees/fee-call.js';
 import { FEED_PAY_SPONSOR_SQL } from '../server/feed/pay/sponsor-schema.js';
 import { createSponsorCredits } from '../server/feed/pay/sponsor.js';
 import { createSponsorSigner, pgSponsorReservations } from '../server/feed/pay/sponsor-signer.js';
-import { createSponsoredCalls, FEED_PAY_SPONSORED_SQL } from '../server/feed/pay/sponsored.js';
+import {
+  createSponsoredCalls,
+  FEED_PAY_SPONSORED_SQL as SPONSORED_250_SQL,
+} from '../server/feed/pay/sponsored.js';
+import { FEED_PAY_SPONSORED_CHAIN_COLUMN_SQL } from '../server/feed/pay/sponsored-count-schema.js';
+
+/** The sponsored calls table as migrations 250 and 359 leave it. */
+const FEED_PAY_SPONSORED_SQL = `${SPONSORED_250_SQL}\n${FEED_PAY_SPONSORED_CHAIN_COLUMN_SQL}`;
 import { ROUTER, setup } from './helpers/x402-fake-base.js';
 
 /*

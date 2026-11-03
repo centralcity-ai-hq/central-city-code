@@ -85,13 +85,15 @@ export const RANGE_DAYS: Record<Exclude<DashboardRange, '24h' | 'all'>, number> 
 };
 
 /**
- * Where a range starts (epoch ms, inclusive) at `now`: 24h is the current hour and the 23 before;
- * the day ranges start at 00:00 UTC of the first day; all starts at 0.
+ * Where a range starts (epoch ms, inclusive) at `now`: 24h is the current hour and the 24 before,
+ * so it always covers the last full 24 hours (hourly buckets cannot stop at a rolling edge; the
+ * Explorer's "Last 24 h" is rolling); the day ranges start at 00:00 UTC of the first day; all
+ * starts at 0.
  */
 export function rangeStart(range: DashboardRange, now: number): number {
   const hour = Math.floor(now / HOUR_MS) * HOUR_MS;
   const day = Math.floor(now / DAY_MS) * DAY_MS;
-  if (range === '24h') return hour - 23 * HOUR_MS;
+  if (range === '24h') return hour - 24 * HOUR_MS;
   if (range === 'all') return 0;
   return day - (RANGE_DAYS[range] - 1) * DAY_MS;
 }

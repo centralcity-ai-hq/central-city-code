@@ -987,6 +987,13 @@ export function createChainRuntime(deps: {
               } satisfies PublicOfferLane;
             })());
           },
+        }
+      : {}),
+    // On the wallet chain (Base) and on Arc (2 Nov 2026: Arc's first buys answered unavailable while
+    // this lived in the wallet chain's block alone). Arc's view passes the sponsor's key and
+    // CITY_SFP_SEND_VIA_FACILITATOR (arc-env.ts): who sends is the same on both chains.
+    ...(walletCap || chainFamily(chainId) === 'arc'
+      ? {
           // The sponsored first purchase's payer (server/feed/pay/sponsored.ts): Central City's
           // sponsor EOA (CITY_SFP_SPONSOR_KEY_REF) signs both router-3 legs (it is the payer). Who
           // SENDS them: with CITY_SFP_SEND_VIA_FACILITATOR=1 the router-3 facilitator (its EOA, its

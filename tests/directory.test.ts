@@ -12,6 +12,7 @@ import {
   skillNames,
 } from '../server/directory/store.js';
 import { ON_BASE_LIVE, SEARCH_TIMEOUT_MS } from '../server/base/explorer/routes.js';
+import { ARC_MAINNET, ARC_TESTNET, arcNetwork } from '../shared/chains.js';
 import {
   DIRECTORY_LIMITS,
   DIRECTORY_PATHS,
@@ -494,5 +495,167 @@ test('an Arc agent is told the directory lists Base, not that it needs a Base ID
   assert.equal(
     refused.json().error,
     'The directory lists agents on Base for now, and this agent is on Arc.',
+  );
+});
+
+const ARC_ON = { CITY_ARC: '1' };
+
+test('with Arc on, a final Arc agent can be listed and is found on Arc; with Arc off it is refused', async (t) => {
+  const { db } = await listedOnBothChains(t);
+  const listUnlisted = (app: ReturnType<typeof arcRoutes>) =>
+    app.inject({
+      method: 'PATCH',
+      url: settingsPath(agentId(4)),
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify({ listed: true }),
+    });
+  const off = await listUnlisted(arcRoutes(t, db, {}));
+  assert.equal(off.statusCode, 409);
+  const on = arcRoutes(t, db);
+  const listed = await listUnlisted(on);
+  assert.equal(listed.statusCode, 200, listed.body);
+  assert.equal(listed.json().listed, true);
+  assert.deepEqual(ids(await search(on, '?q=unlisted&chain=arc')), ['122']);
+});
+
+function arcRoutes(
+  t: { after: (fn: () => Promise<unknown>) => void },
+  db: Database,
+  env: Record<string, string | undefined> = ARC_ON,
+) {
+  const app = Fastify();
+  t.after(() => app.close());
+  registerDirectoryRoutes(app, { db, owns: async () => 'ok', env });
+  return app;
+}
+
+async function listedOnBothChains(t: { after: (fn: () => Promise<unknown>) => void }) {
+  const db = await directoryDb(t);
+  const registry = arcNetwork(ARC_MAINNET, ARC_ON)!.contracts.identityRegistry;
+  await db.exec('ALTER TABLE base_wallets DROP CONSTRAINT IF EXISTS base_wallets_chain_id_check');
+  await add(db, { n: 1, kind: 'final', id: 120, name: 'Harbor', description: 'On Base' });
+  await add(db, {
+    n: 2,
+    kind: 'final',
+    id: 120,
+    name: 'Quay',
+    description: 'On Arc',
+    chainId: ARC_MAINNET,
+    registry,
+  });
+  await add(db, {
+    n: 3,
+    kind: 'final',
+    id: 121,
+    name: 'Other registry',
+    chainId: ARC_MAINNET,
+    registry: '0x' + 'a'.repeat(40),
+  });
+  await add(db, { n: 4, kind: 'final', id: 122, name: 'Unlisted', chainId: ARC_MAINNET, registry });
+  for (const n of [1, 2, 3]) await setListed(db, n);
+  return { db, registry };
+}
+
+test('chain=arc lists Arc agents only, each naming its chain and linking its ID to Arc', async (t) => {
+  const { db, registry } = await listedOnBothChains(t);
+  const app = arcRoutes(t, db);
+  const response = await app.inject({ url: `${DIRECTORY_PATHS.search}?chain=arc` });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(response.headers['cache-control'], ON_BASE_LIVE);
+  const page = response.json() as DirectoryPage;
+  // The same Base ID number on Base is another agent; another registry and unlisted are out.
+  assert.deepEqual(
+    page.agents.map((card) => card.name),
+    ['Quay'],
+  );
+  assert.deepEqual(page.agents[0].chain, { slug: 'arc', chainId: ARC_MAINNET, name: 'Arc' });
+  assert.equal(
+    page.agents[0].explorerUrl,
+    `https://explorer.arc.io/token/${registry}/instance/120`,
+  );
+  // A search and its keys work the same, under one canonical URL with the chain last.
+  const sent = await app.inject({ url: `${DIRECTORY_PATHS.search}?chain=arc&q=quay` });
+  assert.equal(sent.statusCode, 307);
+  assert.equal(sent.headers.location, `${DIRECTORY_PATHS.search}?q=quay&chain=arc`);
+  assert.deepEqual(ids(await search(app, '?q=quay&chain=arc')), ['120']);
+  assert.deepEqual(ids(await search(app, '?q=harbor&chain=arc')), []);
+});
+
+test('no chain answers Base, with no chain fields, byte for byte; chain=base is sent on to it', async (t) => {
+  const { db } = await listedOnBothChains(t);
+  const app = arcRoutes(t, db);
+  const response = await app.inject({ url: DIRECTORY_PATHS.search });
+  assert.equal(response.statusCode, 200);
+  const expected = {
+    agents: [
+      {
+        baseId: '120',
+        short: shortOf(1),
+        name: 'Harbor',
+        description: 'On Base',
+        skills: [],
+        score: null,
+        paidTimes: 0,
+        invitable: true,
+        activeAt: null,
+      },
+    ],
+    next: null,
+  };
+  assert.equal(response.body, JSON.stringify(expected));
+  for (const spelling of ['?chain=base', '?chain=']) {
+    const sent = await app.inject({ url: `${DIRECTORY_PATHS.search}${spelling}` });
+    assert.equal(sent.statusCode, 307, spelling);
+    assert.equal(sent.headers.location, DIRECTORY_PATHS.search);
+  }
+  // Arc being off changes nothing for Base.
+  const off = arcRoutes(t, db, {});
+  assert.equal((await off.inject({ url: DIRECTORY_PATHS.search })).body, response.body);
+});
+
+test('a bad chain is invalid_request before the database; arc while off is 404, never Base', async (t) => {
+  const failing = {
+    query: async () => assert.fail('no read for a refused chain'),
+    exec: async () => assert.fail('no read for a refused chain'),
+    transaction: async () => assert.fail('no read for a refused chain'),
+  } as unknown as Database;
+  const app = arcRoutes(t, failing, {});
+  for (const bad of ['solana', 'ARC', '5042', 'arc%20']) {
+    const refused = await app.inject({ url: `${DIRECTORY_PATHS.search}?chain=${bad}` });
+    assert.equal(refused.statusCode, 400, bad);
+    assert.equal(refused.headers['cache-control'], 'no-store');
+    assert.deepEqual(refused.json(), {
+      error: 'chain must be one of base, arc.',
+      code: 'invalid_request',
+    });
+  }
+  const twice = await app.inject({ url: `${DIRECTORY_PATHS.search}?chain=arc&chain=base` });
+  assert.equal(twice.statusCode, 400);
+  assert.equal(twice.json().code, 'invalid_request');
+  const off = await app.inject({ url: `${DIRECTORY_PATHS.search}?chain=arc` });
+  assert.equal(off.statusCode, 404);
+  assert.equal(off.headers['cache-control'], 'no-store');
+  assert.equal(off.json().code, 'chain_not_live');
+});
+
+test('CITY_ARC_CHAIN_ID picks the Arc network: its registry and its explorer', async (t) => {
+  const db = await directoryDb(t);
+  const network = arcNetwork(ARC_TESTNET, ARC_ON)!;
+  await db.exec('ALTER TABLE base_wallets DROP CONSTRAINT IF EXISTS base_wallets_chain_id_check');
+  await add(db, {
+    n: 1,
+    kind: 'final',
+    id: 7,
+    name: 'Tester',
+    chainId: ARC_TESTNET,
+    registry: network.contracts.identityRegistry,
+  });
+  await setListed(db, 1);
+  const app = arcRoutes(t, db, { ...ARC_ON, CITY_ARC_CHAIN_ID: String(ARC_TESTNET) });
+  const page = await search(app, '?chain=arc');
+  assert.equal(page.agents[0].chain?.chainId, ARC_TESTNET);
+  assert.equal(
+    page.agents[0].explorerUrl,
+    `${network.explorerUrl}/token/${network.contracts.identityRegistry}/instance/7`,
   );
 });

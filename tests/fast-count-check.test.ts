@@ -10,6 +10,7 @@ import {
 } from '../server/stats/fast-count-check.js';
 import { AI_AGENTS_TOTAL_SCAN_SQL, AI_AGENTS_TOTAL_SQL } from '../server/stats/public-stats.js';
 import { COUNTED_AGENT_IDS_SQL, COUNTED_AGENT_IDS_SYNC_SQL } from '../server/stats/schema.js';
+import { AGENT_ROWS_SQL } from '../server/agent-rows/schema.js';
 import type { Database, Transaction } from '../server/database.js';
 import {
   checkPaidCalls,
@@ -30,6 +31,8 @@ async function seeded(t: { after: (fn: () => Promise<unknown>) => void }) {
   await db.exec(COUNTED_AGENT_IDS_SQL);
   // The trigger function as migration 111 replaced it.
   await db.exec(COUNTED_AGENT_IDS_SYNC_SQL);
+  // Migration 245's tables and functions: the checks read rows-mode workspaces from their rows.
+  await db.exec(AGENT_ROWS_SQL);
   const put = (operatorId: string, ids: string[], extra: unknown[] = []) =>
     db.query('INSERT INTO workspaces(operator_id,data) VALUES($1,$2::jsonb)', [
       operatorId,

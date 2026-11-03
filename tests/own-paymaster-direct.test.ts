@@ -34,6 +34,7 @@ import {
   ownSendMarginS,
   NeverBroadcastError,
   registerOwnBundlerMaintainRoute,
+  MAINTAIN_EVERY_MS,
   type OwnBundlerUpkeep,
   VALIDITY_MARGIN_S,
   SPONSOR_VALIDITY_S,
@@ -332,6 +333,7 @@ async function setup(
     fail?: { next: boolean };
     /** No log dep: the bundler's own default sink (the console). */
     noLog?: boolean;
+    autoMaintain?: boolean;
   } = {},
 ) {
   const db = await database(t);
@@ -361,7 +363,7 @@ async function setup(
       budget: wrap ? wrap(budget) : budget,
       policy: { addresses: ADDRESSES },
       now: () => clock.at,
-      autoMaintain: false,
+      autoMaintain: options.autoMaintain ?? false,
       ...(options.noLog ? {} : { log: (line: string) => void lines.push(line) }),
     });
   return { db, chain, budget, bundler: make(), restart: make, clock, lines };
@@ -671,6 +673,22 @@ test('two operations take two nonces; the same operation twice at once is stored
   assert.equal(rows.length, 2);
   assert.deepEqual(rows.map((r) => r.nonce).sort(), ['0', '1']);
   assert.equal(await laneNonce(db), '2');
+});
+
+test('upkeep started by a receipt runs under waitUntil, so a frozen instance cannot hold its locks', async (t) => {
+  const key = Symbol.for('@vercel/request-context');
+  const kept: Promise<unknown>[] = [];
+  const global = globalThis as unknown as Record<symbol, unknown>;
+  const before = global[key];
+  global[key] = { get: () => ({ waitUntil: (work: Promise<unknown>) => void kept.push(work) }) };
+  t.after(() => {
+    global[key] = before;
+  });
+  const { bundler, clock } = await setup(t, { autoMaintain: true });
+  clock.at += MAINTAIN_EVERY_MS + 1;
+  await bundler.receipt(`0x${'ab'.repeat(32)}`);
+  assert.equal(kept.length, 1);
+  await Promise.all(kept);
 });
 
 test('receipt: the event settles the reservation at actualGasCost; a reverted bundle settles at 0', async (t) => {
@@ -2485,6 +2503,30 @@ test('Arc lanes: past the cap a send is busy, nothing moves and nothing is signe
   assert.equal(Number(open.rows[0]!.n), 2 * cap, 'one exposure per stored send, none for the busy');
 });
 
+test("Arc lanes: the last free slot is an owner's exit's; other flows leave it free", async (t) => {
+  const { bundler, selfPaid, db, lines } = await lanesOn(t);
+  const cap = chainParams(ARC_TESTNET).lanePool!.capPerLane;
+  // Two slots free in all: a registration takes one (one per lane would have refused it).
+  for (let i = 0; i < 2 * cap - 2; i++) await selfPaid(bundler, i);
+  await bundler.prepare(await unsigned([register()], { nonce: 899n }), {
+    intent: intentOf('registration'),
+  });
+  // One slot left in all: kept for an exit.
+  const registration = await bundler
+    .prepare(await unsigned([register()], { nonce: 900n }), { intent: intentOf('registration') })
+    .catch((e: unknown) => e);
+  assert.ok(registration instanceof BundlerError && bundlerRateLimited(registration), 'busy');
+  assert.ok(lines.some((l) => l.includes('lanes full, registration not sponsored now')));
+  // An owner's withdrawal or cancel still gets its sponsorship there.
+  const cancel = [{ target: SPENDER, value: 0n, data: '0x' as const }];
+  const exit = await bundler.prepare(await unsigned(cancel), { intent: intentOf('exit', cancel) });
+  assert.notEqual(exit.paymasterAndData, '0x', 'sponsored by our paymaster');
+  const held = await db.query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM own_paymaster_reservations WHERE flow = 'exit' AND status = 'reserved'`,
+  );
+  assert.equal(Number(held.rows[0]!.n), 1);
+});
+
 test('Arc lanes: mined sends free their lane before their receipts are read', async (t) => {
   const { bundler, selfPaid, nonces, rows } = await lanesOn(t);
   const cap = chainParams(ARC_TESTNET).lanePool!.capPerLane;
@@ -2514,8 +2556,9 @@ test('Arc lanes: with the lanes full no sponsorship is reserved or signed', asyn
 test('Arc lanes: sponsorships just handed out hold their place', async (t) => {
   const { bundler, selfPaid } = await lanesOn(t);
   const cap = chainParams(ARC_TESTNET).lanePool!.capPerLane;
-  for (let i = 0; i < 2 * cap - 1; i++) await selfPaid(bundler, i);
-  // One place left: the first sponsorship takes it, the second hears busy.
+  for (let i = 0; i < 2 * cap - 2; i++) await selfPaid(bundler, i);
+  // Two places left, one kept for exits: the first sponsorship takes the other, the second hears
+  // busy.
   await bundler.prepare(await unsigned([register()], { nonce: 900n }), {
     intent: intentOf('registration'),
   });

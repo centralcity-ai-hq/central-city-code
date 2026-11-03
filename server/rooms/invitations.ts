@@ -20,6 +20,8 @@ import { parseRecipient } from '../../shared/base/pay.js';
 import { partsContainCredential } from './contract.js';
 import { RoomError, type RoomGuard, type RoomPrincipal, type Rooms } from './service.js';
 import { lineName, postSystemLine } from './system-lines.js';
+import { agentsArraySql } from '../agent-rows/sql.js';
+import { WORKSPACE_DATA_BY_ID_SQL } from '../agent-rows/read-sql.js';
 
 /*
  * Room invitations (Operation Directory D2; shared/directory.ts is the contract, migration 101 in
@@ -288,11 +290,8 @@ export function createRoomInvitations(d: RoomInvitationDependencies) {
   /** The caller's own live (not revoked) agent: its workspace entry, else 404 agent_not_found. */
   async function ownAgent(q: Pick<Tx, 'query'>, operatorId: string, agentId: string) {
     if (!idSchema.safeParse(agentId).success) return agentNotFound();
-    const workspace = (
-      await q.query<{ data: Workspace }>('SELECT data FROM workspaces WHERE operator_id=$1', [
-        operatorId,
-      ])
-    ).rows[0]?.data;
+    const workspace = (await q.query<{ data: Workspace }>(WORKSPACE_DATA_BY_ID_SQL, [operatorId]))
+      .rows[0]?.data;
     const agent = workspace?.agents.find((item) => item.id === agentId);
     return agent && !agent.revokedAt ? agent : agentNotFound();
   }
@@ -328,7 +327,7 @@ export function createRoomInvitations(d: RoomInvitationDependencies) {
        LEFT JOIN agent_directory dir ON dir.agent_id = l.agent_id
        WHERE p.name IS NOT NULL AND COALESCE(dir.invitations, 'ask') = 'ask'
          AND EXISTS (SELECT 1 FROM workspaces ws
-           CROSS JOIN LATERAL jsonb_array_elements(ws.data->'agents') a
+           CROSS JOIN LATERAL jsonb_array_elements(${agentsArraySql('ws.operator_id', 'ws.data')}) a
            WHERE ws.operator_id = l.owner_id AND a->>'id' = l.agent_id AND a->>'revokedAt' IS NULL
              AND a->>'pausedAt' IS NULL)
          AND NOT EXISTS (SELECT 1 FROM room_invitation_blocks b
@@ -581,9 +580,7 @@ export function createRoomInvitations(d: RoomInvitationDependencies) {
       [room.id, p.operatorId],
     );
     const workspace = (
-      await d.db.query<{ data: Workspace }>('SELECT data FROM workspaces WHERE operator_id=$1', [
-        p.operatorId,
-      ])
+      await d.db.query<{ data: Workspace }>(WORKSPACE_DATA_BY_ID_SQL, [p.operatorId])
     ).rows[0]?.data;
     const live = new Set(
       (workspace?.agents ?? []).filter((agent) => !agent.revokedAt).map((agent) => agent.id),
@@ -880,9 +877,7 @@ export function createRoomInvitations(d: RoomInvitationDependencies) {
    */
   async function inbox(p: RoomPrincipal): Promise<OwnerInvitation[]> {
     const workspace = (
-      await d.db.query<{ data: Workspace }>('SELECT data FROM workspaces WHERE operator_id=$1', [
-        p.operatorId,
-      ])
+      await d.db.query<{ data: Workspace }>(WORKSPACE_DATA_BY_ID_SQL, [p.operatorId])
     ).rows[0]?.data;
     const agents = new Map(
       (workspace?.agents ?? []).filter((a) => !a.revokedAt).map((a) => [a.id, a.name]),

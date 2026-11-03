@@ -87,6 +87,10 @@ export interface ChainParams {
   budgetLockTimeoutMs?: number;
   /** How old the budget's settled and exit-day sums may be, in ms. Unset (Base): counted under the lock. */
   budgetHistoryMaxAgeMs?: number;
+  /** Settles without the budget lock (own-paymaster-budget.ts settleUnlocked). Unset (Base): under it. */
+  budgetSettleUnlocked?: boolean;
+  /** How often the hot paths lapse never-sent reservations, in ms. Unset (Base): every time. */
+  budgetExpireEveryMs?: number;
   /** The keyless public RPC used as the second read endpoint when hosted. */
   publicReadRpc: string | undefined;
   facilitator: {
@@ -275,6 +279,12 @@ const ARC_COMMON: Omit<ChainParams, 'feeBudgetRequired' | 'publicReadRpc'> = {
   // At 100k a day about 400k rows are added daily, and these two sums read them all: spent in this
   // time passes the 10,000 ceiling at most by the hourly cap's share, about 17 USDC.
   budgetHistoryMaxAgeMs: 120_000,
+  // 2 Nov at ~86 registrations a minute: lock waits of 0.5-3.4 s, the queue held at ~2.2 operations
+  // a second whatever the number of creators. An operation took the lock four times (reserve, send,
+  // two settles), each held for its round trips to the database, not its SQL (sums 20 ms, lapse
+  // 0.2 ms). Settles leave the queue, and the send's lapse runs once a second per instance.
+  budgetSettleUnlocked: true,
+  budgetExpireEveryMs: 1_000,
   facilitator: {
     minBalanceWei: usdcGas(100n), // 1 USDC, about 202 settles at 25 gwei
     caps: {
@@ -315,9 +325,11 @@ const ARC_COMMON: Omit<ChainParams, 'feeBudgetRequired' | 'publicReadRpc'> = {
   hotWallets: {
     // Its USDC and its gas are ONE balance on Arc, read at 6 and at 18 decimals: the same limit in
     // each. A smaller gas limit would alert on every sponsor that holds its buying money.
+    // Sized for the 40 USDC sponsored first buys on Arc (2 Nov 2026: up to ~200 a minute, funded by
+    // the owner); alerts only (hot-wallets.ts), nothing is refused by them.
     sfp_sponsor: {
-      usdc: { ceiling: 500n * USDC_RAW, outflowPerHour: 100n * USDC_RAW },
-      eth: { ceiling: 500n * USDC_GAS, outflowPerHour: 100n * USDC_GAS },
+      usdc: { ceiling: 250_000n * USDC_RAW, outflowPerHour: 200_000n * USDC_RAW },
+      eth: { ceiling: 250_000n * USDC_GAS, outflowPerHour: 200_000n * USDC_GAS },
     },
     // The key 'eth' is the role's gas balance on every chain; on Arc it is shown as usdc-gas.
     router3_facilitator: { eth: { ceiling: 50n * USDC_GAS, outflowPerHour: 5n * USDC_GAS } }, // about 1010 settles/h

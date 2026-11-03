@@ -295,6 +295,30 @@ export function createWithdrawal(
 export const readWithdrawal = (agentId: string, withdrawalId: string) =>
   api<WithdrawalView>(`${base(agentId)}/${encodeURIComponent(withdrawalId)}`, undefined, 'GET');
 
+/**
+ * The withdrawal a refusal as operation_pending names, when it still awaits its signature: one
+ * prepared and never signed (2 Nov 2026: a review left unsigned held the owner's next withdrawals
+ * for its whole window, worded as "on its way"). Nothing of it can move, so it may be dropped. Null:
+ * not named, another state, or not read.
+ */
+export async function unsignedPending(
+  agentId: string,
+  error: unknown,
+  read: typeof readWithdrawal = readWithdrawal,
+): Promise<string | null> {
+  const named =
+    error instanceof ApiError && error.code === 'operation_pending'
+      ? (error.details as { withdrawalId?: unknown } | undefined)?.withdrawalId
+      : undefined;
+  if (typeof named !== 'string' || !named) return null;
+  try {
+    const view = await read(agentId, named);
+    return view?.withdrawalId === named && view.state === 'awaiting_signature' ? named : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Asks for the no-op at the withdrawal's nonce; the answer carries it to sign. */
 export const askCancel = (agentId: string, withdrawalId: string) =>
   api<WithdrawalView>(`${base(agentId)}/${encodeURIComponent(withdrawalId)}/cancel`, {});

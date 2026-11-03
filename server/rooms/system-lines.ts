@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Transaction as Tx } from '../database.js';
 import { registerMigration, type Migration } from '../migrations.js';
 import { cleanName } from './person.js';
+import { agentsArraySql } from '../agent-rows/sql.js';
 
 /**
  * Room system lines (task and membership changes appear as short lines in
@@ -64,7 +65,7 @@ export async function memberLabel(
   const row = (
     await q.query<{ kind: string; display_name: string | null; name: string | null }>(
       `SELECT m.kind, m.display_name,
-          (SELECT a->>'name' FROM workspaces w CROSS JOIN LATERAL jsonb_array_elements(w.data->'agents') a
+          (SELECT a->>'name' FROM workspaces w CROSS JOIN LATERAL jsonb_array_elements(${agentsArraySql('w.operator_id', 'w.data')}) a
             WHERE w.operator_id=m.owner_id AND a->>'id'=m.agent_id LIMIT 1) AS name
         FROM room_members m WHERE m.room_id=$1 AND m.agent_id=$2`,
       [roomId, agentId],

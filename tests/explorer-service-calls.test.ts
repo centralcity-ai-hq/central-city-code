@@ -27,7 +27,11 @@ import {
   parseServiceCallsSearch,
   type ServiceCallsPage,
 } from '../shared/explorer-calls.js';
-import { FEED_PAY_SPONSORED_SQL } from '../server/feed/pay/sponsored.js';
+import { FEED_PAY_SPONSORED_SQL as SPONSORED_250_SQL } from '../server/feed/pay/sponsored.js';
+import { FEED_PAY_SPONSORED_CHAIN_COLUMN_SQL } from '../server/feed/pay/sponsored-count-schema.js';
+
+/** The sponsored calls table as migrations 250 and 359 leave it. */
+const FEED_PAY_SPONSORED_SQL = `${SPONSORED_250_SQL}\n${FEED_PAY_SPONSORED_CHAIN_COLUMN_SQL}`;
 import { FEED_PAY_SPONSOR_KEY_SQL } from '../server/feed/pay/sponsor-key.js';
 import { FEED_PAY_SPONSORED_EXPLORER_SQL } from '../server/feed/pay/sponsored-explorer-schema.js';
 import { PAID_CALL_COUNT_SPONSORED_SQL } from '../server/feed/pay/sponsored-count-schema.js';

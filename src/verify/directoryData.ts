@@ -1,9 +1,12 @@
+import { arcIdUrl } from '../../shared/chains';
 import {
   DIRECTORY_PATHS,
   type DirectoryCard,
+  type DirectoryChain,
   type DirectoryPage,
   type DirectorySort,
 } from '../../shared/directory';
+import { ARC_EXPLORER_CHAIN } from '../explorer/chain';
 import { loadOnBase, refusedSearchNote, searchNotes, type OnBaseRow } from './onBaseData';
 
 /*
@@ -18,6 +21,7 @@ export type DirectorySearch = {
   minRating?: number;
   sort?: DirectorySort;
   before?: string | null;
+  chain?: DirectoryChain;
 };
 
 /** The address of one search; empty and default parts are left out. */
@@ -28,6 +32,7 @@ export function directoryUrl(search: DirectorySearch = {}): string {
   if (search.minRating) params.set('min_rating', String(search.minRating));
   if (search.sort && search.sort !== 'best_rated') params.set('sort', search.sort);
   if (search.before) params.set('before', search.before);
+  if (search.chain && search.chain !== 'base') params.set('chain', search.chain);
   const query = params.toString();
   return query ? `${DIRECTORY_PATHS.search}?${query}` : DIRECTORY_PATHS.search;
 }
@@ -56,6 +61,8 @@ function readPage(body: unknown): DirectoryPage {
       paidTimes: typeof card.paidTimes === 'number' ? card.paidTimes : null,
       invitable: card.invitable === true,
       activeAt: typeof card.activeAt === 'number' ? card.activeAt : null,
+      // It becomes a link: only an https address.
+      explorerUrl: card.explorerUrl?.startsWith?.('https://') ? card.explorerUrl : undefined,
     })),
     next: typeof raw.next === 'string' ? raw.next : null,
   };
@@ -93,15 +100,17 @@ function registryCard(row: OnBaseRow): DirectoryCard {
 /**
  * The header finder's search: the directory first; while it has no match (it is opt-in and starts
  * empty) or the server has none, the registry of every Central City agent on Base, which matches
- * name, Base ID and passport number. Rows without a public name are left out.
+ * name, Base ID and passport number. Rows without a public name are left out. With chain 'arc', the
+ * same on Arc: its directory first, then every Central City agent on Arc.
  */
 export async function findAgents(
   q: string,
   signal?: AbortSignal,
+  chain: DirectoryChain = 'base',
 ): Promise<{ source: 'directory' | 'registry'; agents: DirectoryCard[]; note?: string }> {
   let page: DirectoryPage | null = null;
   try {
-    page = await searchDirectory({ q }, signal);
+    page = await searchDirectory(chain === 'arc' ? { q, chain } : { q }, signal);
   } catch (err) {
     if (signal?.aborted) throw err;
   }
@@ -110,12 +119,26 @@ export async function findAgents(
   // that search is unavailable): nothing is asked, and the reason is the note, never "no match".
   const refused = refusedSearchNote(q);
   if (refused) return { source: 'registry', agents: [], note: refused };
-  const list = await loadOnBase({ q });
+  const list = await loadOnBase(
+    chain === 'arc' ? { q, listPath: ARC_EXPLORER_CHAIN.paths.list } : { q },
+  );
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
   const note = searchNotes(list);
+  const cards = list.rows.filter((row) => row.name.trim()).map(registryCard);
   return {
     source: 'registry',
-    agents: list.rows.filter((row) => row.name.trim()).map(registryCard),
+    agents:
+      chain === 'arc'
+        ? cards.map((card) => ({
+            ...card,
+            chain: {
+              slug: 'arc' as const,
+              chainId: ARC_EXPLORER_CHAIN.chainId,
+              name: ARC_EXPLORER_CHAIN.name,
+            },
+            explorerUrl: arcIdUrl(ARC_EXPLORER_CHAIN.explorerUrl, list.registry, card.baseId),
+          }))
+        : cards,
     ...(note ? { note } : {}),
   };
 }

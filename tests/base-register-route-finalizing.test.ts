@@ -30,6 +30,7 @@ import {
 } from '../server/base/identity/service.js';
 import { BASE_MAINNET, baseNetwork, type Address } from '../shared/base/chains.js';
 import { FakeIdentityChain } from './base-identity-fake-chain.js';
+import { AGENT_ROWS_SQL } from '../server/agent-rows/schema.js';
 
 /*
  * The owner repeats POST /register (wallet key flow) while the registration waits at Base's SAFE
@@ -68,6 +69,7 @@ async function setup(
   await pg.exec(`CREATE TABLE operators (id text PRIMARY KEY, kind text NOT NULL);
     INSERT INTO operators VALUES ('p-1', 'owner');
     CREATE TABLE workspaces (operator_id text PRIMARY KEY, data jsonb NOT NULL);
+    ${AGENT_ROWS_SQL}
     CREATE TABLE agent_manifests (agent_id text, operator_id text, revision integer, manifest jsonb);
     INSERT INTO workspaces VALUES ('p-1', '{"agents":[{"id":"${AGENT}","revision":1}]}');
     INSERT INTO agent_manifests VALUES ('${AGENT}', 'p-1', 1, '{"spec":{"visibility":"public"}}');`);

@@ -86,6 +86,7 @@ const KNOWN = [
   '/dpa',
   '/imprint',
   '/contact',
+  '/news',
   '/r/launch-plan',
   '/r/A_b-9',
   '/rooms',

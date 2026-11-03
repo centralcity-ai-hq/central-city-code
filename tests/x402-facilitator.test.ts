@@ -15,8 +15,13 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { Database } from '../server/database.js';
 import {
   BATCH_KEY_PREFIX,
+  BATCH_MIN_VALIDITY_LEFT_S,
   BroadcastDeferred,
+  CANCEL_GAS,
+  CANCELLED,
+  CANCELLING,
   CLAIM_TTL_MS,
+  DEAD_HEAD_MS,
   createRouter3Facilitator,
   decodeSettle,
   encodeSettle,
@@ -1006,6 +1011,85 @@ test('a lane head nobody follows is refreshed by the next submit: the lane never
   assert.equal(parseTransaction(base.sends[2]).nonce, head.nonce! + 1);
 });
 
+test('a dead lane head (never mined, its call reverts) is cancelled at its nonce, then ends failed, never final', async (t) => {
+  const { base, facilitator, clock } = await setup(t);
+  const op = await facilitator.submit({
+    key: 'k1',
+    intentHash: INTENT,
+    settlement: settlement(),
+    beforeBroadcast: ok,
+  });
+  const head = parseTransaction(base.sends[0]!);
+  const signer = await recoverTransactionAddress({
+    serializedTransaction: base.sends[0]! as `0x02${string}`,
+  });
+  // Its authorizations expired meanwhile: the call reverts now, and Base never mines it.
+  base.revertData = encodeErrorResult({ abi: router3SettleAbi, errorName: 'AlreadyCharged' });
+  clock.now += DEAD_HEAD_MS + 1;
+  await facilitator.status('k1');
+  assert.equal(base.sends.length, 2, 'one cancel, no replacement of the settlement');
+  const cancel = parseTransaction(base.sends[1]!);
+  assert.equal(cancel.nonce, head.nonce);
+  assert.equal(cancel.to?.toLowerCase(), signer.toLowerCase());
+  assert.equal(cancel.value ?? 0n, 0n);
+  assert.equal(cancel.data ?? '0x', '0x');
+  assert.equal(cancel.gas, CANCEL_GAS);
+  assert.ok(cancel.maxFeePerGas! >= (head.maxFeePerGas! * 13n) / 10n);
+  assert.ok(cancel.maxPriorityFeePerGas! >= (head.maxPriorityFeePerGas! * 13n) / 10n);
+  assert.equal((await facilitator.status('k1'))?.errorCode, CANCELLING);
+  // The cancel is mined: included as CANCELLED (never read as paid), then failed at finality.
+  base.mine(keccak256(base.sends[1]!), 60n);
+  const included = await facilitator.status('k1');
+  assert.equal(included?.status, 'included');
+  assert.equal(included?.errorCode, CANCELLED);
+  base.finalized = 80n;
+  const ended = await facilitator.status('k1');
+  assert.equal(ended?.status, 'failed');
+  assert.equal(ended?.errorCode, CANCELLED);
+  assert.equal(op.txHash === ended?.txHash, false, 'the stored settlement never executed');
+  base.revertData = null;
+});
+
+test('a stuck head that still simulates fine is replaced as before, never cancelled', async (t) => {
+  const { base, facilitator, clock } = await setup(t);
+  await facilitator.submit({
+    key: 'k1',
+    intentHash: INTENT,
+    settlement: settlement(),
+    beforeBroadcast: ok,
+  });
+  const head = parseTransaction(base.sends[0]!);
+  clock.now += DEAD_HEAD_MS + 1;
+  await facilitator.status('k1');
+  assert.equal(base.sends.length, 2);
+  const again = parseTransaction(base.sends[1]!);
+  assert.equal(again.nonce, head.nonce);
+  assert.equal(again.data, head.data, 'the same settlement at a higher fee');
+});
+
+test('a cancel that is itself stuck is bumped as a cancel, never sent back as the settlement', async (t) => {
+  const { base, facilitator, clock } = await setup(t);
+  await facilitator.submit({
+    key: 'k1',
+    intentHash: INTENT,
+    settlement: settlement(),
+    beforeBroadcast: ok,
+  });
+  base.revertData = encodeErrorResult({ abi: router3SettleAbi, errorName: 'AlreadyCharged' });
+  clock.now += DEAD_HEAD_MS + 1;
+  await facilitator.status('k1');
+  const first = parseTransaction(base.sends[1]!);
+  // The cancel is not mined either; past STUCK_MS the next look replaces it.
+  base.revertData = null;
+  clock.now += STUCK_MS + 1;
+  await facilitator.status('k1');
+  const bumped = parseTransaction(base.sends.at(-1)!);
+  assert.equal(bumped.nonce, first.nonce);
+  assert.equal(bumped.data ?? '0x', '0x');
+  assert.equal(bumped.to, first.to);
+  assert.ok(bumped.maxFeePerGas! > first.maxFeePerGas!);
+});
+
 test('a settlement included after the block the balance was read at still counts as in flight', async (t) => {
   const { base, facilitator } = await setup(t, {
     minBalanceWei: 0n,
@@ -1110,6 +1194,34 @@ test('a full batch goes out as ONE settleBatch from the facilitator; members sha
   base.finalized = 70n;
   assert.equal((await facilitator.status('m3', { authorize: allowAll }))?.status, 'final');
   assert.equal((await row('m1')).status, 'final');
+});
+
+test('a member whose authorizations run out soon is refused unsent; the rest goes out as the batch', async (t) => {
+  const { base, facilitator, row, clock } = await setup(t, {
+    batch: { maxItems: 3, windowMs: 1_500 },
+  });
+  const soon = {
+    ...member(2),
+    validBefore: BigInt(Math.floor(clock.now / 1000) + BATCH_MIN_VALIDITY_LEFT_S - 1),
+  };
+  for (const [i, s] of [
+    [1, member(1)],
+    [2, soon],
+    [3, member(3)],
+  ] as const)
+    await facilitator.submit({
+      key: `m${i}`,
+      intentHash: intentOf(i),
+      settlement: s,
+      beforeBroadcast: ok,
+      batch: { authorize: allowAll, grant: null },
+    });
+  assert.equal(base.sends.length, 1);
+  assert.equal(batchOf(base.sends[0]!).data, encodeSettleBatch([member(1), member(3)]));
+  const refused = await row('m2');
+  assert.equal(refused.status, 'failed');
+  assert.equal(refused.never_sent, true);
+  assert.equal(refused.raw_tx, null);
 });
 
 test('a waiting settlement goes in a smaller batch once the window is over', async (t) => {

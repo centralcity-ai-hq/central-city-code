@@ -6,6 +6,7 @@ import { postgresDatabase, type Database } from '../server/database.js';
 import { BASE_MIGRATION_SQL, baseShortIdsMigration } from '../server/base/schema.js';
 import { domainRegistrations } from '../server/base/identity/short-links.js';
 import { BASE_IDENTITY_MOVES_SQL } from '../server/base/identity/moves.js';
+import { AGENT_ROWS_SQL } from '../server/agent-rows/schema.js';
 
 // The domain file reads its identities and the public agents in two statements. Whatever another
 // connection commits between them (a revocation, a card made private), both reads must see one
@@ -57,6 +58,7 @@ test(
     await writer.exec(BASE_IDENTITY_MOVES_SQL);
     await writer.exec(`
       CREATE TABLE workspaces (operator_id text PRIMARY KEY, data jsonb NOT NULL);
+      ${AGENT_ROWS_SQL}
       CREATE TABLE agent_manifests (agent_id text, operator_id text, revision int, manifest jsonb,
         PRIMARY KEY (agent_id, revision));
       -- The public cards (280) not backfilled yet: the two reads of the workspace documents.

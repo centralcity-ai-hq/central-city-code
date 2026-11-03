@@ -8,6 +8,7 @@ import type { ResolvedAgentManifest } from '../../shared/manifest.js';
 import { compileAgentCard, type AgentCard } from './agent-card.js';
 import { basePassport } from '../base/identity/passport.js';
 import { passportExtension } from '../../shared/base/passport.js';
+import { agentsArraySql } from '../agent-rows/sql.js';
 
 export interface CardAgent {
   operatorId: string;
@@ -51,7 +52,7 @@ async function readCardIndex(db: Database, operatorId: string, now: number): Pro
             a->>'revokedAt' IS NOT NULL AS revoked
        FROM workspaces w
        JOIN operators o ON o.id=w.operator_id
-       LEFT JOIN LATERAL jsonb_array_elements(w.data->'agents') a ON true
+       LEFT JOIN LATERAL jsonb_array_elements(${agentsArraySql('w.operator_id', 'w.data')}) a ON true
       WHERE w.operator_id=$1`,
     [operatorId],
   );

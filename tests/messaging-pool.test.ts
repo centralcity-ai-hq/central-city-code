@@ -6,6 +6,7 @@ import { postgresDatabase } from '../server/database.js';
 import { createMessaging, pairKey } from '../server/messaging/service.js';
 import { emptyWorkspace, type StoredAgent } from '../server/model.js';
 import { MemoryRateLimiter, PostgresRateLimiter } from '../server/rate-limit.js';
+import { WORKSPACE_DATA_BY_ID_SQL } from '../server/agent-rows/read-sql.js';
 
 function agent(name: string): StoredAgent {
   return {
@@ -66,7 +67,7 @@ async function concurrentSends(samePair: boolean) {
       return { rows: [] };
     }
     if (sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] };
-    if (sql.startsWith('SELECT data FROM workspaces')) {
+    if (sql === WORKSPACE_DATA_BY_ID_SQL) {
       const fixture = fixtures.find((item) => item.operatorId === params[0]);
       assert.ok(fixture);
       return { rows: [{ data: fixture.workspace }] };

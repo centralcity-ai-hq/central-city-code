@@ -21,6 +21,21 @@ const SHARED_BASE_SETTINGS = new Set([
   'CITY_BASE_SPONSOR_OPERATOR_OWNERS',
 ]);
 
+/**
+ * The sponsored first purchase's payer is the same EOA on Arc (its USDC there; EIP-3009 signatures
+ * are bound to each chain). Its key passes, and so does how it sends (owner, 2 Nov 2026): with
+ * CITY_SFP_SEND_VIA_FACILITATOR Arc's router-3 facilitator sends the sponsored batches too, as on
+ * Base, so the payer is never the sender (x402 volume counts them). Its gas floor stays Arc's own
+ * (CITY_ARC_SFP_SENDER_MIN_GAS_WEI).
+ */
+const SHARED_SFP_SETTINGS = new Set([
+  'CITY_SFP_SPONSOR_KEY_REF',
+  'CITY_SFP_SEND_VIA_FACILITATOR',
+  'CITY_SFP_BATCH_MAX',
+  'CITY_SFP_BATCH_WINDOW_MS',
+  'CITY_SFP_BATCH_MEMBER_AGE_MS',
+]);
+
 /** Not on Arc for now: each of these names a Base endpoint, key or lane. */
 const NOT_ON_ARC =
   /^(CITY_FEED_PAY_CDP_RPC_URL|CITY_X402_PUBLIC_|CITY_X402_FACILITATOR_ETH_USD|CITY_SFP_|CITY_PROTOCOL_(ROUTER|RPC_URL|START_BLOCK|CHAIN_ID|FEE_ROUTER2|ESCROW_OPERATOR))/;
@@ -45,7 +60,7 @@ export function arcRuntimeEnv(
   const scoped: Record<string, string | undefined> = {};
   for (const [name, value] of Object.entries(env)) {
     if (name.startsWith('CITY_BASE_') && !SHARED_BASE_SETTINGS.has(name)) continue;
-    if (NOT_ON_ARC.test(name) || name in ARC_SETTINGS) continue;
+    if ((NOT_ON_ARC.test(name) && !SHARED_SFP_SETTINGS.has(name)) || name in ARC_SETTINGS) continue;
     scoped[name] = value;
   }
   for (const [baseName, arcName] of Object.entries(ARC_SETTINGS)) {

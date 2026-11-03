@@ -82,6 +82,7 @@ import {
   type TransferRecord,
 } from './service.js';
 import { createPaymentIntentStore, type PaymentReceiptReader } from './store.js';
+import { agentsArraySql } from '../../agent-rows/sql.js';
 
 const CHAIN_ID = WALLET_CHAIN_ID;
 const USDC = WALLET_NETWORK.tokens.USDC;
@@ -522,7 +523,8 @@ function agentPayOn(deps: AgentPayDeps, paying: PayingChain) {
       agents: Array<{ id: string; revokedAt?: string | null; pausedAt?: string | null }> | null;
       paused: boolean | null;
     }>(
-      "SELECT data->'agents' AS agents, (data->>'paused')::boolean AS paused FROM workspaces WHERE operator_id = $1",
+      `SELECT ${agentsArraySql('w.operator_id', 'w.data')} AS agents, (w.data->>'paused')::boolean AS paused
+         FROM workspaces w WHERE w.operator_id = $1`,
       [workspaceId],
     );
     const agent = spaces[0]?.agents?.find((item) => item.id === agentId && !item.revokedAt);

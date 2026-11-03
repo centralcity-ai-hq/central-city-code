@@ -5,6 +5,8 @@ import { roomNotFound, type RoomPrincipal } from '../service.js';
 import { TaskError } from '../tasks-service.js';
 import { REPO_LIMITS } from './contract.js';
 import { GitHubError, type GitHubApp, type RepoSession, type TokenPermissions } from './github.js';
+import { agentsArraySql } from '../../agent-rows/sql.js';
+import { WORKSPACE_DATA_BY_ID_SQL } from '../../agent-rows/read-sql.js';
 
 /**
  * Shared authority and GitHub-session helpers for the room repo services (
@@ -27,7 +29,7 @@ export const HOUR = 3_600_000;
 export const LIVE_REVIEWER_SQL = (reviews: string, roomId: string) => `EXISTS (
   SELECT 1 FROM room_members m JOIN workspaces w ON w.operator_id = m.owner_id
    WHERE m.room_id = ${roomId} AND m.agent_id = ${reviews}.author_agent_id AND m.removed_at IS NULL
-     AND EXISTS (SELECT 1 FROM jsonb_array_elements(w.data->'agents') a
+     AND EXISTS (SELECT 1 FROM jsonb_array_elements(${agentsArraySql('w.operator_id', 'w.data')}) a
                   WHERE a->>'id' = m.agent_id AND (a->>'revokedAt') IS NULL))`;
 
 export interface RepoDependencies {
@@ -100,11 +102,8 @@ export function createRepoAccess(d: RepoDependencies) {
   async function membership(q: Pick<Tx, 'query'>, roomRef: string, operatorId: string) {
     const room = await findRoom(q, roomRef);
     if (!room) return roomNotFound();
-    const data = (
-      await q.query<{ data: Workspace }>('SELECT data FROM workspaces WHERE operator_id=$1', [
-        operatorId,
-      ])
-    ).rows[0]?.data;
+    const data = (await q.query<{ data: Workspace }>(WORKSPACE_DATA_BY_ID_SQL, [operatorId]))
+      .rows[0]?.data;
     if (!data) refuse(401, 'unauthorized', 'Sign in to continue.');
     const agents = new Map(
       data!.agents.filter((agent) => !agent.revokedAt).map((agent) => [agent.id, agent]),

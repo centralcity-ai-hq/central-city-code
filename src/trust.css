@@ -1021,3 +1021,49 @@
     transition: none;
   }
 }
+
+/* /news: independent coverage, small minimal cards. */
+.news-list {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.news-card {
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border-subtle, var(--border));
+  border-radius: 8px;
+  min-width: 0;
+}
+.trust .news-card p {
+  margin: 0;
+}
+.trust .news-meta {
+  font-size: 13px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.news-lang {
+  margin-left: 6px;
+  padding: 0 6px;
+  border: 1px solid var(--border-subtle, var(--border));
+  border-radius: 4px;
+  font-size: 12px;
+}
+.trust .news-title {
+  display: block;
+  margin: 4px 0;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.trust .news-note {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+.trust .news-foot {
+  margin-top: 20px;
+  font-size: 14px;
+  color: var(--text-muted);
+}

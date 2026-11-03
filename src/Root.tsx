@@ -94,7 +94,7 @@ const EXPLORER_AGENT_PATH = /^\/explorer\/agents\/(0|[1-9][0-9]{0,19})\/?$/;
 const ARC_AGENT_PATH = /^\/explorer\/arc\/agents\/(0|[1-9][0-9]{0,19})\/?$/;
 /** The public trust and company pages (src/Trust.tsx); kept here so the entry chunk stays small. */
 const TRUST_PATH =
-  /^\/(privacy|privacy-choices|terms|acceptable-use|dpa|imprint|security|audit|support|status|about|contact)\/?$/;
+  /^\/(privacy|privacy-choices|terms|acceptable-use|dpa|imprint|security|audit|support|status|about|contact|news)\/?$/;
 function trustPage(pathname: string) {
   return (TRUST_PATH.exec(pathname)?.[1] ?? null) as import('./Trust').TrustPageId | null;
 }

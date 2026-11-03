@@ -22,6 +22,7 @@ import { disconnectSignal, keepSocket } from './socket.js';
 import { WakeError, idleKeys, type Wake, type WakeGuard, type WakePrincipal } from './service.js';
 import { registerWakeCron } from './cron.js';
 import { sweepLapsedTasks } from '../rooms/tasks-service.js';
+import { WORKSPACE_DATA_BY_ID_SQL } from '../agent-rows/read-sql.js';
 
 /**
  * Wake-up REST and SSE (docs/WAKE.md):
@@ -419,9 +420,7 @@ export function registerWakeRoutes(app: FastifyInstance, d: WakeRouteDependencie
     if (who.runtime && who.runtime.agentId !== agentId)
       fail(403, 'forbidden', 'A runtime may only stream its own agent.');
     const workspace = (
-      await d.db.query<{ data: Workspace }>('SELECT data FROM workspaces WHERE operator_id=$1', [
-        who.operatorId,
-      ])
+      await d.db.query<{ data: Workspace }>(WORKSPACE_DATA_BY_ID_SQL, [who.operatorId])
     ).rows[0]?.data;
     const agent = workspace?.agents.find((item) => item.id === agentId);
     if (!agent || agent.revokedAt)

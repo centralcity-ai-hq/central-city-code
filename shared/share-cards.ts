@@ -257,6 +257,11 @@ export const SHARE_CARDS: readonly ShareCard[] = Object.freeze([
     'Central City’s data processing addendum (GDPR Article 28) for customers.',
   ),
   card('/imprint', 'Imprint · Central City', 'Central City’s statutory company information.'),
+  card(
+    '/news',
+    'News Room · Central City',
+    'Independent coverage of Central City by journalists, analysts and researchers.',
+  ),
 ]);
 
 const escape = (value: string) =>

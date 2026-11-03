@@ -561,7 +561,7 @@ the difference; its log lines carry counts only (`paid_calls_counter`, `paid_cal
   A new one (such as a Central City listing bought with the fee included, through the router's
   `FeeCharged` kind 1) records its call there and settles it the same way; until it does, it is not
   counted.
-- Public: the optional field `paid_calls` of `GET /api/public/stats`, Base mainnet (8453) only:
+- Public: the optional field `paid_calls` of `GET /api/public/stats`, added up over every live chain:
   `{total, as_of, recent_ms, recent_complete}`. `recent_ms` is the time from each payment's block to
   `as_of`, for blocks at most 120 s old, newest first; `recent_complete` is false when all 64 kept
   times fall inside that window. The field is left out while `CITY_PAID_CALLS_TICKER` is `0` and
@@ -788,6 +788,17 @@ Off by default. Server: `server/feed/offers/public-route.ts`, `public-pay.ts`. T
 - **Without `CITY_X402_PUBLIC_OFFERS_SETTLE=1`:** the 402 only, and 501 for a payment it never
   stored. A call already stored answers its own state, also after the setting or the allowlist
   changed.
+- **Standard `exact` (`CITY_X402_PUBLIC_OFFERS_EXACT=1`, off by default; owner's decision, 2 Nov
+  2026).** The 402 also lists a plain x402 `exact` entry first: Base USDC, the full price, the
+  seller's wallet as `payTo`. No protocol fee is charged on these calls and nothing passes through
+  Central City. The payment is bound to the seller and the exact price, checked as the public
+  facilitator's `/verify` does, then the kind runs, then the public sender settles it with its own
+  guards (screening, gas budget, one per payer in flight). The result is sent only once the
+  transfer is included. One signed authorization buys one call: a replay is refused. Needs the
+  public sender (`CITY_X402_PUBLIC_SETTLE=1`). Server: `public-exact.ts`. A paid call is stored in
+  `feed_pay_public_calls` with `scheme` `exact` and fee 0 (migration 358), so it counts in the paid
+  calls count, the daily check and the Explorer like every other public call; a failed save is
+  logged (`x402_offer.exact_record_failed`) and the call stays answered.
 - **Base only.** An offer whose seller's wallet is on another chain answers as an unknown route.
 - **Pause.** The `feed_flags` row `x402-offer-settle` with `enabled` false, no redeploy: 503 for new
   402s and payments, and open calls neither run nor go out (they wait, and end by their window). A

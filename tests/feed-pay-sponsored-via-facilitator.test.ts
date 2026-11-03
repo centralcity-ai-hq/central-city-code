@@ -20,6 +20,7 @@ import {
   type Router3Settlement,
 } from '../server/protocol/x402/facilitator.js';
 import { FEED_PAY_SPONSOR_SQL } from '../server/feed/pay/sponsor-schema.js';
+import { FEED_PAY_SPONSORED_CHAIN_COLUMN_SQL } from '../server/feed/pay/sponsored-count-schema.js';
 import { createSponsorCredits } from '../server/feed/pay/sponsor.js';
 import { createSponsorSigner, pgSponsorReservations } from '../server/feed/pay/sponsor-signer.js';
 import {
@@ -89,6 +90,7 @@ async function world(t: Parameters<typeof setup>[0], agents = 8) {
     INSERT INTO city_offers VALUES ('of_1', 'ws-s', 's1', 'w-s');`);
   await f.pg.exec(FEED_PAY_SPONSOR_SQL);
   await f.pg.exec(FEED_PAY_SPONSORED_SQL);
+  await f.pg.exec(FEED_PAY_SPONSORED_CHAIN_COLUMN_SQL);
   await f.pg.exec(FEED_PAY_SPONSOR_FLEET_CEILING_SQL);
   for (let i = 1; i <= agents; i++)
     await f.pg

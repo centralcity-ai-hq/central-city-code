@@ -288,6 +288,23 @@ export const STUCK_MS = 5 * 60_000;
 export const HEAD_CHECK_MS = 15_000;
 /** A lane head unmined this long after its send is refreshed by the next submit. */
 export const HEAD_STALE_MS = 30_000;
+/**
+ * A lane head that stays unmined while its settlement already reverts (expired authorizations, a
+ * used leg) holds every later nonce behind it, and resending or replacing it cannot help: it can
+ * only ever revert (2 Nov 2026: 19 batches, 246 sponsored buys, held about 40 minutes in Base's
+ * sequencer, then mined as reverts). A head unmined this long whose call reverts in a simulation is
+ * cancelled (cancelHead): the lane moves on at once, at the cost of one plain transfer.
+ */
+export const DEAD_HEAD_MS = STUCK_MS;
+/** A batch member signed now must stay valid at least this long (s), or it is refused unsent. */
+export const BATCH_MIN_VALIDITY_LEFT_S = 180;
+/** A lane head unmined this long raises an ALERT (once per head and instance). */
+export const HEAD_ALERT_MS = 3 * 60_000;
+/** A cancel is a plain transfer to the facilitator itself. */
+export const CANCEL_GAS = 21_000n;
+/** error_code of a head whose cancel is on its way; CANCELLED once the cancel is mined. */
+export const CANCELLING = 'CANCELLING';
+export const CANCELLED = 'CANCELLED';
 /** A claim on a queued settlement (simulate, sign, send) older than this may be taken over. */
 export const CLAIM_TTL_MS = 60_000;
 /**
@@ -690,6 +707,29 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
     });
   };
 
+  /**
+   * A cancel of a dead lane head (cancelHead): a 0-value transfer to the facilitator itself at the
+   * head's nonce, so the nonce is used and the stored settlement can never execute. The only
+   * signature of this EOA that is not a router call.
+   */
+  const signCancel = async (
+    account: PrivateKeyAccount,
+    input: { nonce: bigint; maxFeePerGas: bigint; maxPriorityFeePerGas: bigint },
+  ) => {
+    assertFeeFloor(params, input.maxFeePerGas, 'A cancel fee');
+    return account.signTransaction({
+      type: 'eip1559',
+      chainId: deps.chainId,
+      nonce: Number(input.nonce),
+      to: account.address,
+      value: 0n,
+      data: '0x',
+      gas: CANCEL_GAS,
+      maxFeePerGas: input.maxFeePerGas,
+      maxPriorityFeePerGas: input.maxPriorityFeePerGas,
+    });
+  };
+
   /** Ends a queued, unsigned settlement this worker claimed, as never sent. */
   const endClaimed = async (key: string, claimId: string, code: string, name: string | null) => {
     const { rows } = await deps.db.query<OpRow>(
@@ -1054,6 +1094,133 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
     return replaced;
   }
 
+  /**
+   * Whether a stored settlement's call reverts now (a simulation at the latest block); false when
+   * Base could not tell (a transient error), so only a definite revert ever cancels a head.
+   */
+  async function revertsNow(row: OpRow): Promise<boolean> {
+    try {
+      await deps.client.estimateGas({
+        account: row.facilitator as Address,
+        to: router,
+        data: row.calldata as Hex,
+      });
+      return false;
+    } catch (error) {
+      return simulationRevert(error).reverted && !transientChainError(error);
+    }
+  }
+
+  /**
+   * Cancels a dead lane head (DEAD_HEAD_MS): a transfer to the facilitator itself at its nonce,
+   * signed and stored under the lane lock and fenced on sent_at like a replacement, with both fees
+   * at least 30% above the stored ones and Base's own (a same-nonce replacement must raise both),
+   * within the fee caps, its gas checked against the budget. The row keeps its key and its batch
+   * members; once the cancel is mined it ends failed (CANCELLED, refresh), never final, and every
+   * member with it (catchUpMembers). A cancel still pending is only ever bumped as a cancel.
+   */
+  async function cancelHead(row: OpRow): Promise<OpRow> {
+    let fresh: Awaited<ReturnType<typeof nodeFees>> | null = null;
+    try {
+      fresh = await nodeFees();
+    } catch {
+      fresh = null;
+    }
+    const oldMax = BigInt(row.max_fee_per_gas ?? '0');
+    const oldPriority = BigInt(row.max_priority_fee_per_gas ?? '0');
+    const maxPriorityFeePerGas = maxOf(
+      ceilMul(oldPriority, 13n, 10n),
+      fresh?.maxPriorityFeePerGas ?? 0n,
+    );
+    const bumped = capped({
+      maxFeePerGas: maxOf(
+        maxOf(ceilMul(oldMax, 13n, 10n), fresh?.maxFeePerGas ?? 0n),
+        maxPriorityFeePerGas,
+      ),
+      maxPriorityFeePerGas,
+    });
+    if (bumped.maxFeePerGas <= oldMax || bumped.maxPriorityFeePerGas <= oldPriority) {
+      log(`x402 facilitator: ALERT ${row.op_key} fee ceiling reached, dead head not cancelled`);
+      return row;
+    }
+    const from = row.facilitator as Address;
+    let overBudget = false;
+    let raw: Hex | null = null;
+    await address();
+    const rows = await withKey((account) =>
+      deps.db.transaction(async (tx) => {
+        const at = now();
+        await lockLane(tx, from, at);
+        const current = await get(row.op_key, tx, true);
+        if (!current || current.sent_at !== row.sent_at) return [] as OpRow[];
+        let balance: { balance: bigint; block: bigint };
+        let l1Fee = 0n;
+        try {
+          balance = await ethBalanceAt();
+          l1Fee = await l1FeeOf({
+            nonce: BigInt(row.nonce!),
+            data: '0x',
+            gas: CANCEL_GAS,
+            maxFeePerGas: bumped.maxFeePerGas,
+            maxPriorityFeePerGas: bumped.maxPriorityFeePerGas,
+          });
+        } catch {
+          return [] as OpRow[];
+        }
+        if (
+          !fits(
+            balance.balance,
+            CANCEL_GAS,
+            bumped.maxFeePerGas,
+            l1Fee,
+            await inFlightLiability(tx, from, row.op_key, balance.block),
+          )
+        ) {
+          overBudget = true;
+          return [] as OpRow[];
+        }
+        raw = await signCancel(account, {
+          nonce: BigInt(row.nonce!),
+          maxFeePerGas: bumped.maxFeePerGas,
+          maxPriorityFeePerGas: bumped.maxPriorityFeePerGas,
+        });
+        const hash = keccak256(raw);
+        return (
+          await tx.query<OpRow>(
+            `UPDATE x402_facilitator_ops SET raw_tx = $3, tx_hash = $4, tx_hashes = array_append(tx_hashes, $4),
+               max_fee_per_gas = $5, max_priority_fee_per_gas = $6, gas_limit = $9, l1_fee_wei = $10,
+               error_code = $11, sent_at = $7, updated_at = $7
+             WHERE op_key = $1 AND sent_at = $2 AND status = ANY($8::text[]) RETURNING ${COLUMNS}`,
+            [
+              row.op_key,
+              row.sent_at,
+              raw,
+              hash,
+              bumped.maxFeePerGas.toString(10),
+              bumped.maxPriorityFeePerGas.toString(10),
+              at,
+              ['submitted', 'unknown', 'reorged'],
+              CANCEL_GAS.toString(10),
+              l1Fee.toString(10),
+              CANCELLING,
+            ],
+          )
+        ).rows;
+      }),
+    );
+    if (overBudget) {
+      log(`x402 facilitator: ALERT ${row.op_key} gas budget reached, dead head not cancelled`);
+      return row;
+    }
+    const cancelled = rows[0];
+    if (!cancelled || !raw) return (await get(row.op_key)) ?? row;
+    log(
+      `x402 facilitator: ALERT ${row.op_key} lane head at nonce ${row.nonce} reverts and was never mined, cancel sent (attempt ${cancelled.tx_hashes.length})`,
+    );
+    await send(raw);
+    return cancelled;
+  }
+
   /** The receipt for any hash this settlement ever had, newest first; null when none has one. */
   async function anyReceipt(row: OpRow): Promise<TransactionReceipt | null> {
     for (const hash of [...row.tx_hashes].reverse()) {
@@ -1128,6 +1295,8 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
   }
 
   let headCheckedAt = 0;
+  /** The head the watchdog last alerted about (HEAD_ALERT_MS), so each is alerted once here. */
+  let alertedHead: string | null = null;
   /**
    * The lane's head: the stored settlement holding the next nonce Base expects. Every later
    * settlement waits behind it, and refresh() (rebroadcast exactly as stored, or the reviewed
@@ -1153,6 +1322,24 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
       );
       const head = rows[0];
       if (!head || Number(head.sent_at ?? 0) > now() - HEAD_STALE_MS) return;
+      // The watchdog: a head that holds the lane for minutes is an ALERT, once per head here.
+      if (Number(head.sent_at ?? 0) <= now() - HEAD_ALERT_MS && alertedHead !== head.op_key) {
+        alertedHead = head.op_key;
+        log(
+          `x402 facilitator: ALERT lane head ${head.op_key} at nonce ${head.nonce} unmined for over ${HEAD_ALERT_MS / 60_000} min, every later settlement waits`,
+        );
+      }
+      // Dead: unmined for DEAD_HEAD_MS, no receipt for any of its hashes, and its call reverts.
+      // Base never includes it, so it is cancelled instead of sent again.
+      if (
+        head.error_code !== CANCELLING &&
+        Number(head.sent_at ?? 0) <= now() - DEAD_HEAD_MS &&
+        !(await anyReceipt(head)) &&
+        (await revertsNow(head))
+      ) {
+        await cancelHead(head);
+        return;
+      }
       log(`x402 facilitator: lane head ${head.op_key} waited past ${HEAD_STALE_MS} ms, refreshed`);
       await refresh(head);
     } catch {
@@ -1211,6 +1398,9 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
     if (receipt) {
       const hash = receipt.transactionHash.toLowerCase();
       const reverted = receipt.status !== 'success';
+      // Our cancel was mined (cancelHead): the nonce is used, the settlement never executed. It
+      // ends failed, never final, so nothing behind it ever reads as paid.
+      const cancelled = !reverted && receipt.to?.toLowerCase() === from.toLowerCase();
       let current = row;
       if (
         row.status !== 'included' ||
@@ -1222,9 +1412,11 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
           tx_hash: hash,
           block_number: receipt.blockNumber.toString(10),
           block_hash: receipt.blockHash.toLowerCase(),
-          error_code: reverted ? 'REVERTED' : null,
+          error_code: reverted ? 'REVERTED' : cancelled ? CANCELLED : null,
         });
-        if (current.status === 'included' && current.tx_hash === hash)
+        if (cancelled)
+          log(`x402 facilitator: ${row.op_key} cancel mined, nonce ${row.nonce} used, not settled`);
+        else if (current.status === 'included' && current.tx_hash === hash)
           // Runs once, at this first transition; a failed check is itself an ALERT (its
           // receipt status included), so a reverted batch or a costly settlement is never lost.
           await watchReceipt(current, receipt).catch(() =>
@@ -1242,7 +1434,11 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
       return move(
         current,
         ['included'],
-        reverted ? { status: 'failed', error_code: 'REVERTED' } : { status: 'final' },
+        reverted
+          ? { status: 'failed', error_code: 'REVERTED' }
+          : cancelled
+            ? { status: 'failed', error_code: CANCELLED }
+            : { status: 'final' },
       );
     }
 
@@ -1277,7 +1473,8 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
     if (current.status === 'reconciling')
       current = await move(current, ['reconciling'], { status: 'submitted', error_code: null });
     if (current.sent_at !== null && now() - Number(current.sent_at) >= STUCK_MS)
-      return replace(current);
+      // A cancel on its way is only ever replaced by a dearer cancel, never by the settlement.
+      return current.error_code === CANCELLING ? cancelHead(current) : replace(current);
     let known = true;
     try {
       await deps.client.getTransaction({ hash: current.tx_hash as Hex });
@@ -1454,6 +1651,20 @@ export function createRouter3Facilitator(deps: Router3FacilitatorDeps) {
     )
       return;
     members = members.filter((m) => !tooOld(m));
+    // A member whose authorizations run out soon is never signed into a batch (2 Nov 2026: batches
+    // held in Base's pool past their legs' validBefore could then only revert and blocked the
+    // lane). Refused, never sent: its caller ends it unpaid at once.
+    const expiring = (m: OpRow) =>
+      decodeSettle(m.calldata as Hex).validBefore <
+      BigInt(Math.floor(now() / 1000) + BATCH_MIN_VALIDITY_LEFT_S);
+    if (
+      !(await fenced(
+        members.filter(expiring).map((m) => m.op_key),
+        'refuse',
+      ))
+    )
+      return;
+    members = members.filter((m) => !expiring(m));
     if (late()) return stop();
     const refused = await authorize(members.map((m) => m.op_key));
     if (!(await fenced([...refused], 'refuse'))) return;

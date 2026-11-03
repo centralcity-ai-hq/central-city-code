@@ -69,6 +69,7 @@ export class FakeBase {
       status: 'success' | 'reverted';
       blockNumber: bigint;
       blockHash: Hex;
+      to: Hex | null;
       gasUsed?: bigint;
       effectiveGasPrice?: bigint;
       l1Fee?: bigint;
@@ -93,7 +94,8 @@ export class FakeBase {
   ) {
     const blockHash = keccak256(`0x${blockNumber.toString(16).padStart(8, '0')}aa` as Hex);
     this.blocks.set(blockNumber, blockHash);
-    this.receipts.set(hash, { status, blockNumber, blockHash, ...gas });
+    const to = parseTransaction(this.known.get(hash)!).to ?? null;
+    this.receipts.set(hash, { status, blockNumber, blockHash, to, ...gas });
     const nonce = parseTransaction(this.known.get(hash)!).nonce!;
     this.minedCount = Math.max(this.minedCount, nonce + 1);
   }

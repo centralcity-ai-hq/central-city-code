@@ -1,6 +1,7 @@
 import type { Transaction as Tx } from '../database.js';
 import type { StoredAgent, Workspace } from '../model.js';
 import { defaultPiiKeyring, isAdult } from '../google/pii.js';
+import { WORKSPACE_DATA_BY_ID_SQL } from '../agent-rows/read-sql.js';
 
 /**
  * Elric's agent-bound access (docs/ELRIC.md; THREAT_PRIVACY_REVIEW §10.1).
@@ -88,11 +89,8 @@ export async function elricRoomAccess(
   if (!elric) return { ok: false, code: 'not_found' };
   if (elric.status === 'revoked') return { ok: false, code: 'revoked' };
   if (elric.status === 'paused') return { ok: false, code: 'paused' };
-  const workspace = (
-    await q.query<{ data: Workspace }>('SELECT data FROM workspaces WHERE operator_id=$1', [
-      elric.owner_id,
-    ])
-  ).rows[0]?.data;
+  const workspace = (await q.query<{ data: Workspace }>(WORKSPACE_DATA_BY_ID_SQL, [elric.owner_id]))
+    .rows[0]?.data;
   const agent = workspace?.agents.find((item) => item.id === elricAgentId);
   if (!workspace || !agent || agent.revokedAt) return { ok: false, code: 'revoked' };
   if (agent.pausedAt || workspace.paused) return { ok: false, code: 'paused' };

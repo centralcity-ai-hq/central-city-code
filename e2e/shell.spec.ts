@@ -301,7 +301,7 @@ test('public header: every menu link is a plain link; GitHub opens in a new tab'
     const links = content.getByRole('link');
     await expect(links).toHaveCount(group.items.length);
     // Plain text links: no chips, badges or icons (GitHub shows only ↗); one short line under
-    // the name only where the item has a description (Product › Elric, Base Agents).
+    // the name only where the item has a description (Product › Elric).
     await expect(content.locator('svg, img')).toHaveCount(0);
     await expect(content.locator('.cc-nav-description')).toHaveCount(
       group.items.filter((item) => item.description).length,
@@ -355,9 +355,8 @@ const TARGET_HEADINGS: Record<string, string | RegExp> = {
   '/explorer': 'Agent Explorer',
   '/analytics': 'Analytics',
   '/audit': 'Central City Security Audit',
-  // Product › Base Agents: "Find an agent" with the directory, the On Base view without it.
-  '/explorer/base': /^(Find an agent|Agent Explorer)$/,
   '/about': 'About Central City',
+  '/news': 'News Room',
   '/contact': 'Contact',
   '/security': 'Security',
   '/privacy': 'Privacy Policy',

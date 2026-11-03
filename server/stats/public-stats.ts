@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { agentsArraySql } from '../agent-rows/sql.js';
 import { createRateTracker, type RateTracker } from './rates.js';
 import type { Database } from '../database.js';
 import { clientAddressKey } from '../rate-limit.js';
@@ -47,8 +48,8 @@ import './schema.js'; // migrations 28 public_stats and 59 counted_agent_ids (si
  * agents and growing with document size). AI_AGENTS_TOTAL_SCAN_SQL is the same definition as a
  * scan over the documents; tests/public-stats.test.ts keeps the two equal.
  *
- * `paid_calls` (optional): the paid service calls on Base mainnet (server/stats/paid-calls.ts,
- * shared/paid-calls.ts), from one primary-key read per server every 5 s.
+ * `paid_calls` (optional): the paid service calls on every live chain (server/stats/paid-calls.ts,
+ * shared/paid-calls.ts), from one primary-key read per chain per server every 5 s.
  *
  * `base_agents` (optional): the Agent Explorer's "On Base now" total (server/stats/base-agents.ts),
  * shared through its own public_stats row under the same lease; left out until it is counted.
@@ -88,8 +89,9 @@ export const PUBLIC_STATS_RATE = { max: 60, windowMs: 60_000 } as const;
  */
 export const AI_AGENTS_TOTAL_SCAN_SQL = `SELECT count(DISTINCT a.value->>'id')::bigint AS n
   FROM workspaces w
-  CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(w.data->'agents') = 'array'
-                                               THEN w.data->'agents' ELSE '[]'::jsonb END) AS a(value)
+  CROSS JOIN LATERAL (SELECT ${agentsArraySql('w.operator_id', 'w.data')} AS list OFFSET 0) l
+  CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(l.list) = 'array'
+                                               THEN l.list ELSE '[]'::jsonb END) AS a(value)
   WHERE a.value->>'demoKey' IS NULL
     AND NOT (w.operator_id = ANY($1::text[]))`;
 

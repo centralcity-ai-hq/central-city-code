@@ -1749,7 +1749,10 @@ test('concurrent metrics misses share one aggregation over every workspace', asy
   const original = db.query.bind(db);
   let scans = 0;
   (db as { query: typeof db.query }).query = ((text: string, params?: unknown[]) => {
-    if (typeof text === 'string' && text.includes("jsonb_array_elements(w.data->'agents')"))
+    if (
+      typeof text === 'string' &&
+      text.includes('count(DISTINCT w.operator_id)::text AS partitions')
+    )
       scans++;
     return original(text as never, params as never);
   }) as typeof db.query;

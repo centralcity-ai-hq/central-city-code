@@ -36,6 +36,14 @@ import {
   type PublicOfferPay,
 } from './public-pay.js';
 
+import {
+  exactEntry,
+  exactPayloadOf,
+  payExact,
+  publicExactOn,
+  type PublicExactDeps,
+} from './public-exact.js';
+
 export { PUBLIC_OFFER_MAX_RAW, PUBLIC_OFFER_SCHEME };
 /** Kinds that fetch a page stay Feed-only: anonymous buyers would use up the fetcher's limits. */
 const NOT_PUBLIC_KINDS: ReadonlySet<string> = new Set(['web-read', 'web-meta', 'web-links']);
@@ -68,6 +76,8 @@ export function registerPublicOfferRoutes(
     limit: (key: string, max: number, windowMs: number) => Promise<void>;
     /** The paid side (public-pay.ts): used only with CITY_X402_PUBLIC_OFFERS_SETTLE=1. */
     pay?: PublicOfferPay;
+    /** The standard exact lane (public-exact.ts): used only with CITY_X402_PUBLIC_OFFERS_EXACT=1. */
+    exact?: PublicExactDeps;
     cronSecret?: string;
   },
 ): void {
@@ -117,8 +127,13 @@ export function registerPublicOfferRoutes(
       const settle = publicOfferSettleOn(deps.env) ? (deps.pay ?? null) : null;
       const parsed = body.safeParse(request.body ?? {});
       const resource = new URL(request.url, deps.origin()).href;
-      const challengeAnswer = (entry: object): PublicAnswer => {
-        const challenge = { x402Version: 2, resource: { url: resource }, accepts: [entry] };
+      const challengeAnswer = (entries: object[], error?: string): PublicAnswer => {
+        const challenge = {
+          x402Version: 2,
+          ...(error ? { error } : {}),
+          resource: { url: resource },
+          accepts: entries,
+        };
         return {
           status: 402,
           headers: {
@@ -128,6 +143,52 @@ export function registerPublicOfferRoutes(
           json: challenge,
         };
       };
+      // The standard exact entry, offered first, while that lane is on (public-exact.ts).
+      const exactLane =
+        deps.exact && publicExactOn(deps.env, deps.chainId) && deps.exact.sender()
+          ? deps.exact
+          : null;
+      const exactFor = (offer: PublicHostedOffer) => {
+        const entry = exactLane ? exactEntry(offer, deps.chainId, deps.env) : null;
+        return entry ? [entry] : [];
+      };
+      const exactPayload = exactLane ? exactPayloadOf(request.headers) : null;
+      if (exactLane && exactPayload) {
+        if (!parsed.success)
+          return reply
+            .code(400)
+            .header('Cache-Control', 'no-store')
+            .send({ error: 'Send the input as a JSON object.', code: 'invalid_inputs' });
+        let offer: PublicHostedOffer;
+        try {
+          offer = await deps.hosted(deps.serviceIdOf(offerId), {
+            body: parsed.data as FeedPayJson,
+          });
+        } catch (error) {
+          if (!(error instanceof FeedPayRefusal)) throw error;
+          if (error.code !== 'invalid_inputs') return notFound(reply);
+          return reply
+            .code(400)
+            .header('Cache-Control', 'no-store')
+            .send({ error: error.message, code: 'invalid_inputs' });
+        }
+        if (NOT_PUBLIC_KINDS.has(offer.kind) || offer.split.gross > PUBLIC_OFFER_MAX_RAW)
+          return notFound(reply);
+        const entry = exactEntry(offer, deps.chainId, deps.env);
+        if (!entry) return unavailable(reply);
+        return send(
+          reply,
+          await payExact({
+            deps: exactLane,
+            offer,
+            entry,
+            payload: exactPayload,
+            client: clientKey,
+            serviceId: deps.serviceIdOf(offerId),
+            challenge: (error) => challengeAnswer([entry], error),
+          }),
+        );
+      }
       // A payment comes first: a call already stored still answers while the router is off.
       if (settle && (request.headers['payment-signature'] || request.headers['x-payment'])) {
         const payment = publicPaymentOf(request.headers);
@@ -145,7 +206,7 @@ export function registerPublicOfferRoutes(
             client: clientKey,
             payment: payment.payment,
             v1: payment.v1,
-            challenge: challengeAnswer,
+            challenge: (entry) => challengeAnswer([entry]),
           }),
         );
       }
@@ -181,7 +242,9 @@ export function registerPublicOfferRoutes(
         if (await settle.paused()) return unavailable(reply);
         if (!(await settle.ready())) return unavailable(reply, 30);
         const entry = settle.acceptsEntry(offerId, offer);
-        return entry ? send(reply, challengeAnswer(entry)) : unavailable(reply);
+        return entry
+          ? send(reply, challengeAnswer([...exactFor(offer), entry]))
+          : unavailable(reply);
       }
       if (request.headers['payment-signature'] || request.headers['x-payment'])
         return reply.code(501).header('Cache-Control', 'no-store').send({
@@ -191,26 +254,29 @@ export function registerPublicOfferRoutes(
       const now = Math.floor(Date.now() / 1000);
       return send(
         reply,
-        challengeAnswer({
-          scheme: PUBLIC_OFFER_SCHEME,
-          network: `eip155:${deps.chainId}`,
-          asset: getAddress(network.tokens.USDC.address),
-          amount: offer.split.gross.toString(),
-          payTo: getAddress(offer.payTo),
-          maxTimeoutSeconds: ROUTER3_VALIDITY_S,
-          extra: {
-            name: domain.name,
-            version: domain.version,
-            assetTransferMethod: 'eip3009',
-            router,
-            treasury: getAddress(treasury),
-            sellerAmount: offer.split.net.toString(),
-            feeAmount: offer.split.fee.toString(),
-            ref: `0x${randomBytes(32).toString('hex')}`,
-            validAfter: String(now - 60),
-            validBefore: String(now + ROUTER3_VALIDITY_S),
+        challengeAnswer([
+          ...exactFor(offer),
+          {
+            scheme: PUBLIC_OFFER_SCHEME,
+            network: `eip155:${deps.chainId}`,
+            asset: getAddress(network.tokens.USDC.address),
+            amount: offer.split.gross.toString(),
+            payTo: getAddress(offer.payTo),
+            maxTimeoutSeconds: ROUTER3_VALIDITY_S,
+            extra: {
+              name: domain.name,
+              version: domain.version,
+              assetTransferMethod: 'eip3009',
+              router,
+              treasury: getAddress(treasury),
+              sellerAmount: offer.split.net.toString(),
+              feeAmount: offer.split.fee.toString(),
+              ref: `0x${randomBytes(32).toString('hex')}`,
+              validAfter: String(now - 60),
+              validBefore: String(now + ROUTER3_VALIDITY_S),
+            },
           },
-        }),
+        ]),
       );
     },
   );

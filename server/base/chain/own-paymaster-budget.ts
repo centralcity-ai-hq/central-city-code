@@ -549,6 +549,22 @@ export const boundWaits = (tx: Pick<Transaction, 'query'>, lockTimeoutMs: number
 /** A budget lock wait this long is logged, at most this often per instance. */
 const LOCK_WAIT_NOTICE_MS = 500;
 const LOCK_WAIT_NOTICE_EVERY_MS = 10_000;
+/**
+ * How long the lock was held, from taking it to the end of the transaction's work (2 Nov 2026: the
+ * waits stayed after settles left the lock, and nobody knew what held it). Every hold is counted per
+ * call site; once per this interval an instance logs one line, only when a hold reached the notice.
+ */
+const LOCK_HELD_NOTICE_MS = 200;
+const LOCK_HELD_NOTICE_EVERY_MS = 10_000;
+
+/** Holds of one call site within one notice interval; `parts`: the longest of each named step. */
+interface HeldSite {
+  n: number;
+  slow: number;
+  maxMs: number;
+  totalMs: number;
+  parts: Record<string, number>;
+}
 
 /** An exit admitted past the deployment's exit day (first of its account's day): the day's sum with it. */
 interface PastExitDay {
@@ -592,6 +608,19 @@ export function ownPaymasterBudget(deps: {
    * and everything open are still exact. Default 0: all counted under the lock.
    */
   historyMaxAgeMs?: number;
+  /**
+   * Settles without the budget lock. A settle only replaces one reservation's worst case with its
+   * actual cost (never more: the EntryPoint charges at most the prefund, a submitter at most gas
+   * limit x max fee), and an admission reads every sum in one statement, so it sees a settle whole
+   * or not at all. With a submitterBound budget only; default false: settled under the lock.
+   */
+  settleUnlocked?: boolean;
+  /**
+   * The lapse of never-sent reservations past validUntil + margin runs at most this often (ms) per
+   * instance instead of in every send and exposure. Such a reservation cannot execute either way;
+   * until it lapses it only keeps counting as open, which is the careful side. Default 0: every time.
+   */
+  expireEveryMs?: number;
   /** Read at every admission; a limit left out is BUDGET_LIMITS'. */
   limits?: Partial<BudgetLimits>;
   /**
@@ -617,8 +646,79 @@ export function ownPaymasterBudget(deps: {
   const now = deps.now ?? Date.now;
   const chainId = deps.chainId ?? BASE_MAINNET;
   const depositMaxAgeMs = deps.depositMaxAgeMs ?? 0;
+  const settleUnlocked = deps.submitterBound === true && deps.settleUnlocked === true;
+  const expireEveryMs = deps.expireEveryMs ?? 0;
+  /** When this instance last lapsed never-sent reservations (expireEveryMs). */
+  let expiredAt = -Infinity;
   let lockWaitNoticeAt = -Infinity;
   const lockTimeoutSet = new WeakSet<Transaction>();
+  /** When each transaction took the lock (real time, like the wait). */
+  const lockedAt = new WeakMap<Transaction, number>();
+  /**
+   * The steps of a transaction that holds the lock (the longest of each name, ms), reported with its
+   * hold: 2 Nov 2026, the lane wait and the signature were a few ms while holds reached 0.9 s.
+   */
+  const stepsOf = new WeakMap<Transaction, Record<string, number>>();
+  const timed = async <T>(tx: Transaction, name: string, work: () => Promise<T>): Promise<T> => {
+    const started = Date.now();
+    try {
+      return await work();
+    } finally {
+      if (lockedAt.has(tx)) {
+        const steps = stepsOf.get(tx) ?? {};
+        steps[name] = Math.max(steps[name] ?? 0, Date.now() - started);
+        stepsOf.set(tx, steps);
+      }
+    }
+  };
+  let held = new Map<string, HeldSite>();
+  let heldSince = Date.now();
+  /**
+   * Counts one hold of the lock by `site`, if this transaction took it; logs this instance's
+   * holds once per interval when one reached the notice.
+   */
+  const noteHeldIn = (tx: Transaction, site: string, given: Record<string, number> = {}) => {
+    const at = lockedAt.get(tx);
+    if (at === undefined) return;
+    lockedAt.delete(tx);
+    const parts = { ...stepsOf.get(tx), ...given };
+    stepsOf.delete(tx);
+    const end = Date.now();
+    const ms = end - at;
+    const s = held.get(site) ?? { n: 0, slow: 0, maxMs: 0, totalMs: 0, parts: {} };
+    s.n += 1;
+    s.totalMs += ms;
+    if (ms >= LOCK_HELD_NOTICE_MS) s.slow += 1;
+    if (ms > s.maxMs) s.maxMs = ms;
+    for (const [part, partMs] of Object.entries(parts))
+      if (partMs > (s.parts[part] ?? -1)) s.parts[part] = partMs;
+    held.set(site, s);
+    if (end - heldSince < LOCK_HELD_NOTICE_EVERY_MS) return;
+    const seconds = Math.round((end - heldSince) / 1000);
+    const sites = [...held.entries()];
+    held = new Map();
+    heldSince = end;
+    if (!sites.some(([, v]) => v.slow > 0)) return;
+    const text = sites
+      .sort(([, a], [, b]) => b.totalMs - a.totalMs)
+      .map(([name, v]) => {
+        const steps = Object.entries(v.parts)
+          .map(([part, partMs]) => `; ${part} max ${partMs} ms`)
+          .join('');
+        return `${name} ${v.n} (${v.slow} >= ${LOCK_HELD_NOTICE_MS} ms, max ${v.maxMs} ms, total ${v.totalMs} ms${steps})`;
+      })
+      .join(', ');
+    log(`own paymaster: budget lock held on chain ${chainId} over ${seconds} s: ${text}`);
+  };
+  /** A transaction of this module's own: its hold is counted under `site`. */
+  const inLock = <T>(site: string, action: (tx: Transaction) => Promise<T>): Promise<T> =>
+    deps.db.transaction(async (tx) => {
+      try {
+        return await action(tx);
+      } finally {
+        noteHeldIn(tx, site);
+      }
+    });
   /** The last reading and when it was asked for; a failed read is never kept. */
   let lastDeposit: { reading: DepositReading; at: number } | null = null;
   let depositRead: Promise<DepositReading> | null = null;
@@ -691,7 +791,9 @@ export function ownPaymasterBudget(deps: {
       [chainId],
     );
     // Waiters each hold a pooled connection: a long queue here starves every route.
-    const waitedMs = Date.now() - asked;
+    const got = Date.now();
+    if (!lockedAt.has(tx)) lockedAt.set(tx, got);
+    const waitedMs = got - asked;
     if (waitedMs >= LOCK_WAIT_NOTICE_MS && asked - lockWaitNoticeAt >= LOCK_WAIT_NOTICE_EVERY_MS) {
       lockWaitNoticeAt = asked;
       log(`own paymaster: budget lock waited ${waitedMs} ms on chain ${chainId}`);
@@ -719,22 +821,37 @@ export function ownPaymasterBudget(deps: {
     );
   };
 
-  /** Lapses reservations that were never sent and can no longer execute (validUntil + margin). */
-  const expire = (tx: Transaction, at: number) =>
-    tx.query(
-      `UPDATE own_paymaster_reservations SET status = 'expired', updated_at = $1
-       WHERE status = 'reserved' AND (valid_until + $2) * 1000 < $1`,
-      [at, EXPIRY_MARGIN_S],
+  /**
+   * Lapses reservations that were never sent and can no longer execute (validUntil + margin). On
+   * the hot paths (`hot`: reserve, markSentIn, exposeIn) at most every expireEveryMs on this
+   * instance; a rolled-back transaction may skip one turn, and the next one past the interval
+   * lapses them. Every other caller (release, lapsedState, rekey, snapshot) lapses them each time.
+   */
+  const expire = async (tx: Transaction, at: number, hot = false) => {
+    if (hot && expireEveryMs > 0 && at - expiredAt < expireEveryMs) return;
+    expiredAt = at;
+    await timed(tx, 'expire', () =>
+      tx.query(
+        `UPDATE own_paymaster_reservations SET status = 'expired', updated_at = $1
+         WHERE status = 'reserved' AND (valid_until + $2) * 1000 < $1`,
+        [at, EXPIRY_MARGIN_S],
+      ),
     );
+  };
 
   async function markSentIn(tx: Transaction, userOpHash: string): Promise<void> {
     const at = now();
     await lockBudget(tx);
-    await expire(tx, at);
-    const moved = await tx.query(
-      `UPDATE own_paymaster_reservations SET status = 'sent', updated_at = $2
-       WHERE user_op_hash = $1 AND status IN ('reserved','sent') RETURNING user_op_hash`,
-      [userOpHash.toLowerCase(), at],
+    await expire(tx, at, true);
+    // A reservation past validUntil + margin is never sent, whether or not the lapse above ran.
+    const moved = await timed(tx, 'mark', () =>
+      tx.query(
+        `UPDATE own_paymaster_reservations SET status = 'sent', updated_at = $2
+         WHERE user_op_hash = $1 AND status IN ('reserved','sent')
+           AND NOT (status = 'reserved' AND (valid_until + $3) * 1000 < $2)
+         RETURNING user_op_hash`,
+        [userOpHash.toLowerCase(), at, EXPIRY_MARGIN_S],
+      ),
     );
     if (moved.rows.length !== 1) throw new ReservationGone();
   }
@@ -746,6 +863,25 @@ export function ownPaymasterBudget(deps: {
     block: bigint,
   ): Promise<void> {
     if (actualCostWei < 0n) throw new Error('A cost is never negative.');
+    if (settleUnlocked) {
+      // Outside the lock a settle may only lower what a row counts: its actual cost is held to
+      // the worst case it was admitted at (a higher one is logged). Settled is final: a second
+      // settle changes nothing. The lapse moves only 'reserved' rows, so it never undoes a settle.
+      const { rows } = await tx.query<{ max: string }>(
+        `UPDATE own_paymaster_reservations
+           SET status = 'settled', actual_cost_wei = LEAST($2::numeric, max_cost_wei),
+               settled_block = $3, updated_at = $4
+         WHERE user_op_hash = $1 AND status IN ('reserved','sent','expired')
+         RETURNING max_cost_wei::text AS max`,
+        [userOpHash.toLowerCase(), actualCostWei.toString(), block.toString(), now()],
+      );
+      const max = rows[0] ? BigInt(rows[0].max) : null;
+      if (max !== null && actualCostWei > max)
+        log(
+          `own paymaster: ALERT ${userOpHash} settled at its admitted ${max} wei, actual ${actualCostWei} wei on chain ${chainId}`,
+        );
+      return;
+    }
     await lockBudget(tx);
     await tx.query(
       `UPDATE own_paymaster_reservations
@@ -778,20 +914,24 @@ export function ownPaymasterBudget(deps: {
     if (admission.kind === 'selfPaid') {
       if (admission.floatWei === undefined) return null;
       const open = (
-        await tx.query<{ open: string }>(
-          `SELECT COALESCE(SUM(max_cost_wei), 0)::text AS open FROM own_paymaster_reservations
-           WHERE chain_id = $1 AND flow = '${SELF_PAID}' AND status = 'sent'`,
-          [chainId],
+        await timed(tx, 'float', () =>
+          tx.query<{ open: string }>(
+            `SELECT COALESCE(SUM(max_cost_wei), 0)::text AS open FROM own_paymaster_reservations
+             WHERE chain_id = $1 AND flow = '${SELF_PAID}' AND status = 'sent'`,
+            [chainId],
+          ),
         )
       ).rows[0]!.open;
       if (BigInt(open) + cost > admission.floatWei) throw new BudgetError('submitter_float');
       return null;
     }
-    const deposit = await depositForAdmission();
+    const deposit = await timed(tx, 'deposit', depositForAdmission);
     const history = historyForAdmission();
-    const s = history
-      ? await recentSums(tx, at, deposit.block, chainId, history)
-      : await sums(tx, w, at, deposit.block, chainId);
+    const s = await timed(tx, history ? 'sums' : 'sums (full)', () =>
+      history
+        ? recentSums(tx, at, deposit.block, chainId, history)
+        : sums(tx, w, at, deposit.block, chainId),
+    );
     const free = deposit.wei - s.allOpen - s.settledAfter - cost;
     if (free < 0n) throw new BudgetError('deposit');
     if (admission.kind === 'exposure') return null;
@@ -800,7 +940,7 @@ export function ownPaymasterBudget(deps: {
     const own =
       (who.accountId === null && who.sender === null) || (operator && !isProtected)
         ? null
-        : await sponseeSums(tx, bound, at, isProtected, who, chainId);
+        : await timed(tx, 'own', () => sponseeSums(tx, bound, at, isProtected, who, chainId));
     let pastDay: PastExitDay | null = null;
     if (!isProtected) {
       if (s.overhead + s.ordinaryDone + s.ordinaryOpen + cost > limit('ordinaryCeilingWei'))
@@ -887,7 +1027,7 @@ export function ownPaymasterBudget(deps: {
     if (sender !== null && !ADDRESS.test(sender)) throw new Error('A sender is an address.');
     const at = now();
     await lockBudget(tx);
-    await expire(tx, at);
+    await expire(tx, at, true);
     const known = await tx.query<{
       max_cost_wei: string;
       status: string;
@@ -992,10 +1132,10 @@ export function ownPaymasterBudget(deps: {
       const isProtected = PROTECTED_FLOWS.has(input.flow);
       const admitted: { pastDay: PastExitDay | null } = { pastDay: null };
       await freshenDeposit();
-      await deps.db.transaction(async (tx) => {
+      await inLock('reserve', async (tx) => {
         const at = now();
         await lockBudget(tx);
-        await expire(tx, at);
+        await expire(tx, at, true);
         const known = await tx.query<{
           flow: string;
           max_cost_wei: string;
@@ -1060,7 +1200,7 @@ export function ownPaymasterBudget(deps: {
     async release(userOpHash: string): Promise<void> {
       const hash = userOpHash.toLowerCase();
       if (!/^0x[0-9a-f]{64}$/.test(hash)) throw new Error('userOpHash must be 32 bytes.');
-      await deps.db.transaction(async (tx) => {
+      await inLock('release', async (tx) => {
         const at = now();
         await lockBudget(tx);
         await expire(tx, at);
@@ -1080,7 +1220,7 @@ export function ownPaymasterBudget(deps: {
      * interleave with an expiry or an admission.
      */
     async markSent(userOpHash: string): Promise<void> {
-      await deps.db.transaction((tx) => markSentIn(tx, userOpHash));
+      await inLock('markSent', (tx) => markSentIn(tx, userOpHash));
     },
 
     /**
@@ -1089,7 +1229,7 @@ export function ownPaymasterBudget(deps: {
      * no reservation) here proves no transaction carrying it was ever stored or ever can be.
      */
     async lapsedState(userOpHash: string): Promise<string | undefined> {
-      return deps.db.transaction(async (tx) => {
+      return inLock('lapsedState', async (tx) => {
         await lockBudget(tx);
         await expire(tx, now());
         const row = await tx.query<{ status: string }>(
@@ -1131,7 +1271,7 @@ export function ownPaymasterBudget(deps: {
       if (!/^0x[0-9a-f]{64}$/.test(source) || !/^0x[0-9a-f]{64}$/.test(target))
         throw new Error('Reservation keys are 32 bytes.');
       let gone = false;
-      await deps.db.transaction(async (tx) => {
+      await inLock('rekey', async (tx) => {
         await lockBudget(tx);
         await expire(tx, now());
         if (source !== target) {
@@ -1177,17 +1317,23 @@ export function ownPaymasterBudget(deps: {
      * reservation never leaves "outstanding" while a reserve() decides. Settles expired ones too.
      */
     async settle(userOpHash: string, actualCostWei: bigint, block: bigint): Promise<void> {
-      await deps.db.transaction((tx) => settleIn(tx, userOpHash, actualCostWei, block));
+      await inLock('settle', (tx) => settleIn(tx, userOpHash, actualCostWei, block));
     },
 
     /** Envelope gas spent outside the paymaster (deploy, allowlist, failed submitter txs). */
     async recordOverhead(wei: bigint): Promise<void> {
-      await deps.db.transaction((tx) => recordOverheadIn(tx, wei));
+      await inLock('recordOverhead', (tx) => recordOverheadIn(tx, wei));
     },
+
+    /**
+     * Counts a hold of the lock by a caller's own transaction that took it (markSentIn, exposeIn,
+     * settleIn, ...): call it at the end of that transaction's work. `parts`: named steps' times.
+     */
+    noteHeldIn,
 
     /** For the monitor: where the envelope stands right now. */
     async snapshot() {
-      return deps.db.transaction(async (tx) => {
+      return inLock('snapshot', async (tx) => {
         await lockBudget(tx);
         await expire(tx, now());
         const deposit = await deps.deposit();

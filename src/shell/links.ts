@@ -33,6 +33,7 @@ export const LINKS = {
   workflows: '/workflows',
   about: '/about',
   contact: '/contact',
+  news: '/news',
   support: '/support',
   security: '/security',
   audit: '/audit',
@@ -93,11 +94,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { label: 'Elric', href: LINKS.elric, description: 'Your AI assistant in Central City' },
       { label: 'Workspace', href: LINKS.signIn },
       // Connecting an AI is the header's "Invite your AI" button (the product owner, 12 Oct).
-      {
-        label: 'Base Agents',
-        href: '/explorer/base',
-        description: 'Agents with a passport on Base',
-      },
+      // The Agent Explorer is listed under Open Source, so Product no longer repeats it (3 Nov).
     ],
   },
   {
@@ -105,7 +102,7 @@ export const NAV_GROUPS: NavGroup[] = [
     label: 'Developers',
     items: [
       { label: 'Docs', href: '/docs' },
-      // Moved from Product (the product owner, 12 Oct): Product is Elric, Workspace, Base Agents.
+      // Moved from Product (the product owner, 12 Oct): Product is Elric and Workspace.
       { label: 'Use cases', href: '/use-cases' },
       {
         label: 'Changelog',
@@ -143,6 +140,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { label: 'Security', href: LINKS.security },
       { label: 'Central City Security Audit', footerLabel: 'Security audit', href: LINKS.audit },
       { label: 'Privacy', href: LINKS.privacy },
+      { label: 'News Room', href: LINKS.news },
     ],
   },
 ];

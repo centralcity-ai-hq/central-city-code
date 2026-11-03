@@ -25,6 +25,8 @@ import { authorizeRoomPair, roomMemberNames, type RoomPair } from './room-direct
 import { SENDER_CONTEXT_INDEX } from './sender-index-schema.js';
 import { storedOwnerKind } from '../rooms/owner-labels.js';
 import { partsContainCredential } from '../rooms/contract.js';
+import { agentsArraySql, agentsListSql } from '../agent-rows/sql.js';
+import { WORKSPACE_DATA_BY_ID_SQL } from '../agent-rows/read-sql.js';
 
 /**
  * Agent messaging v0 (docs/MESSAGING.md). Every operation runs in one short transaction that
@@ -228,11 +230,8 @@ export function createMessaging(d: MessagingDependencies): Messaging {
 
   /** Unlocked snapshot read: never holds the owner's workspace row lock. */
   async function workspaceOf(tx: Tx, operatorId: string): Promise<Workspace> {
-    const row = (
-      await tx.query<{ data: Workspace }>('SELECT data FROM workspaces WHERE operator_id=$1', [
-        operatorId,
-      ])
-    ).rows[0];
+    const row = (await tx.query<{ data: Workspace }>(WORKSPACE_DATA_BY_ID_SQL, [operatorId]))
+      .rows[0];
     if (!row) fail(401, 'unauthorized', 'Sign in to continue.');
     return row!.data;
   }
@@ -290,7 +289,7 @@ export function createMessaging(d: MessagingDependencies): Messaging {
       await tx.query<{ id: string; name: string }>(
         `SELECT DISTINCT a->>'id' AS id, a->>'name' AS name FROM cross_connections c
           JOIN workspaces w ON w.operator_id = CASE WHEN c.to_owner_id=$1 THEN c.from_owner_id ELSE c.to_owner_id END
-          CROSS JOIN LATERAL jsonb_array_elements(w.data->'agents') a
+          CROSS JOIN LATERAL jsonb_array_elements(${agentsArraySql('w.operator_id', 'w.data')}) a
           WHERE c.status IN ('approved','revoked') AND (
             (c.to_owner_id=$1 AND a->>'id'=c.from_agent_id) OR
             (c.from_owner_id=$1 AND a->>'id'=c.to_agent_id))
@@ -809,9 +808,7 @@ export function createMessaging(d: MessagingDependencies): Messaging {
       // Cross-owner budgets (F4 §5), also charged before the transaction. Plain reads decide
       // whether the recipient is another owner's agent along an approved connection.
       const own = (
-        await d.db.query<{ data: Workspace }>('SELECT data FROM workspaces WHERE operator_id=$1', [
-          principal.operatorId,
-        ])
+        await d.db.query<{ data: Workspace }>(WORKSPACE_DATA_BY_ID_SQL, [principal.operatorId])
       ).rows[0]?.data;
       if (own && !own.agents.some((agent) => agent.id === input.to_agent_id)) {
         const link = (
@@ -879,10 +876,7 @@ export function createMessaging(d: MessagingDependencies): Messaging {
         if (link) {
           senderLabel = link.from_owner_label;
           const other = (
-            await tx.query<{ data: Workspace }>(
-              'SELECT data FROM workspaces WHERE operator_id=$1',
-              [link.to_operator_id],
-            )
+            await tx.query<{ data: Workspace }>(WORKSPACE_DATA_BY_ID_SQL, [link.to_operator_id])
           ).rows[0]?.data;
           const found = other?.agents.find((agent) => agent.id === input.to_agent_id);
           if (other && found) {
@@ -1785,8 +1779,7 @@ export function createMessaging(d: MessagingDependencies): Messaging {
       }>(
         `SELECT r.id AS room_id, r.name AS room_name, t.agent_id AS member_id, t.kind, t.owner_kind,
             CASE WHEN t.kind='person' THEN t.display_name ELSE (
-              SELECT a->>'name' FROM workspaces w CROSS JOIN LATERAL jsonb_array_elements(
-                CASE WHEN jsonb_typeof(w.data->'agents')='array' THEN w.data->'agents' ELSE '[]'::jsonb END) a
+              SELECT a->>'name' FROM workspaces w CROSS JOIN LATERAL jsonb_array_elements(${agentsListSql('w.operator_id', 'w.data')}) a
               WHERE w.operator_id=t.owner_id AND a->>'id'=t.agent_id LIMIT 1) END AS name,
             t.owner_label, (t.owner_id=$1) AS own
           FROM room_members s

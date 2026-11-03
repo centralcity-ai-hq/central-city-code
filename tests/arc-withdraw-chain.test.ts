@@ -83,7 +83,11 @@ import {
   type ChainNetwork,
 } from '../shared/chains.js';
 import { protocolArcRouter3Address } from '../server/protocol/fees/cron.js';
-import { PROTOCOL_BASE_MAINNET, type ProtocolDeployment } from '../shared/protocol.js';
+import {
+  PROTOCOL_BASE_MAINNET,
+  SFP_SPONSOR_BASE_MAINNET,
+  type ProtocolDeployment,
+} from '../shared/protocol.js';
 
 /*
  * Withdrawals and payments per chain: an Arc agent's are Arc's in every part (USDC, chain id, port,
@@ -812,7 +816,6 @@ test("REFUSED on Arc: its contracts, its USDC, this deployment's own, and Base's
     ...Object.values(arc.contracts).filter((address): address is Address => address !== null),
     ARC_PAYMASTER,
     ARC_ROUTER,
-    PROTOCOL_BASE_MAINNET.treasury,
     PROTOCOL_BASE_MAINNET.feeRouter3,
     BASE_NET.tokens.USDC.address,
     NATIVE_ETH,
@@ -1422,4 +1425,12 @@ test("Arc's only hold is its USDC: native gas is held nowhere", async (t) => {
     holds.rows.map((row) => row.token.toLowerCase()),
     [ARC_USDC.toLowerCase()],
   );
+});
+
+test('Arc: the first-buy sponsor is an allowed destination even though it is one of our keys (owner decision 2 Nov 2026)', async (t) => {
+  const f = await setup(t, {
+    env: { ...ARC_ON, CITY_ARC_PAYMASTER: ARC_PAYMASTER, CITY_ARC_FEE_ROUTER3: ARC_ROUTER },
+  });
+  const res = await f.withdraw(ARC_AGENT, { to: SFP_SPONSOR_BASE_MAINNET.toLowerCase() });
+  assert.notEqual(res.json().code, 'destination_not_allowed', res.body);
 });

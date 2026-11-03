@@ -1,5 +1,6 @@
 import type { Database } from '../database.js';
 import { AI_WORKSPACE_IDLE_MS } from './service.js';
+import { agentCountSql } from '../agent-rows/sql.js';
 
 /**
  * Operator reconciliation of the live AI workspace counters (docs/AI_WORKSPACES.md), run by
@@ -64,7 +65,7 @@ export async function reconcileAiWorkspaces(
       (
         await tx.query<{ n: string }>(
           `SELECT count(*)::text AS n FROM ai_workspaces a JOIN workspaces w ON w.operator_id=a.operator_id
-            WHERE jsonb_array_length(w.data->'agents')=0 AND a.created_at<=$1
+            WHERE ${agentCountSql('w.operator_id', 'w.data')}=0 AND a.created_at<=$1
             AND NOT EXISTS (SELECT 1 FROM workspace_keys k WHERE k.operator_id=a.operator_id AND COALESCE(k.last_used_at,k.created_at)>$1)
             AND NOT EXISTS (SELECT 1 FROM operator_links l WHERE l.ai_operator_id=a.operator_id)`,
           [now - AI_WORKSPACE_IDLE_MS],

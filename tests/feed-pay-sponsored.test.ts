@@ -14,12 +14,14 @@ import {
 import type { FeedPayOp } from '../server/base/chain/feed-pay-chain.js';
 import type { Router3FacilitatorPort } from '../server/feed/pay/router3.js';
 import { FEED_PAY_SPONSOR_SQL } from '../server/feed/pay/sponsor-schema.js';
+import { FEED_PAY_SPONSORED_CHAIN_COLUMN_SQL } from '../server/feed/pay/sponsored-count-schema.js';
 import { createSponsorCredits } from '../server/feed/pay/sponsor.js';
 import { createSponsorSigner, pgSponsorReservations } from '../server/feed/pay/sponsor-signer.js';
 import {
   createSponsoredCalls,
   FEED_PAY_SPONSORED_SQL,
   SponsoredRefusal,
+  sponsoredMaxSent,
 } from '../server/feed/pay/sponsored.js';
 import { TERMS_VERSION } from '../shared/terms.js';
 
@@ -100,6 +102,7 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }) {
     CREATE TABLE elric_verified_identities (operator_id text PRIMARY KEY);`);
   await pg.exec(FEED_PAY_SPONSOR_SQL);
   await pg.exec(FEED_PAY_SPONSORED_SQL);
+  await pg.exec(FEED_PAY_SPONSORED_CHAIN_COLUMN_SQL);
   await pg.exec(FEED_PAY_SPONSOR_FLEET_CEILING_SQL);
   // The buyer: owner o1 (verified, onboarded) with agent a1 in workspace ws1, identity final.
   await pg.exec(`INSERT INTO operators VALUES ('o1','x','owner'), ('o2','x','owner');
@@ -432,6 +435,53 @@ test('sponsor low on USDC or ETH: first buys pause (unavailable, nothing reserve
     f.calls.start('o1', { ...ask('k2'), agentId: 'a2' }),
     (e: SponsoredRefusal) => e.code === 'unavailable',
   );
+});
+
+test('pace guard: the in-flight cap defaults to 120 and stays within 10 to 1,000', () => {
+  assert.equal(sponsoredMaxSent({}), 120);
+  assert.equal(sponsoredMaxSent({ CITY_SFP_MAX_SENT: '40' }), 40);
+  assert.equal(sponsoredMaxSent({ CITY_SFP_MAX_SENT: '1000' }), 1000);
+  for (const bad of ['9', '1001', '-5', '4e1', '40.5', 'many', ''])
+    assert.equal(sponsoredMaxSent({ CITY_SFP_MAX_SENT: bad }), 120, bad);
+});
+
+test("pace guard: at the cap of this chain's sent buys first buys pause; other chains and paid ones do not count", async (t) => {
+  const f = await setup(t);
+  f.env.CITY_SFP_MAX_SENT = '10';
+  f.wallet.usdc = 100_000_000n; // the in-flight buys hold their USDC too
+  const stuck = async (n: number, chain: number) => {
+    for (let i = 0; i < n; i++)
+      await f.pg.query(
+        `INSERT INTO feed_pay_sponsored_calls (call_id, owner_account_id, idempotency_key,
+           request_hash, operator_id, agent_id, service_id, offer_id, offer_kind, offer_version,
+           pay_to, gross_raw, fee_raw, input, state, op_key, created_at, updated_at, fleet,
+           valid_before, chain_id)
+         VALUES ($1, 'o-other', $1, 'h', 'op-x', 'ax', 'svc-x', 'offer-x', 'kind', 1, $2,
+           1500000, 150000, '{}', 'sent', 'sfp:' || $1, $3, $3, true, 9, $4)`,
+        [`sp_pace_${chain}_${i}`, `0x${'4'.repeat(40)}`, START, chain],
+      );
+  };
+  await stuck(9, 8453);
+  await stuck(30, 5042); // another chain's lane: not this one's pace
+  const c = await f.calls.start('o1', ask());
+  assert.equal(c.state, 'sent'); // the tenth
+  f.env.CITY_SFP_OWNER_DAILY_MAX = '5';
+  await f.pg
+    .exec(`INSERT INTO base_identities VALUES ('a2', 8453, 'confirmed', 2, ${START + 1}, ${START + 1});
+    INSERT INTO base_wallets VALUES ('w-a2', 'a2', 8453, 'ws2', 'o1', 'deployed');`);
+  f.clock.now += 11_000;
+  await assert.rejects(
+    f.calls.start('o1', { ...ask('k2'), agentId: 'a2' }),
+    (e: SponsoredRefusal) => e.code === 'unavailable',
+  );
+  // The lane catches up (one paid): the next buy goes.
+  await f.pg.query(
+    `UPDATE feed_pay_sponsored_calls SET state = 'paid', tx_hash = $1, block_number = 7
+     WHERE call_id = 'sp_pace_8453_0'`,
+    [`0x${'ab'.repeat(32)}`],
+  );
+  const d = await f.calls.start('o1', { ...ask('k2'), agentId: 'a2' });
+  assert.equal(d.state, 'sent');
 });
 
 test('sponsored call: a reservation never handed over is fenced, then failed and released (S3)', async (t) => {

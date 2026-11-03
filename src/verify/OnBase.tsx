@@ -5,6 +5,7 @@ import { ON_BASE_QUERY_MAX } from '../../shared/base/on-base';
 import { PublicHeader } from '../shell/PublicHeader';
 import { number } from './countLogClient';
 import { ExplorerSwitch, useOnBaseCount, useStatsCounts } from './ExplorerSwitch';
+import { DisclosureLine } from '../explorer/proofParts';
 import { BASE_EXPLORER_CHAIN, type ExplorerChain } from '../explorer/chain';
 import { OnBaseVerifyPanel, type VerifyState } from './OnBaseVerifyPanel';
 import {
@@ -438,6 +439,7 @@ export function OnBase({ chain = BASE_EXPLORER_CHAIN }: { chain?: ExplorerChain 
               </dd>
             </div>
           </dl>
+          <DisclosureLine />
           <p className="ob-under">
             <span>
               Final means {chain.name} can no longer change it. Finalizing rows turn final by

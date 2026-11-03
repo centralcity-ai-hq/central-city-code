@@ -98,6 +98,7 @@ import {
   checkSponsorship,
   OWNER_SIGNED_FLOWS,
   PolicyRefusal,
+  PROTECTED_FLOWS,
   type GasCeilings,
   type PolicyAddresses,
   type SponsorFlow,
@@ -264,6 +265,19 @@ export const MAX_REPLACEMENTS = 3;
 export const SUBMITTER_RESERVE_WEI = chainParams(BASE_MAINNET).submitterReserveWei;
 /** How often (per instance) open sends are looked after without being asked (maintain). */
 export const MAINTAIN_EVERY_MS = 15_000;
+
+/**
+ * Runs upkeep past the response on Vercel Fluid (waitUntil), else just in the background. Upkeep
+ * holds the budget lock in its transactions: an instance frozen after its response would keep
+ * every other sender of the chain waiting on that lock.
+ */
+function keepRunning(work: Promise<unknown>): void {
+  const settled = work.catch(() => {});
+  const context = (
+    globalThis as { [key: symbol]: { get?: () => { waitUntil?: (p: Promise<unknown>) => void } } }
+  )[Symbol.for('@vercel/request-context')];
+  context?.get?.()?.waitUntil?.(settled);
+}
 /** Final receipts settled per run: 4 x the lane limit (200 per cron minute), 8 at a time. */
 export const SETTLE_FACTOR = 4;
 export const SETTLE_PARALLEL = 8;
@@ -337,7 +351,7 @@ export interface DirectBundlerDeps {
     | 'lapsedState'
     | 'release'
   > &
-    Partial<Pick<ReturnType<typeof ownPaymasterBudget>, 'freshenDeposit'>>;
+    Partial<Pick<ReturnType<typeof ownPaymasterBudget>, 'freshenDeposit' | 'noteHeldIn'>>;
   policy: { addresses: PolicyAddresses; ceilings?: GasCeilings; paused?: ReadonlySet<SponsorFlow> };
   /** Receipts of operations this module never sent (the CDP bundler's, before the switch). */
   fallback?: Pick<Bundler, 'receipt'>;
@@ -800,7 +814,13 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
    * sponsorships just handed to server flows and not yet sent. Owner-signed ones wait for a person
    * and are checked again at their send. Only with a cap; before anything is reserved or signed.
    */
-  const sponsorshipRoom = async (): Promise<boolean> => {
+  /**
+   * Room for one more sponsorship of `flow`. Every flow but an owner's exit leaves one slot free in
+   * all, which only exits may take (2 Nov 2026: a fleet's registrations kept the Arc lanes full, and
+   * an owner's withdrawal was refused as "network fee cannot be covered"). One slot per lane cost
+   * the fleet's registrations about a third of their pace; one in all keeps an exit's way open.
+   */
+  const sponsorshipRoom = async (flow: SponsorFlow): Promise<boolean> => {
     if (cap === null) return true;
     let usable;
     try {
@@ -808,7 +828,8 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
     } catch {
       throw new BundlerError('RPC_UNAVAILABLE', 'Lanes cannot be read now.');
     }
-    const room = usable.reduce((sum, { open }) => sum + Math.max(0, cap - open), 0);
+    const free = usable.reduce((sum, { open }) => sum + Math.max(0, cap - open), 0);
+    const room = PROTECTED_FLOWS.has(flow) ? free : Math.max(0, free - 1);
     if (room === 0) return false;
     const handed = await deps.db.query<{ n: string }>(
       `SELECT count(*)::text AS n FROM own_paymaster_reservations
@@ -963,7 +984,7 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
 
     // Room on the lanes, before anything is held or signed: a sponsorship that cannot be sent in
     // time is never issued.
-    if (!(await sponsorshipRoom())) {
+    if (!(await sponsorshipRoom(intent.flow))) {
       log(`own paymaster: lanes full, ${intent.flow} not sponsored now`);
       throw refuse('the submitter lanes are full.', 'busy');
     }
@@ -1225,7 +1246,7 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
   }
 
   async function send(op: UserOperation<'0.6'>): Promise<Hex> {
-    void maintainSoon();
+    keepRunning(maintainSoon());
     const hash = opHash(op);
     const stored = await get(hash);
     if (stored) {
@@ -1346,68 +1367,78 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
     try {
       row = await withSubmitter(lane, (account) =>
         deps.db.transaction(async (tx) => {
-          const at = now();
-          // Budget lock first (markSentIn, exposeIn), lane lock second: the one lock order here.
-          if (sponsored) await deps.budget.markSentIn(tx, hash);
-          // Counted for whom the sponsorship is (its own record), a self-paid one for its sender.
-          const owner = sponsored
-            ? ((await flowOf(tx, hash)) ??
-              (() => {
-                // markSentIn just moved this very reservation: its record cannot be missing.
-                throw new ReservationGone();
-              })())
-            : { flow: SELF_PAID, sender: op.sender, accountId: null };
-          await deps.budget.exposeIn(tx, {
-            key: exposureKey(hash),
-            flow: owner.flow,
-            maxCostWei: exposure,
-            sender: owner.sender,
-            accountId: owner.accountId,
-            sponsored,
-            floatWei: selfPaidFloat(balance),
-          });
-          const laneRow = await lockLane(tx, at, lane.key);
-          if (await get(hash, tx)) return null; // another instance stored it meanwhile
-          // The cap's last word, under the lane lock: thrown, the whole transaction rolls back.
-          if (cap !== null && (await openOn(tx, lane, mined)) >= cap) throw new LaneFull();
-          const nonce = maxOf(BigInt(laneRow.next_nonce), BigInt(pending));
-          const raw = await signTx(account, lane, {
-            nonce,
-            to: deps.entryPoint,
-            data: calldata,
-            gas: gasLimit,
-            ...fees,
-          });
-          await tx.query(
-            'UPDATE own_paymaster_lanes SET next_nonce = $3, updated_at = $4 WHERE chain_id = $1 AND submitter = $2',
-            [deps.chainId, lane.key, (nonce + 1n).toString(10), at],
-          );
-          return (
-            await tx.query<SendRow>(
-              `INSERT INTO own_paymaster_sends (user_op_hash, chain_id, submitter, sponsored, calldata,
+          // How long the budget lock is held here, and by which step (lane lock wait, signing).
+          const steps: Record<string, number> = {};
+          try {
+            const at = now();
+            // Budget lock first (markSentIn, exposeIn), lane lock second: the one lock order here.
+            if (sponsored) await deps.budget.markSentIn(tx, hash);
+            // Counted for whom the sponsorship is (its own record), a self-paid one for its sender.
+            const owner = sponsored
+              ? ((await flowOf(tx, hash)) ??
+                (() => {
+                  // markSentIn just moved this very reservation: its record cannot be missing.
+                  throw new ReservationGone();
+                })())
+              : { flow: SELF_PAID, sender: op.sender, accountId: null };
+            await deps.budget.exposeIn(tx, {
+              key: exposureKey(hash),
+              flow: owner.flow,
+              maxCostWei: exposure,
+              sender: owner.sender,
+              accountId: owner.accountId,
+              sponsored,
+              floatWei: selfPaidFloat(balance),
+            });
+            const laneAsked = Date.now();
+            const laneRow = await lockLane(tx, at, lane.key);
+            steps['lane wait'] = Date.now() - laneAsked;
+            if (await get(hash, tx)) return null; // another instance stored it meanwhile
+            // The cap's last word, under the lane lock: thrown, the whole transaction rolls back.
+            if (cap !== null && (await openOn(tx, lane, mined)) >= cap) throw new LaneFull();
+            const nonce = maxOf(BigInt(laneRow.next_nonce), BigInt(pending));
+            const signAsked = Date.now();
+            const raw = await signTx(account, lane, {
+              nonce,
+              to: deps.entryPoint,
+              data: calldata,
+              gas: gasLimit,
+              ...fees,
+            });
+            steps.sign = Date.now() - signAsked;
+            await tx.query(
+              'UPDATE own_paymaster_lanes SET next_nonce = $3, updated_at = $4 WHERE chain_id = $1 AND submitter = $2',
+              [deps.chainId, lane.key, (nonce + 1n).toString(10), at],
+            );
+            return (
+              await tx.query<SendRow>(
+                `INSERT INTO own_paymaster_sends (user_op_hash, chain_id, submitter, sponsored, calldata,
                valid_until, nonce, gas_limit, max_fee_per_gas, max_priority_fee_per_gas, raw_tx,
                l1_fee_wei, tx_hash, tx_hashes, sent_at, status, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, ARRAY[$13]::text[], $14,
                'submitted', $14, $14)
              RETURNING ${COLUMNS}`,
-              [
-                hash,
-                deps.chainId,
-                lane.key,
-                sponsored,
-                calldata,
-                validUntilOf(op),
-                nonce.toString(10),
-                gasLimit.toString(10),
-                fees.maxFeePerGas.toString(10),
-                fees.maxPriorityFeePerGas.toString(10),
-                raw,
-                l1Fee.toString(10),
-                keccak256(raw),
-                at,
-              ],
-            )
-          ).rows[0]!;
+                [
+                  hash,
+                  deps.chainId,
+                  lane.key,
+                  sponsored,
+                  calldata,
+                  validUntilOf(op),
+                  nonce.toString(10),
+                  gasLimit.toString(10),
+                  fees.maxFeePerGas.toString(10),
+                  fees.maxPriorityFeePerGas.toString(10),
+                  raw,
+                  l1Fee.toString(10),
+                  keccak256(raw),
+                  at,
+                ],
+              )
+            ).rows[0]!;
+          } finally {
+            deps.budget.noteHeldIn?.(tx, 'send', steps);
+          }
         }),
       );
     } catch (error) {
@@ -1623,52 +1654,61 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
     await deps.budget.freshenDeposit?.();
     const rows = await withSubmitter(lane, (account) =>
       deps.db.transaction(async (tx) => {
-        const at = now();
-        const flow = await flowOf(tx, row.user_op_hash);
-        if (!flow) {
-          // No accounting record to classify it by: nothing is signed.
-          unaccounted = true;
-          return [] as SendRow[];
-        }
+        const steps: Record<string, number> = {};
         try {
-          await deps.budget.exposeIn(tx, {
-            key: exposureKey(row.user_op_hash),
-            flow: flow.flow,
-            maxCostWei: exposure,
-            sender: flow.sender,
-            accountId: flow.accountId,
-            sponsored: row.sponsored,
-            floatWei: selfPaidFloat(balance),
-          });
-        } catch (error) {
-          if (!(error instanceof BudgetError)) throw error;
-          refused = error;
-          return [] as SendRow[];
-        }
-        await lockLane(tx, at, lane.key);
-        const current = await get(row.user_op_hash, tx, true);
-        if (!current || current.sent_at !== row.sent_at || current.status !== 'submitted')
-          return [] as SendRow[];
-        raw = await signTx(account, lane, { nonce: BigInt(row.nonce), to, data, gas, ...fees });
-        const hash = keccak256(raw);
-        return (
-          await tx.query<SendRow>(
-            `UPDATE own_paymaster_sends SET raw_tx = $3, tx_hash = $4, tx_hashes = array_append(tx_hashes, $4),
+          const at = now();
+          const flow = await flowOf(tx, row.user_op_hash);
+          if (!flow) {
+            // No accounting record to classify it by: nothing is signed.
+            unaccounted = true;
+            return [] as SendRow[];
+          }
+          try {
+            await deps.budget.exposeIn(tx, {
+              key: exposureKey(row.user_op_hash),
+              flow: flow.flow,
+              maxCostWei: exposure,
+              sender: flow.sender,
+              accountId: flow.accountId,
+              sponsored: row.sponsored,
+              floatWei: selfPaidFloat(balance),
+            });
+          } catch (error) {
+            if (!(error instanceof BudgetError)) throw error;
+            refused = error;
+            return [] as SendRow[];
+          }
+          const laneAsked = Date.now();
+          await lockLane(tx, at, lane.key);
+          steps['lane wait'] = Date.now() - laneAsked;
+          const current = await get(row.user_op_hash, tx, true);
+          if (!current || current.sent_at !== row.sent_at || current.status !== 'submitted')
+            return [] as SendRow[];
+          const signAsked = Date.now();
+          raw = await signTx(account, lane, { nonce: BigInt(row.nonce), to, data, gas, ...fees });
+          steps.sign = Date.now() - signAsked;
+          const hash = keccak256(raw);
+          return (
+            await tx.query<SendRow>(
+              `UPDATE own_paymaster_sends SET raw_tx = $3, tx_hash = $4, tx_hashes = array_append(tx_hashes, $4),
              max_fee_per_gas = $5, max_priority_fee_per_gas = $6, sent_at = $7, updated_at = $7,
              cancelled = cancelled OR $8
            WHERE user_op_hash = $1 AND sent_at = $2 RETURNING ${COLUMNS}`,
-            [
-              row.user_op_hash,
-              row.sent_at,
-              raw,
-              hash,
-              fees.maxFeePerGas.toString(10),
-              fees.maxPriorityFeePerGas.toString(10),
-              at,
-              cancel,
-            ],
-          )
-        ).rows;
+              [
+                row.user_op_hash,
+                row.sent_at,
+                raw,
+                hash,
+                fees.maxFeePerGas.toString(10),
+                fees.maxPriorityFeePerGas.toString(10),
+                at,
+                cancel,
+              ],
+            )
+          ).rows;
+        } finally {
+          deps.budget.noteHeldIn?.(tx, cancel ? 'cancel' : 'replace', steps);
+        }
       }),
     );
     if (unaccounted) {
@@ -1830,7 +1870,7 @@ export function directBundler(deps: DirectBundlerDeps): DirectBundler {
   }
 
   async function receipt(userOpHash: Hex): Promise<BundlerReceipt | null> {
-    void maintainSoon();
+    keepRunning(maintainSoon());
     const row = await get(userOpHash);
     if (!row) return deps.fallback ? deps.fallback.receipt(userOpHash) : null;
     const current = await refresh(row);
@@ -2320,6 +2360,8 @@ export async function createDirectBundler(deps: {
     depositMaxAgeMs: chainParams(deps.chainId).depositMaxAgeMs ?? 0,
     lockTimeoutMs: chainParams(deps.chainId).budgetLockTimeoutMs ?? 0,
     historyMaxAgeMs: chainParams(deps.chainId).budgetHistoryMaxAgeMs ?? 0,
+    settleUnlocked: chainParams(deps.chainId).budgetSettleUnlocked === true,
+    expireEveryMs: chainParams(deps.chainId).budgetExpireEveryMs ?? 0,
     // The proven fleet accounts (sponsor-operators.ts), read at every admission.
     operatorAccounts: sponsorOperatorAccounts,
     // Every sponsorship this bundler signs carries allowAnyBundler = false (own-paymaster.ts), it

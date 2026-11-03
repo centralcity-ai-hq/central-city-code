@@ -74,3 +74,19 @@ test('a subscriber gets every new answer, so the switch numbers move without a r
   assert.equal(seen.at(-1)?.paid?.total, 630_557);
   assert.equal(seen.at(-1)?.base?.total, 1_012_910);
 });
+
+test('the strip counts never go back within a session, per number, but show a large drop', async () => {
+  const { stripCount, resetStripCounts } = await import('../src/verify/stripCount.js');
+  resetStripCounts();
+  assert.equal(stripCount('all', 3_203_395), 3_203_395);
+  // Another view's poll answers an older cached copy: the higher number stays.
+  assert.equal(stripCount('all', 3_203_380), 3_203_395);
+  assert.equal(stripCount('all', 3_203_400), 3_203_400);
+  // Per number: a lower Base count is not held by the All count.
+  assert.equal(stripCount('base', 1_000_000), 1_000_000);
+  assert.equal(stripCount('calls', 500), 500);
+  // A real reset after a deploy (a large drop) is shown at once and becomes the new floor.
+  assert.equal(stripCount('all', 2_000_000), 2_000_000);
+  assert.equal(stripCount('all', 1_999_990), 2_000_000);
+  resetStripCounts();
+});

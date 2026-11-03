@@ -4,7 +4,7 @@ import { BASE_MAINNET } from '../shared/base/chains.js';
 import { ARC_MAINNET, ARC_NETWORKS, ARC_TESTNET, chainNetwork } from '../shared/chains.js';
 import { arcRuntimeEnv, bothUpkeeps, paymasterSide } from '../server/base/chain/arc-env.js';
 import { ownPaymasterMode } from '../server/base/chain/own-paymaster-keys.js';
-import { createChainRuntime } from '../server/base/chain/runtime.js';
+import { createChainRuntime, router3BatchFromEnv } from '../server/base/chain/runtime.js';
 import { allowedToken, NATIVE_ETH } from '../shared/base/chains.js';
 
 const FACTORY = '0x0BA5ED0c6AA8c49038F819E587E2633c4A9F428a';
@@ -67,7 +67,10 @@ test('no setting of Base reaches a runtime on Arc, except what is shared on purp
     CITY_PROTOCOL_TREASURY: '0x00000000000000000000000000000000000000b4',
     CITY_X402_FACILITATOR_KEY_REF: 'base-facilitator',
     CITY_X402_PUBLIC_SETTLE_KEY_REF: 'base-public',
-    CITY_SFP_SPONSOR_KEY_REF: 'base-sponsor',
+    CITY_SFP_SPONSOR_KEY_REF: 'sponsor',
+    CITY_SFP_SEND_VIA_FACILITATOR: '1',
+    CITY_SFP_BATCH_MAX: '80',
+    CITY_SFP_OFFERS: 'off_base',
     CITY_BASE_SPENDER_KEK: 'shared-kek',
     CITY_BASE_SUBMITTER_KEY_REFS: 'base-submitter',
     CITY_BASE_PAYMASTER_SIGNER_KEY_REF: 'base-signer',
@@ -87,10 +90,19 @@ test('no setting of Base reaches a runtime on Arc, except what is shared on purp
     'CITY_FEED_PAY_CDP_RPC_URL',
     'CITY_PROTOCOL_TREASURY',
     'CITY_X402_PUBLIC_SETTLE_KEY_REF',
-    'CITY_SFP_SPONSOR_KEY_REF',
+    'CITY_SFP_OFFERS',
   ]) {
     assert.equal(scoped[gone], undefined, gone);
   }
+  // The first buy's sponsor is the same EOA on Arc, and it sends the same way (2 Nov 2026): its
+  // key, the facilitator switch and the batch settings pass; nothing else of CITY_SFP_*.
+  assert.equal(scoped.CITY_SFP_SPONSOR_KEY_REF, 'sponsor');
+  assert.equal(scoped.CITY_SFP_SEND_VIA_FACILITATOR, '1');
+  assert.equal(scoped.CITY_SFP_BATCH_MAX, '80');
+  // So Arc's router-3 facilitator batches the sponsored group, as Base's does.
+  const batch = router3BatchFromEnv(scoped);
+  assert.equal(batch?.groups?.[0]?.keyPrefix, 'sfp:');
+  assert.equal(batch?.groups?.[0]?.maxItems, 80);
   assert.equal(scoped.CITY_BASE_SPENDER_KEK, 'shared-kek');
   assert.equal(scoped.CITY_BASE_SUBMITTER_KEY_REFS, 'arc-submitter');
   // Arc's own keys only: optional, and Base's never stand in for them.
@@ -167,6 +179,9 @@ test('with its own settings, a runtime on Arc builds', () => {
     chainId: ARC_TESTNET,
   });
   assert.ok(runtime.identityPort);
+  // The sponsored first purchase's payer exists on Arc too (2 Nov 2026: it was Base's alone, and
+  // every Arc first buy answered unavailable).
+  assert.equal(typeof runtime.sponsorPay, 'function');
 });
 
 test('paymasterSide: Base unless a server runs Arc alone', () => {

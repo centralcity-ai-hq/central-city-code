@@ -2,10 +2,11 @@
  * Operation Directory D1 over HTTP (store.ts decides who is listed; shared/directory.ts is the
  * contract the browser and the AI tools use).
  *
- *   GET   /api/public/directory?q=&min_rating=&sort=&before=   DirectoryPage. Public (signed out
- *         too), rate limited per address like the explorer (a text search per IPv6 /56 too),
+ *   GET   /api/public/directory?q=&min_rating=&sort=&before=&chain=   DirectoryPage. Public (signed
+ *         out too), rate limited per address like the explorer (a text search per IPv6 /56 too),
  *         cached as briefly as its list, bounded in the database like the explorer's search.
- *         A search that cannot finish in time answers 503 busy.
+ *         A search that cannot finish in time answers 503 busy. chain=arc lists Arc while it is on
+ *         (404 chain_not_live otherwise); the settings below stay Base's.
  *   GET   /api/agents/:agentId/directory                       DirectorySettings
  *   PATCH /api/agents/:agentId/directory                       {listed?, invitations?} ->
  *         DirectorySettings. listed=true needs a final Base ID and a public card (409
@@ -18,10 +19,12 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { BASE_MAINNET, type BaseChainId } from '../../shared/base/chains.js';
+import { arcNetwork, liveChainIds } from '../../shared/chains.js';
 import {
   canonicalDirectorySearch,
   DIRECTORY_PATHS,
   directoryQueryRefusal,
+  readDirectoryChain,
   readDirectoryQuery,
 } from '../../shared/directory.js';
 import { registeredChainName } from '../base/identity/short-links.js';
@@ -48,6 +51,8 @@ export interface DirectoryRouteDeps {
   owns(request: FastifyRequest, agentId: string): Promise<'ok' | 'signed_out' | 'not_found'>;
   /** The network listed; Base mainnet (the explorer's) unless a test or local run says otherwise. */
   chainId?: BaseChainId;
+  /** Where CITY_ARC and CITY_ARC_CHAIN_ID are read: whether chain=arc is on, and which Arc. */
+  env?: Record<string, string | undefined>;
   /** The agent URI origin (tests); defaults to https://centralcity.ai. */
   uriOrigin?: string;
   /** The shared rate limiter (server/app.ts); absent in unit tests. */
@@ -61,10 +66,14 @@ const patchBody = z
   .strict();
 
 export function registerDirectoryRoutes(app: FastifyInstance, deps: DirectoryRouteDeps): void {
-  const store = createDirectoryStore(deps.db, {
-    chainId: deps.chainId ?? BASE_MAINNET,
-    uriOrigin: deps.uriOrigin,
-  });
+  const baseChainId = deps.chainId ?? BASE_MAINNET;
+  const store = createDirectoryStore(deps.db, { chainId: baseChainId, uriOrigin: deps.uriOrigin });
+  // The one Arc network this deployment has on, or null. The registry follows from its chain id.
+  const env = deps.env ?? {};
+  const arc =
+    liveChainIds(env)
+      .map((id) => arcNetwork(id, env))
+      .find((network) => network !== null) ?? null;
 
   const notFound = (reply: FastifyReply) =>
     reply.code(404).send({ error: 'Agent not found.', code: 'agent_not_found' });
@@ -88,18 +97,15 @@ export function registerDirectoryRoutes(app: FastifyInstance, deps: DirectoryRou
   // searches in flight share one read (nothing is kept after it: an owner's switch shows at once).
   type Page = Awaited<ReturnType<typeof store.search>>;
   const inflight = new Map<string, Promise<Page>>();
-  function search(query: ReturnType<typeof readDirectoryQuery>): Promise<Page> {
-    const key = JSON.stringify(query);
+  function search(query: ReturnType<typeof readDirectoryQuery>, chainId: number): Promise<Page> {
+    const key = JSON.stringify([chainId, query]);
     const shared = inflight.get(key);
     if (shared) return shared;
     const page = deps.db
       .transaction(async (tx) => {
         await tx.query('SET TRANSACTION READ ONLY');
         await tx.query(`SET LOCAL statement_timeout = ${SEARCH_TIMEOUT_MS}`);
-        return createDirectoryStore(tx, {
-          chainId: deps.chainId ?? BASE_MAINNET,
-          uriOrigin: deps.uriOrigin,
-        }).search(query);
+        return createDirectoryStore(tx, { chainId, uriOrigin: deps.uriOrigin }).search(query);
       })
       .finally(() => inflight.delete(key));
     inflight.set(key, page);
@@ -121,6 +127,12 @@ export function registerDirectoryRoutes(app: FastifyInstance, deps: DirectoryRou
         .code(400)
         .header('Cache-Control', 'no-store')
         .send({ error: refusal, code: 'invalid_request' });
+    const chain = readDirectoryChain(query);
+    if (chain === 'arc' && !arc)
+      return reply
+        .code(404)
+        .header('Cache-Control', 'no-store')
+        .send({ error: 'Arc is not on here.', code: 'chain_not_live' });
     // Any other spelling of the same search (another key order, spaces around q, an empty value, a
     // stray '&' or '?') is sent on to its one canonical URL.
     const canonical = canonicalDirectorySearch(query);
@@ -145,7 +157,8 @@ export function registerDirectoryRoutes(app: FastifyInstance, deps: DirectoryRou
         ON_BASE_SEARCH_SITE_RATE.windowMs,
       );
     // A search that cannot finish in time is busy (503); any other failure stays a 500.
-    const page = await search(parsed).catch(busyOnTimeout);
+    const chainId = chain === 'arc' && arc ? arc.chainId : baseChainId;
+    const page = await search(parsed, chainId).catch(busyOnTimeout);
     if (!page)
       return reply
         .code(503)
@@ -174,7 +187,15 @@ export function registerDirectoryRoutes(app: FastifyInstance, deps: DirectoryRou
         error: "Send {listed: true|false} and/or {invitations: 'ask'|'never'}.",
         code: 'invalid_request',
       });
-    if (body.data.listed === true && !(await store.eligible(agentId))) {
+    // Listed where it is final: on Base, or on the Arc network this deployment has on.
+    const arcStore = arc
+      ? createDirectoryStore(deps.db, { chainId: arc.chainId, uriOrigin: deps.uriOrigin })
+      : null;
+    if (
+      body.data.listed === true &&
+      !(await store.eligible(agentId)) &&
+      !(arcStore && (await arcStore.eligible(agentId)))
+    ) {
       const chainName = await registeredChainName(deps.db, agentId);
       return reply.code(409).send({
         error:

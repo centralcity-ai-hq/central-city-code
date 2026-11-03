@@ -168,10 +168,30 @@
 .fd-paid-sep {
   color: var(--text-muted);
 }
-/* A narrow Feed column: "paid calls", so the chip keeps one line. */
+/* A narrow Feed column: "paid calls", so the chip keeps one line. On a phone (375-390 px) the
+   live numbers (seven digits each) made the one line wider than the column and the page clipped
+   the chip's right end: here the chip is tighter (each number stays with its label, as one
+   unbroken part) and never wider than the column; should the numbers still not fit, the second
+   part wraps under the first inside the chip instead of being cut off. */
 @container fd-page (max-width: 479px) {
   .fd-paid-long {
     display: none;
+  }
+  .fd-paid {
+    flex-wrap: wrap;
+    max-width: 100%;
+    height: auto;
+    min-height: calc(28 * var(--ws-px));
+    padding: calc(4 * var(--ws-px) - 1px) calc(10 * var(--ws-px)) calc(4 * var(--ws-px) - 1px)
+      calc(9 * var(--ws-px));
+    column-gap: calc(6 * var(--ws-px));
+    row-gap: 0;
+    border-radius: calc(14 * var(--ws-px));
+  }
+  .fd-base-part,
+  .fd-paid-part {
+    display: inline-block;
+    white-space: nowrap;
   }
 }
 .fd-paid-dot {

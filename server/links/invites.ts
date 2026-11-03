@@ -80,6 +80,7 @@ import {
   ROOM_FILE_TOOLS,
   type RoomFileToolName,
 } from '../rooms/file-tool-names.js';
+import { agentsArraySql } from '../agent-rows/sql.js';
 const hash = (value: string) =>
   createHash('sha256').update(`room-credential:${value}`).digest('hex');
 /** The one answer for every unusable invitation (wrong, expired, used up, rotated, revoked). */
@@ -598,8 +599,9 @@ export function createRoomInvites(d: Dependencies) {
   const agentName = async (q: Pick<Transaction, 'query'>, operatorId: string, agentId: string) =>
     (
       await q.query<{ name: string | null }>(
-        `SELECT (SELECT a->>'name' FROM jsonb_array_elements(data->'agents') a WHERE a->>'id'=$2) AS name
-         FROM workspaces WHERE operator_id=$1`,
+        `SELECT (SELECT a->>'name' FROM jsonb_array_elements(${agentsArraySql('w.operator_id', 'w.data')}) a
+                  WHERE a->>'id'=$2) AS name
+         FROM workspaces w WHERE w.operator_id=$1`,
         [operatorId, agentId],
       )
     ).rows[0]?.name ?? null;

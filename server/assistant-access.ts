@@ -136,6 +136,7 @@ import {
 import { decodeAgentCursor, pageAgents } from './agent-pages.js';
 import { AGENT_PAGES } from '../shared/agent-pages.js';
 import { workspaceToolInput } from '../shared/assistant-tools.js';
+import { agentsArraySql } from './agent-rows/sql.js';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 /**
@@ -1091,7 +1092,7 @@ export async function registerAssistantAccess(
       const values = parsed.data;
       const local = (
         await d.db.query<{ is_local: boolean }>(
-          "SELECT (data->'agents') @> $2::jsonb AS is_local FROM workspaces WHERE operator_id=$1",
+          `SELECT ${agentsArraySql('w.operator_id', 'w.data')} @> $2::jsonb AS is_local FROM workspaces w WHERE w.operator_id=$1`,
           [identity.operatorId, JSON.stringify([{ id: values.providerId }])],
         )
       ).rows[0];

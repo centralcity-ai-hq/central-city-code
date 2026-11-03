@@ -245,6 +245,7 @@ import { createFeedRequests, feedCaps } from './feed/requests.js';
 import { registerFeedRoutes } from './feed/routes.js';
 import { feedEventLog, registerFeedReviewRoutes } from './feed/review.js';
 import { registerPublicOfferRoutes } from './feed/offers/public-route.js';
+import { recordExactCall } from './feed/offers/public-exact.js';
 import { registerArcChainIdsMigrations } from './base/arc-chain-ids-schema.js';
 import {
   createPublicOfferPay,
@@ -259,7 +260,12 @@ import {
 } from './feed/offers/public-pay.js';
 import { registerFeedPayPublicMigrations } from './feed/pay/public-calls-schema.js';
 import { registerFacilitatorKeyRoute } from './protocol/x402/facilitator-key-route.js';
-import { registerPublicFacilitatorRoutes } from './protocol/x402/public-facilitator.js';
+import {
+  registerPublicFacilitatorRoutes,
+  verifyExactPayment,
+  VERIFY_SIMULATIONS_PER_MINUTE,
+  type PublicSettle,
+} from './protocol/x402/public-facilitator.js';
 import {
   createPublicSettle,
   publicSettlePaused,
@@ -267,6 +273,7 @@ import {
   onceReady,
   publicSettleScreening,
   limiterBudget,
+  PUBLIC_SETTLE_PER_PAYER_HOUR,
   publicSettleCooldown,
   limiterSimulations,
   unavailablePublicFacilitator,
@@ -342,6 +349,8 @@ import {
 import { registerAgentPublicCardsMigration } from './agent-rows/public-cards-schema.js';
 import { registerPublicCardsCron } from './agent-rows/public-cards.js';
 import { registerAgentRowsMigration } from './agent-rows/schema.js';
+import { WORKSPACE_DATA_SQL, writeWorkspaceData } from './agent-rows/writer.js';
+import { registerAgentRowsWriterMigration } from './agent-rows/writer-schema.js';
 import { registerBaseWalletsAddressLowerMigration } from './base/pay/address-index-schema.js';
 import { registerBaseIdentitiesBaseIdMigration } from './base/explorer/base-id-index-schema.js';
 import { registerBaseWalletsSpenderMigration } from './base/wallet/spender-index-schema.js';
@@ -353,6 +362,8 @@ import { createSponsorCredits } from './feed/pay/sponsor.js';
 import {
   createSponsoredCalls,
   registerFeedPaySponsoredMigration,
+  sponsoredOnChains,
+  SponsoredRefusal,
   type SponsoredDeps,
 } from './feed/pay/sponsored.js';
 import { registerSponsoredRoutes } from './feed/pay/sponsored-routes.js';
@@ -450,7 +461,11 @@ import {
 import { createArcAgentsReader, createBaseAgentsReader } from './stats/base-agents.js';
 import { registerFastCountCheckRoute } from './stats/fast-count-check.js';
 import { registerCodeCountRoutes } from './stats/code-count.js';
-import { createPaidCallsReader } from './stats/paid-calls.js';
+import {
+  combinedPaidCallsReader,
+  createPaidCallsReader,
+  PAID_CALLS_CHAIN_ID,
+} from './stats/paid-calls.js';
 import { assertHostedSigningKey, loadPlatformSigner } from './autonomy/signing.js';
 import { RUNTIME_CREDENTIAL_PREFIX } from './credential-prefixes.js';
 import {
@@ -633,6 +648,8 @@ export interface AppOptions {
     screeningProvider?: () => ScreeningProvider | null;
     /** Tests: the sponsored first purchase's payer (server/feed/pay/sponsored.ts). */
     sponsorPay?: SponsoredDeps['pay'];
+    /** Tests: the same on Arc. */
+    arcSponsorPay?: SponsoredDeps['pay'];
     /** Tests: the offers' public address's lane (server/feed/offers/public-pay.ts). */
     publicOfferLane?: () => Promise<PublicOfferLane | null>;
     /** Tests: how long a public payment waits before it answers 202. */
@@ -1135,19 +1152,14 @@ async function createDatabaseApp(
   // 357: the revert cool-down of outside x402 payers (server/protocol/x402/payer-cooldown.ts), one
   // new table.
   registerFeedPayPublicMigrations();
+  // 360: how a workspace that stores its agents as rows is written (server/agent-rows/writer-schema.ts):
+  // the writer function, and the agents cards trigger function replaced (document-mode guard,
+  // default-collation ids); no table touched, and both idle while every workspace is in document mode.
+  registerAgentRowsWriterMigration();
   await runMigrations(db);
-  // This build reads every workspace's agents from its document. A workspace whose agents were
-  // moved to rows (by a later build) would look empty here, so it never serves such a database.
-  if (
-    (
-      await db.query<{ found: boolean }>(
-        "SELECT EXISTS (SELECT 1 FROM workspace_storage WHERE mode = 'rows') AS found",
-      )
-    ).rows[0]?.found
-  )
-    throw new Error(
-      'A workspace stores its agents as rows; this build reads agents from documents only; refusing to start.',
-    );
+  // Every reader and writer works in both storage modes (2a, 2b), so a rows-mode workspace no
+  // longer stops this build from starting. A build older than the dual-mode readers (#983) still
+  // reads documents only: never serve one on a database with a switched workspace.
   const caps = loadLimits(process.env, options.limits);
   // Number of trusted proxy hops nearest the socket; 0 disables X-Forwarded-For entirely.
   const trustedHops = options.trustProxyHops ?? (options.hosted?.trustProxy ? 1 : 0);
@@ -1495,7 +1507,7 @@ async function createDatabaseApp(
           presence: Parameters<typeof applyPresence>[1];
           inbound: Parameters<typeof inboundFromRows>[0];
         }>(
-          `SELECT ws.data, ${PRESENCE_JSON_SQL} AS presence, ${INBOUND_JSON_SQL} AS inbound
+          `SELECT ${WORKSPACE_DATA_SQL} AS data, ${PRESENCE_JSON_SQL} AS presence, ${INBOUND_JSON_SQL} AS inbound
              FROM workspaces ws WHERE ws.operator_id=$1`,
           [operatorId],
         )
@@ -1507,7 +1519,7 @@ async function createDatabaseApp(
     }
     const row = (
       await tx.query<{ data: Workspace }>(
-        `SELECT data FROM workspaces WHERE operator_id=$1${lock ? ' FOR UPDATE' : ''}`,
+        `SELECT ${WORKSPACE_DATA_SQL} AS data FROM workspaces ws WHERE ws.operator_id=$1${lock ? ' FOR UPDATE' : ''}`,
         [operatorId],
       )
     ).rows[0];
@@ -1540,11 +1552,7 @@ async function createDatabaseApp(
       }
       const after = JSON.stringify(workspace);
       changed = before !== after;
-      if (changed)
-        await tx.query('UPDATE workspaces SET data=$2::jsonb WHERE operator_id=$1', [
-          operatorId,
-          after,
-        ]);
+      if (changed) await writeWorkspaceData(tx, operatorId, after);
       return response;
     });
     if (changed) notify(operatorId);
@@ -1579,7 +1587,7 @@ async function createDatabaseApp(
         }
         const after = JSON.stringify(workspace);
         if (after === before.get(id)) continue;
-        await tx.query('UPDATE workspaces SET data=$2::jsonb WHERE operator_id=$1', [id, after]);
+        await writeWorkspaceData(tx, id, after);
         changed.push(id);
       }
       return response;
@@ -2240,25 +2248,43 @@ async function createDatabaseApp(
     });
     return { value: sender, ready: facilitator !== null };
   });
+  // The public sender (server/protocol/x402/public-settle.ts): only with
+  // CITY_X402_PUBLIC_SETTLE=1 and its own key (CITY_X402_PUBLIC_SETTLE_KEY_REF); else /settle
+  // answers 503 settlement_unavailable, and nothing is ever sent.
+  // Advertised in /supported only while on; the address of CITY_X402_PUBLIC_SETTLE_KEY_REF's key.
+  const publicSettleRoute: PublicSettle | null =
+    process.env.CITY_X402_PUBLIC_SETTLE === '1' &&
+    /^0x[0-9a-fA-F]{40}$/.test(process.env.CITY_X402_PUBLIC_SETTLE_ADDRESS ?? '')
+      ? {
+          address: process.env.CITY_X402_PUBLIC_SETTLE_ADDRESS as `0x${string}`,
+          settle: async (payment, verify, context) =>
+            (await publicSender()).settle(payment, verify, context),
+        }
+      : null;
   registerPublicFacilitatorRoutes(app, {
     reader: async () => (await baseRuntimes(8453)).readClient ?? null,
     limit: (key, max, windowMs) => limit(key, max, windowMs),
     now: clock,
     reserved: publicReserved,
-    // The public sender (server/protocol/x402/public-settle.ts): only with
-    // CITY_X402_PUBLIC_SETTLE=1 and its own key (CITY_X402_PUBLIC_SETTLE_KEY_REF); else /settle
-    // answers 503 settlement_unavailable, and nothing is ever sent.
-    // Advertised in /supported only while on; the address of CITY_X402_PUBLIC_SETTLE_KEY_REF's key.
-    settle:
-      process.env.CITY_X402_PUBLIC_SETTLE === '1' &&
-      /^0x[0-9a-fA-F]{40}$/.test(process.env.CITY_X402_PUBLIC_SETTLE_ADDRESS ?? '')
-        ? {
-            address: process.env.CITY_X402_PUBLIC_SETTLE_ADDRESS as `0x${string}`,
-            settle: async (payment, verify, context) =>
-              (await publicSender()).settle(payment, verify, context),
-          }
-        : null,
+    settle: publicSettleRoute,
   });
+  // The offers' exact lane (server/feed/offers/public-exact.ts) checks a payment exactly as the
+  // facilitator's /verify does, and settles through the same public sender.
+  const publicExactVerify = async (body: unknown, admit?: () => Promise<void>) => {
+    const reserved = await publicReserved().catch(() => null);
+    if (reserved === null)
+      return { isValid: false as const, invalidReason: 'unexpected_verify_error' as const };
+    return verifyExactPayment(body, {
+      reader: await (async () => (await baseRuntimes(8453)).readClient ?? null)().catch(() => null),
+      nowSeconds: Math.floor(clock() / 1000),
+      ...(publicSettleRoute ? { account: publicSettleRoute.address } : {}),
+      // The sender's own admission right before its send; otherwise /verify's shared budget.
+      admit:
+        admit ?? (() => limit('x402-verify:simulations', VERIFY_SIMULATIONS_PER_MINUTE, 60_000)),
+      pinToHead: !admit,
+      reserved,
+    });
+  };
   // Feed offers' built-in kinds (server/feed/offers/kind-core.ts): their one Base reader, set once
   // here. Without the Base mainnet gate and endpoint it is null and the Base kinds answer
   // 'unavailable' (503); the web kind's safe fetcher is the process default.
@@ -2413,6 +2439,7 @@ async function createDatabaseApp(
   registerDirectoryRoutes(app, {
     db,
     limit,
+    env: process.env,
     // The selected workspace owns the agent (as every /api/agents/:id route checks it).
     owns: async (request, agentId) => {
       if (!(await optionalOperator(request))) return 'signed_out';
@@ -2616,6 +2643,7 @@ async function createDatabaseApp(
     chainId: () => protocolFeeChainId(process.env),
     // The treasury's own payments never count, also in rows stored before that rule (CCA-126).
     treasury: (chainId) => protocolTreasuryFor(process.env, chainId),
+    arcChainId: () => protocolArcChainIdFromEnv(process.env),
   });
   registerProtocolFeeCron(app, {
     db,
@@ -3485,7 +3513,13 @@ async function createDatabaseApp(
       excludedOperators: parseExcludedOperators(process.env.CITY_STATS_EXCLUDED_OPERATORS),
     }),
     limit,
-    paidCalls: paidCallsReader,
+    // Every live chain's paid calls, the same total as the Agent Explorer's Service calls.
+    paidCalls: combinedPaidCallsReader(
+      paidCallsReader,
+      liveChainIds(process.env)
+        .filter((id) => id !== PAID_CALLS_CHAIN_ID)
+        .map((chainId) => createPaidCallsReader({ db, clock, chainId })),
+    ),
     // The Agent Explorer's "On Base now" total, shared through its own public_stats row.
     baseAgents: createBaseAgentsReader({ db, store: sqlPublicStatsStore(db), clock }),
     // The same count on Arc (its own row), only while Arc is on; undefined: no field, no query.
@@ -3701,23 +3735,59 @@ async function createDatabaseApp(
   // The sponsored first purchase (server/feed/pay/sponsored.ts; docs/protocol/
   // SPONSORED_FIRST_PURCHASE.md): its own routes and worker, off unless CITY_SFP_ENABLED is '1'.
   // Paid by the sponsor's own key and facilitator (runtime sponsorPay); the engine is only read.
-  registerSponsoredRoutes(app, {
-    sponsored: createSponsoredCalls({
+  // One engine per chain: Base's, and with Arc on Arc's beside it (2 Nov 2026), each over its own
+  // rows, paid by the same sponsor key on that chain (its own USDC there) and checked by that
+  // chain's pay engine (sponsorOn).
+  const sponsorCredits = createSponsorCredits({ db, env: process.env, now: clock });
+  const sponsoredOn = (chainId: number, pay: SponsoredDeps['pay']) => {
+    const helpers = () => {
+      const on = feedPay.sponsorOn(chainId);
+      if (!on) throw new SponsoredRefusal('unavailable');
+      return on;
+    };
+    return createSponsoredCalls({
       db,
       env: process.env,
       now: clock,
-      chainId: WALLET_CHAIN_ID,
+      chainId,
       agentChain: (agentId) => agentChainOf(db, process.env, agentId),
-      credits: createSponsorCredits({ db, env: process.env, now: clock }),
-      hosted: { forSponsor: feedPay.hostedForSponsor, run: feedPay.runHostedOffer },
+      credits: sponsorCredits,
+      hosted: {
+        forSponsor: (serviceId, inputs) => helpers().forSponsor(serviceId, inputs),
+        run: (offer, input) => helpers().run(offer, input),
+      },
       // The engine's own pre-send checks before the sponsor signs (screening, treasury, router 3).
-      preSign: feedPay.router3PreSign,
-      pay:
-        options.feedPay?.sponsorPay ??
-        (async () => (await baseRuntimes(WALLET_CHAIN_ID)).sponsorPay?.() ?? null),
+      preSign: (input) => helpers().preSign(input),
+      pay,
       // Called per request, after `offers` below exists.
       serviceIdOf: (offerId) => offers.serviceIdOf(offerId),
       ...(options.logLine ? { log: options.logLine } : {}),
+    });
+  };
+  const sponsoredArcId = protocolArcChainIdFromEnv(process.env);
+  registerSponsoredRoutes(app, {
+    sponsored: sponsoredOnChains({
+      base: sponsoredOn(
+        WALLET_CHAIN_ID,
+        options.feedPay?.sponsorPay ??
+          (async () => (await baseRuntimes(WALLET_CHAIN_ID)).sponsorPay?.() ?? null),
+      ),
+      others: new Map(
+        sponsoredArcId === null
+          ? []
+          : [
+              [
+                sponsoredArcId,
+                sponsoredOn(
+                  sponsoredArcId,
+                  options.feedPay?.arcSponsorPay ??
+                    (async () =>
+                      (await baseRuntimes(sponsoredArcId as ChainId)).sponsorPay?.() ?? null),
+                ),
+              ],
+            ],
+      ),
+      agentChain: (agentId) => agentChainOf(db, process.env, agentId),
     }),
     env: process.env,
     person: feedPayPerson,
@@ -3735,6 +3805,43 @@ async function createDatabaseApp(
     hosted: feedPay.hostedForSponsor,
     limit,
     cronSecret: process.env.CRON_SECRET,
+    exact: {
+      verify: publicExactVerify,
+      sender: () => publicSettleRoute,
+      // Shared limiter rows outlive an authorization's whole window (at most 15 minutes).
+      claim: async (payer, nonce) =>
+        (
+          await limiter.hit(
+            `x402-offer-exact:${payer.toLowerCase()}:${nonce.toLowerCase()}`,
+            1,
+            86_400_000,
+          )
+        ).allowed,
+      // One exact call per payer a minute (it covers the settle), and the public sender's 20/h.
+      admit: async (payer) =>
+        (await limiter.hit(`x402-offer-exact:payer-min:${payer.toLowerCase()}`, 1, 60_000))
+          .allowed &&
+        (
+          await limiter.hit(
+            `x402-offer-exact:payer-hour:${payer.toLowerCase()}`,
+            PUBLIC_SETTLE_PER_PAYER_HOUR,
+            3_600_000,
+          )
+        ).allowed,
+      run: feedPay.runHostedOffer,
+      // Counted like every paid call (migration 358); a failed save is logged, the buyer has paid.
+      record: (call) =>
+        recordExactCall(db, clock, call).catch((error: unknown) => {
+          errorLog(
+            JSON.stringify({
+              event: 'x402_offer.exact_record_failed',
+              level: 'ALERT',
+              tx: call.txHash,
+              reason: error instanceof Error ? error.message.slice(0, 120) : 'unknown',
+            }),
+          );
+        }),
+    },
     pay: createPublicOfferPay({
       db,
       env: process.env,
@@ -4764,11 +4871,7 @@ async function createDatabaseApp(
         const workspace = await readWorkspace(tx, row.operator_id, true),
           time = clock();
         changed = advances(workspace, time);
-        if (changed)
-          await tx.query('UPDATE workspaces SET data=$2::jsonb WHERE operator_id=$1', [
-            row.operator_id,
-            JSON.stringify(workspace),
-          ]);
+        if (changed) await writeWorkspaceData(tx, row.operator_id, JSON.stringify(workspace));
       });
       if (changed) notify(row.operator_id);
     }

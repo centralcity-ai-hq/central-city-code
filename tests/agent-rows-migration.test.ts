@@ -668,7 +668,7 @@ test('the agent rows tables check what they store', async (t) => {
   await rejected(`UPDATE agent_rows_control SET new_workspace_mode = 'json'`);
 });
 
-test('a build that reads documents only refuses to start on a database with a rows-mode workspace', async (t) => {
+test('a build that reads both modes starts on a database with a rows-mode workspace and keeps its agents', async (t) => {
   const base = resolve(process.env.CC_RECOVERY_TEST_ROOT ?? tmpdir());
   await mkdir(base, { recursive: true });
   const root = await mkdtemp(join(base, 'city-agent-rows-'));
@@ -678,15 +678,32 @@ test('a build that reads documents only refuses to start on a database with a ro
   });
   const dataDir = join(root, 'data');
   const { app, operatorId } = await ownerApp(t, { dataDir, close: false });
-  await app.city.db.query(`INSERT INTO workspace_storage VALUES ($1, 'document', 1)`, [operatorId]);
-  await app.close();
-  const again = await createApp({ dataDir, startWorkers: false });
-  await again.city.db.query(`UPDATE workspace_storage SET mode = 'rows' WHERE operator_id = $1`, [
+  const list = [agent('r1'), agent('r2', { name: 'Second' })];
+  await app.city.db.query(
+    `UPDATE workspaces SET data = jsonb_set(data, '{agents}', $2::jsonb) WHERE operator_id = $1`,
+    [operatorId, JSON.stringify(list)],
+  );
+  // Switched by hand, as the mover does: rows first, then the mode, then the document stripped.
+  await app.city.db.query(
+    `INSERT INTO agents(operator_id, agent_id, ordinal, agent)
+       SELECT $1, e.agent->>'id', e.ordinal, e.agent
+         FROM jsonb_array_elements($2::jsonb) WITH ORDINALITY AS e(agent, ordinal)`,
+    [operatorId, JSON.stringify(list)],
+  );
+  await app.city.db.query(`INSERT INTO workspace_storage VALUES ($1, 'rows', 1)`, [operatorId]);
+  await app.city.db.query(`UPDATE workspaces SET data = data - 'agents' WHERE operator_id = $1`, [
     operatorId,
   ]);
+  await app.close();
+  const again = await createApp({ dataDir, startWorkers: false });
+  const seen = (
+    await again.city.db.query<{ agents: unknown }>(
+      `SELECT workspace_document(operator_id, data)->'agents' AS agents FROM workspaces
+        WHERE operator_id = $1`,
+      [operatorId],
+    )
+  ).rows[0]!.agents;
+  // Closed here, before the temporary directory is removed (t.after above).
   await again.close();
-  await assert.rejects(
-    createApp({ dataDir, startWorkers: false }),
-    /stores its agents as rows; this build reads agents from documents only; refusing to start/,
-  );
+  assert.deepEqual(seen, list);
 });

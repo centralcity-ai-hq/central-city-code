@@ -4,6 +4,7 @@ import type { Database, Transaction } from '../database.js';
 import { checkRoomCounts } from '../rooms/overview.js';
 import { checkPaidCallsAllChains } from './paid-calls.js';
 import { AI_AGENTS_TOTAL_SCAN_SQL, AI_AGENTS_TOTAL_SQL } from './public-stats.js';
+import { documentAgentsSql } from '../agent-rows/sql.js';
 
 /**
  * Daily guard that the fast public count (`counted_agent_ids`, kept by triggers, migration 59)
@@ -62,9 +63,12 @@ export type FastCountLog = (level: 'info' | 'error', fields: Record<string, unkn
 const defaultLog: FastCountLog = (level, fields) =>
   (level === 'error' ? console.error : console.info)(JSON.stringify(fields));
 
+/** A workspace's document with its agents in both storage modes (rows mode: from its rows). */
+const DOC = documentAgentsSql('w.operator_id', 'w.data');
+
 export const DIFFERING_OPERATORS_SQL = `WITH expected AS MATERIALIZED (
     SELECT w.operator_id, n.agent_id
-      FROM workspaces w CROSS JOIN LATERAL counted_agent_ids_of(w.data) n
+      FROM workspaces w CROSS JOIN LATERAL counted_agent_ids_of(${DOC}) n
   )
   SELECT COALESCE(e.operator_id, c.operator_id) AS operator_id
     FROM expected e
@@ -78,12 +82,12 @@ const LOCK_OPERATOR_SQL = 'SELECT 1 FROM workspaces WHERE operator_id = $1 FOR U
 const REMOVE_STALE_SQL = `DELETE FROM counted_agent_ids c
    WHERE c.operator_id = $1
      AND NOT EXISTS (
-       SELECT 1 FROM workspaces w CROSS JOIN LATERAL counted_agent_ids_of(w.data) n
+       SELECT 1 FROM workspaces w CROSS JOIN LATERAL counted_agent_ids_of(${DOC}) n
         WHERE w.operator_id = $1 AND n.agent_id = c.agent_id)
   RETURNING 1`;
 const ADD_MISSING_SQL = `INSERT INTO counted_agent_ids(operator_id, agent_id)
     SELECT w.operator_id, n.agent_id
-      FROM workspaces w CROSS JOIN LATERAL counted_agent_ids_of(w.data) n
+      FROM workspaces w CROSS JOIN LATERAL counted_agent_ids_of(${DOC}) n
      WHERE w.operator_id = $1
     ON CONFLICT DO NOTHING
   RETURNING 1`;

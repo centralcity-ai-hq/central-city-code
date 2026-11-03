@@ -374,11 +374,12 @@ export async function readWindow(
     );
     paid.push(...paidOf(rows));
   }
-  if (tables.sponsored && chainId === DASHBOARD_CHAIN_ID) {
+  // Each chain's own sponsored first purchases (migration 359; every one before it is Base's).
+  if (tables.sponsored) {
     const { rows } = await db.query<PaidRow>(
       `SELECT ${sponsoredColumns(tables.services)} FROM feed_pay_sponsored_calls s
-        WHERE ${SPONSORED_PAID} AND s.updated_at >= $1 AND s.updated_at < $2`,
-      [from, to],
+        WHERE ${SPONSORED_PAID} AND s.updated_at >= $1 AND s.updated_at < $2 AND s.chain_id = $3`,
+      [from, to, chainId],
     );
     paid.push(...paidOf(rows));
   }
@@ -959,7 +960,13 @@ async function backfillBatch(
       `WITH page AS (SELECT call_id FROM ${name}
                       WHERE call_id > $2 ORDER BY call_id LIMIT $3)
        SELECT p.call_id AS k, ${columns},
-              (${sponsored ? `${SPONSORED_PAID} AND s.updated_at < $4 AND $1::int = $1::int` : `${SETTLED} AND c.settled_at < $4`}) AS ok
+              (${
+                source === 'sponsored'
+                  ? `${SPONSORED_PAID} AND s.updated_at < $4 AND s.chain_id = $1::int`
+                  : sponsored
+                    ? `${SPONSORED_PAID} AND s.updated_at < $4 AND $1::int = $1::int`
+                    : `${SETTLED} AND c.settled_at < $4`
+              }) AS ok
          FROM page p JOIN ${table} ON ${alias}.call_id = p.call_id ORDER BY p.call_id`,
       [chainId, after, limit, cut.liveFrom],
     );

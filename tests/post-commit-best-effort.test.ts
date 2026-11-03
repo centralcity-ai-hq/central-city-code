@@ -84,7 +84,8 @@ test('a token exchange answers with its tokens when housekeeping on another owne
   const state = failQueries(
     app.city.db,
     (sql, params) =>
-      /^SELECT data FROM workspaces .*FOR UPDATE/.test(sql) && params?.[0] === otherId,
+      /^SELECT [\s\S]* AS data FROM workspaces ws [\s\S]*FOR UPDATE/.test(sql) &&
+      params?.[0] === otherId,
   );
   const tokens = await tokenRequest(app, {
     grant_type: 'authorization_code',

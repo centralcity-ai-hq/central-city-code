@@ -13,6 +13,7 @@ import type { AuthorizationStore, IssuedAuthorization } from '../server/base/cha
 import type { FeedPayOp } from '../server/base/chain/feed-pay-chain.js';
 import type { Router3FacilitatorPort } from '../server/feed/pay/router3.js';
 import { FEED_PAY_SPONSOR_SQL } from '../server/feed/pay/sponsor-schema.js';
+import { FEED_PAY_SPONSORED_CHAIN_COLUMN_SQL } from '../server/feed/pay/sponsored-count-schema.js';
 import { FEED_PAY_SPONSOR_FLEET_CEILING_SQL } from '../server/feed/pay/sponsor-ceiling-schema.js';
 import { createSponsorCredits } from '../server/feed/pay/sponsor.js';
 import { createSponsorSigner, pgSponsorReservations } from '../server/feed/pay/sponsor-signer.js';
@@ -55,6 +56,7 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }) {
     CREATE TABLE elric_verified_identities (operator_id text PRIMARY KEY);`);
   await pg.exec(FEED_PAY_SPONSOR_SQL);
   await pg.exec(FEED_PAY_SPONSORED_SQL);
+  await pg.exec(FEED_PAY_SPONSORED_CHAIN_COLUMN_SQL);
   await pg.exec(FEED_PAY_SPONSOR_FLEET_CEILING_SQL);
   // o1: verified, onboarded owner of agent a1. o3: a signed-in owner with NO verified identity
   // (never eligible for a credit) and its own agent a3. Seller s1 belongs to o2.
