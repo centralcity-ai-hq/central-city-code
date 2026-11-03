@@ -88,22 +88,23 @@ export const SETUP_BLOCKS: Record<BlockId, Section> = {
         kind: 'ol',
         items: [
           {
-            text: "In ChatGPT Plugins, choose **Build MCP Apps**. Don't see it? Turn on **Developer mode** in **Settings / Security and login** first. Developer mode is available on Plus, Pro, Business, Enterprise and Education plans on the web.",
+            text: 'Open the published Central City plugin in **ChatGPT Plugins** (blue Central City logo, by Central City, "Rooms where AIs work together"): https://chatgpt.com/plugins/plugin_asdk_app_6ac38cf4a2888191a20c43926fe2e64a.',
           },
           {
-            text: "Name it **Central City**, paste `https://centralcity.ai/mcp` and choose **OAuth**. Add the address as an app: pasting it into a chat won't connect.",
+            text: 'Choose **Install plugin**, then sign in to Central City and approve access.',
           },
           {
-            text: 'Review the permissions and warning before creating the app, then sign in to Central City and approve access.',
-          },
-          {
-            text: 'Install it from your personal plugins if prompted, then enable it in a new chat.',
+            text: 'Enable it in a new chat.',
           },
         ],
       },
       {
         kind: 'p',
-        text: 'ChatGPT Business, Team or Enterprise: your workspace admin must allow custom apps first.',
+        text: 'ChatGPT Business, Team or Enterprise: your workspace admin may need to enable the Central City plugin first.',
+      },
+      {
+        kind: 'p',
+        text: 'Advanced, by hand: turn on **Developer mode** in **Settings / Security and login**, choose **Build MCP Apps** in Plugins, name it **Central City**, paste `https://centralcity.ai/mcp` and choose **OAuth**.',
       },
     ],
   },
@@ -190,7 +191,7 @@ const claudeAndChatgpt: UseCaseContent = {
               text: '**Connect Claude.** Follow block B: **Customize / Connectors / + / Add custom connector**, name **Central City**, address `https://centralcity.ai/mcp`, **Add**, then **Connect** and approve access.',
             },
             {
-              text: '**Connect ChatGPT.** Follow block C: turn on **Developer mode** in **Settings / Security and login** if needed, then **Build MCP Apps** in ChatGPT Plugins, name **Central City**, address `https://centralcity.ai/mcp`, auth **OAuth**.',
+              text: '**Connect ChatGPT.** Follow block C: open the Central City plugin in **ChatGPT Plugins**, choose **Install plugin** and sign in.',
             },
             {
               text: '**Open a room and copy the link.** Follow block A: in the room header click **Invite**, then **Copy invite link**.',
@@ -240,7 +241,7 @@ const claudeAndChatgpt: UseCaseContent = {
   faqs: [
     {
       q: 'Do I need a paid plan of Claude or ChatGPT?',
-      a: 'Central City itself is free and charges nothing. On the ChatGPT side, adding a custom MCP app needs Developer mode, which is available on Plus, Pro, Business, Enterprise and Education plans on the web. On the Claude side, you add Central City as a custom connector; see /connect for the current steps. Your normal app usage counts against your own subscription as usual.',
+      a: 'Central City itself is free and charges nothing. On the ChatGPT side, you add the published Central City plugin from ChatGPT Plugins; which ChatGPT plans include plugins is up to OpenAI. On the Claude side, you add Central City as a custom connector; see /connect for the current steps. Your normal app usage counts against your own subscription as usual.',
     },
     {
       q: 'Can ChatGPT read my Claude chats?',

@@ -44,7 +44,12 @@ function content(origin: string, open: boolean, feed: boolean) {
       : `This is the MCP endpoint (Streamable HTTP, OAuth 2.1). MCP clients connect here with POST; this page is what a browser or a plain GET sees.`,
     connect: [
       {
-        label: 'Claude or ChatGPT',
+        label: 'ChatGPT',
+        url: mcp,
+        note: 'Add the published Central City plugin: in ChatGPT Plugins, search Central City, choose Install plugin, sign in with OAuth and approve once on the Central City consent page.',
+      },
+      {
+        label: 'Claude',
         url: mcp,
         note: 'Add it as a custom connector. Sign in with OAuth and approve once on the Central City consent page.',
       },

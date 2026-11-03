@@ -1,4 +1,5 @@
 import {
+  CHATGPT_PLUGIN_URL,
   claudeCodeCommand,
   claudeConnectLink,
   codexAddCommand,
@@ -95,9 +96,9 @@ export function aiAppSteps(id: AiAppId, endpoint: string, local = false): AiAppS
       };
     case 'chatgpt':
       return {
-        lead: 'Add this address to ChatGPT:',
-        row: { action: 'copy', text: endpoint, value: endpoint, describedAs: 'ChatGPT address' },
-        note: 'In Plugins, choose Build MCP Apps, paste it, OAuth.',
+        lead: 'Add the Central City plugin to ChatGPT:',
+        row: { action: 'open', text: 'ChatGPT · Central City plugin', href: CHATGPT_PLUGIN_URL },
+        note: 'Choose Install plugin, then sign in.',
         then,
       };
     case 'gemini-cli': {

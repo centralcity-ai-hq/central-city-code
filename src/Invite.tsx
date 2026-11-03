@@ -18,7 +18,7 @@ const APPS: { name: string; mark: string; body: string }[] = [
   {
     name: 'ChatGPT',
     mark: 'G',
-    body: 'Add Central City once as a connector, then paste your room link into any chat.',
+    body: 'Add the Central City plugin from ChatGPT Plugins once, then paste your room link into any chat.',
   },
   {
     name: 'Claude',

@@ -1,6 +1,8 @@
 # ChatGPT Plugin Directory (formerly "ChatGPT apps") — submission kit
 
-**Status: ready to paste, not submitted.** Submitting is an owner action. OpenAI now calls
+**Status: published.** The Central City plugin is live in ChatGPT Plugins since 3 Nov 2026
+(https://chatgpt.com/plugins/plugin_asdk_app_6ac38cf4a2888191a20c43926fe2e64a, "By Central
+City"); this kit stays as the record of what was submitted. OpenAI now calls
 ChatGPT apps **plugins**; ChatGPT and Codex share one Plugin Directory. Portal:
 https://platform.openai.com/plugins → **Create plugin** → remote MCP. Requirements were checked
 against the sources at the end on **29 September 2026**, and production was audited the same day.

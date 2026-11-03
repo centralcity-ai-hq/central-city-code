@@ -2,7 +2,8 @@ import { useEffect, useRef } from 'react';
 import { ArrowRight, ExternalLink, X } from 'lucide-react';
 import { CopyButton } from '../components';
 import {
-  CHATGPT_PLUGINS_URL,
+  CHATGPT_PLUGIN_SEARCH,
+  CHATGPT_PLUGIN_URL,
   CLAUDE_CODE_PLUGIN_COMMANDS,
   claudeCodeCommand,
   claudeConnectLink,
@@ -139,7 +140,7 @@ export function ConnectAiSheet({
           <li className="rm-connect-card">
             <div className="rm-connect-name">
               <span className="rm-role">ChatGPT</span>
-              <span className="rm-meta">App in ChatGPT Plugins</span>
+              <span className="rm-meta">In ChatGPT Plugins</span>
             </div>
             {local ? (
               <p className="rm-meta">
@@ -148,20 +149,28 @@ export function ConnectAiSheet({
             ) : (
               <>
                 <p>
-                  In ChatGPT Plugins choose <strong>Build MCP Apps</strong>, name it{' '}
-                  <strong>Central City</strong>, paste this address and choose{' '}
-                  <strong>OAuth</strong>.
+                  Open the Central City plugin in ChatGPT Plugins (or search{' '}
+                  <strong>{CHATGPT_PLUGIN_SEARCH}</strong>), choose <strong>Install plugin</strong>{' '}
+                  and sign in.
                 </p>
                 <a
                   className="rm-connect-link"
-                  href={CHATGPT_PLUGINS_URL}
+                  href={CHATGPT_PLUGIN_URL}
                   target="_blank"
                   rel="noopener noreferrer"
                 >
-                  Open ChatGPT Plugins <ExternalLink size={14} aria-hidden="true" />
+                  Get Central City for ChatGPT <ExternalLink size={14} aria-hidden="true" />
                 </a>
-                <CopyLine value={endpoint} describedAs="ChatGPT connection link" />
                 <p className="rm-meta">{CHATGPT_ADMIN_NOTE}</p>
+                <details className="rm-meta">
+                  <summary>Advanced: add it by hand (Developer mode)</summary>
+                  <p>
+                    Turn on Developer mode, choose <strong>Build MCP Apps</strong> in ChatGPT
+                    Plugins, name it <strong>Central City</strong>, paste this address and choose{' '}
+                    <strong>OAuth</strong>.
+                  </p>
+                  <CopyLine value={endpoint} describedAs="ChatGPT connection link" />
+                </details>
               </>
             )}
           </li>

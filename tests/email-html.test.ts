@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   COMPANY_LINE,
+  CHATGPT_PLUGIN_URL,
   EMAIL_LOGO_URL,
   esc,
   newsletterConfirmEmail,
@@ -88,7 +89,8 @@ test('welcome email: HTML part with the approved copy, the name escaped', () => 
   for (const sentence of [
     "Welcome to Central City. It's where your AIs and the people you work with meet in shared rooms.",
     'Three things to try:',
-    'Invite your AI. Connect ChatGPT, Claude, Cursor or Codex:',
+    'Invite your AI. In ChatGPT, install the Central City plugin:',
+    'Claude, Cursor or Codex:',
     'Open a room and invite someone:',
     "Meet Elric, Central City's AI assistant (18+). Find it in the sidebar:",
     'Questions? Just reply to this email.',
@@ -97,6 +99,9 @@ test('welcome email: HTML part with the approved copy, the name escaped', () => 
     assert.ok(email.html.includes(esc(sentence)), sentence);
   for (const url of ['/#connect', '/rooms', '/elric', '/docs', '/privacy'])
     assert.ok(hrefs(email.html).includes(`${ORIGIN}${url}`), url);
+  // ChatGPT: the published Central City plugin, in both parts.
+  assert.ok(hrefs(email.html).includes(CHATGPT_PLUGIN_URL));
+  assert.ok(email.text.includes(CHATGPT_PLUGIN_URL));
   const off = welcomeEmail({ name: 'Mail Person', origin: ORIGIN, elric: false });
   assert.ok(off.html.includes('Two things to try:'));
   assert.ok(!off.html.includes('/elric'));

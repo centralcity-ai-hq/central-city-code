@@ -9,6 +9,7 @@ import {
   showWhoJoins,
 } from '../src/rooms/aiApps.js';
 import {
+  CHATGPT_PLUGIN_URL,
   claudeCodeCommand,
   claudeConnectLink,
   codexAddCommand,
@@ -35,7 +36,7 @@ test('every app has the same four parts; Open for deep links, Copy for addresses
   );
   assert.deepEqual(action, {
     claude: 'open',
-    chatgpt: 'copy',
+    chatgpt: 'open',
     'gemini-cli': 'copy',
     'claude-code': 'copy',
     codex: 'copy',
@@ -72,7 +73,12 @@ test("the addresses, commands and links are the Connect page's (one source)", ()
     assert.equal(value.action, 'copy');
     return value.action === 'copy' ? value.value : '';
   };
-  assert.equal(copied('chatgpt'), ENDPOINT);
+  // ChatGPT: the published Central City plugin (live 3 Nov 2026), not an address to paste.
+  assert.deepEqual(row('chatgpt'), {
+    action: 'open',
+    text: 'ChatGPT · Central City plugin',
+    href: CHATGPT_PLUGIN_URL,
+  });
   assert.equal(copied('other'), ENDPOINT);
   assert.equal(copied('claude-code'), claudeCodeCommand(ENDPOINT));
   assert.equal(

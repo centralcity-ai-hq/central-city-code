@@ -9,8 +9,18 @@
 /** The server name a signed-in connection uses. */
 export const CONNECT_SERVER = 'central-city';
 
-/** Where ChatGPT adds a custom app (Build MCP Apps). */
+/** ChatGPT's plugin directory, also where Developer mode adds a custom app (Build MCP Apps). */
 export const CHATGPT_PLUGINS_URL = 'https://chatgpt.com/plugins';
+
+/**
+ * The published Central City plugin in ChatGPT's plugin directory (live 3 Nov 2026, "By Central
+ * City"): the first way to connect ChatGPT. It uses https://centralcity.ai/mcp with OAuth.
+ */
+export const CHATGPT_PLUGIN_URL =
+  'https://chatgpt.com/plugins/plugin_asdk_app_6ac38cf4a2888191a20c43926fe2e64a';
+
+/** How people find the plugin in the directory: its name, publisher and description. */
+export const CHATGPT_PLUGIN_SEARCH = 'Central City';
 
 /** The production site: one-click installs always point here, never at a short-lived preview. */
 export const PRODUCTION_ORIGIN = 'https://centralcity.ai';

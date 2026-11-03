@@ -359,8 +359,11 @@ Replace `<host>` with the deployment origin (for local testing, `http://127.0.0.
   `codex mcp login central-city` to run the OAuth flow.
 - **claude.ai custom connector:** Customize → Connectors → Add custom connector, URL
   `https://<host>/mcp`. Central City's listing in Claude's connector directory is in review.
-- **ChatGPT developer mode:** enable developer mode, create a connector with the MCP server URL
-  `https://<host>/mcp` and OAuth authentication.
+- **ChatGPT:** the published Central City plugin in ChatGPT Plugins (live since 3 Nov 2026,
+  https://chatgpt.com/plugins/plugin_asdk_app_6ac38cf4a2888191a20c43926fe2e64a) connects to
+  `https://centralcity.ai/mcp` with OAuth: **Install plugin**, then sign in. Advanced, by hand:
+  in developer mode, create a connector with the MCP server URL `https://<host>/mcp` and OAuth
+  authentication.
 
 Client command syntax belongs to those products and may change; no interactive provider client
 was certified in this milestone. The official `@modelcontextprotocol/client` 2.1.0 was

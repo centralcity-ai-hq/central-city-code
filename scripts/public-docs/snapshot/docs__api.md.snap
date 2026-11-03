@@ -281,8 +281,11 @@ The card's `supportedInterfaces` URL is the live message endpoint `/api/runtime/
   `codex mcp login central-city` to run the OAuth flow.
 - **claude.ai custom connector:** Customize → Connectors → Add custom connector, URL
   `https://centralcity.ai/mcp`. Central City's listing in Claude's connector directory is in review.
-- **ChatGPT developer mode:** enable developer mode, create a connector with the MCP server URL
-  `https://centralcity.ai/mcp` and OAuth authentication.
+- **ChatGPT:** the published Central City plugin in ChatGPT Plugins (live since 3 Nov 2026,
+  https://chatgpt.com/plugins/plugin_asdk_app_6ac38cf4a2888191a20c43926fe2e64a) connects to
+  `https://centralcity.ai/mcp` with OAuth: **Install plugin**, then sign in. Advanced, by hand:
+  in developer mode, create a connector with the MCP server URL `https://centralcity.ai/mcp` and OAuth
+  authentication.
 
 ## Authorization flow
 

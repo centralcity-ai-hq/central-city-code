@@ -73,10 +73,10 @@ function Start() {
           directory is in review; until then it is added as a custom connector.
         </li>
         <li>
-          <strong>ChatGPT:</strong> add Central City as an app under ChatGPT Plugins (Developer
-          mode), as the setup guide shows. Your plan must allow custom connectors; on Business, Team
-          or Enterprise, your admin must allow custom apps first. If signing in from ChatGPT fails,
-          choose the no-account option in the setup.
+          <strong>ChatGPT:</strong> open the published Central City plugin in ChatGPT Plugins (blue
+          logo, by Central City), choose <strong>Install plugin</strong>, sign in and approve. On
+          Business, Team or Enterprise, your admin may need to enable the Central City plugin first.
+          Advanced: the setup guide also shows how to add it by hand in Developer mode.
         </li>
         <li>
           <strong>Cursor and VS Code:</strong> use the one-click install on Connect your AI, then

@@ -15,7 +15,7 @@ const PRODUCTION = 'https://centralcity.ai';
 const APPS = ['ChatGPT', 'Claude', 'Cursor', 'VS Code', 'Claude Code', 'Gemini CLI', 'Codex'];
 /** The line under each tile's name. */
 const KINDS = [
-  'Custom app',
+  'ChatGPT Plugins',
   'Connector',
   'One click',
   'One click',
@@ -24,6 +24,9 @@ const KINDS = [
   'App or terminal',
 ];
 const ARROWS = /[←-⇿⟰-⟿⤀-⥿⬀-⬯]|->|=>|>>/;
+/** The published Central City plugin in ChatGPT's directory (src/shell/connectLinks.ts). */
+const CHATGPT_PLUGIN =
+  'https://chatgpt.com/plugins/plugin_asdk_app_6ac38cf4a2888191a20c43926fe2e64a';
 
 /** VS Code: the HTTPS redirect on vscode.dev, config = { type: 'http', url }; a new tab. */
 function expectVscodeLink(href: string | null, name: string, url: string) {
@@ -208,7 +211,7 @@ test('each of the seven tiles shows its steps; the tiles follow the arrow keys',
   const rail = page.getByRole('tablist', { name: 'Which AI do you use?' });
   await expect(rail.getByRole('tab')).toHaveText(APPS.map((name, index) => name + KINDS[index]));
   const expected: Record<string, string> = {
-    ChatGPT: 'Build MCP Apps',
+    ChatGPT: 'Install plugin',
     Claude: 'Add custom connector',
     'Claude Code': 'Install Central City in Claude Code',
     Cursor: 'Cursor opens with Central City ready to add',
@@ -256,21 +259,30 @@ test('hosted: production links for ChatGPT, Claude, Cursor and VS Code in both m
   const account = `${PRODUCTION}/mcp`;
   const open = `${PRODUCTION}/mcp/open`;
   await expect(address(page)).toHaveText(account);
-  // ChatGPT: the Plugins page, the address as an app, OAuth for the account.
+  // ChatGPT with an account: the published Central City plugin first (live 3 Nov 2026); adding
+  // the address by hand in Developer mode is the collapsed Advanced option.
+  await expect(
+    panel(page).getByRole('link', { name: 'Get Central City for ChatGPT' }),
+  ).toHaveAttribute('href', CHATGPT_PLUGIN);
+  await expect(panel(page).getByText('Install plugin', { exact: true })).toBeVisible();
+  await expect(panel(page).getByText('Build MCP Apps', { exact: true })).toBeHidden();
+  await panel(page).getByText('Advanced: add it by hand (Developer mode)').click();
+  await expect(panel(page).getByText('Build MCP Apps', { exact: true })).toBeVisible();
+  await expect(panel(page).getByText('OAuth', { exact: true })).toBeVisible();
+  await expect(panel(page).getByRole('group', { name: 'ChatGPT connection link' })).toHaveText(
+    account,
+  );
+  // Without an account (/mcp/open): the plugin needs a sign-in, so this stays the setup by hand.
+  await openMode(page).check();
   await expect(panel(page).getByRole('link', { name: 'Open ChatGPT Plugins' })).toHaveAttribute(
     'href',
     'https://chatgpt.com/plugins',
   );
-  await expect(panel(page).getByRole('group', { name: 'ChatGPT connection link' })).toHaveText(
-    account,
-  );
   await expect(panel(page).getByText('Build MCP Apps', { exact: true })).toBeVisible();
   await expect(panel(page).getByText('Developer mode', { exact: true })).toBeVisible();
-  await expect(panel(page).getByText('OAuth', { exact: true })).toBeVisible();
   await expect(
     panel(page).getByText('Add this address as an app. Pasting it into a chat won’t connect.'),
   ).toBeVisible();
-  await openMode(page).check();
   await expect(panel(page).getByRole('group', { name: 'ChatGPT connection link' })).toHaveText(
     open,
   );

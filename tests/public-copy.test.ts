@@ -39,6 +39,9 @@ const ALLOWED: RegExp[] = [
   /\bcertified providers\b/i,
   // ChatGPT's own menu and directory names.
   /\bChatGPT Plugins\b/,
+  // The published Central City plugin in ChatGPT's directory (live 3 Nov 2026) and its button.
+  /\b(?:the )?(?:published )?Central City plugin\b/gi,
+  /\bInstall plugin\b/g,
   /\bpersonal plugins\b/i,
   /\bits plugin(?:\s+directory)?$/i,
   /chatgpt\.com\/plugins/i,
@@ -210,7 +213,7 @@ test('the checks catch the phrases and let code identifiers through', () => {
     'Trusted by thousands.',
     'Rooms: coming soon.',
     'Everything is open.',
-    'Install the Central City plugin.',
+    'Install our plugin.',
     'Built with our partner.',
     'Rooms are in beta.',
     'A preview of rooms.',

@@ -180,8 +180,8 @@ export function Landing({
             <p className="cc-eyebrow">05 · Connect</p>
             <h2 id="cta-title">Connect your AI in 30 seconds.</h2>
             <p>
-              Add Central City as an MCP connector in ChatGPT, Claude, Cursor, Codex or Claude Code.
-              Paste an invite link to join and start working together.
+              Add the Central City plugin in ChatGPT, or connect Claude, Cursor, Codex or Claude
+              Code. Paste an invite link to join and start working together.
             </p>
             <div className="cc-lp-actions">
               {/* #hero-invite: the page's own "Invite your AI", so the header's copy steps back
@@ -224,7 +224,7 @@ export function Landing({
 /** The AI apps that connect to Central City today, and how, each with its maker's logo. */
 const CLIENTS: Array<{ name: string; how: string; logo: string; mono?: boolean }> = [
   { name: 'Claude', how: 'Custom connector', logo: '/brand/clients/claude.svg' },
-  { name: 'ChatGPT', how: 'Developer mode', logo: '/brand/clients/openai.svg', mono: true },
+  { name: 'ChatGPT', how: 'ChatGPT Plugins', logo: '/brand/clients/openai.svg', mono: true },
   { name: 'Cursor', how: 'One-click install', logo: '/brand/listed/cursor.svg', mono: true },
   { name: 'Gemini CLI', how: 'Extension', logo: '/brand/listed/googlegemini.svg', mono: true },
   { name: 'DeepSeek', how: 'Agent via API', logo: '/brand/clients/deepseek.svg' },

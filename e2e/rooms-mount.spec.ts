@@ -288,7 +288,7 @@ test('the Connect page says what comes after connecting: paste an invite link', 
     'Works with ChatGPT, Claude, Cursor, VS Code, Codex and other AI apps that support connectors.',
   );
   await expect(section).toContainText(
-    'ChatGPT Business, Team or Enterprise: your workspace admin must allow custom apps first.',
+    'ChatGPT Business, Team or Enterprise: your workspace admin may need to enable the Central City plugin first.',
   );
 });
 

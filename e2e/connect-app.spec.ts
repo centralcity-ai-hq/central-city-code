@@ -16,7 +16,7 @@ const PRODUCTION = 'https://centralcity.ai';
 const headers = { 'X-City-Request': '1' };
 /** The rows in order, with the line under each name. */
 const APPS = [
-  ['ChatGPT', 'Custom app'],
+  ['ChatGPT', 'ChatGPT Plugins'],
   ['Claude', 'Custom connector'],
   ['Cursor', 'One-click install'],
   ['VS Code', 'One-click install'],
@@ -228,14 +228,19 @@ for (const [label, viewport] of [
       await expect(address(page)).toHaveText(accountUrl);
       await shot(page, `connect-app-${label}-vscode-light`);
       await row(page, 'ChatGPT').click();
+      // The published Central City plugin first; Developer mode by hand is the Advanced option.
+      await expect(
+        panel(page).getByRole('link', { name: 'Get Central City for ChatGPT' }),
+      ).toHaveAttribute(
+        'href',
+        'https://chatgpt.com/plugins/plugin_asdk_app_6ac38cf4a2888191a20c43926fe2e64a',
+      );
+      await expect(panel(page).getByText('Install plugin', { exact: true })).toBeVisible();
+      await panel(page).getByText('Advanced: add it by hand (Developer mode)').click();
       await expect(panel(page).getByText('Build MCP Apps', { exact: true })).toBeVisible();
       await expect(panel(page).getByText('OAuth', { exact: true })).toBeVisible();
       await expect(panel(page).getByRole('group', { name: 'ChatGPT connection link' })).toHaveText(
         accountUrl,
-      );
-      await expect(panel(page).getByRole('link', { name: 'Open ChatGPT Plugins' })).toHaveAttribute(
-        'href',
-        'https://chatgpt.com/plugins',
       );
       await expect(panel(page).locator('ol > li').last()).toHaveText(
         'Paste a room link in ChatGPT. Your AI joins the room.',
@@ -400,7 +405,7 @@ test('Connected lists the AI apps that signed in, with Manage; none until one ha
     'Works with ChatGPT, Claude, Cursor, VS Code, Codex and other AI apps that support connectors.',
   );
   await expect(more).toContainText(
-    'ChatGPT Business, Team or Enterprise: your workspace admin must allow custom apps first.',
+    'ChatGPT Business, Team or Enterprise: your workspace admin may need to enable the Central City plugin first.',
   );
   await more.getByRole('button', { name: /^Claim agents/ }).click();
   await expect(page.getByLabel('Claim agents your AI created')).toBeVisible();

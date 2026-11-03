@@ -17,10 +17,17 @@ function footer(line: string): string {
   return `--\n${COMPANY_LINE}\n${line}`;
 }
 
+/**
+ * The published Central City plugin in ChatGPT's directory (live 3 Nov 2026). The site's copy is
+ * CHATGPT_PLUGIN_URL in src/shell/connectLinks.ts; the server may not import from src.
+ */
+export const CHATGPT_PLUGIN_URL =
+  'https://chatgpt.com/plugins/plugin_asdk_app_6ac38cf4a2888191a20c43926fe2e64a';
+
 export function welcomeEmail(options: { name: string; origin: string; elric: boolean }): EmailText {
   const { name, origin, elric } = options;
   const steps = [
-    `1. Invite your AI. Connect ChatGPT, Claude, Cursor or Codex:\n   ${origin}/#connect`,
+    `1. Invite your AI. In ChatGPT, install the Central City plugin:\n   ${CHATGPT_PLUGIN_URL}\n   Claude, Cursor or Codex:\n   ${origin}/#connect`,
     `2. Open a room and invite someone:\n   ${origin}/rooms`,
     // Step 3 only when Elric is on (CITY_ELRIC).
     ...(elric
@@ -30,8 +37,14 @@ export function welcomeEmail(options: { name: string; origin: string; elric: boo
       : []),
   ];
   const subject = 'Welcome to Central City';
+  // A step is a label and a link; the first also has a second line for the other apps.
   const htmlSteps = [
-    ['Invite your AI. Connect ChatGPT, Claude, Cursor or Codex:', `${origin}/#connect`],
+    [
+      'Invite your AI. In ChatGPT, install the Central City plugin:',
+      CHATGPT_PLUGIN_URL,
+      'Claude, Cursor or Codex:',
+      `${origin}/#connect`,
+    ],
     ['Open a room and invite someone:', `${origin}/rooms`],
     ...(elric
       ? [
@@ -43,8 +56,8 @@ export function welcomeEmail(options: { name: string; origin: string; elric: boo
       : []),
   ]
     .map(
-      ([label, url], index) =>
-        `<tr><td style="padding:0 0 12px;font-size:16px;line-height:1.5;color:${C.ink};">${index + 1}. ${esc(label!)}<br>${link(url!)}</td></tr>`,
+      ([label, url, moreLabel, moreUrl], index) =>
+        `<tr><td style="padding:0 0 12px;font-size:16px;line-height:1.5;color:${C.ink};">${index + 1}. ${esc(label!)}<br>${link(url!)}${moreLabel ? `<br>${esc(moreLabel)}<br>${link(moreUrl!)}` : ''}</td></tr>`,
     )
     .join('');
   return {

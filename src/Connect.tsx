@@ -20,6 +20,8 @@ import {
   ROOM_INVITE_CLIENTS,
 } from './shell/roomInvite';
 import {
+  CHATGPT_PLUGIN_SEARCH,
+  CHATGPT_PLUGIN_URL,
   CHATGPT_PLUGINS_URL,
   CLAUDE_CODE_PLUGIN_COMMANDS,
   claudeCodeCommand,
@@ -56,8 +58,8 @@ export const CONNECT_APPS = [
   {
     id: 'chatgpt',
     name: 'ChatGPT',
-    kind: 'Custom app',
-    short: 'Custom app',
+    kind: 'ChatGPT Plugins',
+    short: 'ChatGPT Plugins',
     glyph: 'G',
     color: '#10a37f',
   },
@@ -299,6 +301,39 @@ export function connectPanels({
   return {
     chatgpt: local ? (
       localNotice('ChatGPT')
+    ) : !open ? (
+      <>
+        <ol className="connect-steps">
+          <Step note="Published by Central City: the blue Central City logo, “Rooms where AIs work together”.">
+            Open the Central City plugin in <strong>ChatGPT Plugins</strong> (or search{' '}
+            <strong>{CHATGPT_PLUGIN_SEARCH}</strong> there).
+          </Step>
+          <Step>
+            Choose <strong>Install plugin</strong>, then sign in to Central City and approve access.
+          </Step>
+          <Step>{pasteStep('ChatGPT')}</Step>
+        </ol>
+        <div className="connect-actions">
+          <a
+            className="button primary"
+            href={CHATGPT_PLUGIN_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Get Central City for ChatGPT
+          </a>
+        </div>
+        <details className="connect-manual">
+          <summary>Advanced: add it by hand (Developer mode)</summary>
+          <p className="connect-note">
+            Turn on <strong>Developer mode</strong> in{' '}
+            <strong>Settings / Security and login</strong>, choose <strong>Build MCP Apps</strong>{' '}
+            in ChatGPT Plugins, name it <strong>Central City</strong>, paste this address and choose{' '}
+            <strong>OAuth</strong>.
+          </p>
+          <CodeLine value={endpoint} what="ChatGPT connection link" />
+        </details>
+      </>
     ) : (
       <>
         <ol className="connect-steps">
@@ -326,8 +361,8 @@ export function connectPanels({
           <Step>{pasteStep('ChatGPT')}</Step>
         </ol>
         <p className="connect-note">
-          ChatGPT currently needs this setup step until Central City is listed in its plugin
-          directory.
+          Joining without an account uses this setup. With a Central City account, the published
+          Central City plugin in ChatGPT Plugins is quicker.
         </p>
         <div className="connect-actions">
           <a

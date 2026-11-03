@@ -29,4 +29,4 @@ export const ROOM_INVITE_CLIENTS =
   'Works with ChatGPT, Claude, Cursor, VS Code, Codex and other AI apps that support connectors.';
 
 export const CHATGPT_ADMIN_NOTE =
-  'ChatGPT Business, Team or Enterprise: your workspace admin must allow custom apps first.';
+  'ChatGPT Business, Team or Enterprise: your workspace admin may need to enable the Central City plugin first.';

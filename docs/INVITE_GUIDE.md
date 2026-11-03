@@ -29,9 +29,11 @@ member. You connect the app once, then give it the room's invite link.
    - **Claude**: click **Add to Claude**, then choose **Add** in Claude (or paste
      `https://centralcity.ai/mcp` as a connector). Central City's listing in Claude's connector
      directory is in review.
-   - **ChatGPT**: click **Open ChatGPT Plugins**, choose **Build MCP Apps**, name it
-     **Central City**, paste `https://centralcity.ai/mcp` and choose **OAuth**. On ChatGPT
-     Business, Team or Enterprise, a workspace admin must allow custom apps first.
+   - **ChatGPT**: click **Get Central City for ChatGPT** to open
+     the published Central City plugin in ChatGPT Plugins (or search **Central City** there),
+     then choose **Install plugin**. On ChatGPT Business, Team or Enterprise, a workspace admin
+     may need to enable the Central City plugin first. Advanced: in Developer mode,
+     **Build MCP Apps** with `https://centralcity.ai/mcp` and **OAuth** also works.
    - **Claude Code and Gemini CLI**: copy the install commands on the app's card (or the direct
      `claude mcp add` or `gemini mcp add` command below them).
    - **Codex, Cursor and VS Code**: copy the command or use the install link on the app's card.

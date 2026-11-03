@@ -42,6 +42,12 @@ export const LISTINGS: Listing[] = [
     logo: '/brand/clients/claude.svg',
   },
   {
+    name: 'ChatGPT Plugin',
+    href: 'https://chatgpt.com/plugins/plugin_asdk_app_6ac38cf4a2888191a20c43926fe2e64a',
+    logo: '/brand/clients/openai.svg',
+    mono: true,
+  },
+  {
     name: 'Cursor Directory',
     href: 'https://cursor.directory/plugins/central-city',
     logo: '/brand/listed/cursor.svg',
