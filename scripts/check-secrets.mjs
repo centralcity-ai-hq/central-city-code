@@ -31,6 +31,25 @@ function git(args, source) {
   return result.stdout;
 }
 
+const WAIVER = /^([0-9a-f]{40}):([^:\s]+):([a-z0-9-]+):([1-9][0-9]*)\s+#\s*\S.*$/;
+const MAX_WAIVERS = 20;
+
+function historyWaivers(source) {
+  const file = path.join(source, '.secret-scan-history-waivers');
+  if (!fs.existsSync(file)) return [];
+  const fingerprints = [];
+  for (const raw of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const match = WAIVER.exec(line);
+    if (!match) throw new Error('Malformed history waiver; scan failed closed.');
+    fingerprints.push(`${match[1]}:${match[2]}:${match[3]}:${match[4]}`);
+  }
+  if (fingerprints.length > MAX_WAIVERS)
+    throw new Error('Too many history waivers; scan failed closed.');
+  return fingerprints;
+}
+
 function scan(mode, source, configuration, ignoreFile, label) {
   const reportPath = path.join(temporary, `${label}.json`);
   const args = [
@@ -102,6 +121,12 @@ try {
   fs.mkdirSync(snapshot);
   const ignoreFile = path.join(temporary, 'empty.ignore');
   fs.writeFileSync(ignoreFile, '');
+  // History findings that were reviewed as false positives (the owner's decision, 3 Nov 2026):
+  // exact Gitleaks fingerprints, one per line with a reason, in the scanned repository's
+  // .secret-scan-history-waivers. They apply to the history phase only; current files are always
+  // scanned with no exceptions. A malformed list fails the scan closed.
+  const historyIgnoreFile = path.join(temporary, 'history.ignore');
+  fs.writeFileSync(historyIgnoreFile, historyWaivers(source).join('\n'));
   for (const relative of files) {
     const target = path.resolve(snapshot, relative);
     if (!target.startsWith(`${snapshot}${path.sep}`)) throw new Error('Invalid repository path.');
@@ -125,7 +150,7 @@ try {
   }
   const configuration = path.join(project, '.gitleaks.toml');
   const results = [
-    scan('git', source, configuration, ignoreFile, 'history'),
+    scan('git', source, configuration, historyIgnoreFile, 'history'),
     scan('dir', snapshot, configuration, ignoreFile, 'current-files'),
   ];
   // Only counts and rule identifiers leave this process. Reports are ephemeral.

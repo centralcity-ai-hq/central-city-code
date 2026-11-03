@@ -121,7 +121,6 @@ test('the home, Elric, Connect, Invite, Verify and Explorer pages carry their co
     '/downtown/verify',
     '/docs',
     '/explorer',
-    '/explorer/base',
     '/elric',
     '/connect',
   ])

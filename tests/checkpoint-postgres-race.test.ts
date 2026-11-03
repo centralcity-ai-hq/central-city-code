@@ -10,6 +10,7 @@ import {
   countLogPendingBackfillMigration,
 } from '../server/count-log/pending.js';
 import { cutInstant } from '../shared/count-log/index.js';
+import { AGENT_ROWS_SQL } from '../server/agent-rows/schema.js';
 
 // Never uses production DATABASE_URL. Creates and deletes only its own isolated test database.
 const url = process.env.CITY_TEST_POSTGRES_URL;
@@ -50,6 +51,8 @@ test(
     await db.exec(
       "CREATE TABLE operators(id text PRIMARY KEY,kind text); CREATE TABLE workspaces(operator_id text PRIMARY KEY,data jsonb); INSERT INTO operators VALUES('one','unclaimed'),('two','unclaimed')",
     );
+    // The count log reads agents through the dual-mode functions (migration 245).
+    await db.exec(AGENT_ROWS_SQL);
     await db.exec(countLogMigration.sql);
     await db.exec(countLogCheckpointV2Migration.sql);
     await db.exec(countLogPendingMigration.sql);

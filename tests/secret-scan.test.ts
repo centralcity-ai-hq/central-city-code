@@ -141,3 +141,44 @@ test('secret scanner detects Central City agent credentials', options, (t) => {
   assert.ok(rules.has('central-city-agent-credential'));
   for (const value of values) assert.ok(!`${result.stdout}${result.stderr}`.includes(value));
 });
+
+test('a reviewed history waiver hides only that exact history finding', options, (t) => {
+  const f = fixture(t);
+  fs.writeFileSync(path.join(f.directory, 'removed.env'), `GITHUB_TOKEN=${syntheticTokens()[0]}\n`);
+  f.commit();
+  const added = spawnSync('git', ['rev-parse', 'HEAD'], {
+    cwd: f.directory,
+    encoding: 'utf8',
+  }).stdout.trim();
+  fs.unlinkSync(path.join(f.directory, 'removed.env'));
+  f.commit();
+  const phase = (result: ReturnType<typeof f.scan>, name: string) =>
+    JSON.parse(result.stdout).results.find((p: { phase: string }) => p.phase === name).findings;
+  // The exact fingerprint, with a reason: the history phase passes.
+  fs.writeFileSync(
+    path.join(f.directory, '.secret-scan-history-waivers'),
+    `# reviewed\n${added}:removed.env:github-pat:1 # synthetic fixture\n`,
+  );
+  const waived = f.scan();
+  assert.equal(waived.status, 0);
+  assert.equal(phase(waived, 'history'), 0);
+  // The same value in a current file is still found: waivers never apply to current files.
+  fs.writeFileSync(path.join(f.directory, 'again.env'), `GITHUB_TOKEN=${syntheticTokens()[0]}\n`);
+  const current = f.scan();
+  assert.equal(current.status, 1);
+  assert.ok(phase(current, 'current-files') > 0);
+  fs.unlinkSync(path.join(f.directory, 'again.env'));
+  // A waiver without a reason, or of another line, waives nothing or fails closed.
+  fs.writeFileSync(
+    path.join(f.directory, '.secret-scan-history-waivers'),
+    `${added}:removed.env:github-pat:1\n`,
+  );
+  assert.equal(f.scan().status, 2);
+  fs.writeFileSync(
+    path.join(f.directory, '.secret-scan-history-waivers'),
+    `${added}:removed.env:github-pat:2 # wrong line\n`,
+  );
+  const other = f.scan();
+  assert.equal(other.status, 1);
+  assert.ok(phase(other, 'history') > 0);
+});
