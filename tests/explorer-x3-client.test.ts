@@ -75,7 +75,7 @@ test('agent metrics: unknown services stay null, lower bounds keep their +, pric
   const metrics = parseAgentMetrics({
     rows: [
       {
-        baseId: '529727',
+        baseId: '400017',
         offeredServices: {
           count: 11,
           exact: true,
@@ -90,10 +90,10 @@ test('agent metrics: unknown services stay null, lower bounds keep their +, pric
       },
     ],
   });
-  const edward = metrics!.get('529727')!;
-  assert.equal(countText(edward.offeredServices), '11');
-  assert.equal(countText(edward.paidCallsSold), '10,001+');
-  assert.equal(priceRangeText(edward.offeredServices!.priceRangeRaw), '0.05 to 20.00 USDC');
+  const vemino = metrics!.get('400017')!;
+  assert.equal(countText(vemino.offeredServices), '11');
+  assert.equal(countText(vemino.paidCallsSold), '10,001+');
+  assert.equal(priceRangeText(vemino.offeredServices!.priceRangeRaw), '0.05 to 20.00 USDC');
   assert.equal(countText(metrics!.get('121')!.offeredServices), '–', 'unknown is never 0');
   assert.equal(countText(metrics!.get('121')!.paidCallsSold), '0', 'a known zero is 0');
   assert.equal(
@@ -398,8 +398,8 @@ test('finalizing: the cursor goes out encoded as before=; a 404 cools down the p
 test('typed search: strict rows, a malformed cursor is unavailable, sparse name pages are followed', async () => {
   const { loadTypedSearch, parseTypedSearch } = await import('../src/explorer/x3Client');
   const row = {
-    baseId: '529727',
-    name: 'Edward',
+    baseId: '400017',
+    name: 'Vemino',
     owner: `0x${'52'.repeat(20)}`,
     short: 'XeAK9B',
     status: 'final',
@@ -417,10 +417,10 @@ test('typed search: strict rows, a malformed cursor is unavailable, sparse name 
         : { rows: [row], nextBefore: `800~${tie}` };
     return new Response(JSON.stringify(body));
   }) as unknown as typeof fetch;
-  const page = await loadTypedSearch('name', 'Edward', null, undefined, fetcher);
+  const page = await loadTypedSearch('name', 'Vemino', null, undefined, fetcher);
   assert.equal(page.state === 'ok' && page.value.rows.length, 1);
   assert.equal(page.state === 'ok' && page.value.nextBefore, `800~${tie}`, 'more may follow');
-  assert.match(seen[0]!, /kind=name&q=Edward$/);
+  assert.match(seen[0]!, /kind=name&q=Vemino$/);
   assert.match(seen[1]!, new RegExp(`before=900%7E${tie}`));
 });
 

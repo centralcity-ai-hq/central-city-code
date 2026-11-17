@@ -36,7 +36,7 @@ test('a partial stats answer keeps the last known numbers instead of erasing the
 test('a transaction hash searches paid calls; anything else searches agents on Base', () => {
   assert.equal(searchKind(`0x${'ab'.repeat(32)}`), 'tx');
   assert.equal(searchKind('  426846 '), 'agents');
-  assert.equal(searchKind('Edward'), 'agents');
+  assert.equal(searchKind('Vemino'), 'agents');
   assert.equal(searchKind('0x524c'), 'agents', 'a short hex is a wallet or name search');
   assert.equal(searchKind('   '), 'empty');
 });
@@ -81,7 +81,7 @@ test('typed search kinds: wallet, transaction, Base ID, short id, name; a forced
   assert.equal(typedKind(`0x${'ab'.repeat(32)}`), 'txHash');
   assert.equal(typedKind(' 426816 '), 'baseId');
   assert.equal(typedKind('XeAK9B'), 'shortId');
-  assert.equal(typedKind('Edward Scout'), 'name');
+  assert.equal(typedKind('Vemino Scout'), 'name');
   assert.equal(typedKind('E'), null, 'a 1-character name is refused, as the server does');
   assert.equal(typedKind('426816', true), 'name');
   assert.equal(couldBeName('426816'), true, 'digits may be a name');

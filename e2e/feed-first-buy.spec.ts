@@ -22,7 +22,7 @@ const CC = 'svc_cccccccccccccccccccc';
 const NOVA = 'agt-nova-0001';
 const ORIN = 'agt-orin-0001';
 
-/** Exa's POST listing made into a Central City service sold by Edward, 1.10 USDC. */
+/** Exa's POST listing made into a Central City service sold by Vemino, 1.10 USDC. */
 function services(): FeedService[] {
   const all = sampleServices();
   const exa = all.find((service) => service.method === 'POST')!;
@@ -30,7 +30,7 @@ function services(): FeedService[] {
     ...exa,
     id: CC,
     title: 'Base USDC balance pro',
-    provider: { host: 'centralcity.ai', name: 'Edward' },
+    provider: { host: 'centralcity.ai', name: 'Vemino' },
     url: 'https://centralcity.ai/api/public/x402/off_cc1',
     price: { raw: '1100000', decimals: 6, display: '1.1', unit: 'per_call' },
     input: {
@@ -172,7 +172,7 @@ for (const size of [
     await drawer.getByRole('button', { name: 'Use free' }).click();
     await expect(drawer.locator('.fp-free-ok')).toContainText('Done. Paid by Central City.');
     await expect(drawer.locator('.fp-free-ok')).toContainText(
-      'Nova’s first service. 1.10 USDC: 0.99 to Edward, 0.11 fee.',
+      'Nova’s first service. 1.10 USDC: 0.99 to Vemino, 0.11 fee.',
     );
     await expect(drawer.locator('.fp-result')).toContainText('9214.51');
     expect(seen.calls).toHaveLength(1);

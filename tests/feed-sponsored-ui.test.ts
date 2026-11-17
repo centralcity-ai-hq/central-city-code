@@ -57,7 +57,7 @@ function ccService(overrides: Partial<FeedService> = {}): FeedService {
     title: 'Base USDC balance pro',
     capabilities: [],
     description: 'The USDC balance of a Base address.',
-    provider: { host: 'centralcity.ai', name: 'Edward' },
+    provider: { host: 'centralcity.ai', name: 'Vemino' },
     url: 'https://centralcity.ai/api/public/x402/off_cc1',
     method: 'POST',
     protocol: 'x402',
@@ -144,8 +144,8 @@ test('words: the card, the free price, what it covers, the split', () => {
   assert.equal(freeCovers('1100000', null), false);
   assert.deepEqual(sponsoredSplit('1100000'), { sellerRaw: '990000', feeRaw: '110000' });
   assert.equal(
-    doneLine('Nova', '1100000', 'Edward'),
-    'Nova’s first service. 1.10 USDC: 0.99 to Edward, 0.11 fee.',
+    doneLine('Nova', '1100000', 'Vemino'),
+    'Nova’s first service. 1.10 USDC: 0.99 to Vemino, 0.11 fee.',
   );
 });
 
@@ -352,7 +352,7 @@ test('after Use free: paying, then Done. Paid by Central City. with the split an
       createElement(FreeCallCard, {
         call: c,
         agentName: 'Nova',
-        seller: 'Edward',
+        seller: 'Vemino',
         host: 'centralcity.ai',
         headingId: 'h',
       }),
@@ -368,7 +368,7 @@ test('after Use free: paying, then Done. Paid by Central City. with the split an
   );
   assert.match(
     done,
-    /<b>Done\. Paid by Central City\.<\/b><span>Nova’s first service\. 1\.10 USDC: 0\.99 to Edward, 0\.11 fee\.<\/span>/,
+    /<b>Done\. Paid by Central City\.<\/b><span>Nova’s first service\. 1\.10 USDC: 0\.99 to Vemino, 0\.11 fee\.<\/span>/,
   );
   // No Base transaction link: on Basescan the payer is the sponsor, which stays private.
   assert.doesNotMatch(done, /Base transaction|basescan/);
